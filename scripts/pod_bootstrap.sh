@@ -13,9 +13,18 @@
 #      `source /workspace/env.sh` in any later shell/script.
 #   2. Arms a safety auto-shutdown (default 2h) via runpodctl so a hung
 #      job doesn't burn money unattended. Override with AUTO_SHUTDOWN_HOURS.
-#   3. Builds each step's isolated venv under /workspace/venv_<name> from
-#      pipeline/envs/<name>/requirements.txt and runs that env's setup.sh
-#      (weight downloads etc.) if present.
+#   3. Builds ONE shared /workspace/venv_main containing every `in_process`-
+#      dispatch step's deps (rmbg, sapiens2 as of this writing) plus this
+#      pipeline package itself — InProcessDispatcher runs a step directly in
+#      the calling process (pipeline/dispatch/in_process.py), not a
+#      subprocess, so those deps have to live in whatever env actually runs
+#      `python -m pipeline.cli`, not an isolated venv of their own.
+#   4. Builds a separate isolated /workspace/venv_<name> per `subprocess`-
+#      dispatch step (wan22, sam3dbody, seedvr2 as of this writing) from
+#      pipeline/envs/<name>/requirements.txt, and runs that env's setup.sh
+#      (weight downloads etc.) if present — these genuinely need isolation
+#      (conflicting/heavy deps), dispatched via SubprocessPythonDispatcher
+#      per envs.yaml's python_bin.
 #
 # Safe to re-run: venv creation and weight downloads are idempotent
 # (python -m venv no-ops on an existing dir; huggingface_hub skips files
@@ -57,7 +66,19 @@ else
     echo "WARNING: runpodctl/RUNPOD_API_KEY/RUNPOD_POD_ID not all available — auto-shutdown NOT armed." >&2
 fi
 
-for env_name in rmbg sam3dbody wan22 seedvr2 sapiens2; do
+echo "=== building shared /workspace/venv_main (in_process steps: rmbg, sapiens2) ==="
+python3 -m venv /workspace/venv_main
+source /workspace/venv_main/bin/activate
+pip install -q --upgrade pip
+pip install -q torch --index-url https://download.pytorch.org/whl/cu124
+for env_name in rmbg sapiens2; do
+    env_dir="$REPO_ROOT/pipeline/envs/$env_name"
+    [ -f "$env_dir/requirements.txt" ] && pip install -q -r "$env_dir/requirements.txt"
+done
+pip install -q -e "$REPO_ROOT"
+deactivate
+
+for env_name in sam3dbody wan22 seedvr2; do
     env_dir="$REPO_ROOT/pipeline/envs/$env_name"
     venv_dir="/workspace/venv_${env_name}"
     [ -f "$env_dir/requirements.txt" ] || continue
@@ -81,11 +102,10 @@ for env_name in rmbg sam3dbody wan22 seedvr2 sapiens2; do
     deactivate
 done
 
-# brush has no requirements.txt (it's a Rust CLI, not a Python env) so it's
-# outside the loop above — run its setup.sh directly if present.
-if [ -f "$REPO_ROOT/pipeline/envs/brush/setup.sh" ]; then
-    echo "=== running pipeline/envs/brush/setup.sh ==="
-    bash "$REPO_ROOT/pipeline/envs/brush/setup.sh"
-fi
+# brush is intentionally NOT built here. It needs docker dispatch (OS-level
+# Vulkan/graphics capability a bare-pod venv can't provide regardless of
+# Python isolation — see docs/docker.md) — build its image separately from
+# pipeline/envs/brush/setup.sh + docs/docker.md, not as part of this
+# bare-pod bootstrap.
 
 echo "=== pod_bootstrap.sh complete ==="

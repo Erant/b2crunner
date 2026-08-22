@@ -52,6 +52,32 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 Vulkan inside the container before debugging a brush failure as something
 else.
 
+**Confirmed the hard way on a bare RunPod pod (not this container, but the
+same underlying issue applies to any container missing this)**: the NVIDIA
+driver's Vulkan `.so` files (`libGLX_nvidia.so.0`, `libnvidia-glcore.so.*`)
+and the ICD json can all be present, and `vulkaninfo` still fails with
+`ERROR_INCOMPATIBLE_DRIVER` / "Found no drivers!" if `NVIDIA_DRIVER_CAPABILITIES`
+doesn't include `graphics` (and usually `display`) — that env var is read by
+`nvidia-container-toolkit` at container-creation time to decide which driver
+components to actually expose, and most ML pod templates only set
+`compute,utility` since they're built for training/inference, not rendering.
+Setting it inside an already-running container doesn't retroactively fix
+anything — it has to be present when the container starts. Bake it into the
+image so `docker run --gpus all` (this project's `DockerDispatcher`, see
+`pipeline/dispatch/docker.py`) always gets it regardless of the host's own
+default:
+
+```dockerfile
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics,display
+```
+
+This is also *why* brush needs `docker` dispatch specifically, not
+`in_process`/`subprocess` — no Python venv, on any dispatch, changes what
+driver capabilities the container/host was started with. `docker` is the
+only dispatch kind in this pipeline that controls the container boundary
+brush's actual requirement lives at (see `pipeline/dispatch/docker.py`'s own
+docstring, which names brush explicitly).
+
 ## Rust toolchain + brush
 
 ```dockerfile

@@ -15,6 +15,12 @@ envs:
   seedvr2:
     kind: subprocess
     python_bin: pipeline/envs/seedvr2/venv/bin/python
-  sapiens2:
-    kind: subprocess
-    python_bin: pipeline/envs/sapiens2/venv/bin/python
+  # kind here is informational (matches the `dispatch: docker` in the
+  # workflow YAML that reads this env) — this image doesn't exist yet, see
+  # docs/docker.md for what needs to be in it (Vulkan/graphics capability
+  # enabled at `docker run` time, brush built per pipeline/envs/brush/setup.sh,
+  # this pipeline package installed so `python -m pipeline.worker` resolves).
+  brush:
+    kind: docker
+    image: b2c/brush:latest
+    gpus: all

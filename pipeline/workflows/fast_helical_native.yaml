@@ -106,16 +106,25 @@ steps:
 
   - id: normal_maps
     step: sapiens2_lite
-    dispatch: subprocess
-    env: sapiens2
+    dispatch: in_process
     inputs:
       images: dataset.images
     outputs:
       normal_maps: scene.normal_maps
 
+  # Not in_process: brush needs OS-level Vulkan/graphics capability, which
+  # is exactly what `docker` dispatch is for (pipeline/README.md's dispatch
+  # table: "OS-level isolation a venv can't give"). A bare Python venv on
+  # the host can't provide that regardless of dispatch — confirmed the hard
+  # way on a pod whose NVIDIA_DRIVER_CAPABILITIES only exposed
+  # compute,utility, not graphics; vulkaninfo failed with
+  # ERROR_INCOMPATIBLE_DRIVER even though the driver's .so files were
+  # present. A brush image built per docs/docker.md, run with the graphics
+  # capability enabled, is what actually fixes this.
   - id: train_splat
     step: brush
-    dispatch: in_process
+    dispatch: docker
+    env: brush
     inputs:
       cameras: dataset.cameras
       image_names: dataset.image_names

@@ -1,6 +1,20 @@
-"""Gaussian-splat training via the Erant/brush CLI (subprocess, per
-docs/docker.md's build instructions — brush is a Rust binary on `PATH`,
-never a Python binding).
+"""Gaussian-splat training via the Erant/brush CLI (a Rust binary on `PATH`
+inside the dispatch container, never a Python binding — see docs/docker.md's
+build instructions).
+
+Dispatch: `docker`, not `in_process`/`subprocess` (see
+fast_helical_native.yaml's `train_splat` step). This Step's own Python code
+has no conflicting dependencies — subprocess.Popen'ing a CLI binary doesn't
+need venv isolation — but brush itself needs Vulkan/graphics capability,
+which is an OS-level container concern no Python dispatch controls.
+Confirmed the hard way on a real pod: `NVIDIA_DRIVER_CAPABILITIES` only
+exposed `compute,utility` there, so `vulkaninfo` failed even with the
+driver's Vulkan libraries physically present — baking
+`compute,utility,graphics,display` into the docker image (read by
+nvidia-container-toolkit at container-creation time) is what actually fixes
+this, not anything achievable from inside a running venv. See
+docs/docker.md and `pipeline/dispatch/docker.py`'s own docstring, which
+names brush explicitly as this dispatcher's motivating case.
 
 Port of nodes/brush_node.py's Body2COLMAP_RunBrush, minus everything that
 was only there to unwrap ComfyUI's list-batched inputs (this pipeline's
