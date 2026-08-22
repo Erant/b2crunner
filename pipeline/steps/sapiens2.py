@@ -1,10 +1,11 @@
 """Sapiens2 surface-normal estimation.
 
-Best-guess port, UNVERIFIED against real inference — the transformers-native
-API below (`AutoModelForNormalEstimation`) wasn't run on a pod this session;
-implemented from the model doc's published usage example, not from a live
-run. Verify against a real frame before trusting the output, same as every
-other step in this file's family was before it got the "verified" label.
+Verified against real inference on an L40S pod: both the single-image
+(`inputs["image"]`) and batched (`inputs["images"]`) paths run cleanly
+against real wan22_vace_denoise output frames, producing correctly-shaped,
+properly L2-normalized (min/max within [-1, 1]) normal maps. Model loads in
+well under a second (0.4B checkpoint) — cheap enough to not bother with a
+disk-cached/pre-warmed instance.
 
 Uses transformers' first-class Sapiens2 support (added to the library
 directly — see the model doc at

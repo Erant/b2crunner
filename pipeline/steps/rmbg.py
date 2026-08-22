@@ -8,11 +8,9 @@ last decoder output. Verified against real inference on an L40S pod
 
 Batch support (inputs["images"], a List[np.ndarray]) was added afterward,
 for the brush-training path (pipeline/steps/brush.py) which needs a mask
-per training frame, not just the one reference image. UNVERIFIED: the batch
-path itself hasn't been run on a pod, only the original single-image path
-that it's built on top of — same model, same preprocessing, just batched
-through the tensor's leading dim instead of called once, so the risk is low,
-but confirm output on a real multi-frame set before trusting it blind.
+per training frame, not just the one reference image. Also verified on an
+L40S pod: 5 wan22_vace_denoise output frames in, 5 correctly-shaped
+float32 [0,1] masks out.
 """
 
 from __future__ import annotations

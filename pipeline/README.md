@@ -60,26 +60,34 @@ pipeline/
 │   └── factory.py       build_dispatcher(dispatch, env_config) -> Dispatcher
 ├── steps/
 │   ├── dataset_io.py    save_dataset / load_dataset — real, working
-│   ├── rmbg.py          real, verified against real inference
+│   ├── rmbg.py          real, verified (single-image + batch paths)
 │   ├── wan22_vace_denoise.py  real, verified against real inference
+│   ├── sapiens2.py      real, verified (single-image + batch paths)
+│   ├── brush.py         real, UNVERIFIED — needs docker dispatch
+│                      (Vulkan/graphics capability), never actually built
 │   ├── sam3d_body.py    NotImplementedError, documented contract
 │   ├── seedvr2.py       NotImplementedError, documented contract
-│   ├── anchor_stub.py   generate_firstlast / inject_anchor —
+│   └── anchor_stub.py   generate_firstlast / inject_anchor —
 │                      NotImplementedError, documented contracts
-│   └── sapiens2_lite_stub.py  NotImplementedError, documented contract
 ├── envs/
 │   ├── envs.yaml        Per-machine registry: env name -> {python_bin |
 │                      image | base_url}
 │   ├── wan22/           requirements.txt + setup.sh (checkpoint/LoRA
 │                      download) — see scripts/pod_bootstrap.sh
-│   ├── rmbg/            requirements.txt
+│   ├── rmbg/            requirements.txt (in_process — installed into
+│                      the shared venv_main, not its own venv)
+│   ├── sapiens2/        requirements.txt (in_process — same as rmbg)
 │   ├── sam3dbody/       requirements.txt + setup.sh (gated checkpoint)
-│   └── seedvr2/         requirements.txt + setup.sh (vendors
+│   ├── seedvr2/         requirements.txt + setup.sh (vendors
 │                      numz/ComfyUI-SeedVR2_VideoUpscaler)
+│   └── brush/           setup.sh only (Rust CLI, no Python env) — meant
+│                      for a docker image build, not the bare-pod
+│                      bootstrap (see docs/docker.md)
 └── workflows/
     ├── roundtrip_example.yaml   in-process-only smoke test (no model deps)
-    └── fast_helical_native.yaml rmbg + wan22_vace_denoise verified on
-                                 real hardware; sam3d_body still stubbed
+    └── fast_helical_native.yaml rmbg/wan22_vace_denoise/sapiens2 verified
+                                 on real hardware; sam3d_body/brush still
+                                 unverified
 ```
 
 ## Core concepts
@@ -243,8 +251,8 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   `${params.resolution.0}`), `Context` get/set, `save_dataset` writing a
   real checkpoint to disk.
 - `rmbg` — RMBG-2.0 background removal (`transformers`, in-process). Ran
-  against `cyber_6f`'s reference image on an L40S pod; mask shape/range
-  correct.
+  against `cyber_6f`'s reference image on an L40S pod, both single-image and
+  batched (`inputs["images"]`) paths; mask shape/range correct on both.
 - `wan22_vace_denoise` — Wan 2.2 VACE denoise, dual high/low-noise expert +
   VACE conditioning, 6-step/cfg=1/uni_pc-beta distilled schedule, fp8
   (torchao) via `diffusers.WanVACEPipeline`. Ran end-to-end on an L40S pod
@@ -254,17 +262,33 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   attention backend, disk caching of the fused/quantized weights) and why
   frame count matters (a short test clip produces visibly worse output —
   not a bug, just an invalid test size for this model/LoRA pairing).
+- `sapiens2_lite` — Sapiens2 surface-normal estimation via transformers'
+  first-class support (`AutoModelForNormalEstimation`,
+  `facebook/sapiens2-normal-0.4b`) — not the older facebookresearch/sapiens
+  (v1) "lite" torchscript path this step's name originally referenced. Ran
+  against `wan22_vace_denoise` output frames on an L40S pod, both
+  single-image and batched paths; output correctly shaped and L2-normalized.
 - `fast_helical_native.yaml` loads and its step names resolve against the
   registry.
+
+**Real but UNVERIFIED:**
+- `brush` — Gaussian-splat training via the `Erant/brush` CLI (COLMAP
+  export, image/normal-map export, subprocess invocation — a close port of
+  `nodes/brush_node.py`'s `Body2COLMAP_RunBrush`). Needs `docker` dispatch:
+  confirmed on a real pod that brush's Vulkan/graphics requirement isn't
+  satisfiable from a bare-pod Python venv regardless of isolation —
+  `NVIDIA_DRIVER_CAPABILITIES` only exposed `compute,utility` there, so
+  `vulkaninfo` failed even with the driver's Vulkan libraries physically
+  present. See `docs/docker.md` for the fix (bake the capability into the
+  image) and `pipeline/dispatch/docker.py`, which already names brush as
+  its motivating case. Never actually built or run — the Docker image this
+  needs doesn't exist yet.
 
 **Stubbed (raise `NotImplementedError`):**
 - `sam3d_body` — SAM-3D-Body mesh/joint reconstruction. Needs a pinned
   `detectron2` build (`--no-build-isolation --no-deps`) → `subprocess`, own
   venv. Gated HF model access — license must be accepted by a human before
   any automated download will work.
-- `sapiens2_lite` — Sapiens2 normal-map estimation via its pure-PyTorch
-  "lite" path (avoids the full mmcv/OpenMMLab install). Candidate for
-  `in_process` once ported.
 - `generate_firstlast`/`inject_anchor` (`anchor_stub.py`) — warp the
   reference photo to the anchor camera and inject it into the frame batch,
   producing the per-frame reference/denoise mask `wan22_vace_denoise`
@@ -300,24 +324,30 @@ the actual `Dockerfile`s / `docker-compose.yml`, and the Gradio frontend.
 
 ## Suggested next steps
 
-1. Port `sam3d_body`, since nearly everything downstream depends on its
+1. Build the brush docker image per `docs/docker.md` (Rust build +
+   `NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics,display` baked in)
+   and point `pipeline/envs/envs.yaml`'s `brush` entry at it — this is the
+   one piece of the `wan22_vace_denoise` → `rmbg`/`sapiens2_lite` → `brush`
+   chain in `fast_helical_native.yaml` that's still unverified, and the only
+   one blocked on infrastructure (a real Docker build/push) rather than
+   pod-side Python work.
+2. Port `sam3d_body`, since nearly everything downstream depends on its
    output shape (vertices/faces/joints) — needs the HF license accepted
    first (human step, can't be automated).
-2. Port `generate_firstlast`/`inject_anchor` (`anchor_stub.py`) — needed
+3. Port `generate_firstlast`/`inject_anchor` (`anchor_stub.py`) — needed
    before a dataset built from scratch (rather than a pre-built one like
    `cyber_6f`) has a valid `control_masks` signal for `wan22_vace_denoise`
    at all.
-3. Wire up rendering + COLMAP export as `Step`s reusing the existing
+4. Wire up rendering + COLMAP export as `Step`s reusing the existing
    `core/`/`nodes/render_node.py` logic (already largely ComfyUI-independent
    numpy/pyrender code — mostly needs `folder_paths`/`comfy.*` calls
    stripped).
-4. Fix `wan22_vace_denoise`'s fp8-checkpoint disk cache (currently
+5. Fix `wan22_vace_denoise`'s fp8-checkpoint disk cache (currently
    best-effort/silently skipped — `save_pretrained()` fails on the
    torchao-quantized tensors in the diffusers/torchao version pairing this
    was verified against; see `docs/fp8-quant-notes.md`) so repeated loads
    skip the LoRA-fuse + quantize step, and so the result is eventually
    publishable to HF as a real fp8 diffusers VACE checkpoint (none exists
    publicly today).
-5. `seedvr2`, Brush containerization (`docs/docker.md`), and the
-   Docker/Compose/Gradio layer last — they're mechanical once the model
-   steps behind them work.
+6. `seedvr2` and the rest of the Docker/Compose/Gradio layer last — they're
+   mechanical once the model steps behind them work.

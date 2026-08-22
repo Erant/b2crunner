@@ -1,12 +1,13 @@
 # Target shape for the native port of workflows/pipeline/fast helical.yaml.
-# rmbg and wan22_vace_denoise (pipeline/steps/) are verified on real
-# hardware (L40S pod) against cyber_6f's initial/ dataset at full 81-frame
-# batch size — see wan22_vace_denoise.py's docstring for why frame count
-# matters and what's confirmed vs. still a guess. sam3d_body, sapiens2_lite,
-# and brush are still unverified: sam3d_body needs a human to accept its
-# gated HF license first; sapiens2_lite's transformers-native API was never
-# run on a pod; brush was never actually built in this session (see
-# docs/docker.md's "Open items"). generate_firstlast/inject_anchor
+# rmbg, wan22_vace_denoise, and sapiens2_lite (pipeline/steps/) are verified
+# on real hardware (L40S pod) — wan22_vace_denoise against cyber_6f's
+# initial/ dataset at full 81-frame batch size (see that module's docstring
+# for why frame count matters), rmbg and sapiens2_lite against its output
+# frames, both single-image and batched paths. sam3d_body and brush are
+# still unverified: sam3d_body needs a human to accept its gated HF license
+# first; brush needs `docker` dispatch and a built image (confirmed on a
+# real pod that its Vulkan/graphics requirement isn't satisfiable from a
+# bare-pod venv — see docs/docker.md). generate_firstlast/inject_anchor
 # (anchor_stub.py) aren't wired into this workflow at all yet — see
 # wan22_vace_denoise.py's mask-semantics note for why a from-scratch dataset
 # needs them before control_masks means anything.
