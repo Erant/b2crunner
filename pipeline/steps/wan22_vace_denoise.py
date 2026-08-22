@@ -188,8 +188,20 @@ class Wan22VaceDenoiseStep(Step):
             self.load(params)
         pipe = self._pipe
 
-        video = [_bgr_to_rgb(frame) for frame in inputs["control_video"]]
-        masks = [1.0 - np.asarray(m, dtype=np.float32) for m in inputs["control_masks"]]
+        # VideoProcessor.get_default_height_width() assumes a raw ndarray
+        # frame already carries a leading batch dim (1, H, W, C) — a plain
+        # per-frame (H, W, C) array gets its axes misread (shape[1]=W read
+        # as height, shape[2]=channel-count read as width, which then
+        # rounds down to 0 against vae_scale_factor). PIL images take the
+        # correct .height/.width attribute path instead, so convert
+        # everything frame-like to PIL rather than relying on the "accepts
+        # numpy too" documentation, which doesn't hold for a list of
+        # unbatched per-frame arrays.
+        video = [Image.fromarray(_bgr_to_rgb(frame)) for frame in inputs["control_video"]]
+        masks = [
+            Image.fromarray(np.clip((1.0 - np.asarray(m, dtype=np.float32)) * 255.0, 0, 255).astype(np.uint8))
+            for m in inputs["control_masks"]
+        ]
         ref_img = inputs.get("reference_image")
         # check_inputs() requires reference_images to be PIL.Image (or nested
         # lists thereof) specifically — unlike video/mask, a raw ndarray is

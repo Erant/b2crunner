@@ -11,13 +11,18 @@ peft>=0.13.0
 ftfy
 torchao>=0.16.0
 kernels>=0.4.0
-# Pinned to the pure-Triton build: SageAttention v2's CUDA int8+fp8 kernel
-# is reported broken on Ada Lovelace/SM89 (thu-ml/SageAttention#360) — the
-# 1.0.6 Triton-only build is what pipeline/steps/wan22_vace_denoise.py
-# falls back to on that architecture. Non-SM89 GPUs use the sage_hub kernel
-# (fetched via `kernels`) instead, so this local build mainly exists for
-# the SM89 fallback path.
-sageattention==1.0.6
+# diffusers' attention dispatcher requires sageattention>=2.1.1 for ANY
+# backend variant (confirmed on the pod: pinning 1.0.6 for the "safe on
+# SM89" Triton kernel below just made set_attention_backend refuse it
+# outright, not use it) — the 1.0.6 pure-Triton package doesn't satisfy
+# diffusers' own version check regardless of which kernel it'd dispatch to.
+# >=2.1.1 gets past that check; whether the Triton kernel path within 2.x
+# actually avoids the SM89 CUDA-kernel correctness bug
+# (thu-ml/SageAttention#360, which is specifically about the CUDA
+# int8+fp8 kernel, not the Triton one) is UNVERIFIED — the fallback in
+# _select_sage_backend() is a try/except either way, so a bad output here
+# would need to be caught by comparing against cyber_6f, not by a crash.
+sageattention>=2.1.1
 huggingface_hub>=0.25.0
 hf_transfer
 opencv-python>=4.8.0
