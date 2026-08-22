@@ -1,0 +1,54 @@
+# Builds both images (see Dockerfile.main / Dockerfile.brush for what's in
+# each and why they're separate). `pipeline` is the service you actually
+# run workflows through; `brush` is built here so the image exists and is
+# tagged correctly, but is invoked per-call by pipeline/dispatch/docker.py
+# (`docker run --rm --gpus all ...`) — not by `docker-compose up`, which is
+# why it has no long-running command and `profiles: [build-only]` keeps it
+# out of a plain `docker-compose up`.
+#
+# Usage:
+#   export HF_TOKEN=hf_...
+#   docker compose -f docker/docker-compose.yml build
+#   docker compose -f docker/docker-compose.yml run --rm pipeline \
+#       run pipeline/workflows/fast_helical_native.yaml --dataset /data/some_dataset -v
+#
+# Both services mount the same named volume at /data — hf_cache (weights),
+# any datasets you bind-mount in, and the sam3d_body checkpoint (gated,
+# downloaded at first run via pipeline/envs/sam3dbody/setup.sh's
+# python snippet, not baked into the image layer — see Dockerfile.main).
+
+services:
+  pipeline:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.main
+    image: b2c/pipeline:latest
+    environment:
+      - HF_TOKEN=${HF_TOKEN}
+      - HF_HOME=/data/hf_cache
+      - HF_HUB_DISABLE_XET=1
+      # So this container can shell out to `docker run` for the brush step
+      # (DockerDispatcher) — requires the host's Docker socket, and thus
+      # that this container runs on the same host as the Docker daemon
+      # building/running b2c/brush:latest (not a remote Docker context).
+      - DOCKER_HOST=unix:///var/run/docker.sock
+    volumes:
+      - b2c_data:/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  brush:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.brush
+    image: b2c/brush:latest
+    profiles: ["build-only"]
+
+volumes:
+  b2c_data:

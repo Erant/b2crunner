@@ -1,0 +1,87 @@
+# Main pipeline image: everything except brush (see Dockerfile.brush — it
+# needs Vulkan/graphics capability this image doesn't grant, and stays a
+# separate image invoked per-call via `dispatch: docker`, not a
+# long-running service).
+#
+# Bakes in every venv pipeline/envs/envs.yaml's `subprocess`-dispatch steps
+# need (wan22, sam3dbody, seedvr2) plus one shared venv_main for
+# `in_process`-dispatch steps (rmbg, sapiens2) — see scripts/pod_bootstrap.sh,
+# which this Dockerfile mirrors for a bare pod instead of a container.
+# `python -m pipeline.cli` runs from venv_main; SubprocessPythonDispatcher
+# execs the other venvs' python binaries by path
+# (pipeline/envs/envs.yaml's python_bin), all inside this one container —
+# that's the whole point of `subprocess` dispatch over `docker`: shared CUDA/
+# system userspace, isolated only at the Python-dependency level.
+#
+# Build: docker build -f docker/Dockerfile.main -t b2c/pipeline:latest .
+# (build context must be the repo root, so `COPY . /workspace/b2c_runner`
+# below picks up pipeline/, pyproject.toml, etc.)
+
+FROM nvidia/cuda:12.4.1-devel-ubuntu22.04
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.12 python3.12-venv python3-pip \
+    git curl build-essential pkg-config libssl-dev \
+    ffmpeg libopencv-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace/b2c_runner
+COPY . /workspace/b2c_runner
+
+# huggingface_hub's Xet backend caches to $HOME regardless of HF_HOME — on
+# a container with a small writable layer and a large mounted volume for
+# weights, this fills the small disk and downloads die with "Disk quota
+# exceeded" even though the volume has room. Learned the hard way on a real
+# pod before this file existed (see docs/docker.md).
+ENV HF_HOME=/data/hf_cache
+ENV HF_HUB_DISABLE_XET=1
+
+# --- venv_main: in_process steps (rmbg, sapiens2) + orchestrator itself ---
+RUN python3.12 -m venv /workspace/venv_main \
+    && /workspace/venv_main/bin/pip install --no-cache-dir --upgrade pip \
+    && /workspace/venv_main/bin/pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cu124 \
+    && /workspace/venv_main/bin/pip install --no-cache-dir \
+        -r pipeline/envs/rmbg/requirements.txt \
+        -r pipeline/envs/sapiens2/requirements.txt \
+    && /workspace/venv_main/bin/pip install --no-cache-dir -e .
+
+# --- venv_wan22: wan22_vace_denoise (subprocess dispatch) ---
+RUN python3.12 -m venv /workspace/venv_wan22 \
+    && /workspace/venv_wan22/bin/pip install --no-cache-dir --upgrade pip \
+    && /workspace/venv_wan22/bin/pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cu124 \
+    && /workspace/venv_wan22/bin/pip install --no-cache-dir -r pipeline/envs/wan22/requirements.txt \
+    && /workspace/venv_wan22/bin/pip install --no-cache-dir -e .
+
+# --- venv_sam3dbody: sam3d_body (subprocess dispatch, gated checkpoint) ---
+# detectron2 pinned per facebookresearch/sam-3d-body's own INSTALL.md.
+RUN python3.12 -m venv /workspace/venv_sam3dbody \
+    && /workspace/venv_sam3dbody/bin/pip install --no-cache-dir --upgrade pip \
+    && /workspace/venv_sam3dbody/bin/pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cu124 \
+    && /workspace/venv_sam3dbody/bin/pip install --no-cache-dir -r pipeline/envs/sam3dbody/requirements.txt \
+    && /workspace/venv_sam3dbody/bin/pip install --no-cache-dir \
+        'git+https://github.com/facebookresearch/detectron2.git@a1ce2f9' --no-build-isolation --no-deps \
+    && /workspace/venv_sam3dbody/bin/pip install --no-cache-dir git+https://github.com/facebookresearch/sam-3d-body.git \
+    && /workspace/venv_sam3dbody/bin/pip install --no-cache-dir -e .
+# Checkpoint download (facebook/sam-3d-body-dinov3) is NOT baked into the
+# image — it's gated, needs HF_TOKEN from an account that accepted the
+# license, and shouldn't be baked into a shareable image layer anyway. Run
+# pipeline/envs/sam3dbody/setup.sh's checkpoint-download step at container
+# start against the mounted /data volume instead (see docker-compose.yml).
+
+# --- venv_seedvr2: seedvr2 (subprocess dispatch) ---
+# UNVERIFIED — this step is still a documented-contract stub as of this
+# writing (pipeline/steps/seedvr2.py), and the vendored
+# numz/ComfyUI-SeedVR2_VideoUpscaler repo's flash-attn/apex pins may not
+# match this base image's CUDA/torch ABI. Confirm before trusting this
+# layer in production.
+RUN python3.12 -m venv /workspace/venv_seedvr2 \
+    && /workspace/venv_seedvr2/bin/pip install --no-cache-dir --upgrade pip \
+    && /workspace/venv_seedvr2/bin/pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cu124 \
+    && /workspace/venv_seedvr2/bin/pip install --no-cache-dir -r pipeline/envs/seedvr2/requirements.txt \
+    && /workspace/venv_seedvr2/bin/pip install --no-cache-dir -e . \
+    && git clone https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler /workspace/venv_seedvr2_vendor
+ENV PYTHONPATH="/workspace/venv_seedvr2_vendor:${PYTHONPATH}"
+
+VOLUME ["/data"]
+
+ENTRYPOINT ["/workspace/venv_main/bin/python", "-m", "pipeline.cli"]
