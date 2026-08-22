@@ -33,10 +33,19 @@ dataset's mask channel before feeding it to `WanVaceToVideo` as
 per diffusers' pipeline_wan_vace.py) are the *inverse* of the dataset's mask
 convention (which follows RMBG's foreground=1 convention). Replicated below
 as `1.0 - mask`; this one is read directly off the graph, not guessed.
+
+Caching: pass params["fused_cache_dir"] to skip the LoRA-fuse + fp8-quantize
+work (slow, CPU-bound) on every load() after the first — the fused
+transformer/transformer_2 get saved there via save_pretrained() and reloaded
+directly on subsequent runs. Also the natural artifact to eventually publish
+as a real fp8 diffusers VACE checkpoint, since none currently exists (see
+prior scoping conversation) — but verify a cache-hit load actually produces
+correct output before trusting it that far.
 """
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import cv2
@@ -60,12 +69,31 @@ class Wan22VaceDenoiseStep(Step):
 
     def load(self, params: Dict[str, Any]) -> None:
         import torch
-        from diffusers import WanVACEPipeline
+        from diffusers import WanVACEPipeline, WanVACETransformer3DModel
 
         checkpoint = params.get("checkpoint", DEFAULT_CHECKPOINT)
-        pipe = WanVACEPipeline.from_pretrained(checkpoint, torch_dtype=torch.bfloat16)
+        cache_dir = params.get("fused_cache_dir")
+        cache_hit = bool(cache_dir) and Path(cache_dir, "transformer").is_dir() and Path(cache_dir, "transformer_2").is_dir()
 
-        if params.get("use_lora", True):
+        if cache_hit:
+            # Skip base-checkpoint download of the transformers entirely —
+            # load the already LoRA-fused, fp8-quantized weights saved by a
+            # prior run below. VAE/text_encoder/tokenizer/scheduler still
+            # come from the base checkpoint (never modified, so never cached
+            # separately).
+            transformer = WanVACETransformer3DModel.from_pretrained(
+                cache_dir, subfolder="transformer", torch_dtype=torch.bfloat16
+            )
+            transformer_2 = WanVACETransformer3DModel.from_pretrained(
+                cache_dir, subfolder="transformer_2", torch_dtype=torch.bfloat16
+            )
+            pipe = WanVACEPipeline.from_pretrained(
+                checkpoint, transformer=transformer, transformer_2=transformer_2, torch_dtype=torch.bfloat16
+            )
+        else:
+            pipe = WanVACEPipeline.from_pretrained(checkpoint, torch_dtype=torch.bfloat16)
+
+        if not cache_hit and params.get("use_lora", True):
             lora_repo = params.get("lora_repo", DEFAULT_LORA_REPO)
             lora_subfolder = params.get("lora_subfolder", DEFAULT_LORA_SUBFOLDER)
             pipe.load_lora_weights(
@@ -97,12 +125,23 @@ class Wan22VaceDenoiseStep(Step):
             )
             pipe.unload_lora_weights()
 
-        if params.get("quantize", True):
+        if not cache_hit and params.get("quantize", True):
             from torchao.quantization import Float8WeightOnlyConfig, quantize_
 
             quant_config = Float8WeightOnlyConfig()
             quantize_(pipe.transformer, quant_config)
             quantize_(pipe.transformer_2, quant_config)
+
+        if not cache_hit and cache_dir:
+            # Save the fused+quantized transformers so the next load() skips
+            # straight to the cache_hit branch above. UNVERIFIED: whether
+            # torchao-quantized tensor subclasses round-trip correctly
+            # through save_pretrained/from_pretrained in this diffusers/
+            # torchao version pairing — check the reloaded model actually
+            # produces sane output before trusting this cache (or publishing
+            # it to HF) rather than assuming it's byte-identical.
+            pipe.transformer.save_pretrained(str(Path(cache_dir) / "transformer"))
+            pipe.transformer_2.save_pretrained(str(Path(cache_dir) / "transformer_2"))
 
         if params.get("cpu_offload", True):
             pipe.enable_model_cpu_offload()
