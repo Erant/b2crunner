@@ -10,6 +10,14 @@ accelerate>=1.0.0
 peft>=0.13.0
 ftfy
 torchao>=0.16.0
+kernels>=0.4.0
+# Pinned to the pure-Triton build: SageAttention v2's CUDA int8+fp8 kernel
+# is reported broken on Ada Lovelace/SM89 (thu-ml/SageAttention#360) — the
+# 1.0.6 Triton-only build is what pipeline/steps/wan22_vace_denoise.py
+# falls back to on that architecture. Non-SM89 GPUs use the sage_hub kernel
+# (fetched via `kernels`) instead, so this local build mainly exists for
+# the SM89 fallback path.
+sageattention==1.0.6
 huggingface_hub>=0.25.0
 hf_transfer
 opencv-python>=4.8.0

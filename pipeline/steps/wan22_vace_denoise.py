@@ -34,6 +34,12 @@ per diffusers' pipeline_wan_vace.py) are the *inverse* of the dataset's mask
 convention (which follows RMBG's foreground=1 convention). Replicated below
 as `1.0 - mask`; this one is read directly off the graph, not guessed.
 
+Attention backend: defaults to SageAttention via diffusers' attention
+dispatcher (params["attention_backend"] = "auto"), steered per-GPU-arch by
+`_select_sage_backend()` below — see its docstring for the SM89/L40S
+correctness caveat. Pass "none" to force PyTorch native SDPA, or an explicit
+diffusers backend name (see `set_attention_backend` docs) to override.
+
 Caching: pass params["fused_cache_dir"] to skip the LoRA-fuse + fp8-quantize
 work (slow, CPU-bound) on every load() after the first — the fused
 transformer/transformer_2 get saved there via save_pretrained() and reloaded
@@ -134,14 +140,32 @@ class Wan22VaceDenoiseStep(Step):
 
         if not cache_hit and cache_dir:
             # Save the fused+quantized transformers so the next load() skips
-            # straight to the cache_hit branch above. UNVERIFIED: whether
-            # torchao-quantized tensor subclasses round-trip correctly
-            # through save_pretrained/from_pretrained in this diffusers/
-            # torchao version pairing — check the reloaded model actually
-            # produces sane output before trusting this cache (or publishing
-            # it to HF) rather than assuming it's byte-identical.
-            pipe.transformer.save_pretrained(str(Path(cache_dir) / "transformer"))
-            pipe.transformer_2.save_pretrained(str(Path(cache_dir) / "transformer_2"))
+            # straight to the cache_hit branch above. Best-effort: confirmed
+            # broken on at least one diffusers/torchao/safetensors version
+            # combo ("Attempted to access the data pointer on an invalid
+            # python storage" — safetensors can't serialize the torchao
+            # quantized tensor subclass's storage) — never let a caching
+            # failure take down an otherwise-working run.
+            try:
+                pipe.transformer.save_pretrained(str(Path(cache_dir) / "transformer"))
+                pipe.transformer_2.save_pretrained(str(Path(cache_dir) / "transformer_2"))
+            except Exception as e:  # noqa: BLE001 - caching is an optimization, never fatal
+                print(f"wan22_vace_denoise: failed to cache fused weights to {cache_dir!r}: {e!r}")
+
+        attention_backend = params.get("attention_backend", "auto")
+        if attention_backend and attention_backend != "none":
+            backend_name = (
+                _select_sage_backend() if attention_backend == "auto" else attention_backend
+            )
+            if backend_name:
+                try:
+                    pipe.transformer.set_attention_backend(backend_name)
+                    pipe.transformer_2.set_attention_backend(backend_name)
+                except Exception as e:  # noqa: BLE001 - best-effort optimization, never fatal
+                    print(
+                        f"wan22_vace_denoise: set_attention_backend({backend_name!r}) failed "
+                        f"({e!r}), falling back to PyTorch native SDPA"
+                    )
 
         if params.get("cpu_offload", True):
             pipe.enable_model_cpu_offload()
@@ -199,6 +223,32 @@ class Wan22VaceDenoiseStep(Step):
         frames = result.frames[0] if hasattr(result, "frames") else result[0]
         images = [_rgb_float_to_bgr_uint8(frame) for frame in frames]
         return {"images": images}
+
+
+def _select_sage_backend() -> Optional[str]:
+    """Pick a diffusers attention-dispatch backend name for SageAttention,
+    or None to leave the default (PyTorch native SDPA) in place.
+
+    SageAttention needs Ampere or newer (SM80+). Its v2 CUDA int8+fp8 kernel
+    is reported to produce incorrect output on Ada Lovelace/SM89 (e.g. the
+    L40S this was written against) — thu-ml/SageAttention#360 — so that
+    architecture gets steered to the pure-Triton int8+fp16 kernel instead,
+    which is confirmed to work there at reduced speedup. UNVERIFIED: this
+    steering logic itself, since attention-backend selection wasn't
+    exercised on the pod session that wrote this file — check the reloaded
+    output isn't corrupted before trusting `sage_hub` on non-SM89 hardware
+    either.
+    """
+    import torch
+
+    if not torch.cuda.is_available():
+        return None
+    major, minor = torch.cuda.get_device_capability()
+    if (major, minor) < (8, 0):
+        return None
+    if (major, minor) == (8, 9):
+        return "_sage_qk_int8_pv_fp16_triton"
+    return "sage_hub"
 
 
 def _bgr_to_rgb(img: np.ndarray) -> np.ndarray:
