@@ -1,0 +1,20 @@
+# Minimal workflow exercising the runner end-to-end with only in-process,
+# dependency-free steps (no torch/model deps needed) — a smoke test for the
+# dispatcher/context plumbing itself, independent of any model port.
+#
+# Run with:
+#   python -m pipeline.cli run pipeline/workflows/roundtrip_example.yaml \
+#       --dataset path/to/existing/b2c_dataset --envs pipeline/envs/envs.yaml
+name: roundtrip_example
+description: Load a dataset, checkpoint it back to disk under a new name.
+params:
+  output_directory: output/b2c_roundtrip_check
+
+steps:
+  - id: checkpoint
+    step: save_dataset
+    dispatch: in_process
+    inputs:
+      dataset: dataset
+    params:
+      directory: ${params.output_directory}

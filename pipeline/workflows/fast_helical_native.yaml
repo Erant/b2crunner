@@ -1,0 +1,58 @@
+# Target shape for the native port of workflows/pipeline/fast helical.yaml.
+# References real registered step names (pipeline/steps/stubs.py) so this
+# loads and validates today, but the model steps themselves still raise
+# NotImplementedError until each is ported — this file exists to pin down
+# the intended dispatch/env wiring while that work happens incrementally.
+name: fast_helical_native
+description: Single-loop helical orbit, no upscale pass.
+params:
+  resolution: [512, 512]
+  diffusion_steps: 6
+  cfg: 1.0
+  seed: 0
+
+steps:
+  - id: remove_background
+    step: rmbg
+    dispatch: in_process
+    inputs:
+      image: dataset.reference_image
+    outputs:
+      mask: dataset.masks
+
+  - id: reconstruct_body
+    step: sam3d_body
+    dispatch: subprocess
+    env: sam3dbody
+    inputs:
+      image: dataset.reference_image
+    outputs:
+      vertices: scene.vertices
+      faces: scene.faces
+      joints: scene.joints
+      focal_length: scene.focal_length
+
+  - id: denoise
+    step: wan22_vace_denoise
+    dispatch: subprocess
+    env: wan22
+    inputs:
+      control_video: dataset.images
+      control_masks: dataset.masks
+      reference_image: dataset.reference_image
+    params:
+      width: ${params.resolution.0}
+      height: ${params.resolution.1}
+      steps: ${params.diffusion_steps}
+      cfg: ${params.cfg}
+      seed: ${params.seed}
+    outputs:
+      images: dataset.images
+
+  - id: checkpoint
+    step: save_dataset
+    dispatch: in_process
+    inputs:
+      dataset: dataset
+    params:
+      directory: output/b2c_fast_helical_checkpoint

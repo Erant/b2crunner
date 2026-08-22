@@ -1,0 +1,9 @@
+# Native pipeline dependencies
+
+# Core body2colmap library (provides Camera, used by pipeline/dataset.py)
+body2colmap @ git+https://github.com/Erant/body2colmap.git
+
+numpy>=1.24.0
+opencv-python>=4.8.0
+PyYAML>=6.0
+requests>=2.31.0

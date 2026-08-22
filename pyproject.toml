@@ -1,0 +1,22 @@
+[project]
+name = "b2c-runner"
+version = "0.1.0"
+description = "Standalone (non-ComfyUI) execution engine for the Body2COLMAP pipeline"
+readme = "pipeline/README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+
+dependencies = [
+    "body2colmap @ git+https://github.com/Erant/body2colmap.git",
+    "numpy>=1.24.0",
+    "opencv-python>=4.8.0",
+    "PyYAML>=6.0",
+    "requests>=2.31.0",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["pipeline", "pipeline.dispatch", "pipeline.steps"]
