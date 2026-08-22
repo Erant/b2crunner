@@ -1,17 +1,17 @@
 # Per-machine registry of isolated environments a workflow can dispatch into.
-# Keyed by the name a StepSpec's `env:` field references. Not committed with
-# real paths for every model yet — fill these in as each isolated venv is
-# built (see steps/stubs.py for which steps need which env).
-#
-# envs:
-#   wan22:
-#     kind: subprocess
-#     python_bin: envs/wan22/bin/python
-#   sam3dbody:
-#     kind: subprocess
-#     python_bin: envs/sam3dbody/bin/python
-#   seedvr2:
-#     kind: docker
-#     image: b2c/seedvr2:latest
+# Keyed by the name a StepSpec's `env:` field references. python_bin paths
+# below are the venv layout each envs/<name>/requirements.txt comment
+# documents — they don't exist until that venv is actually built on a given
+# machine, so this file has to be re-pointed (or these entries commented
+# back out) per host until then.
 
-envs: {}
+envs:
+  wan22:
+    kind: subprocess
+    python_bin: pipeline/envs/wan22/venv/bin/python
+  sam3dbody:
+    kind: subprocess
+    python_bin: pipeline/envs/sam3dbody/venv/bin/python
+  seedvr2:
+    kind: subprocess
+    python_bin: pipeline/envs/seedvr2/venv/bin/python

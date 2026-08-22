@@ -32,3 +32,6 @@ htmlcov/
 output/
 temp/
 *.pkl
+
+# Local reference data (not part of the pipeline)
+cyber_6f.zip

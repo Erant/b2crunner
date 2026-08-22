@@ -1,8 +1,8 @@
 # Target shape for the native port of workflows/pipeline/fast helical.yaml.
-# References real registered step names (pipeline/steps/stubs.py) so this
-# loads and validates today, but the model steps themselves still raise
-# NotImplementedError until each is ported — this file exists to pin down
-# the intended dispatch/env wiring while that work happens incrementally.
+# rmbg, sam3d_body, and wan22_vace_denoise (pipeline/steps/) are implemented
+# but UNVERIFIED against real inference — see each module's docstring for
+# what's a confirmed fact from the live ComfyUI graph vs. a best guess to
+# check against the cyber_6f reference dataset once a GPU pod is available.
 name: fast_helical_native
 description: Single-loop helical orbit, no upscale pass.
 params:
@@ -10,6 +10,21 @@ params:
   diffusion_steps: 6
   cfg: 1.0
   seed: 0
+  # Exact strings from the live ComfyUI graph (workflows/api/denoise.json,
+  # nodes 6/7/188) — $SUBJECT_DESC$ gets filled in from dataset.prompt.
+  denoise_prompt: >-
+    The subject is $SUBJECT_DESC$. An unmoving wax statue of the subject
+    undergoes a 360 degree rotation. The subject is unmoving and unblinking,
+    their expression frozen as the camera continues to rotate around them.
+    Their eyes fixed in place. The camera rotates at a constant speed,
+    smoothly completing an orbit around the subject. The subject remains
+    consistent throughout the rotation. 人物正面朝向，表情中性，目光固定，眼睛保持静止，
+    无眨眼，面部完全静止，如雕像般静止，画面无时间变化
+  denoise_negative_prompt: >-
+    色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，
+    低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，
+    毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走,
+    chewing, tattoos, 眼球运动，眨眼，眼动追踪，微表情，面部抽动，头部移动, 小头, 小脸
 
 steps:
   - id: remove_background
@@ -40,12 +55,16 @@ steps:
       control_video: dataset.images
       control_masks: dataset.masks
       reference_image: dataset.reference_image
+      subject_desc: dataset.prompt
     params:
       width: ${params.resolution.0}
       height: ${params.resolution.1}
       steps: ${params.diffusion_steps}
       cfg: ${params.cfg}
       seed: ${params.seed}
+      strength: 1.0
+      prompt: ${params.denoise_prompt}
+      negative_prompt: ${params.denoise_negative_prompt}
     outputs:
       images: dataset.images
 
