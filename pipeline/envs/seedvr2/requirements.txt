@@ -1,0 +1,22 @@
+# seedvr2 isolated venv.
+# uv venv pipeline/envs/seedvr2/venv
+# uv pip install -r pipeline/envs/seedvr2/requirements.txt
+# uv pip install -e .   # so `python -m pipeline.worker` is importable here
+#
+# numz/ComfyUI-SeedVR2_VideoUpscaler must be vendored onto this env's
+# PYTHONPATH so `from src.core.generation_utils import ...` resolves
+# (pipeline/steps/seedvr2.py assumes it's importable, not that it's a
+# published PyPI package). Clone it alongside this venv and add it to
+# PYTHONPATH, e.g.:
+#   git clone https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler pipeline/envs/seedvr2/vendor
+#   export PYTHONPATH=$PYTHONPATH:pipeline/envs/seedvr2/vendor
+#
+# flash-attn/apex are pinned to a specific torch/CUDA ABI upstream — if the
+# pod's CUDA userspace doesn't match, this step needs `docker` dispatch
+# instead of `subprocess` (see pipeline README).
+
+torch==2.6.0
+torchvision==0.21.0
+torchaudio==2.6.0
+opencv-python>=4.8.0
+numpy>=1.24.0

@@ -1,0 +1,20 @@
+# sam3d_body isolated venv.
+# uv venv pipeline/envs/sam3dbody/venv
+# uv pip install -r pipeline/envs/sam3dbody/requirements.txt
+# uv pip install -e .   # so `python -m pipeline.worker` is importable here
+#
+# Gated checkpoint: a human must accept the license at
+# https://huggingface.co/facebook/sam-3d-body-dinov3 before an HF token can
+# download it (see pipeline README's "Current state").
+#
+# facebookresearch/sam-3d-body's own INSTALL.md is authoritative for the
+# detectron2 pin (--no-build-isolation --no-deps) — this file is a
+# best-guess starting point, not a substitute for reading that doc on the
+# pod.
+
+torch>=2.4.0
+git+https://github.com/facebookresearch/sam-3d-body.git
+huggingface_hub>=0.25.0
+hf_transfer
+opencv-python>=4.8.0
+numpy>=1.24.0

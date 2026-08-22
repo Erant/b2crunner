@@ -14,7 +14,8 @@ dist/
 .venv
 env/
 venv/
-pipeline/envs/*/
+pipeline/envs/*/venv/
+pipeline/envs/*/vendor/
 
 # IDEs
 .vscode/

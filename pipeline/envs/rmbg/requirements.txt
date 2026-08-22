@@ -1,0 +1,14 @@
+# rmbg isolated venv (dispatch: in_process once merged into a shared env,
+# but kept isolated here for fast standalone smoke-testing on a fresh pod).
+# uv venv pipeline/envs/rmbg/venv
+# uv pip install -r pipeline/envs/rmbg/requirements.txt
+# uv pip install -e .   # so `python -m pipeline.worker` is importable here
+
+torch>=2.4.0
+torchvision
+transformers>=4.46.0
+kornia
+huggingface_hub>=0.25.0
+hf_transfer
+opencv-python-headless>=4.8.0
+numpy>=1.24.0

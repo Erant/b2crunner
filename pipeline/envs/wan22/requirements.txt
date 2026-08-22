@@ -1,0 +1,14 @@
+# wan22_vace_denoise isolated venv.
+# uv venv pipeline/envs/wan22/venv
+# uv pip install -r pipeline/envs/wan22/requirements.txt
+# uv pip install -e .   # so `python -m pipeline.worker` is importable here
+
+torch>=2.4.0
+diffusers>=0.36.0
+transformers>=4.46.0
+accelerate>=1.0.0
+torchao>=0.16.0
+huggingface_hub>=0.25.0
+hf_transfer
+opencv-python>=4.8.0
+numpy>=1.24.0
