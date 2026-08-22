@@ -8,6 +8,7 @@ torch>=2.4.0
 torchvision
 transformers>=4.46.0
 kornia
+timm
 huggingface_hub>=0.25.0
 hf_transfer
 opencv-python-headless>=4.8.0

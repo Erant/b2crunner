@@ -41,6 +41,7 @@ from typing import Any, Dict, List, Optional
 
 import cv2
 import numpy as np
+from PIL import Image
 
 from ..registry import register_step
 from ..step import Step
@@ -127,7 +128,10 @@ class Wan22VaceDenoiseStep(Step):
         video = [_bgr_to_rgb(frame) for frame in inputs["control_video"]]
         masks = [1.0 - np.asarray(m, dtype=np.float32) for m in inputs["control_masks"]]
         ref_img = inputs.get("reference_image")
-        reference_images = [_bgr_to_rgb(ref_img)] if ref_img is not None else None
+        # check_inputs() requires reference_images to be PIL.Image (or nested
+        # lists thereof) specifically — unlike video/mask, a raw ndarray is
+        # rejected outright.
+        reference_images = [Image.fromarray(_bgr_to_rgb(ref_img))] if ref_img is not None else None
 
         generator = torch.Generator(device=params.get("device", "cuda"))
         generator.manual_seed(int(params.get("seed", 0)))
