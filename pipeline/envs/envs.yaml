@@ -15,3 +15,6 @@ envs:
   seedvr2:
     kind: subprocess
     python_bin: pipeline/envs/seedvr2/venv/bin/python
+  sapiens2:
+    kind: subprocess
+    python_bin: pipeline/envs/sapiens2/venv/bin/python

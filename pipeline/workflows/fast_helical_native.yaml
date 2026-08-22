@@ -2,12 +2,14 @@
 # rmbg and wan22_vace_denoise (pipeline/steps/) are verified on real
 # hardware (L40S pod) against cyber_6f's initial/ dataset at full 81-frame
 # batch size — see wan22_vace_denoise.py's docstring for why frame count
-# matters and what's confirmed vs. still a guess. sam3d_body is still
-# unverified (gated checkpoint, needs a human to accept the HF license
-# first). generate_firstlast/inject_anchor (anchor_stub.py) aren't wired
-# into this workflow at all yet — see wan22_vace_denoise.py's mask-semantics
-# note for why a from-scratch dataset needs them before control_masks means
-# anything.
+# matters and what's confirmed vs. still a guess. sam3d_body, sapiens2_lite,
+# and brush are still unverified: sam3d_body needs a human to accept its
+# gated HF license first; sapiens2_lite's transformers-native API was never
+# run on a pod; brush was never actually built in this session (see
+# docs/docker.md's "Open items"). generate_firstlast/inject_anchor
+# (anchor_stub.py) aren't wired into this workflow at all yet — see
+# wan22_vace_denoise.py's mask-semantics note for why a from-scratch dataset
+# needs them before control_masks means anything.
 name: fast_helical_native
 description: Single-loop helical orbit, no upscale pass.
 params:
@@ -15,6 +17,14 @@ params:
   diffusion_steps: 6
   cfg: 1.0
   seed: 0
+  # Defaults match nodes/brush_node.py's ComfyUI node defaults.
+  brush_total_steps: 30000
+  brush_sh_degree: 3
+  brush_max_resolution: 1920
+  brush_max_splats: 10000000
+  brush_refine_every: 200
+  brush_normal_loss_strength: 0.05
+  brush_normal_loss_step_start: 5000
   # Exact strings from the live ComfyUI graph (workflows/api/denoise.json,
   # nodes 6/7/188) — $SUBJECT_DESC$ gets filled in from dataset.prompt.
   denoise_prompt: >-
@@ -80,6 +90,51 @@ steps:
       negative_prompt: ${params.denoise_negative_prompt}
     outputs:
       images: dataset.images
+
+  # Per-frame masks for the *denoised* batch — distinct from
+  # remove_background above (which masks the raw reference photo for a
+  # generate_firstlast pass that isn't wired in yet). Overwrites
+  # dataset.masks; the per-frame reference/denoise flag that field held for
+  # the denoise step above is no longer needed past this point.
+  - id: mask_denoised_frames
+    step: rmbg
+    dispatch: in_process
+    inputs:
+      images: dataset.images
+    outputs:
+      masks: dataset.masks
+
+  - id: normal_maps
+    step: sapiens2_lite
+    dispatch: subprocess
+    env: sapiens2
+    inputs:
+      images: dataset.images
+    outputs:
+      normal_maps: scene.normal_maps
+
+  - id: train_splat
+    step: brush
+    dispatch: in_process
+    inputs:
+      cameras: dataset.cameras
+      image_names: dataset.image_names
+      points_3d: dataset.points_3d
+      images: dataset.images
+      masks: dataset.masks
+      normal_maps: scene.normal_maps
+    params:
+      brush_path: brush
+      total_steps: ${params.brush_total_steps}
+      sh_degree: ${params.brush_sh_degree}
+      max_resolution: ${params.brush_max_resolution}
+      max_splats: ${params.brush_max_splats}
+      refine_every: ${params.brush_refine_every}
+      alpha_mode: transparent
+      normal_loss_strength: ${params.brush_normal_loss_strength}
+      normal_loss_step_start: ${params.brush_normal_loss_step_start}
+    outputs:
+      splat_path: dataset.splat_path
 
   - id: checkpoint
     step: save_dataset

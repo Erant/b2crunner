@@ -8,9 +8,10 @@ step it was told to run, but it still imports this whole package to find it.
 """
 
 from . import anchor_stub  # noqa: F401
+from . import brush  # noqa: F401
 from . import dataset_io  # noqa: F401
 from . import rmbg  # noqa: F401
 from . import sam3d_body  # noqa: F401
+from . import sapiens2  # noqa: F401
 from . import seedvr2  # noqa: F401
 from . import wan22_vace_denoise  # noqa: F401
-from . import sapiens2_lite_stub  # noqa: F401

@@ -57,7 +57,7 @@ else
     echo "WARNING: runpodctl/RUNPOD_API_KEY/RUNPOD_POD_ID not all available — auto-shutdown NOT armed." >&2
 fi
 
-for env_name in rmbg sam3dbody wan22 seedvr2; do
+for env_name in rmbg sam3dbody wan22 seedvr2 sapiens2; do
     env_dir="$REPO_ROOT/pipeline/envs/$env_name"
     venv_dir="/workspace/venv_${env_name}"
     [ -f "$env_dir/requirements.txt" ] || continue
@@ -80,5 +80,12 @@ for env_name in rmbg sam3dbody wan22 seedvr2; do
 
     deactivate
 done
+
+# brush has no requirements.txt (it's a Rust CLI, not a Python env) so it's
+# outside the loop above — run its setup.sh directly if present.
+if [ -f "$REPO_ROOT/pipeline/envs/brush/setup.sh" ]; then
+    echo "=== running pipeline/envs/brush/setup.sh ==="
+    bash "$REPO_ROOT/pipeline/envs/brush/setup.sh"
+fi
 
 echo "=== pod_bootstrap.sh complete ==="

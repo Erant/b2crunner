@@ -1,0 +1,18 @@
+# sapiens2_lite (normal-map estimation) isolated venv.
+# uv venv pipeline/envs/sapiens2/venv
+# uv pip install -r pipeline/envs/sapiens2/requirements.txt
+# uv pip install -e .   # so `python -m pipeline.worker` is importable here
+#
+# Uses transformers' first-class Sapiens2 support (AutoModelForNormalEstimation)
+# rather than the older facebookresearch/sapiens "lite" torchscript path — see
+# pipeline/steps/sapiens2.py's docstring. Pin transformers to a version that
+# actually ships Sapiens2 support once that's confirmed on a pod; >= below is
+# a floor, not a verified minimum.
+
+torch>=2.4.0
+transformers>=4.56.0
+huggingface_hub>=0.25.0
+hf_transfer
+opencv-python>=4.8.0
+Pillow
+numpy>=1.24.0
