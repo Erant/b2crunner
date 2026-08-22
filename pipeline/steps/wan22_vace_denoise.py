@@ -27,12 +27,27 @@ LoRAs to VACE checkpoints since VACE reuses the T2V transformer backbone plus
 added control conditioning; this is the single biggest correctness risk in
 this file and must be checked against cyber_6f first.
 
-Mask polarity: the ComfyUI graph runs `InvertMask` (node 199) on the
-dataset's mask channel before feeding it to `WanVaceToVideo` as
-`control_masks` — i.e. VACE's mask semantics (white=regions to generate,
-per diffusers' pipeline_wan_vace.py) are the *inverse* of the dataset's mask
-convention (which follows RMBG's foreground=1 convention). Replicated below
-as `1.0 - mask`; this one is read directly off the graph, not guessed.
+Mask semantics: this `mask` is NOT a spatial subject/foreground cutout —
+it's a per-*frame* flag distinguishing already-good reference frames from
+frames that need denoising. Verified directly against `cyber_6f`'s
+`initial/` frames: each frame's alpha channel is uniform across the whole
+image (not a per-pixel silhouette), with `frame_00001` (the anchor/
+reference view) at alpha=0 and every other frame at alpha=255. VACE's own
+convention is white=generate, black=keep (per diffusers'
+pipeline_wan_vace.py), which already matches reference=0/denoise=255
+directly — so the dataset mask is passed straight through as `mask/255`,
+*not* inverted, despite the ComfyUI graph running an `InvertMask` node
+(199) before this same tensor reaches `WanVaceToVideo`. That graph-literal
+inversion was tried first and produced visibly wrong output on a real pod
+run (the reference frame got regenerated while the frames needing
+denoising were left untouched) — whatever convention the live ComfyUI
+mask tensor uses internally, it isn't the same as what ends up baked into
+these PNGs' alpha channel on disk. Trust the verified per-frame alpha
+values over the graph reading if the two ever conflict again.
+
+RMBGStep's foreground-mask output is a *different* kind of mask (spatial,
+per-pixel) and is not what belongs in `control_masks` here — don't wire
+`rmbg`'s output into this step expecting frame-selection semantics.
 
 Attention backend: defaults to SageAttention via diffusers' attention
 dispatcher (params["attention_backend"] = "auto"), steered per-GPU-arch by
@@ -135,8 +150,18 @@ class Wan22VaceDenoiseStep(Step):
             from torchao.quantization import Float8WeightOnlyConfig, quantize_
 
             quant_config = Float8WeightOnlyConfig()
-            quantize_(pipe.transformer, quant_config)
-            quantize_(pipe.transformer_2, quant_config)
+            device = params.get("device", "cuda")
+            # One expert on GPU at a time rather than quantizing both in
+            # place on CPU: torchao's fp8 conversion is a GPU-kernel
+            # operation, so running it on CPU tensors is much slower, and
+            # holding both 14B bf16 experts on GPU simultaneously risks OOM
+            # on smaller cards. Move each expert over, quantize, move back
+            # to host RAM, and clear the CUDA cache before the next one.
+            for transformer in (pipe.transformer, pipe.transformer_2):
+                transformer.to(device)
+                quantize_(transformer, quant_config)
+                transformer.to("cpu")
+                torch.cuda.empty_cache()
 
         if not cache_hit and cache_dir:
             # Save the fused+quantized transformers so the next load() skips
@@ -198,10 +223,11 @@ class Wan22VaceDenoiseStep(Step):
         # numpy too" documentation, which doesn't hold for a list of
         # unbatched per-frame arrays.
         video = [Image.fromarray(_bgr_to_rgb(frame)) for frame in inputs["control_video"]]
-        masks = [
-            Image.fromarray(np.clip((1.0 - np.asarray(m, dtype=np.float32)) * 255.0, 0, 255).astype(np.uint8))
-            for m in inputs["control_masks"]
-        ]
+        # Passed through as-is (not inverted — see module docstring) and
+        # normalized to [0, 1] regardless of whether the source mask is
+        # already float [0,1] (RMBGStep's contract) or raw uint8 [0,255]
+        # (Dataset.from_disk's alpha-channel masks).
+        masks = [_mask_to_pil(m) for m in inputs["control_masks"]]
         ref_img = inputs.get("reference_image")
         # check_inputs() requires reference_images to be PIL.Image (or nested
         # lists thereof) specifically — unlike video/mask, a raw ndarray is
@@ -261,6 +287,17 @@ def _select_sage_backend() -> Optional[str]:
     if (major, minor) == (8, 9):
         return "_sage_qk_int8_pv_fp16_triton"
     return "sage_hub"
+
+
+def _mask_to_pil(m: np.ndarray) -> Image.Image:
+    """Normalize a control mask to uint8 [0,255] and wrap as PIL, without
+    inverting — see module docstring for why. Handles both RMBGStep's
+    float32 [0,1] contract and Dataset.from_disk's raw uint8 [0,255] alpha
+    channel transparently."""
+    arr = np.asarray(m, dtype=np.float32)
+    if arr.max() > 1.0:
+        arr = arr / 255.0
+    return Image.fromarray(np.clip(arr * 255.0, 0, 255).astype(np.uint8))
 
 
 def _bgr_to_rgb(img: np.ndarray) -> np.ndarray:

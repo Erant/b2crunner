@@ -27,13 +27,21 @@ params:
     chewing, tattoos, 眼球运动，眨眼，眼动追踪，微表情，面部抽动，头部移动, 小头, 小脸
 
 steps:
+  # rmbg's foreground/background mask is for the Gaussian-splat stage
+  # (brush's --alpha-mode, not yet a step in this workflow) — NOT for
+  # wan22_vace_denoise's control_masks below, which needs a different thing
+  # entirely: a per-frame reference-vs-needs-denoising flag (see that
+  # module's docstring, verified against cyber_6f's initial/ alpha
+  # channel). That flag already comes baked into dataset.masks from
+  # Dataset.from_disk() (the alpha channel of the loaded frames) — so rmbg
+  # writes to its own scene.* path here rather than overwriting it.
   - id: remove_background
     step: rmbg
     dispatch: in_process
     inputs:
       image: dataset.reference_image
     outputs:
-      mask: dataset.masks
+      mask: scene.foreground_mask
 
   - id: reconstruct_body
     step: sam3d_body
