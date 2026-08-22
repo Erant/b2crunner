@@ -7,14 +7,57 @@
 # https://huggingface.co/facebook/sam-3d-body-dinov3 before an HF token can
 # download it (see pipeline README's "Current state").
 #
-# facebookresearch/sam-3d-body's own INSTALL.md is authoritative for the
-# detectron2 pin (--no-build-isolation --no-deps) — this file is a
-# best-guess starting point, not a substitute for reading that doc on the
-# pod.
+# Dependency list and the detectron2 pin are copied verbatim from
+# facebookresearch/sam-3d-body's own INSTALL.md (fetched directly, not
+# summarized) — including "chump" (not "chumpy"), which reads like it could
+# be a typo for the well-known chumpy SMPL-body package upstream, but this
+# file preserves what INSTALL.md actually says rather than silently
+# "fixing" it. If `pip install chump` fails outright, try chumpy instead
+# and note here which one worked. torch itself is installed separately per
+# that doc's own instructions, so it's not repeated below.
 
-torch>=2.4.0
-git+https://github.com/facebookresearch/sam-3d-body.git
-huggingface_hub>=0.25.0
+pytorch-lightning
+pyrender
+opencv-python
+yacs
+scikit-image
+einops
+timm
+dill
+pandas
+rich
+hydra-core
+hydra-submitit-launcher
+hydra-colorlog
+pyrootutils
+webdataset
+chump
+networkx==3.2.1
+roma
+joblib
+seaborn
+wandb
+appdirs
+appnope
+ffmpeg
+cython
+jsonlines
+pytest
+xtcocotools
+loguru
+optree
+fvcore
+black
+pycocotools
+tensorboard
+huggingface_hub
 hf_transfer
-opencv-python>=4.8.0
-numpy>=1.24.0
+
+# --no-build-isolation --no-deps per INSTALL.md — install everything above
+# first, then this separately:
+#   pip install 'git+https://github.com/facebookresearch/detectron2.git@a1ce2f9' --no-build-isolation --no-deps
+#
+# The actual sam-3d-body package itself (this env's requirements.txt
+# doesn't list it — INSTALL.md assumes you're running from a clone of the
+# repo, not pip-installing it as a dependency):
+#   pip install git+https://github.com/facebookresearch/sam-3d-body.git

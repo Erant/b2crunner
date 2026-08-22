@@ -69,7 +69,11 @@ steps:
       vertices: scene.vertices
       faces: scene.faces
       joints: scene.joints
+      keypoints_3d: scene.keypoints_3d
+      global_rots: scene.global_rots
+      cam_t: scene.cam_t
       focal_length: scene.focal_length
+      bbox: scene.bbox
 
   - id: denoise
     step: wan22_vace_denoise

@@ -6,13 +6,33 @@ detectron2 build -> dispatch: subprocess, own venv
 (see envs/sam3dbody/requirements.txt), never import `sam_3d_body` at module
 top level.
 
-API surface below is inferred from facebookresearch/sam-3d-body's demo.py
-(load_sam_3d_body() -> (model, model_cfg); SAM3DBodyEstimator.process_one_image()
--> outputs consumed by visualize_sample_together(img, outputs, estimator.faces)),
-not from a documented return schema — the exact output dict keys/shapes are
-UNVERIFIED and are the first thing to check once sam-3d-body is actually
-importable on a pod (`python -c "help(SAM3DBodyEstimator.process_one_image)"`
-beats guessing further from here).
+Output schema confirmed against PozzettiAndrea/ComfyUI-SAM3DBody's
+process.py (the node pack the project's actual ComfyUI flow uses — see that
+repo's SAM3DBodyProcess node, which does `output = outputs[0]` then reads
+`pred_vertices`, `pred_keypoints_3d`, `pred_joint_coords`,
+`pred_global_rots`, `pred_cam_t`, `focal_length`, `bbox`, plus pose-param
+fields), not guessed from facebookresearch/sam-3d-body's demo.py/notebook
+the way the first version of this file was — those never show the actual
+dict keys, only that the whole `outputs` object gets forwarded to a
+visualization helper. `faces` still comes from `estimator.faces` (both the
+base repo's demo.py and the ComfyUI wrapper agree on this one).
+
+The ComfyUI wrapper downloads a different checkpoint repo
+(`apozz/sam-3d-body-safetensors`, a safetensors repackaging) and defers
+actual model construction to an isolated worker process not shown in the
+file that does the checkpoint download — the exact estimator-construction
+call there is UNVERIFIED. This module instead calls the official
+`facebookresearch/sam-3d-body` loading path directly
+(`load_sam_3d_body(checkpoint_dir, device=device, mhr_path=...)` ->
+`SAM3DBodyEstimator(model, model_cfg)`, per that repo's own demo.py) against
+`facebook/sam-3d-body-dinov3` — same underlying model class producing the
+same output schema, different checkpoint packaging/loader. Confirm
+`SAM3DBodyEstimator`'s real constructor signature once sam_3d_body is
+actually importable (`python -c "import inspect;
+from sam_3d_body import SAM3DBodyEstimator;
+print(inspect.signature(SAM3DBodyEstimator.__init__))"`) — this version
+drops the `device=` kwarg the first version of this file guessed, since
+neither source confirms the constructor accepts it directly.
 """
 
 from __future__ import annotations
@@ -46,7 +66,7 @@ class SAM3DBodyStep(Step):
         model, model_cfg = load_sam_3d_body(
             checkpoint_dir, device=device, mhr_path=params.get("mhr_path")
         )
-        self._estimator = SAM3DBodyEstimator(model, model_cfg, device=device)
+        self._estimator = SAM3DBodyEstimator(model, model_cfg)
 
     def unload(self) -> None:
         self._estimator = None
@@ -71,10 +91,17 @@ class SAM3DBodyStep(Step):
                 use_mask=params.get("use_mask", False),
             )
 
-        person = outputs[0] if isinstance(outputs, (list, tuple)) else outputs
+        if not outputs:
+            raise RuntimeError("SAM-3D-Body detected no people in the input image")
+        person = outputs[0]
+
         return {
-            "vertices": np.asarray(person["vertices"]),
+            "vertices": np.asarray(person["pred_vertices"]),
             "faces": np.asarray(self._estimator.faces),
-            "joints": np.asarray(person.get("joints", person.get("keypoints_3d"))),
-            "focal_length": float(person.get("focal_length", person.get("focal", 0.0))),
+            "joints": np.asarray(person["pred_joint_coords"]),
+            "keypoints_3d": np.asarray(person["pred_keypoints_3d"]),
+            "global_rots": np.asarray(person["pred_global_rots"]),
+            "cam_t": np.asarray(person["pred_cam_t"]),
+            "focal_length": float(person["focal_length"]),
+            "bbox": np.asarray(person["bbox"]),
         }
