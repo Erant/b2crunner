@@ -7,6 +7,7 @@ isolated env's worker process — pipeline.worker only ever exercises the one
 step it was told to run, but it still imports this whole package to find it.
 """
 
+from . import anchor_stub  # noqa: F401
 from . import dataset_io  # noqa: F401
 from . import rmbg  # noqa: F401
 from . import sam3d_body  # noqa: F401

@@ -49,6 +49,15 @@ RMBGStep's foreground-mask output is a *different* kind of mask (spatial,
 per-pixel) and is not what belongs in `control_masks` here — don't wire
 `rmbg`'s output into this step expecting frame-selection semantics.
 
+Where that per-frame flag actually comes from: `generate_firstlast`/
+`inject_anchor` (pipeline/steps/anchor_stub.py, not yet ported) overwrite
+the frame(s) at the anchor camera with a warped real photo and mark them
+alpha=0; every synthetic render frame is alpha=255. `cyber_6f` already has
+this baked in from the ComfyUI flow that produced it, which is why the
+smoke test this was verified against never exercised the gap — a dataset
+built from scratch needs those two steps wired in before this mask exists
+at all.
+
 Attention backend: defaults to SageAttention via diffusers' attention
 dispatcher (params["attention_backend"] = "auto"), steered per-GPU-arch by
 `_select_sage_backend()` below — see its docstring for the SM89/L40S
