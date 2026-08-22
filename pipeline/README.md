@@ -9,8 +9,8 @@ executed by a `Dispatcher` that hides *how* each step actually runs.
 
 Status: the orchestration engine works end-to-end (verified: dataset
 round-trip, template resolution, dispatcher caching, context wiring — see
-"Current state" below). None of the actual ML models are ported yet; they
-exist as documented stubs in `steps/stubs.py`.
+"Current state" below). `rmbg` and `wan22_vace_denoise` are ported and
+verified against real inference on a GPU pod; the rest are still stubs.
 
 ## Why this shape
 
@@ -60,16 +60,26 @@ pipeline/
 │   └── factory.py       build_dispatcher(dispatch, env_config) -> Dispatcher
 ├── steps/
 │   ├── dataset_io.py    save_dataset / load_dataset — real, working
-│   └── stubs.py         rmbg / sam3d_body / sapiens2_lite /
-│                      wan22_vace_denoise / seedvr2 — NotImplementedError,
-│                      documented input/param/output contracts
+│   ├── rmbg.py          real, verified against real inference
+│   ├── wan22_vace_denoise.py  real, verified against real inference
+│   ├── sam3d_body.py    NotImplementedError, documented contract
+│   ├── seedvr2.py       NotImplementedError, documented contract
+│   ├── anchor_stub.py   generate_firstlast / inject_anchor —
+│                      NotImplementedError, documented contracts
+│   └── sapiens2_lite_stub.py  NotImplementedError, documented contract
 ├── envs/
-│   └── envs.yaml        Per-machine registry: env name -> {python_bin |
-│                      image | base_url}. Empty until real envs are built.
+│   ├── envs.yaml        Per-machine registry: env name -> {python_bin |
+│                      image | base_url}
+│   ├── wan22/           requirements.txt + setup.sh (checkpoint/LoRA
+│                      download) — see scripts/pod_bootstrap.sh
+│   ├── rmbg/            requirements.txt
+│   ├── sam3dbody/       requirements.txt + setup.sh (gated checkpoint)
+│   └── seedvr2/         requirements.txt + setup.sh (vendors
+│                      numz/ComfyUI-SeedVR2_VideoUpscaler)
 └── workflows/
     ├── roundtrip_example.yaml   in-process-only smoke test (no model deps)
-    └── fast_helical_native.yaml target shape for the real pipeline; loads
-                                 and validates today, stub steps not runnable
+    └── fast_helical_native.yaml rmbg + wan22_vace_denoise verified on
+                                 real hardware; sam3d_body still stubbed
 ```
 
 ## Core concepts
@@ -232,14 +242,22 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   `${params.x}` templating (including list indices like
   `${params.resolution.0}`), `Context` get/set, `save_dataset` writing a
   real checkpoint to disk.
+- `rmbg` — RMBG-2.0 background removal (`transformers`, in-process). Ran
+  against `cyber_6f`'s reference image on an L40S pod; mask shape/range
+  correct.
+- `wan22_vace_denoise` — Wan 2.2 VACE denoise, dual high/low-noise expert +
+  VACE conditioning, 6-step/cfg=1/uni_pc-beta distilled schedule, fp8
+  (torchao) via `diffusers.WanVACEPipeline`. Ran end-to-end on an L40S pod
+  against all 81 frames of `cyber_6f`'s `initial/` dataset at strength=1.0;
+  output confirmed correct by the project owner. See that module's
+  docstring for what's verified vs. still a param to tune (LoRA strengths,
+  attention backend, disk caching of the fused/quantized weights) and why
+  frame count matters (a short test clip produces visibly worse output —
+  not a bug, just an invalid test size for this model/LoRA pairing).
 - `fast_helical_native.yaml` loads and its step names resolve against the
-  registry (dataset_io + stubs all import cleanly).
+  registry.
 
-**Stubbed (raise `NotImplementedError`, contract documented in
-`steps/stubs.py`):**
-- `rmbg` — RMBG-2.0 background removal. Plain PyTorch, no compiled
-  extensions → should be `in_process`. Best first target: proves the
-  in-process path needs no isolation machinery at all.
+**Stubbed (raise `NotImplementedError`):**
 - `sam3d_body` — SAM-3D-Body mesh/joint reconstruction. Needs a pinned
   `detectron2` build (`--no-build-isolation --no-deps`) → `subprocess`, own
   venv. Gated HF model access — license must be accepted by a human before
@@ -247,18 +265,13 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
 - `sapiens2_lite` — Sapiens2 normal-map estimation via its pure-PyTorch
   "lite" path (avoids the full mmcv/OpenMMLab install). Candidate for
   `in_process` once ported.
-- `wan22_vace_denoise` — Wan 2.2 VACE denoise, dual high/low-noise expert +
-  VACE conditioning, 6-step/cfg=1/uni_pc-beta distilled schedule. Maps to
-  `diffusers.WanVACEPipeline(transformer, transformer_2, boundary_ratio=...)`.
-  Target checkpoint: `linoyts/Wan2.2-VACE-Fun-14B-diffusers`; speed LoRAs:
-  `lightx2v/Wan2.2-Lightning` (separate high/low-noise rank-64 LoRAs).
-  **Open verification items before this can be trusted**: exact LoRA
-  filename/variant match to the live ComfyUI graph, mask polarity convention,
-  `boundary_ratio` tuning to replicate the step-2-of-6 expert handoff, and a
-  VRAM/offload strategy for two 14B experts (~56GB bf16 combined) plus the
-  UMT5 text encoder on a single 48GB card (fp8 quantization, sequential
-  expert load/unload, or CPU offload — pick one deliberately, don't let it
-  silently OOM).
+- `generate_firstlast`/`inject_anchor` (`anchor_stub.py`) — warp the
+  reference photo to the anchor camera and inject it into the frame batch,
+  producing the per-frame reference/denoise mask `wan22_vace_denoise`
+  consumes. `cyber_6f` has this baked in already (from the ComfyUI flow that
+  produced it), so it's never been exercised by these steps — a dataset
+  built from scratch needs it wired in before `control_masks` means
+  anything at all. Not yet in `fast_helical_native.yaml`.
 - `seedvr2` — video upscaling. Needs `flash_attn==2.5.9.post1` + `apex`
   built from source pinned to torch 2.4.0 + CUDA 12.1/12.4 →
   `subprocess` if that ABI matches the host, `docker` otherwise.
@@ -267,7 +280,8 @@ Not yet started at all: RMBG/MediaPipe face-landmark porting (though
 `nodes/face_landmarks_node.py` is already ComfyUI-independent and should
 port almost as-is), pyrender-based rendering as a `Step`, COLMAP export as a
 `Step`, Brush invocation as a `Step` (already a subprocess call internally in
-`nodes/brush_node.py` — wrap, don't rewrite), gsplat re-render as a `Step`,
+`nodes/brush_node.py` — wrap, don't rewrite; see `docs/docker.md` for
+containerizing the `Erant/brush` fork itself), gsplat re-render as a `Step`,
 the actual `Dockerfile`s / `docker-compose.yml`, and the Gradio frontend.
 
 ## Adding a new step (checklist)
@@ -286,18 +300,24 @@ the actual `Dockerfile`s / `docker-compose.yml`, and the Gradio frontend.
 
 ## Suggested next steps
 
-1. Port `rmbg` for real (in-process) — cheapest way to validate a full
-   real-model step against the `Dataset`/`Context` plumbing before touching
-   anything that needs isolation.
-2. Port `sam3d_body` next, since nearly everything downstream depends on its
+1. Port `sam3d_body`, since nearly everything downstream depends on its
    output shape (vertices/faces/joints) — needs the HF license accepted
    first (human step, can't be automated).
+2. Port `generate_firstlast`/`inject_anchor` (`anchor_stub.py`) — needed
+   before a dataset built from scratch (rather than a pre-built one like
+   `cyber_6f`) has a valid `control_masks` signal for `wan22_vace_denoise`
+   at all.
 3. Wire up rendering + COLMAP export as `Step`s reusing the existing
    `core/`/`nodes/render_node.py` logic (already largely ComfyUI-independent
    numpy/pyrender code — mostly needs `folder_paths`/`comfy.*` calls
    stripped).
-4. Only then tackle `wan22_vace_denoise` — highest-risk piece, resolve the
-   four open verification items above against a real reference dataset
-   before trusting its output.
-5. `seedvr2` and the Docker/Compose/Gradio layer last — they're mechanical
-   once the model steps behind them work.
+4. Fix `wan22_vace_denoise`'s fp8-checkpoint disk cache (currently
+   best-effort/silently skipped — `save_pretrained()` fails on the
+   torchao-quantized tensors in the diffusers/torchao version pairing this
+   was verified against; see `docs/fp8-quant-notes.md`) so repeated loads
+   skip the LoRA-fuse + quantize step, and so the result is eventually
+   publishable to HF as a real fp8 diffusers VACE checkpoint (none exists
+   publicly today).
+5. `seedvr2`, Brush containerization (`docs/docker.md`), and the
+   Docker/Compose/Gradio layer last — they're mechanical once the model
+   steps behind them work.

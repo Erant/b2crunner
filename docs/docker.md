@@ -105,15 +105,6 @@ COPY pipeline/envs/rmbg/requirements.txt /tmp/rmbg-requirements.txt
 RUN pip install --no-cache-dir -r /tmp/wan22-requirements.txt \
     && pip install --no-cache-dir -r /tmp/rmbg-requirements.txt
 
-# Found missing at runtime, not yet in requirements.txt as of this writing —
-# check pipeline/envs/wan22/requirements.txt hasn't already picked these up
-# before adding them again:
-#   peft        (diffusers load_lora_weights() needs the PEFT backend)
-#   ftfy        (diffusers WanVACEPipeline.encode_prompt() calls
-#                ftfy.fix_text() without importing it at module scope in
-#                the diffusers version this was tested against)
-#   timm        (RMBG-2.0's trust_remote_code model file needs it)
-
 COPY . /workspace/b2c_runner
 WORKDIR /workspace/b2c_runner
 RUN pip install --no-cache-dir -e .

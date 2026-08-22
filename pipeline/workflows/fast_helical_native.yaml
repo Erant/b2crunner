@@ -1,8 +1,13 @@
 # Target shape for the native port of workflows/pipeline/fast helical.yaml.
-# rmbg, sam3d_body, and wan22_vace_denoise (pipeline/steps/) are implemented
-# but UNVERIFIED against real inference — see each module's docstring for
-# what's a confirmed fact from the live ComfyUI graph vs. a best guess to
-# check against the cyber_6f reference dataset once a GPU pod is available.
+# rmbg and wan22_vace_denoise (pipeline/steps/) are verified on real
+# hardware (L40S pod) against cyber_6f's initial/ dataset at full 81-frame
+# batch size — see wan22_vace_denoise.py's docstring for why frame count
+# matters and what's confirmed vs. still a guess. sam3d_body is still
+# unverified (gated checkpoint, needs a human to accept the HF license
+# first). generate_firstlast/inject_anchor (anchor_stub.py) aren't wired
+# into this workflow at all yet — see wan22_vace_denoise.py's mask-semantics
+# note for why a from-scratch dataset needs them before control_masks means
+# anything.
 name: fast_helical_native
 description: Single-loop helical orbit, no upscale pass.
 params:

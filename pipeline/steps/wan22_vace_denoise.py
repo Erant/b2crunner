@@ -1,31 +1,57 @@
 """Wan 2.2 VACE-Fun video denoise — dual-expert (high/low noise), fp8.
 
-Best-guess port of the live ComfyUI graph in workflows/api/denoise.json
-(KSamplerAdvanced x2, uni_pc/beta, steps=6, cfg=1, split at step 2) onto
-diffusers.WanVACEPipeline. Everything below is UNVERIFIED against real
-inference — the whole point of the params below being overridable is so a
-wrong guess is a workflow YAML edit, not a code change, once a pod is
-available to check output against the cyber_6f reference dataset
-(initial/ --[strength=1.0]--> circular/, masked_splatted/ --[strength=0.8]-->
-helical/).
+Port of the live ComfyUI graph in workflows/api/denoise.json (KSamplerAdvanced
+x2, uni_pc/beta, steps=6, cfg=1, split at step 2) onto
+diffusers.WanVACEPipeline. VERIFIED against real inference on an L40S pod:
+running the `initial/` --[strength=1.0]--> pass against all 81 frames of the
+`cyber_6f` reference dataset (see below on why frame count matters) produces
+output the project owner confirmed looks correct. Params below stay
+overridable regardless — a future wrong guess (different dataset, different
+LoRA) is still a workflow YAML edit, not a code change.
+
+Frame count matters: the model/LoRA combination here is calibrated for
+~81-frame clips (`denoise.json`'s `WanVaceToVideo` uses `length: 81`, matching
+`LoadDataset`'s `batch_size: 81`). WAN's temporal VAE compresses 4 frames to
+1 latent, so a short clip (e.g. 5 frames, used for early smoke tests here)
+leaves the model almost no temporal context and produced visibly diverged,
+lower-quality output relative to `cyber_6f`'s reference frames — not a code
+bug, just an invalid test size. Always pass close to a full ~81-frame batch
+when judging output quality, not a small trimmed subset.
 
 Base checkpoint: linoyts/Wan2.2-VACE-Fun-14B-diffusers (bf16 diffusers
 weights; model_index.json confirms boundary_ratio=0.875 and
 UniPCMultistepScheduler, matching the ComfyUI graph's uni_pc/beta sampler).
-The user's ComfyUI setup used a GGUF quant of the *ComfyUI-format* checkpoint
-(Kijai's WanVideoWrapper weights); GGUF isn't diffusers-loadable, so instead
-we fp8-quantize the bf16 diffusers checkpoint at load time via torchao. This
-should land close to the same VRAM footprint as the GGUF quant did in
-ComfyUI, but the quantized weights themselves are not bit-identical — expect
-to tune `quantize`/dtype once real hardware is available.
+Confirmed on-pod to be a real WanVACETransformer3DModel on both experts
+(`vace_in_channels: 96`, `vace_layers: [0,5,10,15,20,25,30,35]`, 235
+vace-named submodules including full-width 5120x5120 Linear layers) — not a
+plain T2V fallback silently ignoring `control_video`. The user's ComfyUI
+setup used a GGUF quant of the *ComfyUI-format* checkpoint (Kijai's
+WanVideoWrapper weights); GGUF isn't diffusers-loadable, so instead we
+fp8-quantize the bf16 diffusers checkpoint at load time via torchao
+(quantize_() has no custom filter_fn, so it quantizes every nn.Linear
+uniformly — the VACE injection blocks get the same treatment as the main
+backbone, not skipped or stripped). This lands close to the same VRAM
+footprint as the GGUF quant did in ComfyUI, but the quantized weights
+themselves are not bit-identical.
 
 LoRA: lightx2v/Wan2.2-Lightning's 4-step distill LoRA
 (Wan2.2-T2V-A14B-4steps-lora-rank64-Seko-V1.1/{high,low}_noise_model.safetensors).
 This is a *T2V* lightning LoRA, not VACE-specific — no VACE-specific lightning
-LoRA is published as of this writing. Community usage applies T2V lightning
-LoRAs to VACE checkpoints since VACE reuses the T2V transformer backbone plus
-added control conditioning; this is the single biggest correctness risk in
-this file and must be checked against cyber_6f first.
+LoRA is published as of this writing. Applying it to the VACE checkpoint
+(since VACE reuses the T2V transformer backbone plus added control
+conditioning) produces correct output per the verification above, so this
+risk did not materialize in practice — kept as a param in case a different
+dataset/prompt combination surfaces it.
+
+$SUBJECT_DESC$ substitution: `prompt` must contain the literal substring
+`$SUBJECT_DESC$` for `inputs["subject_desc"]` to get spliced in (see `run()`
+below) — a caller that embeds this prompt through a shell heredoc or similar
+must not let `$SUBJECT_DESC$` get backslash-escaped or shell-expanded before
+it reaches Python, or the substitution silently no-ops and the model sees
+the literal placeholder text instead of an actual subject description. Hit
+exactly this in an ad-hoc bash test harness during verification — not a bug
+in this module, but an easy trap for any script that constructs `params`
+outside a plain Python/YAML path.
 
 Mask semantics: this `mask` is NOT a spatial subject/foreground cutout —
 it's a per-*frame* flag distinguishing already-good reference frames from
