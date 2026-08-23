@@ -63,9 +63,12 @@ pipeline/
 │   ├── rmbg.py          real, verified (single-image + batch paths)
 │   ├── wan22_vace_denoise.py  real, verified against real inference
 │   ├── sapiens2.py      real, verified (single-image + batch paths)
-│   ├── brush.py         real, UNVERIFIED — needs docker dispatch
-│                      (Vulkan/graphics capability), never actually built
-│   ├── sam3d_body.py    NotImplementedError, documented contract
+│   ├── brush.py         real, UNVERIFIED — dispatch: in_process (see
+│                      docker/Dockerfile's comment on why brush is baked
+│                      into the same image, targeting RunPod), never
+│                      actually built/run
+│   ├── sam3d_body.py    real, build/verification in progress (gated
+│                      checkpoint + pinned detectron2 build)
 │   ├── seedvr2.py       NotImplementedError, documented contract
 │   └── anchor_stub.py   generate_firstlast / inject_anchor —
 │                      NotImplementedError, documented contracts
@@ -77,18 +80,22 @@ pipeline/
 │   ├── rmbg/            requirements.txt (in_process — installed into
 │                      the shared venv_main, not its own venv)
 │   ├── sapiens2/        requirements.txt (in_process — same as rmbg)
-│   ├── sam3dbody/       requirements.txt + setup.sh (gated checkpoint)
-│   ├── seedvr2/         requirements.txt + setup.sh (vendors
+│   ├── sam3dbody/       requirements.txt + setup.sh (gated checkpoint,
+│                      pinned detectron2 build, numpy/cython +
+│                      --no-build-isolation gotcha — see that
+│                      requirements.txt's comment)
+│   └── seedvr2/         requirements.txt + setup.sh (vendors
 │                      numz/ComfyUI-SeedVR2_VideoUpscaler)
-│   └── brush/           setup.sh only (Rust CLI, no Python env) — meant
-│                      for a docker image build, not the bare-pod
-│                      bootstrap (see docs/docker.md)
 └── workflows/
     ├── roundtrip_example.yaml   in-process-only smoke test (no model deps)
     └── fast_helical_native.yaml rmbg/wan22_vace_denoise/sapiens2 verified
-                                 on real hardware; sam3d_body/brush still
-                                 unverified
+                                 on real hardware; sam3d_body in progress,
+                                 brush/seedvr2 still unverified
 ```
+
+Brush has no `pipeline/envs/brush/` directory — it's a Rust CLI baked
+directly into `docker/Dockerfile`, not a Python env with a
+`requirements.txt`/`setup.sh` of its own.
 
 ## Core concepts
 
@@ -271,24 +278,36 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
 - `fast_helical_native.yaml` loads and its step names resolve against the
   registry.
 
+**Real, build/verification in progress:**
+- `sam3d_body` — SAM-3D-Body mesh/joint reconstruction. Output schema
+  (`pred_vertices`, `pred_keypoints_3d`, `pred_joint_coords`,
+  `pred_global_rots`, `pred_cam_t`, `focal_length`, `bbox`) confirmed
+  against `PozzettiAndrea/ComfyUI-SAM3DBody`'s `process.py` — the node pack
+  the project's actual ComfyUI flow uses — not guessed from
+  facebookresearch/sam-3d-body's demo.py, which never shows the real dict
+  keys. Dependency list and the detectron2 pin
+  (`@a1ce2f9`, `--no-build-isolation --no-deps`) copied verbatim from that
+  repo's INSTALL.md. Gated checkpoint access confirmed working. Building on
+  a real pod as of this writing; hit and fixed one real bug already —
+  `xtcocotools`'s legacy setup.py needs `numpy` at build time without
+  declaring it as a PEP 517 dependency, so the bulk install needs
+  `--no-build-isolation` (see that requirements.txt's comment).
+
 **Real but UNVERIFIED:**
 - `brush` — Gaussian-splat training via the `Erant/brush` CLI (COLMAP
   export, image/normal-map export, subprocess invocation — a close port of
-  `nodes/brush_node.py`'s `Body2COLMAP_RunBrush`). Needs `docker` dispatch:
-  confirmed on a real pod that brush's Vulkan/graphics requirement isn't
-  satisfiable from a bare-pod Python venv regardless of isolation —
-  `NVIDIA_DRIVER_CAPABILITIES` only exposed `compute,utility` there, so
-  `vulkaninfo` failed even with the driver's Vulkan libraries physically
-  present. See `docs/docker.md` for the fix (bake the capability into the
-  image) and `pipeline/dispatch/docker.py`, which already names brush as
-  its motivating case. Never actually built or run — the Docker image this
-  needs doesn't exist yet.
+  `nodes/brush_node.py`'s `Body2COLMAP_RunBrush`). `dispatch: in_process`
+  (targeting RunPod, where a pod is a single container — no nested Docker
+  daemon to split brush into its own `docker`-dispatched image the way an
+  earlier version of this setup did; see `docker/Dockerfile`'s comment).
+  Brush's actual requirement (Vulkan/graphics capability) is baked into
+  that image's `NVIDIA_DRIVER_CAPABILITIES`, confirmed necessary on a real
+  pod (`vulkaninfo` failed with `ERROR_INCOMPATIBLE_DRIVER` under the
+  default RunPod capability set even with the driver's Vulkan libraries
+  physically present) but not yet confirmed sufficient for how RunPod
+  provisions a pod from a custom image. Never actually built or run.
 
 **Stubbed (raise `NotImplementedError`):**
-- `sam3d_body` — SAM-3D-Body mesh/joint reconstruction. Needs a pinned
-  `detectron2` build (`--no-build-isolation --no-deps`) → `subprocess`, own
-  venv. Gated HF model access — license must be accepted by a human before
-  any automated download will work.
 - `generate_firstlast`/`inject_anchor` (`anchor_stub.py`) — warp the
   reference photo to the anchor camera and inject it into the frame batch,
   producing the per-frame reference/denoise mask `wan22_vace_denoise`
@@ -297,16 +316,13 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   built from scratch needs it wired in before `control_masks` means
   anything at all. Not yet in `fast_helical_native.yaml`.
 - `seedvr2` — video upscaling. Needs `flash_attn==2.5.9.post1` + `apex`
-  built from source pinned to torch 2.4.0 + CUDA 12.1/12.4 →
-  `subprocess` if that ABI matches the host, `docker` otherwise.
+  built from source pinned to torch 2.4.0 + CUDA 12.1/12.4, vendoring
+  `numz/ComfyUI-SeedVR2_VideoUpscaler` (see that env's requirements.txt).
 
 Not yet started at all: RMBG/MediaPipe face-landmark porting (though
 `nodes/face_landmarks_node.py` is already ComfyUI-independent and should
 port almost as-is), pyrender-based rendering as a `Step`, COLMAP export as a
-`Step`, Brush invocation as a `Step` (already a subprocess call internally in
-`nodes/brush_node.py` — wrap, don't rewrite; see `docs/docker.md` for
-containerizing the `Erant/brush` fork itself), gsplat re-render as a `Step`,
-the actual `Dockerfile`s / `docker-compose.yml`, and the Gradio frontend.
+`Step`, gsplat re-render as a `Step`, and the Gradio frontend.
 
 ## Adding a new step (checklist)
 
@@ -324,16 +340,14 @@ the actual `Dockerfile`s / `docker-compose.yml`, and the Gradio frontend.
 
 ## Suggested next steps
 
-1. Build the brush docker image per `docs/docker.md` (Rust build +
-   `NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics,display` baked in)
-   and point `pipeline/envs/envs.yaml`'s `brush` entry at it — this is the
-   one piece of the `wan22_vace_denoise` → `rmbg`/`sapiens2_lite` → `brush`
-   chain in `fast_helical_native.yaml` that's still unverified, and the only
-   one blocked on infrastructure (a real Docker build/push) rather than
-   pod-side Python work.
-2. Port `sam3d_body`, since nearly everything downstream depends on its
-   output shape (vertices/faces/joints) — needs the HF license accepted
-   first (human step, can't be automated).
+1. Finish proving out `sam3d_body` on a pod (build + gated checkpoint +
+   real inference against `cyber_6f`'s `anchor.png`), then `seedvr2` —
+   both currently in progress/next up as of this writing.
+2. Build `docker/Dockerfile` for real and confirm whether RunPod's
+   pod-creation path honors the image-level `NVIDIA_DRIVER_CAPABILITIES`
+   the way a plain `docker run --gpus all` does — this is the one open
+   question standing between "brush code is done" and "brush actually
+   works on RunPod" (see `docs/docker.md`'s "Why one image" section).
 3. Port `generate_firstlast`/`inject_anchor` (`anchor_stub.py`) — needed
    before a dataset built from scratch (rather than a pre-built one like
    `cyber_6f`) has a valid `control_masks` signal for `wan22_vace_denoise`
@@ -349,5 +363,5 @@ the actual `Dockerfile`s / `docker-compose.yml`, and the Gradio frontend.
    skip the LoRA-fuse + quantize step, and so the result is eventually
    publishable to HF as a real fp8 diffusers VACE checkpoint (none exists
    publicly today).
-6. `seedvr2` and the rest of the Docker/Compose/Gradio layer last — they're
-   mechanical once the model steps behind them work.
+6. The Gradio frontend last — mechanical once the model steps behind it
+   work.

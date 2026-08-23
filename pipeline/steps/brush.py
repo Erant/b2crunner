@@ -1,20 +1,24 @@
-"""Gaussian-splat training via the Erant/brush CLI (a Rust binary on `PATH`
-inside the dispatch container, never a Python binding — see docs/docker.md's
-build instructions).
+"""Gaussian-splat training via the Erant/brush CLI (a Rust binary on `PATH`,
+never a Python binding — built into docker/Dockerfile).
 
-Dispatch: `docker`, not `in_process`/`subprocess` (see
-fast_helical_native.yaml's `train_splat` step). This Step's own Python code
-has no conflicting dependencies — subprocess.Popen'ing a CLI binary doesn't
-need venv isolation — but brush itself needs Vulkan/graphics capability,
-which is an OS-level container concern no Python dispatch controls.
-Confirmed the hard way on a real pod: `NVIDIA_DRIVER_CAPABILITIES` only
-exposed `compute,utility` there, so `vulkaninfo` failed even with the
-driver's Vulkan libraries physically present — baking
-`compute,utility,graphics,display` into the docker image (read by
-nvidia-container-toolkit at container-creation time) is what actually fixes
-this, not anything achievable from inside a running venv. See
-docs/docker.md and `pipeline/dispatch/docker.py`'s own docstring, which
-names brush explicitly as this dispatcher's motivating case.
+Dispatch: `in_process`, not `docker` — targeting RunPod specifically, where
+a pod is a single container with no nested Docker daemon to run a separate
+brush image in (confirmed on a real pod: no /var/run/docker.sock, no
+`docker` binary at all). This Step's own Python code has no conflicting
+dependencies either way — subprocess.Popen'ing a CLI binary doesn't need
+venv isolation — so `in_process` is fine for the Python side; what's
+*unresolved* is brush's OS-level Vulkan/graphics requirement, since a
+default RunPod pod's `NVIDIA_DRIVER_CAPABILITIES` only exposed
+`compute,utility` on a real pod tested this session (`vulkaninfo` failed
+with `ERROR_INCOMPATIBLE_DRIVER` even with the driver's Vulkan libraries
+physically present). docker/Dockerfile bakes
+`compute,utility,graphics,display` into the image itself, which is
+necessary but not yet confirmed sufficient for how RunPod provisions a pod
+from a custom image — see that file's comment and docs/docker.md. If this
+never gets resolved for RunPod, `dispatch: docker` (this pipeline still
+supports it — `pipeline/dispatch/docker.py`'s own docstring names brush as
+its motivating case) is the fallback for any other target that does expose
+a Docker daemon.
 
 Port of nodes/brush_node.py's Body2COLMAP_RunBrush, minus everything that
 was only there to unwrap ComfyUI's list-batched inputs (this pipeline's

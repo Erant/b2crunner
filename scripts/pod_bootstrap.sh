@@ -91,7 +91,19 @@ for env_name in sam3dbody wan22 seedvr2; do
     # torch first, from the CUDA wheel index, before the rest of each env's
     # requirements.txt (which pin torch>=X but don't specify --index-url).
     pip install -q torch --index-url https://download.pytorch.org/whl/cu124
-    pip install -q -r "$env_dir/requirements.txt"
+
+    if [ "$env_name" = "sam3dbody" ]; then
+        # numpy/cython must be installed first, and the bulk install must
+        # run with --no-build-isolation — confirmed on a real pod that
+        # xtcocotools's legacy setup.py needs numpy at build time without
+        # declaring it as a PEP 517 build dependency, so pip's normal
+        # per-package isolated build env doesn't have it even when this
+        # venv already does (see pipeline/envs/sam3dbody/requirements.txt).
+        pip install -q numpy cython
+        pip install -q --no-build-isolation -r "$env_dir/requirements.txt"
+    else
+        pip install -q -r "$env_dir/requirements.txt"
+    fi
     pip install -q -e "$REPO_ROOT"
 
     if [ -f "$env_dir/setup.sh" ]; then
@@ -102,10 +114,12 @@ for env_name in sam3dbody wan22 seedvr2; do
     deactivate
 done
 
-# brush is intentionally NOT built here. It needs docker dispatch (OS-level
-# Vulkan/graphics capability a bare-pod venv can't provide regardless of
-# Python isolation — see docs/docker.md) — build its image separately from
-# pipeline/envs/brush/setup.sh + docs/docker.md, not as part of this
-# bare-pod bootstrap.
+# brush is intentionally NOT built here. It needs OS-level Vulkan/graphics
+# capability — confirmed on a real bare RunPod pod that this isn't present
+# by default (NVIDIA_DRIVER_CAPABILITIES only exposed compute,utility) and
+# isn't fixable by installing anything, on any dispatch, into an
+# already-running pod — it has to be baked into the pod's own image at
+# creation time. See docker/Dockerfile (which does build brush) and
+# docs/docker.md; this bare-pod bootstrap script can't help here at all.
 
 echo "=== pod_bootstrap.sh complete ==="

@@ -15,6 +15,23 @@
 # "fixing" it. If `pip install chump` fails outright, try chumpy instead
 # and note here which one worked. torch itself is installed separately per
 # that doc's own instructions, so it's not repeated below.
+#
+# Install as: pip install numpy cython && pip install --no-build-isolation \
+#   -r pipeline/envs/sam3dbody/requirements.txt
+#
+# numpy/cython MUST be installed first in their own command, and the bulk
+# install MUST run with --no-build-isolation — confirmed on a real pod:
+# `xtcocotools`'s legacy setup.py imports numpy directly at build time but
+# doesn't declare it as a PEP 517 build dependency. Pre-installing numpy in
+# this venv alone does NOT fix it: pip's *default* behavior builds each
+# sdist in its own isolated build env that doesn't see this venv's packages
+# at all, so the isolated build subprocess still has no numpy even though
+# the outer venv does. --no-build-isolation makes pip build against this
+# venv directly instead (same reason detectron2 itself needs the flag,
+# per facebookresearch/sam-3d-body's own INSTALL.md) — but it means every
+# package below must have its own build-time deps already satisfied by
+# what's already installed (numpy/cython/torch), which is why those come
+# first as a separate command.
 
 pytorch-lightning
 pyrender
