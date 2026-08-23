@@ -1,8 +1,8 @@
 """Runs a step inside a separate Python interpreter (its own venv/conda env).
 
 For steps whose dependencies conflict with the main environment or with each
-other — SAM-3D-Body's pinned detectron2 build, SeedVR2's flash-attn/apex
-pinned to a specific torch+CUDA ABI, Sapiens2, Wan2.2/diffusers. Each such
+other — SAM-3D-Body's pinned detectron2 build, SeedVR2's own torch/diffusers
+pins, Sapiens2, Wan2.2/diffusers. Each such
 step gets its own venv under `envs/<name>/` (created out-of-band, e.g. via
 `uv venv envs/sam3dbody && uv pip install -r envs/sam3dbody/requirements.txt`
 plus `uv pip install -e .` for this `pipeline` package itself), and this

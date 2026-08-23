@@ -68,7 +68,7 @@ pipeline/
 │                      into the same image, targeting RunPod), never
 │                      actually built/run
 │   ├── sam3d_body.py    real, verified against real inference
-│   ├── seedvr2.py       NotImplementedError, documented contract
+│   ├── seedvr2.py       real, verified against real inference
 │   └── anchor_stub.py   generate_firstlast / inject_anchor —
 │                      NotImplementedError, documented contracts
 ├── envs/
@@ -89,7 +89,9 @@ pipeline/
     ├── roundtrip_example.yaml   in-process-only smoke test (no model deps)
     └── fast_helical_native.yaml rmbg/wan22_vace_denoise/sapiens2/
                                  sam3d_body verified on real hardware;
-                                 brush/seedvr2 still unverified
+                                 brush still unverified. seedvr2 itself is
+                                 verified but not yet wired into this
+                                 workflow's steps: list.
 ```
 
 Brush has no `pipeline/envs/brush/` directory — it's a Rust CLI baked
@@ -142,7 +144,7 @@ field:
 | `dispatch:`   | Class                        | Use for |
 |---------------|-------------------------------|---------|
 | `in_process`  | `InProcessDispatcher`         | No conflicting deps: dataset I/O, camera paths, rendering (pyrender/numpy), gsplat, RMBG, Sapiens2-lite |
-| `subprocess`  | `SubprocessPythonDispatcher`  | Conflicting Python deps needing their own venv: SAM-3D-Body (pinned detectron2), Wan2.2 (diffusers), SeedVR2 (flash-attn/apex) if the ABI matches the host |
+| `subprocess`  | `SubprocessPythonDispatcher`  | Conflicting Python deps needing their own venv: SAM-3D-Body (pinned detectron2), Wan2.2 (diffusers), SeedVR2 (own torch/diffusers pins; no flash-attn/apex needed — see below) |
 | `service`     | `ServiceDispatcher`           | A step run against a long-lived FastAPI microservice that keeps a model loaded across many workflow runs (batch processing) — not needed for a single interactive pass |
 | `docker`      | `DockerDispatcher`            | OS-level isolation a venv can't give (different CUDA/cuDNN userspace, a non-Python runtime) |
 
@@ -291,6 +293,27 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   vendored rather than pip-installed, `load_sam_3d_body`'s `checkpoint_path`
   needing to be the `.ckpt` file not its directory, and `mhr_path` being
   required despite defaulting to `""` upstream).
+- `seedvr2` — one-step diffusion video upscaling. Ran real inference on an
+  L40S pod against 5 frames of `cyber_6f`'s `initial/` dataset: a real
+  720x1280 -> 1440x2560 upscale (`resolution` is the CLI's target output
+  shortest edge, not a multiplier — asking for less than the input's
+  shortest edge downscales, which is what the first smoke test
+  accidentally did before this was caught and re-run correctly), visibly
+  sharper output with no artifacts or color-cast drift. Needed
+  `vae_encode_tiled`/`vae_decode_tiled` at this resolution — an
+  untiled full-res VAE decode OOM'd a 44GB L40S outright, which is exactly
+  what those CLI flags exist for. An earlier version of this module guessed
+  the real API entirely wrong: it assumed `_process_frames_core` lived in
+  `src.core.generation_utils` with ~3 fields, when it's actually a private
+  function in `inference_cli.py` (the vendored repo's own CLI script, not
+  a library module) taking ~30 `argparse.Namespace` fields covering every
+  CLI flag. Fixed by reading `inference_cli.py` directly and vendoring +
+  importing it as a module (confirmed safe: its only module-level side
+  effects are `parse_known_args()`, `mp.set_start_method(...)`, and
+  `os.environ.setdefault(...)`; `main()` is guarded by `if __name__ ==
+  "__main__"`). Also corrected a bad guess in `requirements.txt`:
+  flash-attn/apex are NOT required — they're optional accelerators behind
+  non-default `attention_mode` values; the default `sdpa` is pure PyTorch.
 
 **Real but UNVERIFIED:**
 - `brush` — Gaussian-splat training via the `Erant/brush` CLI (COLMAP
@@ -314,9 +337,6 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   produced it), so it's never been exercised by these steps — a dataset
   built from scratch needs it wired in before `control_masks` means
   anything at all. Not yet in `fast_helical_native.yaml`.
-- `seedvr2` — video upscaling. Needs `flash_attn==2.5.9.post1` + `apex`
-  built from source pinned to torch 2.4.0 + CUDA 12.1/12.4, vendoring
-  `numz/ComfyUI-SeedVR2_VideoUpscaler` (see that env's requirements.txt).
 
 Not yet started at all: RMBG/MediaPipe face-landmark porting (though
 `nodes/face_landmarks_node.py` is already ComfyUI-independent and should
@@ -339,13 +359,14 @@ port almost as-is), pyrender-based rendering as a `Step`, COLMAP export as a
 
 ## Suggested next steps
 
-1. Prove out `seedvr2` the same way `sam3d_body` just was — currently a
-   documented-contract stub, next up as of this writing.
-2. Build `docker/Dockerfile` for real and confirm whether RunPod's
+1. Build `docker/Dockerfile` for real and confirm whether RunPod's
    pod-creation path honors the image-level `NVIDIA_DRIVER_CAPABILITIES`
    the way a plain `docker run --gpus all` does — this is the one open
    question standing between "brush code is done" and "brush actually
    works on RunPod" (see `docs/docker.md`'s "Why one image" section).
+2. Wire `seedvr2` into `fast_helical_native.yaml` (it's verified as a step
+   but not yet a stage in that workflow) and decide where in the pipeline
+   it belongs relative to `brush`'s output.
 3. Port `generate_firstlast`/`inject_anchor` (`anchor_stub.py`) — needed
    before a dataset built from scratch (rather than a pre-built one like
    `cyber_6f`) has a valid `control_masks` signal for `wan22_vace_denoise`

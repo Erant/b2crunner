@@ -1,10 +1,14 @@
 """SeedVR2 one-step diffusion video upscaling.
 
-Needs flash-attn/apex pinned to a specific torch/CUDA ABI -> dispatch:
-subprocess if the pod's host ABI matches the pins in
-envs/seedvr2/requirements.txt, docker otherwise. UNVERIFIED on real
-hardware as of this writing — implemented against numz/ComfyUI-
-SeedVR2_VideoUpscaler's actual source (read directly, not guessed).
+Verified end to end on a real L40S pod: a genuine 720x1280 -> 1440x2560
+upscale of 5 frames from cyber_6f's initial/ dataset (`resolution` is the
+CLI's target output shortest edge, not a multiplier — passing something
+smaller than the input's shortest edge downscales instead, which is what
+the first, deliberately-cheap smoke test did before being corrected).
+Output visibly sharper with no artifacts or color-cast drift. dispatch:
+subprocess, own venv — flash-attn/apex are NOT required despite an earlier
+version of this docstring assuming so (see below); the default
+attention_mode ("sdpa") is pure PyTorch.
 
 The previous version of this module assumed `_process_frames_core` lived
 in `src.core.generation_utils` and took a handful of fields. Both were
@@ -32,6 +36,12 @@ model (`seedvr2_ema_3b_fp8_e4m3fn.safetensors`), not the 7B one this
 module originally guessed — kept as the default here too since nothing
 in this project's docs says otherwise; override via params.dit_model for
 7B quality at ~2x the VRAM/time cost.
+
+An untiled VAE decode at 1440px target resolution OOM'd a 44GB L40S
+outright on just 5 frames — real memory pressure, not a bug. Pass
+params.vae_encode_tiled / params.vae_decode_tiled (True) for any resolution
+much above the input's native size; that's exactly what those flags exist
+for (confirmed: identical call with them on succeeded immediately after).
 """
 
 from __future__ import annotations

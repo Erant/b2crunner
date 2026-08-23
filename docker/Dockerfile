@@ -71,7 +71,7 @@ RUN python3.12 -m venv /workspace/venv_wan22 \
     && /workspace/venv_wan22/bin/pip install --no-cache-dir -e .
 
 # --- venv_sam3dbody: sam3d_body (subprocess dispatch, gated checkpoint) ---
-# Real, pod-verified build (unlike wan22/seedvr2, this one's actually been
+# Real, pod-verified build (unlike wan22, this one's actually been
 # fully compiled and imports cleanly — see pipeline/envs/sam3dbody's
 # requirements.txt/setup.sh comments for the full story). Notable
 # departures from the other venvs in this file:
@@ -95,7 +95,8 @@ RUN python3.12 -m venv /workspace/venv_wan22 \
 #   - sam-3d-body itself is vendored (git clone + a .pth file), not
 #     `pip install`ed — confirmed it has no setup.py/pyproject.toml at all;
 #     its own INSTALL.md/notebook assume a sys.path'd checkout instead. Same
-#     pattern as seedvr2's vendored ComfyUI-SeedVR2_VideoUpscaler below.
+#     pattern as seedvr2's vendored ComfyUI-SeedVR2_VideoUpscaler below (a
+#     vendored repo isn't a pip-package smell specific to sam-3d-body).
 RUN python3.12 -m venv /workspace/venv_sam3dbody \
     && /workspace/venv_sam3dbody/bin/pip install --no-cache-dir --upgrade pip \
     && /workspace/venv_sam3dbody/bin/pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cu128 \
@@ -116,11 +117,14 @@ RUN python3.12 -m venv /workspace/venv_sam3dbody \
 # start against the mounted /data volume instead.
 
 # --- venv_seedvr2: seedvr2 (subprocess dispatch) ---
-# UNVERIFIED — this step is still a documented-contract stub as of this
-# writing (pipeline/steps/seedvr2.py), and the vendored
-# numz/ComfyUI-SeedVR2_VideoUpscaler repo's flash-attn/apex pins may not
-# match this base image's CUDA/torch ABI. Confirm before trusting this
-# layer in production.
+# Real, pod-verified inference (a genuine 720x1280 -> 1440x2560 upscale on
+# an L40S, see pipeline/steps/seedvr2.py's docstring) — but verified in a
+# bare-pod venv built the same way as this Dockerfile block, not inside an
+# actual Docker build; confirm the two produce the same result before
+# trusting this layer blind. flash-attn/apex are NOT needed despite an
+# earlier version of this comment/requirements.txt guessing they were —
+# they're optional accelerators behind non-default attention_mode values;
+# the default (sdpa) is pure PyTorch.
 RUN python3.12 -m venv /workspace/venv_seedvr2 \
     && /workspace/venv_seedvr2/bin/pip install --no-cache-dir --upgrade pip \
     && /workspace/venv_seedvr2/bin/pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cu124 \

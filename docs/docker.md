@@ -87,11 +87,20 @@ real inference on an L40S RunPod pod — see `pipeline/README.md`'s
   actually run, not guessed.
 - `pipeline/envs/sam3dbody/requirements.txt` and the detectron2 pin
   (`@a1ce2f9`, `--no-build-isolation --no-deps`) — copied verbatim from
-  facebookresearch/sam-3d-body's own INSTALL.md, but the *build itself*
-  (detectron2 compiling cleanly, the full dependency list resolving) was
-  still running on a pod as of this writing — check
-  `pipeline/steps/sam3d_body.py`'s docstring / this repo's commit history
-  for whether that finished clean.
+  facebookresearch/sam-3d-body's own INSTALL.md; the build itself, and real
+  inference against `cyber_6f`'s `anchor.png`, are now confirmed clean on a
+  bare pod venv — see `pipeline/steps/sam3d_body.py`'s docstring. What's
+  NOT yet confirmed is this exact recipe working unmodified inside the
+  Docker image build rather than a bare-pod venv (different base image,
+  different starting package set) — worth a real build+run check before
+  trusting it blind.
+- `pipeline/envs/seedvr2/requirements.txt` and the vendored
+  `numz/ComfyUI-SeedVR2_VideoUpscaler` — real inference (a genuine
+  720x1280 -> 1440x2560 upscale) confirmed on a bare pod venv, see
+  `pipeline/steps/seedvr2.py`'s docstring. flash-attn/apex are NOT actually
+  needed (an earlier version of this doc/requirements.txt guessed they
+  were) — the default `attention_mode: sdpa` is pure PyTorch. Same
+  bare-pod-venv-vs-Docker-image caveat as sam3dbody above applies.
 
 Not yet verified — best-guess, flagged as such in `docker/Dockerfile`'s
 comments too:
@@ -102,10 +111,6 @@ comments too:
   does it need `vulkan-sdk` too" is still open. Also open: whether RunPod's
   pod-creation path honors the image-level `NVIDIA_DRIVER_CAPABILITIES` at
   all (see "Why one image" above).
-- `pipeline/envs/seedvr2/requirements.txt` and the vendored
-  `numz/ComfyUI-SeedVR2_VideoUpscaler` — `seedvr2`'s flash-attn/apex pins
-  need checking against whatever CUDA/torch ABI this image actually
-  produces (see that requirements.txt's own comments).
 - The fp8 checkpoint disk cache (`wan22_vace_denoise.py`'s
   `fused_cache_dir` param) — confirmed broken in the diffusers/torchao
   version pairing this was tested against (`docs/fp8-quant-notes.md`), so
