@@ -70,11 +70,31 @@ tensorboard
 huggingface_hub
 hf_transfer
 
+# torch/CUDA version: pin torch to whatever CUDA toolkit is actually
+# installed on the machine (check `/usr/local/cuda-*/bin/nvcc --version` —
+# it may not be on PATH), not just torch>=X unpinned. Confirmed on a real
+# pod: an unpinned `pip install torch` resolved to a cu130 build while the
+# system toolkit was 12.8, and detectron2's build (below) fails outright
+# with a CUDA version mismatch in that state — even though the same
+# mismatched torch imports and runs fine on its own; the crash only shows
+# up once you try to compile a native extension against it. Use
+# `--index-url https://download.pytorch.org/whl/cu128` (or whatever
+# matches) explicitly, and reinstall torch+torchvision *together* in one
+# pip command if you ever need to change torch's version after
+# torchvision is already installed — reinstalling torch alone leaves
+# torchvision's compiled extensions ABI-mismatched against the new torch
+# (`RuntimeError: operator torchvision::nms does not exist`), also hit and
+# fixed on a real pod.
+#
 # --no-build-isolation --no-deps per INSTALL.md — install everything above
 # first, then this separately:
 #   pip install 'git+https://github.com/facebookresearch/detectron2.git@a1ce2f9' --no-build-isolation --no-deps
 #
-# The actual sam-3d-body package itself (this env's requirements.txt
-# doesn't list it — INSTALL.md assumes you're running from a clone of the
-# repo, not pip-installing it as a dependency):
-#   pip install git+https://github.com/facebookresearch/sam-3d-body.git
+# The actual sam-3d-body package: confirmed on a real pod that it is NOT
+# pip-installable at all (`pip install git+...sam-3d-body.git` fails with
+# "does not appear to be a Python project: neither 'setup.py' nor
+# 'pyproject.toml' found") — INSTALL.md/the official notebook both assume
+# you `sys.path.insert` a cloned checkout instead. See
+# pipeline/envs/sam3dbody/setup.sh, which clones it to
+# /workspace/venv_sam3dbody_vendor and adds a .pth file — same pattern as
+# seedvr2's vendored ComfyUI-SeedVR2_VideoUpscaler.

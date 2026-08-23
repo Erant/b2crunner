@@ -71,21 +71,43 @@ RUN python3.12 -m venv /workspace/venv_wan22 \
     && /workspace/venv_wan22/bin/pip install --no-cache-dir -e .
 
 # --- venv_sam3dbody: sam3d_body (subprocess dispatch, gated checkpoint) ---
-# detectron2 pinned per facebookresearch/sam-3d-body's own INSTALL.md.
-# numpy/cython + --no-build-isolation: confirmed on a real pod that
-# xtcocotools's legacy setup.py imports numpy at build time without
-# declaring it as a PEP 517 build dependency, so pip's normal *isolated*
-# per-package build env doesn't have numpy even when this venv already
-# does — the whole bulk install has to run with --no-build-isolation
-# instead (see pipeline/envs/sam3dbody/requirements.txt's comment).
+# Real, pod-verified build (unlike wan22/seedvr2, this one's actually been
+# fully compiled and imports cleanly — see pipeline/envs/sam3dbody's
+# requirements.txt/setup.sh comments for the full story). Notable
+# departures from the other venvs in this file:
+#   - torch pinned to the cu128 index specifically, not cu124/unpinned.
+#     Confirmed on a real pod: an unpinned torch resolved to a cu130 build
+#     while the pod's actual system CUDA toolkit was 12.8
+#     (/usr/local/cuda-12.8, not on PATH) — torch itself ran fine mismatched,
+#     but detectron2's native-extension build failed outright with a CUDA
+#     version-mismatch error. Match whatever the target machine's installed
+#     toolkit actually is.
+#   - numpy/cython installed before, and the bulk requirements.txt install
+#     run with --no-build-isolation: xtcocotools's legacy setup.py imports
+#     numpy at build time without declaring it as a PEP 517 dependency, so
+#     pip's normal per-package isolated build env doesn't have it even when
+#     this venv already does.
+#   - torch+torchvision reinstalled together, not just torch alone: after
+#     detectron2 built, sam_3d_body's own import failed with
+#     "RuntimeError: operator torchvision::nms does not exist" — reinstalling
+#     torch to match the CUDA index left torchvision's compiled extensions
+#     ABI-mismatched against the new torch build.
+#   - sam-3d-body itself is vendored (git clone + a .pth file), not
+#     `pip install`ed — confirmed it has no setup.py/pyproject.toml at all;
+#     its own INSTALL.md/notebook assume a sys.path'd checkout instead. Same
+#     pattern as seedvr2's vendored ComfyUI-SeedVR2_VideoUpscaler below.
 RUN python3.12 -m venv /workspace/venv_sam3dbody \
     && /workspace/venv_sam3dbody/bin/pip install --no-cache-dir --upgrade pip \
-    && /workspace/venv_sam3dbody/bin/pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cu124 \
+    && /workspace/venv_sam3dbody/bin/pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cu128 \
     && /workspace/venv_sam3dbody/bin/pip install --no-cache-dir numpy cython \
     && /workspace/venv_sam3dbody/bin/pip install --no-cache-dir --no-build-isolation -r pipeline/envs/sam3dbody/requirements.txt \
+    && /workspace/venv_sam3dbody/bin/pip install --no-cache-dir --force-reinstall \
+        torch torchvision --index-url https://download.pytorch.org/whl/cu128 \
     && /workspace/venv_sam3dbody/bin/pip install --no-cache-dir \
         'git+https://github.com/facebookresearch/detectron2.git@a1ce2f9' --no-build-isolation --no-deps \
-    && /workspace/venv_sam3dbody/bin/pip install --no-cache-dir git+https://github.com/facebookresearch/sam-3d-body.git \
+    && git clone --depth 1 https://github.com/facebookresearch/sam-3d-body.git /workspace/venv_sam3dbody_vendor \
+    && echo /workspace/venv_sam3dbody_vendor > $(/workspace/venv_sam3dbody/bin/python3 -c "import site; print(site.getsitepackages()[0])")/sam3dbody_vendor.pth \
+    && /workspace/venv_sam3dbody/bin/python3 -c "from sam_3d_body import SAM3DBodyEstimator, load_sam_3d_body" \
     && /workspace/venv_sam3dbody/bin/pip install --no-cache-dir -e .
 # Checkpoint download (facebook/sam-3d-body-dinov3) is NOT baked into the
 # image — it's gated, needs HF_TOKEN from an account that accepted the

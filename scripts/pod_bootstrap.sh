@@ -88,11 +88,16 @@ for env_name in sam3dbody wan22 seedvr2; do
     source "$venv_dir/bin/activate"
     pip install -q --upgrade pip
 
-    # torch first, from the CUDA wheel index, before the rest of each env's
-    # requirements.txt (which pin torch>=X but don't specify --index-url).
-    pip install -q torch --index-url https://download.pytorch.org/whl/cu124
-
     if [ "$env_name" = "sam3dbody" ]; then
+        # cu128, not cu124: confirmed on a real pod that an unpinned/cu124
+        # torch install resolved to a cu130 build while the pod's actual
+        # system CUDA toolkit was 12.8 (check `/usr/local/cuda-*/bin/nvcc
+        # --version` — it may not be on PATH) — torch itself still ran
+        # fine mismatched, but detectron2's native-extension build below
+        # failed outright with a CUDA version-mismatch error. Match
+        # whatever this specific machine's installed toolkit actually is.
+        pip install -q torch torchvision --index-url https://download.pytorch.org/whl/cu128
+
         # numpy/cython must be installed first, and the bulk install must
         # run with --no-build-isolation — confirmed on a real pod that
         # xtcocotools's legacy setup.py needs numpy at build time without
@@ -101,7 +106,19 @@ for env_name in sam3dbody wan22 seedvr2; do
         # venv already does (see pipeline/envs/sam3dbody/requirements.txt).
         pip install -q numpy cython
         pip install -q --no-build-isolation -r "$env_dir/requirements.txt"
+
+        # Re-pin torch+torchvision together after the bulk install, which
+        # can silently upgrade torch via some other package's dependency
+        # resolution (pytorch-lightning did, on a real pod) — confirmed
+        # this leaves torchvision's compiled extensions ABI-mismatched
+        # against the new torch ("RuntimeError: operator torchvision::nms
+        # does not exist") unless both are reinstalled together.
+        pip install -q --force-reinstall torch torchvision --index-url https://download.pytorch.org/whl/cu128
     else
+        # torch first, from the CUDA wheel index, before the rest of each
+        # env's requirements.txt (which pin torch>=X but don't specify
+        # --index-url).
+        pip install -q torch --index-url https://download.pytorch.org/whl/cu124
         pip install -q -r "$env_dir/requirements.txt"
     fi
     pip install -q -e "$REPO_ROOT"
