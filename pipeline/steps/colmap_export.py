@@ -1,0 +1,101 @@
+"""Standalone COLMAP sparse-reconstruction export — the on-disk format
+brush and other 3DGS tools consume directly (cameras.txt/images.txt/
+points3D.txt + frame_NNNNN_.png, optionally RGBA with masks as alpha, plus
+an optional normals/ directory).
+
+Ported from nodes/export_node.py in the original ComfyUI-Body2COLMAP repo,
+minus the ComfyUI-specific parts (folder_paths output-dir resolution,
+INPUT_IS_LIST batch merging, tensor conversion). The actual export is
+body2colmap's `ColmapExporter` — this step is a thin wrapper around it,
+same image/normal-map/alpha-combination logic pipeline/steps/brush.py
+already uses internally (against its own tempdir) — this step is that
+same logic exposed as its own step, writing to a permanent directory
+instead, for producing a COLMAP dataset without going through brush.
+UNTESTED as of this writing — ColmapExporter itself is unmodified
+library code, but this wrapper hasn't been run.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any, Dict
+
+import cv2
+import numpy as np
+
+from ..registry import register_step
+from ..step import Step
+
+
+@register_step("colmap_export")
+class ColmapExportStep(Step):
+    """Write a COLMAP sparse reconstruction directory.
+
+    inputs: {"cameras": List[Camera], "image_names": List[str],
+             "points_3d": Tuple[np.ndarray, np.ndarray],
+             "images": Optional[List[np.ndarray]] BGR(A),
+             "masks": Optional[List[np.ndarray]] float32 [0,1], foreground=1,
+             "normal_maps": Optional[List[np.ndarray]] HxWx3 float32 [-1,1]}
+    params: {"output_dir": str}
+    outputs: {"output_path": str}
+    """
+
+    def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+        from body2colmap.exporter import ColmapExporter
+
+        cameras = inputs["cameras"]
+        image_names = inputs["image_names"]
+        points_3d = inputs["points_3d"]
+        images = inputs.get("images")
+        masks = inputs.get("masks")
+        normal_maps = inputs.get("normal_maps")
+
+        if images is not None and len(images) != len(image_names):
+            raise ValueError(f"images ({len(images)}) and image_names ({len(image_names)}) length mismatch")
+        if normal_maps is not None and images is not None and len(normal_maps) != len(images):
+            raise ValueError(
+                f"Normal map count ({len(normal_maps)}) does not match image count "
+                f"({len(images)}). Every training view needs a matching normal map."
+            )
+
+        output_path = Path(params["output_dir"])
+        output_path.mkdir(parents=True, exist_ok=True)
+
+        ColmapExporter(cameras=cameras, image_names=image_names, points_3d=points_3d).export(
+            output_dir=output_path
+        )
+
+        alpha_channel = None
+        if images is not None:
+            if masks is not None:
+                alpha_channel = [np.clip(m * 255.0, 0, 255).astype(np.uint8) for m in masks]
+
+            for i, (img, filename) in enumerate(zip(images, image_names)):
+                if alpha_channel is not None:
+                    alpha = alpha_channel[i]
+                    if img.shape[-1] == 4:
+                        rgba = img.copy()
+                        rgba[..., 3] = alpha
+                    elif img.shape[-1] == 3:
+                        rgba = np.dstack([img, alpha])
+                    else:
+                        raise ValueError(f"Unexpected image channels: {img.shape[-1]} (expected 3 or 4)")
+                    cv2.imwrite(str(output_path / filename), rgba)
+                else:
+                    cv2.imwrite(str(output_path / filename), img)
+
+        if normal_maps is not None and images is not None:
+            normals_dir = output_path / "normals"
+            normals_dir.mkdir(exist_ok=True)
+            for i, (normal, filename) in enumerate(zip(normal_maps, image_names)):
+                # normal is HxWx3 float32 in [-1, 1] (sapiens2's output convention) ->
+                # BGR uint8 [0, 255] for disk, matching how images are stored here.
+                normal_bgr = np.clip((normal[..., ::-1] + 1.0) / 2.0 * 255.0, 0, 255).astype(np.uint8)
+                if alpha_channel is not None:
+                    out = np.dstack([normal_bgr, alpha_channel[i]])
+                else:
+                    out = normal_bgr
+                normal_path = normals_dir / Path(filename).with_suffix(".png").name
+                cv2.imwrite(str(normal_path), out)
+
+        return {"output_path": str(output_path.absolute())}

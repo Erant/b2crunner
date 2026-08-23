@@ -69,8 +69,14 @@ pipeline/
 │                      actually built/run
 │   ├── sam3d_body.py    real, verified against real inference
 │   ├── seedvr2.py       real, verified against real inference
-│   └── anchor_stub.py   generate_firstlast / inject_anchor —
-│                      NotImplementedError, documented contracts
+│   ├── render.py        real, UNTESTED — camera-path + mesh/skeleton
+│                      render (needs a pod with graphics/pyrender to verify)
+│   ├── colmap_export.py real, UNTESTED — standalone COLMAP dir export
+│   └── anchor_stub.py   generate_firstlast / inject_anchor — real,
+│                      verified locally (pure numpy/cv2 logic, no GPU
+│                      needed): affine + homography warp paths, anchor
+│                      position-matching incl. duplicate cameras, no-anchor
+│                      passthrough
 ├── envs/
 │   ├── envs.yaml        Per-machine registry: env name -> {python_bin |
 │                      image | base_url}
@@ -314,6 +320,19 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   "__main__"`). Also corrected a bad guess in `requirements.txt`:
   flash-attn/apex are NOT required — they're optional accelerators behind
   non-default `attention_mode` values; the default `sdpa` is pure PyTorch.
+- `generate_firstlast`/`inject_anchor` (`anchor_stub.py`) — warp the
+  reference photo to the anchor camera and inject it into the frame batch,
+  producing the per-frame reference/denoise mask `wan22_vace_denoise`
+  consumes. Pure numpy/cv2 logic with no GPU/model dependency, so verified
+  locally against synthetic data (no pod needed): the affine
+  (identity-rotation) and full-homography warp paths both produce correctly
+  shaped output; anchor position-matching correctly replaces every camera
+  within tolerance including an exact-duplicate camera (the
+  `overlap=1`-circular-path case where frame 0 and the last frame share a
+  position); the no-`anchor_image` case passes inputs through with an
+  all-1.0 mask instead of failing. Not yet run against a real `render`
+  output (`render` itself is unverified — see below) or wired into
+  `fast_helical_native.yaml`.
 
 **Real but UNVERIFIED:**
 - `brush` — Gaussian-splat training via the `Erant/brush` CLI (COLMAP
@@ -328,20 +347,34 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   default RunPod capability set even with the driver's Vulkan libraries
   physically present) but not yet confirmed sufficient for how RunPod
   provisions a pod from a custom image. Never actually built or run.
+- `render` — camera-path generation (circular/sinusoidal/helical,
+  `override_cam_from_mesh` anchor mode) + mesh/depth/skeleton rendering +
+  point-cloud sampling, ported from `nodes/render_node.py`. The geometry
+  work is entirely `body2colmap`'s (`Renderer`, `Scene`, `OrbitPath`,
+  `path`/`utils` helpers) — this module is a thin adapter, same as
+  `sam3d_body.py`/`brush.py` are for their libraries. Needs a real
+  GPU/headless-GL pod to verify (`pyrender` — see the module's
+  `PYOPENGL_PLATFORM` EGL/OSMesa setup); not yet run. **Load-bearing fix
+  found while porting, not obvious from any docstring**: `sam3d_body.py`'s
+  own `joints` output key (`pred_joint_coords`, 127 joints) is NOT what
+  `body2colmap.Scene.from_sam3d_output` wants — it wants `keypoints_3d`
+  (`pred_keypoints_3d`, 70 joints); confirmed by reading
+  facebookresearch/sam-3d-body's `mhr_head.py` (`j3d = j3d[:, :70]`) and
+  `Scene._infer_skeleton_format`'s joint-count-based format lookup
+  (70 -> `"mhr70"`). Using `joints` here would either crash or silently
+  mis-render. See `render.py`'s own docstring for the full story.
+- `colmap_export` — standalone COLMAP sparse-reconstruction directory
+  export (`cameras.txt`/`images.txt`/`points3D.txt` + frame PNGs +
+  optional `normals/`), ported from `nodes/export_node.py`. Reuses the
+  same image/mask/normal-map compositing logic `brush.py` already has
+  inline (against its own tempdir) — this is that logic exposed as its own
+  step, writing to a permanent directory instead. `body2colmap.
+  ColmapExporter` itself is unmodified library code, verified with
+  synthetic data locally (cameras.txt/images.txt/points3D.txt all written,
+  correct camera count/PARAMS, RGBA + normal files land where expected);
+  never run against a real `render` output.
 
-**Stubbed (raise `NotImplementedError`):**
-- `generate_firstlast`/`inject_anchor` (`anchor_stub.py`) — warp the
-  reference photo to the anchor camera and inject it into the frame batch,
-  producing the per-frame reference/denoise mask `wan22_vace_denoise`
-  consumes. `cyber_6f` has this baked in already (from the ComfyUI flow that
-  produced it), so it's never been exercised by these steps — a dataset
-  built from scratch needs it wired in before `control_masks` means
-  anything at all. Not yet in `fast_helical_native.yaml`.
-
-Not yet started at all: RMBG/MediaPipe face-landmark porting (though
-`nodes/face_landmarks_node.py` is already ComfyUI-independent and should
-port almost as-is), pyrender-based rendering as a `Step`, COLMAP export as a
-`Step`, gsplat re-render as a `Step`, and the Gradio frontend.
+**Stubbed (raise `NotImplementedError`):** none currently.
 
 ## Adding a new step (checklist)
 
@@ -359,28 +392,35 @@ port almost as-is), pyrender-based rendering as a `Step`, COLMAP export as a
 
 ## Suggested next steps
 
-1. Build `docker/Dockerfile` for real and confirm whether RunPod's
+1. Get real hardware with working graphics (EGL or OSMesa) and verify
+   `render` — that's the one step in this whole pipeline that genuinely
+   needs a display-capable pod to test at all, unlike everything else
+   here which just needed CUDA. Once verified, run `colmap_export` and
+   `generate_firstlast`/`inject_anchor` against its real output too (their
+   own logic is already verified against synthetic data — see above — but
+   never against a real mesh/camera path).
+2. Build `docker/Dockerfile` for real and confirm whether RunPod's
    pod-creation path honors the image-level `NVIDIA_DRIVER_CAPABILITIES`
    the way a plain `docker run --gpus all` does — this is the one open
    question standing between "brush code is done" and "brush actually
-   works on RunPod" (see `docs/docker.md`'s "Why one image" section).
-2. Wire `seedvr2` into `fast_helical_native.yaml` (it's verified as a step
-   but not yet a stage in that workflow) and decide where in the pipeline
-   it belongs relative to `brush`'s output.
-3. Port `generate_firstlast`/`inject_anchor` (`anchor_stub.py`) — needed
-   before a dataset built from scratch (rather than a pre-built one like
-   `cyber_6f`) has a valid `control_masks` signal for `wan22_vace_denoise`
-   at all.
-4. Wire up rendering + COLMAP export as `Step`s reusing the existing
-   `core/`/`nodes/render_node.py` logic (already largely ComfyUI-independent
-   numpy/pyrender code — mostly needs `folder_paths`/`comfy.*` calls
-   stripped).
-5. Fix `wan22_vace_denoise`'s fp8-checkpoint disk cache (currently
+   works on RunPod" (see `docs/docker.md`'s "Why one image" section). Since
+   `render` needs the same graphics capability brush does, verifying one
+   likely verifies the pod-graphics question for both.
+3. Wire `render` -> `generate_firstlast`/`inject_anchor` -> `seedvr2` (and
+   decide where `seedvr2` sits relative to `brush`'s output) into
+   `fast_helical_native.yaml`, or a new from-scratch workflow — the
+   existing workflow was built around `cyber_6f`, a dataset that already
+   has rendering/anchor-injection baked in from the original ComfyUI flow,
+   so none of these three new steps are wired into any workflow file yet.
+4. Fix `wan22_vace_denoise`'s fp8-checkpoint disk cache (currently
    best-effort/silently skipped — `save_pretrained()` fails on the
    torchao-quantized tensors in the diffusers/torchao version pairing this
    was verified against; see `docs/fp8-quant-notes.md`) so repeated loads
    skip the LoRA-fuse + quantize step, and so the result is eventually
    publishable to HF as a real fp8 diffusers VACE checkpoint (none exists
    publicly today).
+5. RMBG/MediaPipe face-landmark porting (`nodes/face_landmarks_node.py` is
+   already ComfyUI-independent and should port almost as-is) — feeds
+   `render`'s optional face-landmark overlay, not ported in this pass.
 6. The Gradio frontend last — mechanical once the model steps behind it
    work.
