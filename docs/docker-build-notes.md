@@ -32,9 +32,13 @@ on an L40S with 44 GB. Two steps are unlikely to fit here:
   keep tiling on and expect to need a lower `resolution`.
 
 What *is* comfortably testable on 12 GB: `sam3d_body`, `rmbg`,
-`sapiens2_lite`, `render`, `render_splat`, `brush`, and the whole
-in-memory orchestration path. That happens to include every step that has
-never been executed at all, so this box is well matched to the actual gap.
+`sapiens2_lite`, `render`, `brush`, and the whole in-memory orchestration
+path. That includes most of what has never been executed at all, so this
+box is well matched to the actual gap.
+
+`render_splat` is the exception, and not for VRAM reasons: gsplat is gone
+and its brush-based replacement does not exist yet, so that step will fail
+at import until it does. See "gsplat: dropped" below.
 
 ## Build order, and what to check at each step
 
@@ -126,9 +130,10 @@ why the check is spelled out rather than assumed.
    still imports and runs afterwards, because that pin presumably exists
    for a reason.
 4. **Give sam3dbody its own torch.** The venv-sharing scheme degrades
-   gracefully: drop `--system-site-packages` for that one venv and install
-   its own torch at whatever CUDA version detectron2 tolerates. Costs
-   ~3 GB of image and nothing else. The other three venvs keep sharing.
+   gracefully: skip `make-child-venv` for that one venv (i.e. omit the
+   `zz_shared_base.pth`), create a plain venv, and install its own torch at
+   whatever CUDA version detectron2 tolerates. Costs ~3 GB of image and
+   nothing else. The other three venvs keep sharing.
 
 Record which rung worked, here, when you find out.
 
@@ -194,6 +199,21 @@ Dockerfile.)
   stage and only the binary is copied. Built on bookworm/glibc 2.36
   against a noble/glibc 2.39 runtime — older-to-newer is the safe
   direction.
+- **Runtime base, not devel.** Three stages now: brush (Rust), a CUDA
+  `devel` python-builder that exists only because detectron2 compiles CUDA
+  kernels, and a CUDA `runtime` final stage that receives the finished
+  venvs. No nvcc, no compilers, no Rust in the shipped image. This became
+  possible only once gsplat was dropped — see below.
+- **Venv sharing uses a `.pth`, not `--system-site-packages`.** The latter
+  does not do what it looks like it does: `venv` resolves `home` to the
+  real base interpreter, not to the venv you invoked it from, so a child
+  created that way inherits `/usr/lib/python3`'s packages and sees nothing
+  of `venv_base`. Verified directly. `docker/make-child-venv.sh` writes a
+  `.pth` naming venv_base's site-packages instead, which gives all four
+  properties needed: the child imports base packages, pip reports them
+  already satisfied (so no child installs its own torch), a locally
+  installed package still shadows the base copy, and installs in a child
+  leave the base untouched. All four tested.
 - **`libopencv-dev` dropped** — ~300 MB of C++ headers that nothing used;
   the opencv Python wheels bundle their own libraries.
 - **`envs.yaml` paths fixed.** The old file created `/workspace/venv_*`
@@ -232,48 +252,31 @@ Dockerfile currently sidesteps it by installing rmbg's two real extras
 (`kornia`, `timm`) directly rather than via the requirements file. Worth
 making the file consistent at some point.
 
-## gsplat, and whether it should stay
+## gsplat: dropped
 
-`render_splat` is the only consumer, via
-`body2colmap/splat_renderer.py`'s `from gsplat import rasterization`.
+`render_splat` was the only consumer, via body2colmap's `SplatRenderer`.
+gsplat publishes no prebuilt wheel past torch 2.4 / cu124 (checked their
+index: `pt20cu118` through `pt24cu124`, nothing since), so on this stack it
+installs as an sdist and JIT-compiles its CUDA kernels on first use —
+needing nvcc at *runtime*. That single dependency was what forced the whole
+image onto a CUDA `devel` base.
 
-The awkward part: **gsplat publishes no prebuilt wheel past torch 2.4 /
-cu124** (checked their wheel index — `pt20cu118` through `pt24cu124`, and
-nothing since). On a modern stack it installs as an sdist and
-JIT-compiles its CUDA kernels on first use, which means **nvcc must be
-present at runtime**, which is why this image stays on the `devel` base
-rather than the much smaller `runtime` one.
+It is now removed, and the image ships on `cuda:13.0.2-cudnn-runtime`.
+detectron2 still needs nvcc, so it compiles in a `devel` builder stage and
+only the finished venvs are copied forward.
 
-Options, roughly in order of effort:
+**`render_splat` will therefore fail at import until its replacement
+exists.** Everything else is unaffected — the step's camera-path half is
+still verified, only the rasterisation call is missing a backend. The
+replacement is a standalone Rust utility linking `brush-render`; see
+`docs/brush-render-utility.md` (uncommitted design note).
 
-1. **Keep it, stay on `devel`** — status quo, costs image size. Fine for
-   now.
-2. **Pre-warm the JIT at build time.** Trigger the compile during the
-   build with `TORCH_CUDA_ARCH_LIST` set, so the cached extension ships in
-   the image and runtime never needs nvcc. Then a `runtime` base becomes
-   possible. The catch: the cache is keyed by arch and torch version, so a
-   GPU whose arch is not in the list at build time silently recompiles at
-   runtime — and fails if nvcc is gone. Viable if the arch list is
-   comprehensive.
-3. **Render with brush instead.** Appealing on paper: brush is already in
-   the image, is a competent splat *renderer* (wgpu), and needs Vulkan —
-   the capability we must solve for anyway. It would drop the CUDA-compile
-   dependency entirely and unify the graphics story on one API.
-   **But**: brush's CLI has no "load a ply, render these cameras, write
-   images" command today. Its config exposes `eval_save_to_disk`, which
-   renders the *training dataset's* eval views during a training run —
-   not an arbitrary camera path. Making this work means adding a render
-   subcommand to Erant/brush (the `brush-render` crate already does the
-   actual work, so this is plumbing rather than new graphics code) and
-   then changing `body2colmap`'s splat renderer to shell out instead of
-   calling gsplat. That is a real project, but it is the option that ends
-   with the smallest image and the fewest moving parts.
-4. **Pure-PyTorch rasteriser** — no compilation, but far too slow for 81
-   frames at 720x1280. Mentioned only to rule it out.
-
-Recommendation: ship option 1, and treat option 3 as the thing to do if
-image size or the CUDA-toolchain dependency becomes painful. Do not spend
-time on option 2 unless a slim runtime image is specifically wanted.
+One sequencing point from that note, worth repeating here because it is
+easy to miss: **capture gsplat reference renders on the 4070 Ti before
+moving on.** gsplat still installs fine in a scratch venv on a box with a
+CUDA toolchain, and those images are the only oracle the brush renderer can
+be validated against. Once that box is gone, so is the ability to produce
+them.
 
 ## Still unverified after all of the above
 
