@@ -70,9 +70,16 @@ class SAM3DBodyStep(Step):
         # the *parent* of the actual snapshot dir. Not documented anywhere,
         # found by hitting the resulting FileNotFoundError on a real pod.
         checkpoint_path = Path(checkpoint_dir) / "model.ckpt"
+        # mhr_path is NOT optional despite the "" default in
+        # load_sam_3d_body's own signature — an empty string reaches
+        # torch.jit.load("") downstream and crashes with "The provided
+        # filename  does not exist". The checkpoint repo ships the file at
+        # assets/mhr_model.pt (confirmed present after snapshot_download on
+        # a real pod); default to that unless overridden.
+        mhr_path = params.get("mhr_path") or str(Path(checkpoint_dir) / "assets" / "mhr_model.pt")
         device = params.get("device", "cuda")
         model, model_cfg = load_sam_3d_body(
-            str(checkpoint_path), device=device, mhr_path=params.get("mhr_path", "")
+            str(checkpoint_path), device=device, mhr_path=mhr_path
         )
         self._estimator = SAM3DBodyEstimator(model, model_cfg)
 
