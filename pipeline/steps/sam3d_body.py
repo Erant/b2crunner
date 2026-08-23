@@ -62,9 +62,17 @@ class SAM3DBodyStep(Step):
         checkpoint_dir = params.get("checkpoint_dir") or snapshot_download(
             params.get("checkpoint_repo", DEFAULT_CHECKPOINT_REPO)
         )
+        # load_sam_3d_body's checkpoint_path arg must be the .ckpt FILE
+        # itself, not its containing directory — confirmed by reading its
+        # source (sam_3d_body/build_models.py): it derives model_config.yaml's
+        # location via os.path.dirname(checkpoint_path), so passing the
+        # directory strips one level too many and looks for the config in
+        # the *parent* of the actual snapshot dir. Not documented anywhere,
+        # found by hitting the resulting FileNotFoundError on a real pod.
+        checkpoint_path = Path(checkpoint_dir) / "model.ckpt"
         device = params.get("device", "cuda")
         model, model_cfg = load_sam_3d_body(
-            checkpoint_dir, device=device, mhr_path=params.get("mhr_path")
+            str(checkpoint_path), device=device, mhr_path=params.get("mhr_path", "")
         )
         self._estimator = SAM3DBodyEstimator(model, model_cfg)
 
