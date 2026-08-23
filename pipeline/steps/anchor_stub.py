@@ -27,9 +27,20 @@ Both steps take render.py's output directly: GenerateFirstLastStep's
 `camera`/`original_focal_length`/`render_size` inputs are exactly
 render.py's `image_warp` dict's fields (override_cam_from_mesh=True run);
 InjectAnchorStep's `cameras`/`anchor_position` are render.py's own
-`cameras`/`anchor_position` outputs. UNTESTED as of this writing — pure
-numpy/cv2 logic, no GPU/model dependency, but not yet run against a real
-render.py output (which is itself untested — see that module's docstring).
+`cameras`/`anchor_position` outputs.
+
+VERIFICATION STATUS differs between the two steps. `inject_anchor` is
+verified against recorded output: `cyber_6f/initial` records an
+anchor_position at the world origin, and frames 1 and 81 of that dataset
+are byte-identical to its anchor.png — so the recorded data independently
+says which frames the ComfyUI flow injected into, and this step finds the
+same two from camera positions alone, including after a rotate_views
+reordering. `generate_firstlast`'s warp is still verified on synthetic
+data only, and cannot be checked against cyber_6f: the image it warps is
+the single photo SAM-3D-Body ran on, which the dataset does not keep
+(reference.png is a two-panel front/back sheet for Wan-VACE conditioning,
+framed differently). It needs a real render.py `image_warp` output, so it
+waits on a pod. See tests/test_anchor.py.
 
 Unlike the original ComfyUI nodes, this port works in cv2 BGR uint8
 throughout (no RGB<->BGR/float<->uint8 tensor conversion needed — that

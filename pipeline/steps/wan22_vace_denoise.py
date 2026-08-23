@@ -106,8 +106,8 @@ from typing import Any, Dict, List, Optional
 
 import cv2
 import numpy as np
-from PIL import Image
 
+from ..masks import normalize_mask
 from ..registry import register_step
 from ..step import Step
 
@@ -257,6 +257,8 @@ class Wan22VaceDenoiseStep(Step):
         # everything frame-like to PIL rather than relying on the "accepts
         # numpy too" documentation, which doesn't hold for a list of
         # unbatched per-frame arrays.
+        from PIL import Image
+
         video = [Image.fromarray(_bgr_to_rgb(frame)) for frame in inputs["control_video"]]
         # Passed through as-is (not inverted — see module docstring) and
         # normalized to [0, 1] regardless of whether the source mask is
@@ -329,10 +331,9 @@ def _mask_to_pil(m: np.ndarray) -> Image.Image:
     inverting — see module docstring for why. Handles both RMBGStep's
     float32 [0,1] contract and Dataset.from_disk's raw uint8 [0,255] alpha
     channel transparently."""
-    arr = np.asarray(m, dtype=np.float32)
-    if arr.max() > 1.0:
-        arr = arr / 255.0
-    return Image.fromarray(np.clip(arr * 255.0, 0, 255).astype(np.uint8))
+    from PIL import Image
+
+    return Image.fromarray(np.clip(normalize_mask(m) * 255.0, 0, 255).astype(np.uint8))
 
 
 def _bgr_to_rgb(img: np.ndarray) -> np.ndarray:

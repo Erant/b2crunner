@@ -7,3 +7,18 @@ numpy>=1.24.0
 opencv-python>=4.8.0
 PyYAML>=6.0
 requests>=2.31.0
+
+# detect_face_landmarks needs MediaPipe. CPU-only, so it installs anywhere;
+# left out of the hard requirements because every other step works without
+# it and it pulls a large dependency tree.
+#   pip install mediapipe
+#
+# The Gaussian-splat steps (load_splat / save_splat / render_splat) need
+# body2colmap's "splat" extra: gsplat plus plyfile. It is deliberately NOT
+# installed by default — gsplat needs a CUDA toolchain to build, and every
+# other step in this pipeline runs without one, so a CPU-only checkout stays
+# installable. On a GPU host:
+#
+#   pip install "body2colmap[splat] @ git+https://github.com/Erant/body2colmap.git"
+#
+# or `pip install -e ".[splat]"` for the pinned versions in pyproject.toml.

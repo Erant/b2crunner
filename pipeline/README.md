@@ -8,9 +8,18 @@ graph. It replaces `submit.py` + the ComfyUI API-format JSON graphs in
 executed by a `Dispatcher` that hides *how* each step actually runs.
 
 Status: the orchestration engine works end-to-end (verified: dataset
-round-trip, template resolution, dispatcher caching, context wiring — see
-"Current state" below). `rmbg` and `wan22_vace_denoise` are ported and
-verified against real inference on a GPU pod; the rest are still stubs.
+round-trip against real ComfyUI-written data, template resolution,
+dispatcher caching, context wiring, and a real CLI run over `cyber_6f`).
+Every node in the ComfyUI pack now has a native counterpart except
+`DetectFaceLandmarks` — see "Coverage vs. the ComfyUI node pack" below.
+
+What is verified varies a lot by step, and the distinction matters:
+`rmbg`, `wan22_vace_denoise`, `sapiens2_lite`, `sam3d_body` and `seedvr2`
+have run real inference on a GPU pod. `colmap_export`, `mask_splat`,
+`inject_anchor` and the five `views` steps are verified against
+`cyber_6f` — real recorded output of the ComfyUI stages they replace.
+`brush` and the two rasterisers (`render`'s pyrender path, `render_splat`'s
+gsplat call) have never been executed at all. Nothing is stubbed.
 
 ## Why this shape
 
@@ -36,6 +45,11 @@ project owner:
 
 ```
 pipeline/
+├── masks.py           normalize_mask()/mask_to_alpha_u8() — the one place
+│                      the foreground=1 convention and its two ranges
+│                      (float [0,1] from steps, uint8 [0,255] from disk)
+│                      are reconciled. Three call sites had re-derived it
+│                      inline; two of them wrongly.
 ├── dataset.py         Dataset — in-memory dataclass; to_disk()/from_disk()
 │                      match the on-disk layout ComfyUI's Save/Load Dataset
 │                      nodes already use (metadata.json, pointcloud.npz,
@@ -71,7 +85,21 @@ pipeline/
 │   ├── seedvr2.py       real, verified against real inference
 │   ├── render.py        real, UNTESTED — camera-path + mesh/skeleton
 │                      render (needs a pod with graphics/pyrender to verify)
-│   ├── colmap_export.py real, UNTESTED — standalone COLMAP dir export
+│   ├── face_landmarks.py detect_face_landmarks — MediaPipe (CPU-only),
+│                      feeds render's face overlay; verified against
+│                      cyber_6f's real photos
+│   ├── views.py         drop_views / filter_fov / rotate_views /
+│                      replace_views / merge_datasets — real, verified
+│                      locally against cyber_6f's 81 real cameras
+│   ├── mask_splat.py    real, verified against cyber_6f's recorded
+│                      splatted/ -> masked_splatted/ stage output
+│   ├── splat.py         load_splat / save_splat / render_splat — camera
+│                      -path half verified locally against cyber_6f's
+│                      recorded metadata; the gsplat rasterisation itself
+│                      needs a CUDA pod (and body2colmap[splat])
+│   ├── colmap_export.py real, verified against cyber_6f's recorded
+│                      colmap/ export (cameras.txt and points3D.txt
+│                      byte-identical, images.txt to 2.4e-7)
 │   └── anchor_stub.py   generate_firstlast / inject_anchor — real,
 │                      verified locally (pure numpy/cv2 logic, no GPU
 │                      needed): affine + homography warp paths, anchor
@@ -91,13 +119,21 @@ pipeline/
 │                      requirements.txt's comment)
 │   └── seedvr2/         requirements.txt + setup.sh (vendors
 │                      numz/ComfyUI-SeedVR2_VideoUpscaler)
-└── workflows/
-    ├── roundtrip_example.yaml   in-process-only smoke test (no model deps)
-    └── fast_helical_native.yaml rmbg/wan22_vace_denoise/sapiens2/
-                                 sam3d_body verified on real hardware;
-                                 brush still unverified. seedvr2 itself is
-                                 verified but not yet wired into this
-                                 workflow's steps: list.
+├── workflows/
+│   ├── roundtrip_example.yaml   in-process-only smoke test (no model deps)
+│   ├── fast_helical_native.yaml single forward pass; rmbg/
+│   │                            wan22_vace_denoise/sapiens2/sam3d_body
+│   │                            verified on real hardware, brush not
+│   └── fast_helical_full.yaml   full six-stage native port of the
+│                                ComfyUI `fast helical` pipeline; every
+│                                step exists and the file validates, but
+│                                it has never been executed
+└── tests/                 stdlib unittest, no pytest dependency. Run with
+                           `python -m unittest discover -s tests -t .`.
+                           Most tests are golden-output tests against
+                           cyber_6f (real recorded ComfyUI stage output);
+                           they skip cleanly when that directory is absent,
+                           since it is gitignored local reference data.
 ```
 
 Brush has no `pipeline/envs/brush/` directory — it's a Rust CLI baked
@@ -334,6 +370,58 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   output (`render` itself is unverified — see below) or wired into
   `fast_helical_native.yaml`.
 
+- `colmap_export` — verified against `cyber_6f/colmap`, the real COLMAP
+  directory the ComfyUI stage produced from `cyber_6f/upscaled`.
+  cameras.txt and points3D.txt come out byte-identical; images.txt agrees
+  to 2.4e-7 per value (the poses have been through metadata.json's float
+  round-trip). The exported PNGs are not compared — that stage runs RMBG
+  first.
+- `mask_splat` — new step, no single node behind it: it collapses the
+  eight-node subgraph of `workflows/api/mask_splat.json`. Verified against
+  `cyber_6f/splatted` -> `cyber_6f/masked_splatted` at the `fast helical`
+  settings: mean absolute error ~0.25/255, max 15, and the two agree on
+  which pixels survive to within sub-perceptual rounding at the mask edge.
+  Two semantics were established by fitting against that recorded output
+  rather than by reading node source, and both are load-bearing —
+  `ToBinaryMask` compares strictly greater-than with no rounding (getting
+  this wrong pushed max error to 140), and `ImpactDilateMask` uses a plain
+  `dilation x dilation` kernel (200). See that module's docstring.
+- `views` (`drop_views`/`filter_fov`/`rotate_views`/`replace_views`/
+  `merge_datasets`) — verified against `cyber_6f`'s real 81-camera helical
+  orbit rather than synthetic data, which matters because the
+  skeleton-relative azimuth convention can only be got wrong silently and
+  a synthetic orbit built on the same assumption would agree with itself
+  either way. The real data also exercises two cases synthetic data would
+  have missed: a frame at *exactly* azimuth 0 (the anchor sits on the
+  original camera), and exactly one duplicated camera position (the
+  `overlap=1` twin, which `rotate_views` splits to first/last).
+- `inject_anchor` — now verified against recorded output, not just
+  synthetic data. `cyber_6f/initial` records `anchor_position` at the
+  world origin, and frames 1 and 81 of that dataset are byte-identical to
+  `anchor.png` — so the recorded data independently says which frames the
+  ComfyUI flow injected into, and the port finds the same two from camera
+  positions alone. Also verified to survive a `rotate_views` reordering,
+  which is the whole reason position is the durable key and
+  `anchor_frame_index` is informational.
+- `detect_face_landmarks` — MediaPipe face landmarks (CPU, no pod), plus
+  the matching `face_landmarks` input and `face_mode`/`face_max_angle`
+  params on `render` that consume them. Verified against `cyber_6f`'s real
+  photos: 478 landmarks off the anchor photo through the crop-and-retry
+  fallback (the face is a small part of a full-body frame, so the
+  full-image stage finds nothing), and on the two-panel front/back
+  reference sheet the frontality scoring correctly picks the front-facing
+  subject in the left panel over the back of the head in the right. Note
+  `face_mode` is the drawing style ("full" = points + connectivity lines |
+  "points" | "none"); the view-angle gate is the separate
+  `face_max_angle` (90 = full hemisphere, 45 = near-frontal).
+- `load_splat`/`save_splat`/`render_splat` — `render_splat`'s camera-path
+  resolution (which cameras, what focal length, which framing bounds,
+  point-cloud preservation, metadata pass-through) is verified against
+  `cyber_6f`'s recorded metadata: the dataset's `focal_length_mm`
+  reproduces its cameras' `fx` exactly, and an anchored override path
+  rebuilt from its `orbit_target` lands a camera exactly on its recorded
+  `anchor_position`. The gsplat rasterisation is untested — see below.
+
 **Real but UNVERIFIED:**
 - `brush` — Gaussian-splat training via the `Erant/brush` CLI (COLMAP
   export, image/normal-map export, subprocess invocation — a close port of
@@ -376,6 +464,137 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
 
 **Stubbed (raise `NotImplementedError`):** none currently.
 
+**Not ported at all:** nothing. Every node in the pack now has a native
+counterpart or a documented reason it isn't needed — see the next section.
+
+## Bugs found and fixed while verifying against real data
+
+Four real defects, all of the "silently wrong" kind that a synthetic test
+would not have surfaced. Recorded here because each one is a trap worth
+not re-entering:
+
+1. **`Dataset.to_disk()` dropped masks.** It wrote `self.images`
+   unmodified, while `from_disk()` splits an RGBA frame into BGR + alpha-as
+   -mask. So any `save_dataset` checkpoint of a dataset loaded from disk
+   lost `dataset.masks` — which, before the denoise stage, is the per-frame
+   reference/denoise flag `wan22_vace_denoise` consumes, not a throwaway.
+   The ComfyUI save node composites the mask into alpha; this now does too
+   (without ComfyUI's inversion, since this pipeline's convention is
+   already foreground = 1).
+
+2. **Two step modules imported PIL at module scope.** `sapiens2.py` and
+   `wan22_vace_denoise.py` both had a top-level `from PIL import Image`,
+   which breaks the invariant this project's own "Import discipline" note
+   describes: `pipeline/steps/__init__.py` imports every step module
+   unconditionally, so `python -m pipeline.worker sam3d_body` inside the
+   `sam3dbody` venv would crash on a dependency that step does not use.
+   Now guarded by a static check in `tests/test_import_discipline.py`.
+
+3. **`colmap_export` binarised soft masks.** It computed alpha as
+   `np.clip(m * 255.0, 0, 255)` regardless of the mask's range, so a uint8
+   mask straight off disk saturated — every value >= 1 became 255,
+   throwing away the soft edge. Both mask ranges are now reconciled in one
+   place (`pipeline/masks.py`), which is also where bug 1's fix lives.
+
+4. **`render` published four fewer metadata fields than the node it ports.**
+   It dropped `orbit_target`, `forward_azimuth_deg`, `framing_bounds` and
+   `initial_rotation`, and only published `focal_length_mm` in override
+   mode. Not cosmetic: `filter_fov` and `rotate_views` hard-error without
+   the first two, and `render_splat` reuses the rest to keep a re-render
+   framed identically to the render it replaces. Found immediately on
+   porting those steps, which is a decent argument for porting consumers
+   and producers close together.
+
+## Coverage vs. the ComfyUI node pack
+
+Gap list between `~/Projects/ComfyUI-Body2COLMAP` (22 registered nodes +
+`submit.py` + 7 API-format graphs in `workflows/api/` + 5 pipeline YAMLs)
+and what exists here.
+
+### Node-by-node
+
+| ComfyUI node | Native equivalent | State |
+|---|---|---|
+| `CircularPath` / `SinusoidalPath` / `HelicalPath` | `render` / `render_splat` `pattern:` param | ported; path math verified against real cameras |
+| `Body2COLMAP_Render` | `steps/render.py` | ported; **rasterisation untested** (needs headless GL) |
+| `Body2COLMAP_ExportCOLMAP` | `steps/colmap_export.py` | ported, **verified against recorded output** |
+| `Body2COLMAP_RunBrush` | `steps/brush.py` | ported, unverified |
+| `Body2COLMAP_SaveDataset` / `LoadDataset` | `steps/dataset_io.py` | ported, verified against real ComfyUI-written data |
+| `Body2COLMAP_GenerateFirstLast` | `steps/anchor_stub.py` | ported; verified on synthetic data only (see below) |
+| `Body2COLMAP_InjectAnchor` | `steps/anchor_stub.py` | ported, **verified against recorded output** |
+| `Body2COLMAP_LoadSplat` / `SaveSplat` | `steps/splat.py` | ported, verified (PLY round-trip) |
+| `Body2COLMAP_RenderSplat` | `steps/splat.py` | ported; camera-path half verified, **rasterisation untested** |
+| `Body2COLMAP_MergeDatasets` | `steps/views.py` | ported, verified |
+| `Body2COLMAP_DropViews` | `steps/views.py` | ported, verified |
+| `Body2COLMAP_FilterFoV` | `steps/views.py` | ported, verified |
+| `Body2COLMAP_ReplaceViews` | `steps/views.py` | ported, verified |
+| `Body2COLMAP_RotateViews` | `steps/views.py` | ported, verified |
+| `Body2COLMAP_UnpackDataset` | n/a — `Context` dotted paths replace it | not needed |
+| `Body2COLMAP_Placeholder` | n/a — a graph-rewiring hack `submit.py` targets | not needed |
+| `Body2COLMAP_WorkflowComposer` | n/a — replaced by `workflow.py` + `cli.py` | not needed |
+| `Body2COLMAP_DetectFaceLandmarks` | `steps/face_landmarks.py` | ported, **verified against real photos** |
+
+Steps here with no single node behind them (they replace whole ComfyUI
+subgraphs of third-party nodes): `rmbg` (`RMBG`), `wan22_vace_denoise`
+(`WanVaceToVideo` + 2x `KSamplerAdvanced` + ... in `denoise.json`),
+`sapiens2_lite` (`SapiensLoader`/`SapiensSampler`), `seedvr2` (the three
+`SeedVR2*` nodes), and `mask_splat` (the eight generic image/mask nodes
+`mask_splat.json` is built from).
+
+### What is still missing
+
+**Nothing, node-wise.** All 22 nodes now have a native counterpart or a
+documented reason not to need one.
+
+**The two rasterisers.** `render` (pyrender/EGL) and `render_splat`
+(gsplat/CUDA) are the only remaining steps whose core call has never been
+executed. Everything around them — camera paths, framing, anchoring,
+metadata, point clouds — is verified.
+
+**`generate_firstlast`'s warp.** Verified against synthetic data only. It
+cannot be checked against `cyber_6f`: the image it warps is the single
+photo SAM-3D-Body ran on, and that image is not in the dataset.
+`reference.png` is a two-panel front/back sheet used for Wan-VACE
+conditioning — a different image with different framing (the subject's
+bounding box scales by 0.59 horizontally against 0.84 vertically, so no
+uniform warp maps one to the other).
+
+### Orchestration differences (intentional)
+
+`submit.py` does things `cli.py` still does not:
+
+- **Batch datasets**: `submit.py pipeline.yaml ds1 ds2 ...` runs the whole
+  pipeline over N datasets; `cli.py` takes a single `--dataset`.
+- **Per-stage on-disk checkpoints**: every ComfyUI stage read and wrote a
+  named subdirectory, so a crashed run resumed from the last completed
+  stage and every intermediate was inspectable. The in-memory `Context`
+  design deliberately drops this (see "Why this shape" #3); the equivalent
+  is inserting `save_dataset` steps by hand, and there is no
+  resume-from-stage mechanism at all. Worth revisiting if long pipelines
+  start failing halfway on real hardware.
+- **`web/merge_dataset.js`**: dynamic-input UI for `MergeDatasets`. The
+  native `merge_datasets` takes a list of Context paths instead; no
+  frontend equivalent is needed until the Gradio UI exists.
+
+### Pipeline/stage coverage
+
+| ComfyUI stage (`workflows/api/`) | Native | Notes |
+|---|---|---|
+| `denoise.json` | yes | `wan22_vace_denoise` (verified on a pod) |
+| `upscale.json` | yes | `seedvr2` (verified on a pod) |
+| `colmap.json` | yes | `rmbg` + `colmap_export` (export verified against recorded output) |
+| `mask_splat.json` | yes | `mask_splat` (verified against recorded output) |
+| `resplat_helical.json` | yes | `rmbg` + `sapiens2_lite` + `brush` + `load_splat` + `render_splat` + `inject_anchor` |
+| `resplat_tiered.json` | yes | as above plus `merge_datasets` |
+| `outline.json` | yes | adds `filter_fov` + `rotate_views` + `replace_views` |
+
+Every stage of every ComfyUI pipeline YAML now has a native equivalent, and
+`pipeline/workflows/fast_helical_full.yaml` is the full six-stage port of
+`workflows/pipeline/fast helical.yaml`. **None of it has been executed
+end-to-end** — that is the next milestone, and it needs a GPU pod. The
+remaining unexecuted pieces are `brush`, `render`'s and `render_splat`'s
+rasterisers, and the sequencing itself.
+
 ## Adding a new step (checklist)
 
 1. Add a class to `pipeline/steps/` (new file or alongside related steps),
@@ -392,35 +611,39 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
 
 ## Suggested next steps
 
-1. Get real hardware with working graphics (EGL or OSMesa) and verify
-   `render` — that's the one step in this whole pipeline that genuinely
-   needs a display-capable pod to test at all, unlike everything else
-   here which just needed CUDA. Once verified, run `colmap_export` and
-   `generate_firstlast`/`inject_anchor` against its real output too (their
-   own logic is already verified against synthetic data — see above — but
-   never against a real mesh/camera path).
-2. Build `docker/Dockerfile` for real and confirm whether RunPod's
-   pod-creation path honors the image-level `NVIDIA_DRIVER_CAPABILITIES`
-   the way a plain `docker run --gpus all` does — this is the one open
-   question standing between "brush code is done" and "brush actually
-   works on RunPod" (see `docs/docker.md`'s "Why one image" section). Since
-   `render` needs the same graphics capability brush does, verifying one
-   likely verifies the pod-graphics question for both.
-3. Wire `render` -> `generate_firstlast`/`inject_anchor` -> `seedvr2` (and
-   decide where `seedvr2` sits relative to `brush`'s output) into
-   `fast_helical_native.yaml`, or a new from-scratch workflow — the
-   existing workflow was built around `cyber_6f`, a dataset that already
-   has rendering/anchor-injection baked in from the original ComfyUI flow,
-   so none of these three new steps are wired into any workflow file yet.
-4. Fix `wan22_vace_denoise`'s fp8-checkpoint disk cache (currently
+Local work is largely exhausted: what remains needs a GPU pod, in this
+order.
+
+1. **Run `fast_helical_full.yaml` on a pod.** Every stage now has a native
+   step and the file validates statically, but it has never executed. This
+   is simultaneously the first real test of `brush`, `render`,
+   `render_splat`, and the sequencing itself. Expect to debug it stage by
+   stage — insert `save_dataset` steps between stages while doing so,
+   since there is no resume-from-stage mechanism.
+2. **Verify `render`** — the one step that genuinely needs a
+   display-capable pod (EGL or OSMesa), unlike everything else here which
+   just needs CUDA. Its camera-path and metadata halves are verified
+   locally; only the pyrender call is unproven. Once it runs, check
+   `generate_firstlast` against its real `image_warp` output — that step's
+   warp is the last piece verified against synthetic data only, and
+   `cyber_6f` cannot cover it (see "What is still missing").
+3. **Verify `render_splat`'s rasteriser**, which needs
+   `body2colmap[splat]` (gsplat + plyfile — deliberately not in the
+   default install, see `requirements.txt`). That also unskips the PLY
+   round-trip tests.
+4. **Build `docker/Dockerfile` for real** and confirm whether RunPod's
+   pod-creation path honours the image-level `NVIDIA_DRIVER_CAPABILITIES`
+   the way a plain `docker run --gpus all` does — the open question
+   between "brush code is done" and "brush works on RunPod" (see
+   `docs/docker.md`). `render` needs the same graphics capability, so
+   verifying one likely settles both.
+5. **Fix `wan22_vace_denoise`'s fp8-checkpoint disk cache** (currently
    best-effort/silently skipped — `save_pretrained()` fails on the
-   torchao-quantized tensors in the diffusers/torchao version pairing this
-   was verified against; see `docs/fp8-quant-notes.md`) so repeated loads
-   skip the LoRA-fuse + quantize step, and so the result is eventually
-   publishable to HF as a real fp8 diffusers VACE checkpoint (none exists
-   publicly today).
-5. RMBG/MediaPipe face-landmark porting (`nodes/face_landmarks_node.py` is
-   already ComfyUI-independent and should port almost as-is) — feeds
-   `render`'s optional face-landmark overlay, not ported in this pass.
-6. The Gradio frontend last — mechanical once the model steps behind it
-   work.
+   torchao-quantized tensors in the version pairing this was verified
+   against; see `docs/fp8-quant-notes.md`) so repeated loads skip the
+   LoRA-fuse + quantize step.
+6. **Decide what replaces `submit.py`'s batching and per-stage
+   checkpointing** (see "Orchestration differences"). Deferred
+   deliberately; revisit once long pipelines actually run.
+7. **The Gradio frontend last** — mechanical once the model steps behind
+   it work.

@@ -23,6 +23,8 @@ import cv2
 
 from body2colmap.camera import Camera
 
+from .masks import mask_to_alpha_u8
+
 _SPECIAL_KEYS = {"cameras", "image_names", "points_3d", "resolution", "splat_path"}
 
 
@@ -52,8 +54,23 @@ class Dataset:
         out = Path(directory)
         out.mkdir(parents=True, exist_ok=True)
 
-        for img, name in zip(self.images, self.image_names):
-            cv2.imwrite(str(out / name), img)
+        # Masks ride along in the alpha channel, matching what
+        # nodes/save_dataset_node.py writes and what from_disk() below
+        # reads back. Without this a save_dataset checkpoint silently
+        # drops dataset.masks — which for a pre-denoise dataset is the
+        # per-frame reference/denoise flag wan22_vace_denoise consumes,
+        # not a throwaway.
+        #
+        # No inversion here, unlike the ComfyUI node: ComfyUI's MASK
+        # convention is inverted (1.0 = background) so that node writes
+        # alpha = 1 - mask, whereas this pipeline's convention is
+        # foreground = 1 throughout (see steps/rmbg.py), which is already
+        # what alpha means.
+        for i, (img, name) in enumerate(zip(self.images, self.image_names)):
+            frame = img
+            if self.masks is not None and i < len(self.masks):
+                frame = _attach_alpha(img, self.masks[i])
+            cv2.imwrite(str(out / name), frame)
 
         if self.reference_image is not None:
             cv2.imwrite(str(out / "reference.png"), self.reference_image)
@@ -146,6 +163,18 @@ class Dataset:
             splat_path=splat_path,
             extras=metadata.get("b2c_extras", {}),
         )
+
+
+def _attach_alpha(img: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """Composite a mask into an image's alpha channel as uint8 [0,255]."""
+    alpha = mask_to_alpha_u8(mask)
+
+    bgr = img[:, :, :3] if img.ndim == 3 and img.shape[2] == 4 else img
+    if bgr.ndim == 2:
+        bgr = cv2.cvtColor(bgr, cv2.COLOR_GRAY2BGR)
+    if alpha.shape != bgr.shape[:2]:
+        alpha = cv2.resize(alpha, (bgr.shape[1], bgr.shape[0]), interpolation=cv2.INTER_NEAREST)
+    return np.dstack([bgr, alpha])
 
 
 def _serialize_camera(camera: Camera) -> dict:

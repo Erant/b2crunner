@@ -11,8 +11,12 @@ same image/normal-map/alpha-combination logic pipeline/steps/brush.py
 already uses internally (against its own tempdir) — this step is that
 same logic exposed as its own step, writing to a permanent directory
 instead, for producing a COLMAP dataset without going through brush.
-UNTESTED as of this writing — ColmapExporter itself is unmodified
-library code, but this wrapper hasn't been run.
+VERIFIED against recorded output: `cyber_6f/upscaled` -> `cyber_6f/colmap`
+is a real run of `workflows/api/colmap.json`, and this step reproduces its
+cameras.txt and points3D.txt byte-for-byte and its images.txt to 2.4e-7
+per value (the poses have been through metadata.json's float round-trip).
+The exported PNGs are not compared — that ComfyUI stage runs RMBG over the
+frames first. See tests/test_colmap_export.py.
 """
 
 from __future__ import annotations
@@ -23,6 +27,7 @@ from typing import Any, Dict
 import cv2
 import numpy as np
 
+from ..masks import mask_to_alpha_u8
 from ..registry import register_step
 from ..step import Step
 
@@ -68,7 +73,9 @@ class ColmapExportStep(Step):
         alpha_channel = None
         if images is not None:
             if masks is not None:
-                alpha_channel = [np.clip(m * 255.0, 0, 255).astype(np.uint8) for m in masks]
+                # Handles both mask ranges in circulation — a mask loaded
+                # from disk is uint8, not float [0,1]. See pipeline/masks.py.
+                alpha_channel = [mask_to_alpha_u8(m) for m in masks]
 
             for i, (img, filename) in enumerate(zip(images, image_names)):
                 if alpha_channel is not None:

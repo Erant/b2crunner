@@ -9,9 +9,13 @@ tracked, see pipeline/README.md's "Not yet started" list). The actual
 geometry work — camera path generation, mesh/skeleton rasterization, point
 cloud sampling — is body2colmap's, not reimplemented here; this module is a
 thin adapter, same as sam3d_body.py/brush.py are for their libraries.
-UNTESTED as of this writing — port done without a pod to verify against
-(pyrender needs a real GPU/headless-GL setup); leave real verification for
-whenever this project's next pod comes up with graphics support confirmed.
+RASTERISATION UNTESTED — pyrender needs a real GPU/headless-GL setup, so
+the render loop itself has never executed; leave that for the next pod with
+graphics support confirmed. The metadata this step publishes *is* verified
+indirectly: steps/views.py and steps/splat.py consume orbit_target /
+forward_azimuth_deg / focal_length_mm / anchor_position, and their tests
+check those against cyber_6f's real recorded values (e.g. the recorded
+focal_length_mm reproduces the recorded camera fx exactly).
 
 **Key finding, not obvious from any docstring**: body2colmap's own
 `Scene.from_sam3d_output()` expects the RAW SAM-3D-Body field names
@@ -92,7 +96,9 @@ class RenderStep(Step):
     """Render a camera-path orbit of a SAM-3D-Body mesh/skeleton.
 
     inputs: {"mesh_output": dict — sam3d_body.py's raw run() output
-             (vertices, faces, cam_t, keypoints_3d, focal_length, ...)}
+             (vertices, faces, cam_t, keypoints_3d, focal_length, ...),
+             "face_landmarks": Optional[dict] — steps/face_landmarks.py's
+             output, drawn on the skeleton render modes}
 
     params: pattern ("circular" | "sinusoidal" | "helical"), n_frames,
         width, height, render_mode ("mesh" | "depth" | "skeleton" |
@@ -104,7 +110,12 @@ class RenderStep(Step):
         n_loops/amplitude_deg/lead_in_deg/lead_out_deg for helical) and
         rendering params (mesh_color, bg_color, skeleton_format,
         joint_radius, bone_radius, depth_colormap, focal_length_mm,
-        fill_ratio, radius, pointcloud_samples, initial_rotation). See
+        fill_ratio, radius, pointcloud_samples, initial_rotation,
+        face_mode ("full" = points + connectivity lines | "points" |
+        "none"; only meaningful with a face_landmarks input) and
+        face_max_angle (degrees between the face normal and the camera
+        beyond which the overlay is skipped — 90 = full hemisphere,
+        45 = near-frontal only)). See
         body2colmap.path.OrbitPath / body2colmap.renderer.Renderer for the
         exact semantics of each — this step is a thin pass-through.
 
@@ -112,7 +123,9 @@ class RenderStep(Step):
              List[np.ndarray] (float32 [0,1], foreground=1 — see module
              docstring), "cameras": List[Camera],
              "image_names": List[str], "points_3d": (positions, colors),
-             "resolution": (width, height)} plus, when
+             "resolution": (width, height), "orbit_target" (np.ndarray(3,)),
+             "forward_azimuth_deg" (float), "focal_length_mm" (float),
+             "framing_bounds" (dict), "initial_rotation" (float)} plus, when
              override_cam_from_mesh: "anchor_position" (np.ndarray(3,)),
              "anchor_frame_index" (int), "original_focal_length" (float),
              "image_warp" (dict for generate_firstlast — see
@@ -225,6 +238,7 @@ class RenderStep(Step):
                 anchor_info = compute_helical_anchor_params(target=orbit_center, **helix_params)
                 derived_radius = float(anchor_info["radius"])
                 anchor_frame_index = int(anchor_info["anchor_frame_index"])
+                anchor_azimuth = float(anchor_info["anchor_azimuth_deg"])
 
                 path_gen = OrbitPath(target=orbit_center, radius=derived_radius)
                 cameras = path_gen.helical(
@@ -300,6 +314,31 @@ class RenderStep(Step):
         joint_radius = params.get("joint_radius", 0.006)
         bone_radius = params.get("bone_radius", 0.003)
 
+        # Optional face-landmark overlay, from steps/face_landmarks.py.
+        # MediaPipe's raw points are converted to OpenPose Face 70 here
+        # rather than in that step, because the conversion needs the image
+        # size the landmarks were normalized against — which travels with
+        # them in the dict.
+        openpose_face_70 = None
+        face_mode = params.get("face_mode", "full")
+        face_landmarks = inputs.get("face_landmarks")
+        if face_landmarks is not None and face_mode != "none":
+            from body2colmap.face import FaceLandmarkIngest
+
+            source = face_landmarks["source"]
+            if source != "mediapipe":
+                raise ValueError(
+                    f"Unsupported face landmark source: {source!r}. Supported: "
+                    "'mediapipe' (see steps/face_landmarks.py)."
+                )
+            openpose_face_70 = FaceLandmarkIngest.from_mediapipe(
+                face_landmarks["landmarks"],
+                image_size=face_landmarks["image_size"],
+            )
+        else:
+            face_mode = None
+        face_max_angle = float(params.get("face_max_angle", 90.0))
+
         renderer = Renderer(scene=scene, render_size=(width, height))
 
         rendered_images = []
@@ -315,6 +354,9 @@ class RenderStep(Step):
                     joint_radius=joint_radius,
                     bone_radius=bone_radius,
                     bg_color=bg_color,
+                    face_mode=face_mode,
+                    face_landmarks=openpose_face_70,
+                    face_max_angle=face_max_angle,
                 )
             elif render_mode in ("mesh+skeleton", "depth+skeleton"):
                 composite_modes: Dict[str, Any] = {
@@ -328,6 +370,12 @@ class RenderStep(Step):
                     composite_modes["mesh"] = {"color": mesh_color, "bg_color": bg_color}
                 else:
                     composite_modes["depth"] = {"colormap": depth_cmap}
+                if face_mode is not None:
+                    composite_modes["face"] = {
+                        "face_mode": face_mode,
+                        "face_landmarks": openpose_face_70,
+                        "face_max_angle": face_max_angle,
+                    }
                 img = renderer.render_composite(camera=camera, modes=composite_modes)
             else:
                 raise ValueError(f"Unknown render_mode: {render_mode}")
@@ -340,6 +388,22 @@ class RenderStep(Step):
         images = [rgba[..., [2, 1, 0]] for rgba in rendered_images]  # RGB -> BGR
         masks = [rgba[..., 3].astype(np.float32) / 255.0 for rgba in rendered_images]
 
+        # The orbit azimuth that corresponds to the front of the skeleton.
+        # In override mode that is wherever the original camera ended up;
+        # otherwise auto-orient has already turned the skeleton to face -Z
+        # and OrbitPath's azimuth 0 is -Z, so front is 0 by construction
+        # (independent of start_azimuth_deg).
+        forward_azimuth_deg = float(anchor_azimuth) if override_cam_from_mesh else 0.0
+
+        # In override mode the focal_length_mm param is bypassed entirely
+        # (the render used the auto-framed focal length), so publishing the
+        # raw param would make a downstream re-render silently reframe.
+        effective_focal_length_mm = (
+            _focal_length_pixels_to_mm(focal_length, width)
+            if override_cam_from_mesh
+            else params.get("focal_length_mm", 0.0)
+        )
+
         result: Dict[str, Any] = {
             "images": images,
             "masks": masks,
@@ -347,6 +411,18 @@ class RenderStep(Step):
             "image_names": image_names,
             "points_3d": (points, colors),
             "resolution": (width, height),
+            # Orbit metadata, matching nodes/render_node.py's b2c_data. Not
+            # decoration: filter_fov and rotate_views both hard-error
+            # without orbit_target/forward_azimuth_deg, and the splat
+            # renderer reuses framing_bounds/initial_rotation to keep a
+            # re-render framed identically. framing_bounds is in-memory
+            # only — Dataset.to_disk()'s JSON filter drops it, exactly as
+            # the ComfyUI save node does (see cyber_6f's b2c_extras).
+            "orbit_target": np.asarray(orbit_center, dtype=np.float32),
+            "forward_azimuth_deg": forward_azimuth_deg,
+            "focal_length_mm": effective_focal_length_mm,
+            "framing_bounds": all_framing_bounds,
+            "initial_rotation": float(params.get("initial_rotation", 0.0)),
         }
 
         if override_cam_from_mesh:
@@ -354,6 +430,5 @@ class RenderStep(Step):
             result["anchor_frame_index"] = int(anchor_frame_index)
             result["original_focal_length"] = original_focal_length
             result["image_warp"] = image_warp
-            result["focal_length_mm"] = _focal_length_pixels_to_mm(focal_length, width)
 
         return result

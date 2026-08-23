@@ -37,7 +37,6 @@ from typing import Any, Dict, List
 
 import cv2
 import numpy as np
-from PIL import Image
 
 from ..registry import register_step
 from ..step import Step
@@ -94,6 +93,7 @@ class Sapiens2LiteStep(Step):
 
     def _run_batch(self, images_bgr: List[np.ndarray]) -> List[np.ndarray]:
         import torch
+        from PIL import Image
 
         pil_images = [Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB)) for img in images_bgr]
         sizes = [(img.shape[0], img.shape[1]) for img in images_bgr]
