@@ -67,8 +67,7 @@ pipeline/
 │                      docker/Dockerfile's comment on why brush is baked
 │                      into the same image, targeting RunPod), never
 │                      actually built/run
-│   ├── sam3d_body.py    real, build/verification in progress (gated
-│                      checkpoint + pinned detectron2 build)
+│   ├── sam3d_body.py    real, verified against real inference
 │   ├── seedvr2.py       NotImplementedError, documented contract
 │   └── anchor_stub.py   generate_firstlast / inject_anchor —
 │                      NotImplementedError, documented contracts
@@ -88,8 +87,8 @@ pipeline/
 │                      numz/ComfyUI-SeedVR2_VideoUpscaler)
 └── workflows/
     ├── roundtrip_example.yaml   in-process-only smoke test (no model deps)
-    └── fast_helical_native.yaml rmbg/wan22_vace_denoise/sapiens2 verified
-                                 on real hardware; sam3d_body in progress,
+    └── fast_helical_native.yaml rmbg/wan22_vace_denoise/sapiens2/
+                                 sam3d_body verified on real hardware;
                                  brush/seedvr2 still unverified
 ```
 
@@ -277,21 +276,21 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   single-image and batched paths; output correctly shaped and L2-normalized.
 - `fast_helical_native.yaml` loads and its step names resolve against the
   registry.
-
-**Real, build/verification in progress:**
-- `sam3d_body` — SAM-3D-Body mesh/joint reconstruction. Output schema
-  (`pred_vertices`, `pred_keypoints_3d`, `pred_joint_coords`,
-  `pred_global_rots`, `pred_cam_t`, `focal_length`, `bbox`) confirmed
-  against `PozzettiAndrea/ComfyUI-SAM3DBody`'s `process.py` — the node pack
-  the project's actual ComfyUI flow uses — not guessed from
-  facebookresearch/sam-3d-body's demo.py, which never shows the real dict
-  keys. Dependency list and the detectron2 pin
-  (`@a1ce2f9`, `--no-build-isolation --no-deps`) copied verbatim from that
-  repo's INSTALL.md. Gated checkpoint access confirmed working. Building on
-  a real pod as of this writing; hit and fixed one real bug already —
-  `xtcocotools`'s legacy setup.py needs `numpy` at build time without
-  declaring it as a PEP 517 dependency, so the bulk install needs
-  `--no-build-isolation` (see that requirements.txt's comment).
+- `sam3d_body` — SAM-3D-Body mesh/joint reconstruction. Ran real inference
+  on an L40S pod against `cyber_6f`'s `anchor.png`: 18439 vertices, 36874
+  faces, 127 joints, focal_length=1468.6px, all correctly shaped. Output
+  schema confirmed against `PozzettiAndrea/ComfyUI-SAM3DBody`'s
+  `process.py` (the node pack the project's actual ComfyUI flow uses), then
+  confirmed directly by the real run. Four real, undocumented bugs found
+  and fixed getting this to build and load — see that module's docstring
+  and `pipeline/envs/sam3dbody/requirements.txt`'s comment for the full
+  list (xtcocotools needing numpy pre-installed with
+  `--no-build-isolation`, a CUDA-toolkit version pin detectron2's native
+  build needs that a plain `pip install torch` doesn't give you, torch/
+  torchvision needing reinstalling together, sam-3d-body needing to be
+  vendored rather than pip-installed, `load_sam_3d_body`'s `checkpoint_path`
+  needing to be the `.ckpt` file not its directory, and `mhr_path` being
+  required despite defaulting to `""` upstream).
 
 **Real but UNVERIFIED:**
 - `brush` — Gaussian-splat training via the `Erant/brush` CLI (COLMAP
@@ -340,9 +339,8 @@ port almost as-is), pyrender-based rendering as a `Step`, COLMAP export as a
 
 ## Suggested next steps
 
-1. Finish proving out `sam3d_body` on a pod (build + gated checkpoint +
-   real inference against `cyber_6f`'s `anchor.png`), then `seedvr2` —
-   both currently in progress/next up as of this writing.
+1. Prove out `seedvr2` the same way `sam3d_body` just was — currently a
+   documented-contract stub, next up as of this writing.
 2. Build `docker/Dockerfile` for real and confirm whether RunPod's
    pod-creation path honors the image-level `NVIDIA_DRIVER_CAPABILITIES`
    the way a plain `docker run --gpus all` does — this is the one open

@@ -1,38 +1,43 @@
 """SAM-3D-Body mesh/joint reconstruction from a single image.
 
-Gated checkpoint (facebook/sam-3d-body-dinov3 on HF — a human must accept
-the license in the HF UI before any token can download it) and a pinned
-detectron2 build -> dispatch: subprocess, own venv
-(see envs/sam3dbody/requirements.txt), never import `sam_3d_body` at module
-top level.
+Verified end to end on a real L40S pod: loaded facebook/sam-3d-body-dinov3
+(gated checkpoint — a human must accept the license in the HF UI before any
+token can download it) and ran real inference against cyber_6f's
+anchor.png, producing sane-shaped output — 18439 vertices, 36874 faces, 127
+joints, focal_length=1468.6px. dispatch: subprocess, own venv (see
+envs/sam3dbody/requirements.txt), never import `sam_3d_body` at module top
+level.
 
 Output schema confirmed against PozzettiAndrea/ComfyUI-SAM3DBody's
 process.py (the node pack the project's actual ComfyUI flow uses — see that
 repo's SAM3DBodyProcess node, which does `output = outputs[0]` then reads
 `pred_vertices`, `pred_keypoints_3d`, `pred_joint_coords`,
-`pred_global_rots`, `pred_cam_t`, `focal_length`, `bbox`, plus pose-param
-fields), not guessed from facebookresearch/sam-3d-body's demo.py/notebook
-the way the first version of this file was — those never show the actual
-dict keys, only that the whole `outputs` object gets forwarded to a
-visualization helper. `faces` still comes from `estimator.faces` (both the
-base repo's demo.py and the ComfyUI wrapper agree on this one).
+`pred_global_rots`, `pred_cam_t`, `focal_length`, `bbox`), then confirmed
+directly by running this module's own `run()` against a real image and
+checking the returned shapes match. `faces` comes from `estimator.faces`
+(both the base repo's demo.py and the ComfyUI wrapper agree on this one).
 
 The ComfyUI wrapper downloads a different checkpoint repo
 (`apozz/sam-3d-body-safetensors`, a safetensors repackaging) and defers
 actual model construction to an isolated worker process not shown in the
-file that does the checkpoint download — the exact estimator-construction
-call there is UNVERIFIED. This module instead calls the official
-`facebookresearch/sam-3d-body` loading path directly
-(`load_sam_3d_body(checkpoint_dir, device=device, mhr_path=...)` ->
-`SAM3DBodyEstimator(model, model_cfg)`, per that repo's own demo.py) against
+file that does the checkpoint download. This module instead calls the
+official `facebookresearch/sam-3d-body` loading path directly against
 `facebook/sam-3d-body-dinov3` — same underlying model class producing the
-same output schema, different checkpoint packaging/loader. Confirm
-`SAM3DBodyEstimator`'s real constructor signature once sam_3d_body is
-actually importable (`python -c "import inspect;
-from sam_3d_body import SAM3DBodyEstimator;
-print(inspect.signature(SAM3DBodyEstimator.__init__))"`) — this version
-drops the `device=` kwarg the first version of this file guessed, since
-neither source confirms the constructor accepts it directly.
+same output schema, different checkpoint packaging/loader. Two real,
+undocumented bugs found and fixed getting this to actually load, neither
+guessable from the public docs/notebook:
+
+1. `load_sam_3d_body`'s `checkpoint_path` argument must be the `.ckpt`
+   FILE itself, not its containing directory — it derives
+   `model_config.yaml`'s location via `os.path.dirname(checkpoint_path)`
+   internally (confirmed by reading `sam_3d_body/build_models.py`'s
+   source), so passing the snapshot directory strips one path level too
+   many.
+2. `mhr_path` is NOT actually optional despite defaulting to `""` in
+   `load_sam_3d_body`'s own signature — an empty string reaches
+   `torch.jit.load("")` downstream and crashes. The checkpoint repo ships
+   the real file at `assets/mhr_model.pt`; defaults to that path below
+   unless overridden.
 """
 
 from __future__ import annotations
