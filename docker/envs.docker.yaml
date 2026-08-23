@@ -6,9 +6,10 @@
 # does not create. The repo's own pipeline/envs/envs.yaml keeps describing
 # a bare pod; this file describes the container.
 #
-# The venvs below are children of /opt/venv_base created with
-# --system-site-packages, so they see its torch/CUDA wheels without
-# carrying their own copy. See docker/Dockerfile.
+# The venvs below are children of /opt/venv_base: each carries a .pth file
+# naming venv_base's site-packages, so they see its torch/CUDA wheels
+# without carrying their own copy. (NOT --system-site-packages, which
+# resolves to the system python instead — see docker/make-child-venv.sh.)
 
 envs:
   wan22:

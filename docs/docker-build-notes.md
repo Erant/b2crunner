@@ -224,17 +224,25 @@ Dockerfile.)
 
 ## Venv sharing
 
-Children are created by **venv_base's own interpreter** with
-`--system-site-packages`:
+Children are plain venvs carrying a **`.pth` file** that names venv_base's
+site-packages — `docker/make-child-venv.sh` does it:
 
 ```
-/opt/venv_base/bin/python -m venv --system-site-packages /opt/venv_wan22
+python3 -m venv /opt/venv_wan22
+echo /opt/venv_base/lib/python3.12/site-packages \
+    > /opt/venv_wan22/lib/python3.12/site-packages/zz_shared_base.pth
 ```
 
-That is what makes them inherit venv_base's site-packages rather than the
-system python's. pip in a child sees base packages as satisfied and skips
-them; if a child ever needs a different version it installs locally and
-shadows the base, so the defensive isolation survives.
+`--system-site-packages` is **not** the mechanism, whichever interpreter
+invokes it: `venv` resolves the new venv's `home` to the real base
+interpreter, so the child inherits `/usr/lib/python3`'s packages and sees
+nothing of venv_base. That was tested directly; see the bullet under
+"Things that changed in the rewrite".
+
+The `.pth` gives what's needed: pip in a child sees base packages as
+satisfied and skips them; if a child ever needs a different version it
+installs locally, and its own site-packages is searched first, so it
+shadows the base and the defensive isolation survives.
 
 Keep venv_base minimal for that reason. Heavy and genuinely shared (torch,
 torchvision, the `nvidia-*` CUDA wheels, transformers, numpy, opencv) goes

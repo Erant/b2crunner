@@ -221,6 +221,14 @@ RUN make-child-venv /opt/venv_seedvr2 \
 # The old cu128 torch pin is gone: it matched a specific pod's toolkit,
 # and here detectron2 compiles against venv_base's torch and this stage's
 # CUDA 13 toolkit, which agree by construction.
+#
+# This stage never receives the repo (only the runtime stage does a
+# `COPY .`), so the one repo file this layer reads has to be copied in
+# explicitly. Copied on its own, not as part of the tree, so editing
+# pipeline code does not invalidate this very expensive layer.
+COPY pipeline/envs/sam3dbody/requirements.txt \
+     /workspace/b2c_runner/pipeline/envs/sam3dbody/requirements.txt
+
 RUN make-child-venv /opt/venv_sam3dbody \
     && /opt/venv_sam3dbody/bin/pip install cython \
     && /opt/venv_sam3dbody/bin/pip install --no-build-isolation \

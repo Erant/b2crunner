@@ -1,0 +1,42 @@
+# Docker does NOT read .gitignore. Without this file the build context is
+# ~1.7 GB (cyber_6f + its zip + .venv) and, worse, the runtime stage's
+# `COPY . /workspace/b2c_runner` would bake all of it into the image —
+# including a .venv whose interpreter symlinks point at the host.
+
+# Local reference data (gitignored; mount it at /data instead)
+cyber_6f/
+cyber_6f.zip
+
+# Host virtualenvs — the image builds its own under /opt
+.venv/
+env/
+venv/
+pipeline/envs/*/venv/
+pipeline/envs/*/vendor/
+
+.git/
+.gitignore
+
+__pycache__/
+*.py[cod]
+*$py.class
+
+build/
+dist/
+*.egg-info/
+.eggs/
+
+.pytest_cache/
+.coverage
+htmlcov/
+
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Working output
+output/
+temp/
+*.pkl
