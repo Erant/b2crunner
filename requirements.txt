@@ -14,11 +14,10 @@ requests>=2.31.0
 #   pip install mediapipe
 #
 # The Gaussian-splat steps (load_splat / save_splat / render_splat) need
-# body2colmap's "splat" extra: gsplat plus plyfile. It is deliberately NOT
-# installed by default — gsplat needs a CUDA toolchain to build, and every
-# other step in this pipeline runs without one, so a CPU-only checkout stays
-# installable. On a GPU host:
+# `plyfile` for PLY I/O — that's it. render_splat's rasterisation shells out
+# to the brush-splat-render binary (see pipeline/steps/splat.py), not
+# body2colmap's gsplat-based SplatRenderer, so body2colmap's "splat" extra
+# (which bundles gsplat alongside plyfile, and needs a CUDA toolchain to
+# build) is no longer needed here at all:
 #
-#   pip install "body2colmap[splat] @ git+https://github.com/Erant/body2colmap.git"
-#
-# or `pip install -e ".[splat]"` for the pinned versions in pyproject.toml.
+#   pip install plyfile

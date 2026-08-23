@@ -150,7 +150,7 @@ class BrushStep(Step):
             cmd = [
                 brush_path,
                 str(colmap_dir),
-                "--total-steps", str(total_steps),
+                "--total-train-iters", str(total_steps),
                 "--sh-degree", str(sh_degree),
                 "--export-path", str(out_root.absolute()),
                 "--export-name", ply_output_name,

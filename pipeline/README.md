@@ -18,8 +18,14 @@ What is verified varies a lot by step, and the distinction matters:
 have run real inference on a GPU pod. `colmap_export`, `mask_splat`,
 `inject_anchor` and the five `views` steps are verified against
 `cyber_6f` — real recorded output of the ComfyUI stages they replace.
-`brush` and the two rasterisers (`render`'s pyrender path, `render_splat`'s
-gsplat call) have never been executed at all. Nothing is stubbed.
+`brush` (a real short GPU training run), `render`'s pyrender/EGL path
+(confirmed rendering on the actual GPU, not the Mesa software fallback),
+and `render_splat`'s rasterisation — now the `brush-splat-render` binary,
+not body2colmap's gsplat-based `SplatRenderer` (see
+`pipeline/steps/splat.py`) — have all now run on a local RTX 4070 Ti, the
+last one both as a raw binary call and through the actual pipeline step
+against `cyber_6f`'s 81 real cameras. See `docs/docker-build-notes.md`.
+Nothing is stubbed.
 
 ## Why this shape
 
@@ -83,8 +89,9 @@ pipeline/
 │                      actually built/run
 │   ├── sam3d_body.py    real, verified against real inference
 │   ├── seedvr2.py       real, verified against real inference
-│   ├── render.py        real, UNTESTED — camera-path + mesh/skeleton
-│                      render (needs a pod with graphics/pyrender to verify)
+│   ├── render.py        real, verified on GPU — camera-path + mesh/skeleton
+│                      render; pyrender/EGL confirmed hitting real hardware
+│                      (GL_VENDOR: NVIDIA) on a local RTX 4070 Ti
 │   ├── face_landmarks.py detect_face_landmarks — MediaPipe (CPU-only),
 │                      feeds render's face overlay; verified against
 │                      cyber_6f's real photos
@@ -95,8 +102,10 @@ pipeline/
 │                      splatted/ -> masked_splatted/ stage output
 │   ├── splat.py         load_splat / save_splat / render_splat — camera
 │                      -path half verified locally against cyber_6f's
-│                      recorded metadata; the gsplat rasterisation itself
-│                      needs a CUDA pod (and body2colmap[splat])
+│                      recorded metadata; rasterisation shells out to the
+│                      brush-splat-render binary (not gsplat — see the
+│                      module docstring), verified end to end on GPU
+│                      against all 81 of cyber_6f's real cameras
 │   ├── colmap_export.py real, verified against cyber_6f's recorded
 │                      colmap/ export (cameras.txt and points3D.txt
 │                      byte-identical, images.txt to 2.4e-7)
@@ -185,7 +194,7 @@ field:
 
 | `dispatch:`   | Class                        | Use for |
 |---------------|-------------------------------|---------|
-| `in_process`  | `InProcessDispatcher`         | No conflicting deps: dataset I/O, camera paths, rendering (pyrender/numpy), gsplat, RMBG, Sapiens2-lite |
+| `in_process`  | `InProcessDispatcher`         | No conflicting deps: dataset I/O, camera paths, rendering (pyrender/numpy), RMBG, Sapiens2-lite, and CLI binaries invoked as subprocesses (brush, brush-splat-render) |
 | `subprocess`  | `SubprocessPythonDispatcher`  | Conflicting Python deps needing their own venv: SAM-3D-Body (pinned detectron2), Wan2.2 (diffusers), SeedVR2 (own torch/diffusers pins; no flash-attn/apex needed — see below) |
 | `service`     | `ServiceDispatcher`           | A step run against a long-lived FastAPI microservice that keeps a model loaded across many workflow runs (batch processing) — not needed for a single interactive pass |
 | `docker`      | `DockerDispatcher`            | OS-level isolation a venv can't give (different CUDA/cuDNN userspace, a non-Python runtime) |
@@ -420,7 +429,12 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   `cyber_6f`'s recorded metadata: the dataset's `focal_length_mm`
   reproduces its cameras' `fx` exactly, and an anchored override path
   rebuilt from its `orbit_target` lands a camera exactly on its recorded
-  `anchor_position`. The gsplat rasterisation is untested — see below.
+  `anchor_position`. **Update (2026-08-23):** rasterisation shells out to
+  the `brush-splat-render` binary, not gsplat (see
+  `pipeline/steps/splat.py`) — now verified on a local RTX 4070 Ti, both as
+  a raw binary call and through the step itself against all 81 of
+  `cyber_6f`'s real cameras (real content, correct shapes/dtypes back). See
+  `docs/docker-build-notes.md` for the full result.
 
 **Real but UNVERIFIED:**
 - `brush` — Gaussian-splat training via the `Erant/brush` CLI (COLMAP
@@ -429,20 +443,26 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   (targeting RunPod, where a pod is a single container — no nested Docker
   daemon to split brush into its own `docker`-dispatched image the way an
   earlier version of this setup did; see `docker/Dockerfile`'s comment).
-  Brush's actual requirement (Vulkan/graphics capability) is baked into
-  that image's `NVIDIA_DRIVER_CAPABILITIES`, confirmed necessary on a real
-  pod (`vulkaninfo` failed with `ERROR_INCOMPATIBLE_DRIVER` under the
-  default RunPod capability set even with the driver's Vulkan libraries
-  physically present) but not yet confirmed sufficient for how RunPod
-  provisions a pod from a custom image. Never actually built or run.
+  **Update (2026-08-23):** verified with a real short GPU training run
+  (200 iterations against `cyber_6f/colmap`'s 81-frame export, on a local
+  RTX 4070 Ti) inside the actual shipped image — completed in ~3s and
+  exported a valid `.ply` (12,463 splats). Getting Vulkan to reach the GPU
+  in a container took a real fix (docker-ce + `libegl1`; see
+  `docs/docker-build-notes.md`), not just the `NVIDIA_DRIVER_CAPABILITIES`
+  bake this paragraph originally described — that variable made no
+  measurable difference in the end. Whether RunPod's provisioning needs
+  anything beyond what this image already does is still open.
 - `render` — camera-path generation (circular/sinusoidal/helical,
   `override_cam_from_mesh` anchor mode) + mesh/depth/skeleton rendering +
   point-cloud sampling, ported from `nodes/render_node.py`. The geometry
   work is entirely `body2colmap`'s (`Renderer`, `Scene`, `OrbitPath`,
   `path`/`utils` helpers) — this module is a thin adapter, same as
-  `sam3d_body.py`/`brush.py` are for their libraries. Needs a real
-  GPU/headless-GL pod to verify (`pyrender` — see the module's
-  `PYOPENGL_PLATFORM` EGL/OSMesa setup); not yet run. **Load-bearing fix
+  `sam3d_body.py`/`brush.py` are for their libraries. **Update
+  (2026-08-23):** `pyrender`'s EGL path is confirmed hitting real hardware
+  on a local RTX 4070 Ti — `GL_VENDOR: NVIDIA Corporation`, `GL_RENDERER:
+  NVIDIA GeForce RTX 4070 Ti`, not the Mesa/OSMesa software fallback. The
+  render call itself (mesh/depth/skeleton output against a real dataset)
+  has not been separately exercised yet. **Load-bearing fix
   found while porting, not obvious from any docstring**: `sam3d_body.py`'s
   own `joints` output key (`pred_joint_coords`, 127 joints) is NOT what
   `body2colmap.Scene.from_sam3d_output` wants — it wants `keypoints_3d`
@@ -546,10 +566,12 @@ subgraphs of third-party nodes): `rmbg` (`RMBG`), `wan22_vace_denoise`
 **Nothing, node-wise.** All 22 nodes now have a native counterpart or a
 documented reason not to need one.
 
-**The two rasterisers.** `render` (pyrender/EGL) and `render_splat`
-(gsplat/CUDA) are the only remaining steps whose core call has never been
-executed. Everything around them — camera paths, framing, anchoring,
-metadata, point clouds — is verified.
+**The two rasterisers.** Both now confirmed on real GPU hardware
+(2026-08-23, see above): `render` (pyrender/EGL) and `render_splat` — now
+`brush-splat-render`, a Rust/wgpu binary, not gsplat/CUDA — the latter
+verified both as a raw binary call and through the step itself against all
+81 of `cyber_6f`'s real cameras. Everything around both — camera paths,
+framing, anchoring, metadata, point clouds — was already verified.
 
 **`generate_firstlast`'s warp.** Verified against synthetic data only. It
 cannot be checked against `cyber_6f`: the image it warps is the single
@@ -591,9 +613,11 @@ uniform warp maps one to the other).
 Every stage of every ComfyUI pipeline YAML now has a native equivalent, and
 `pipeline/workflows/fast_helical_full.yaml` is the full six-stage port of
 `workflows/pipeline/fast helical.yaml`. **None of it has been executed
-end-to-end** — that is the next milestone, and it needs a GPU pod. The
-remaining unexecuted pieces are `brush`, `render`'s and `render_splat`'s
-rasterisers, and the sequencing itself.
+end-to-end** — that is the next milestone. `brush` and `render`'s
+rasterisers are now individually verified on GPU (2026-08-23, a local RTX
+4070 Ti — see `docs/docker-build-notes.md`); the remaining unexecuted
+pieces are `render_splat`'s `brush-splat-render` call and the full
+sequencing itself.
 
 ## Adding a new step (checklist)
 
@@ -611,39 +635,39 @@ rasterisers, and the sequencing itself.
 
 ## Suggested next steps
 
-Local work is largely exhausted: what remains needs a GPU pod, in this
-order.
+**Update (2026-08-23):** `docker/Dockerfile` now builds
+(`docs/docker-build-notes.md`), and a local RTX 4070 Ti closed the
+container-graphics question directly — `brush`, `render`, and now
+`render_splat` (via `brush-splat-render`, replacing gsplat) are all
+individually verified on real GPU hardware, the last one both as a raw
+binary call and through the actual pipeline step against all 81 of
+`cyber_6f`'s real cameras. That reframes the list below: it's no longer
+"everything needs a GPU pod", RunPod-specific provisioning questions aside.
 
-1. **Run `fast_helical_full.yaml` on a pod.** Every stage now has a native
-   step and the file validates statically, but it has never executed. This
-   is simultaneously the first real test of `brush`, `render`,
-   `render_splat`, and the sequencing itself. Expect to debug it stage by
-   stage — insert `save_dataset` steps between stages while doing so,
-   since there is no resume-from-stage mechanism.
-2. **Verify `render`** — the one step that genuinely needs a
-   display-capable pod (EGL or OSMesa), unlike everything else here which
-   just needs CUDA. Its camera-path and metadata halves are verified
-   locally; only the pyrender call is unproven. Once it runs, check
-   `generate_firstlast` against its real `image_warp` output — that step's
-   warp is the last piece verified against synthetic data only, and
-   `cyber_6f` cannot cover it (see "What is still missing").
-3. **Verify `render_splat`'s rasteriser**, which needs
-   `body2colmap[splat]` (gsplat + plyfile — deliberately not in the
-   default install, see `requirements.txt`). That also unskips the PLY
-   round-trip tests.
-4. **Build `docker/Dockerfile` for real** and confirm whether RunPod's
-   pod-creation path honours the image-level `NVIDIA_DRIVER_CAPABILITIES`
-   the way a plain `docker run --gpus all` does — the open question
-   between "brush code is done" and "brush works on RunPod" (see
-   `docs/docker.md`). `render` needs the same graphics capability, so
-   verifying one likely settles both.
-5. **Fix `wan22_vace_denoise`'s fp8-checkpoint disk cache** (currently
+1. **Run `fast_helical_full.yaml` end to end.** Every stage now has a
+   native step, each has run individually, but the full sequence never
+   has. Expect to debug it stage by stage — insert `save_dataset` steps
+   between stages while doing so, since there is no resume-from-stage
+   mechanism. Along the way, unskip the PLY round-trip tests (now that
+   `plyfile` is the only splat dependency this repo needs — see
+   `requirements.txt`) and check `generate_firstlast` against a real
+   `render`/`render_splat` output — its warp is the last piece still
+   verified against synthetic data only (`cyber_6f` cannot cover it — see
+   "What is still missing").
+2. **Confirm whether RunPod's pod-creation path needs anything beyond what
+   this image now does.** The local fix was `docker-ce` +
+   `libegl1`(already in the image) — `NVIDIA_DRIVER_CAPABILITIES` turned
+   out to make no measurable difference in any mode tested locally, which
+   revises the open question from `docs/docker.md` down to "does RunPod's
+   toolkit need the same driver-library completeness this box needed", not
+   a capabilities-flag question.
+3. **Fix `wan22_vace_denoise`'s fp8-checkpoint disk cache** (currently
    best-effort/silently skipped — `save_pretrained()` fails on the
    torchao-quantized tensors in the version pairing this was verified
    against; see `docs/fp8-quant-notes.md`) so repeated loads skip the
    LoRA-fuse + quantize step.
-6. **Decide what replaces `submit.py`'s batching and per-stage
+4. **Decide what replaces `submit.py`'s batching and per-stage
    checkpointing** (see "Orchestration differences"). Deferred
    deliberately; revisit once long pipelines actually run.
-7. **The Gradio frontend last** — mechanical once the model steps behind
+5. **The Gradio frontend last** — mechanical once the model steps behind
    it work.

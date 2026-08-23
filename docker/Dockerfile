@@ -44,26 +44,60 @@
 # Built on bookworm (glibc 2.36) against a noble (glibc 2.39) runtime:
 # older-to-newer is the safe direction for a dynamically linked binary.
 #
+# rustc >= 1.95 is REQUIRED, and this is the floor the dependency tree sets,
+# not a preference: the first build attempt used rust:1.88 and cargo refused
+# to resolve, naming rerun@0.36.0 and sysinfo@0.39.6 as needing 1.95 (plus
+# safe_arch/wide needing 1.89). 1.98 is current stable; bump rather than
+# pin dependencies back.
+#
 # brush is wgpu/Vulkan, NOT CUDA — no CUDA toolkit needed to build it, and
 # ash dlopen's libvulkan.so.1 at runtime, so no Vulkan dev packages here
 # either. Only the loader, in the runtime stage.
-FROM rust:1.88-slim-bookworm AS brush-builder
+FROM rust:1.98-slim-bookworm AS brush-builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git ca-certificates pkg-config libssl-dev cmake build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# UNVERIFIED: brush has never been compiled in this project, on a pod or in
-# a container. If cargo fails on a missing system library, add it above —
-# that is the expected failure mode, not something deeper.
-RUN git clone --depth 1 https://github.com/Erant/brush.git /src/brush
+# The fork's work lives on the `normal-map-supervision` branch, NOT on
+# `main`. Erant/brush's main merely tracks upstream ArthurBrussee/brush, so
+# cloning the default branch silently builds a binary WITHOUT the two
+# normal-supervision flags the step relies on (--normal-loss-weight,
+# --normal-loss-start-iter). It compiles and runs; it just rejects that argv
+# at runtime.
+#
+# Caught by diffing the built binary's `--help` against the argv
+# pipeline/steps/brush.py constructs. Worth redoing whenever this pin moves:
+#   docker run --rm --entrypoint /bin/sh b2c/brush-builder -c '/out-brush --help' > help.txt
+#   grep -oE '"--[a-z-]+"' pipeline/steps/brush.py | sort -u | tr -d '"' \
+#     | while read f; do grep -q -- "$f" help.txt || echo "MISSING $f"; done
+#
+# That diff also turned up a third flag, --total-steps, which is absent from
+# BOTH branches: upstream renamed it --total-train-iters and the fork carries
+# the rename. Fixed on the Python side in steps/brush.py, not here.
+ARG BRUSH_BRANCH=normal-map-supervision
+RUN git clone --depth 1 --branch ${BRUSH_BRANCH} \
+        https://github.com/Erant/brush.git /src/brush
 WORKDIR /src/brush
-RUN cargo build --release && install -m 0755 target/release/brush /out-brush
 
-# FUTURE: the splat *renderer* utility will be built here too, as a second
-# binary linking brush-render, once it exists — see
-# docs/brush-render-utility.md. That is what replaces gsplat (dropped
-# below) as the backend for the render_splat step.
+# Two binaries out of this one clone: `brush` (apps/brush-app, training +
+# viewer) and `brush-splat-render` (crates/brush-splat-render, a standalone
+# CLI that rasterises a trained .ply against an explicit camera list — see
+# docs/splat-render.md in the brush repo). `brush-splat-render` is what
+# replaces gsplat as render_splat's backend (see "gsplat: dropped" in
+# docs/docker-build-notes.md): gsplat published no wheel past torch
+# 2.4/cu124 and needed nvcc at runtime; this binary is wgpu/Vulkan, same as
+# `brush` itself, so no CUDA toolchain is needed for either.
+#
+# `-p brush-app -p brush-splat-render` rather than a bare `cargo build`:
+# the workspace's `default-members` is just `apps/brush-app`, so a bare
+# build would silently skip brush-splat-render (it's a workspace member,
+# not a default one). `-p` also avoids `--workspace`, which would pull in
+# unrelated members this image doesn't need (brush-js, brush-c, the wasm
+# bindings).
+RUN cargo build --release -p brush-app -p brush-splat-render \
+    && install -m 0755 target/release/brush /out-brush \
+    && install -m 0755 target/release/brush-splat-render /out-brush-splat-render
 
 
 # =============================================================================
@@ -93,9 +127,19 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV PIP_NO_CACHE_DIR=1
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1
 
+# The last four are for `import cv2`, not for compiling anything. venv_base
+# installs opencv-python (not -headless), whose cv2.abi3.so links against
+# libGL/libglib/libgthread/libxcb; without them the sam3dbody layer's own
+# `from sam_3d_body import ...` verification dies on
+# `ImportError: libxcb.so.1` *after* detectron2 has already compiled
+# successfully, which is a maximally misleading place to fail. This stage
+# is not shipped, so the extra packages cost nothing in the final image.
+# (The runtime stage gets libGL and glib explicitly and libxcb1 transitively
+# via libxext6 -> libx11-6.)
 RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 python3-venv python3-dev python3-pip \
         git curl ca-certificates build-essential \
+        libgl1 libglib2.0-0 libxcb1 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace/b2c_runner
@@ -154,12 +198,10 @@ RUN chmod +x /usr/local/bin/make-child-venv
 #
 # gsplat is deliberately NOT installed. It was the only reason this image
 # needed nvcc at runtime: it publishes no wheel past torch 2.4/cu124, so on
-# a modern stack it JIT-compiles its CUDA kernels on first use. Splat
-# rendering moves to a brush-based utility instead (see
-# docs/brush-render-utility.md), which is Vulkan — the capability this
-# image already has to provide for brush itself. Until that utility exists
-# and pipeline/steps/splat.py is switched over, `render_splat` will fail at
-# import; every other step is unaffected.
+# a modern stack it JIT-compiles its CUDA kernels on first use.
+# render_splat now shells out to the brush-splat-render binary instead (see
+# the brush-builder stage above), which is Vulkan — the capability this
+# image already has to provide for brush itself.
 #
 # plyfile stays: load_splat/save_splat need it, and brush emits .ply.
 RUN make-child-venv /opt/venv_main \
@@ -286,7 +328,17 @@ ENV PIP_DISABLE_PIP_VERSION_CHECK=1
 ENV HF_HOME=/data/hf_cache
 ENV HF_HUB_DISABLE_XET=1
 
-ENV PYTHONPATH="/opt/vendor/seedvr2:${PYTHONPATH}"
+# NOT "...:${PYTHONPATH}": nothing defines PYTHONPATH in the base image, so
+# that expanded to a trailing colon, which BuildKit flags
+# (UndefinedVar, the build's only warning) and which Python reads as an
+# empty entry meaning the working directory:
+#   PYTHONPATH="/opt/vendor/seedvr2:"  ->  ['/tmp/probe', '/opt/vendor/seedvr2',
+#                                           '/tmp/probe', ...]
+#   PYTHONPATH="/opt/vendor/seedvr2"   ->  ['/tmp/probe', '/opt/vendor/seedvr2',
+#                                           '/usr/lib/python312.zip', ...]
+# i.e. a duplicate CWD entry, not a shadowing-the-stdlib hazard — sys.path[0]
+# is the script/CWD either way. Tidiness and a clean build, not a security fix.
+ENV PYTHONPATH=/opt/vendor/seedvr2
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         # python3 only: the venvs carry their own packages, and nothing is
@@ -310,6 +362,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=brush-builder /out-brush /usr/local/bin/brush
+COPY --from=brush-builder /out-brush-splat-render /usr/local/bin/brush-splat-render
 COPY --from=python-builder /opt/venv_base /opt/venv_base
 COPY --from=python-builder /opt/venv_main /opt/venv_main
 COPY --from=python-builder /opt/venv_wan22 /opt/venv_wan22

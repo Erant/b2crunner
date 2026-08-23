@@ -15,6 +15,7 @@ position that dataset already records.
 
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -263,6 +264,49 @@ class TestRenderSplatPointcloud(unittest.TestCase):
     def test_samples_when_there_is_no_dataset(self):
         points, _ = _resolve_pointcloud(self.scene, None, {"pointcloud_samples": 16})
         self.assertEqual(len(points), 16)
+
+
+class TestCamerasJson(unittest.TestCase):
+    """_write_cameras_json's schema against brush-splat-render's expected
+    input (~/Projects/brush/docs/splat-render.md): row-major rotation,
+    body2colmap.Camera's OpenGL-convention c2w passed straight through with
+    no conversion (that happens Rust-side).
+    """
+
+    def test_schema_matches_camera_fields(self):
+        from body2colmap.camera import Camera
+
+        from pipeline.steps.splat import _write_cameras_json
+
+        camera = Camera(
+            focal_length=(1213.917, 1213.917),
+            image_size=(720, 1280),
+            principal_point=(360.0, 640.0),
+            position=np.array([1.0, 2.0, 3.0], dtype=np.float32),
+            rotation=np.array(
+                [[1, 0, 0], [0, 0, -1], [0, 1, 0]], dtype=np.float32
+            ),
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cameras.json"
+            _write_cameras_json([camera], ["frame_00001_.png"], 720, 1280, path)
+            payload = json.loads(path.read_text())
+
+        self.assertEqual(payload["width"], 720)
+        self.assertEqual(payload["height"], 1280)
+        self.assertEqual(len(payload["cameras"]), 1)
+
+        entry = payload["cameras"][0]
+        self.assertEqual(entry["name"], "frame_00001_.png")
+        self.assertEqual(entry["fx"], 1213.917)
+        self.assertEqual(entry["fy"], 1213.917)
+        self.assertEqual(entry["cx"], 360.0)
+        self.assertEqual(entry["cy"], 640.0)
+        self.assertEqual(entry["position"], [1.0, 2.0, 3.0])
+        # rotation[row][col], columns are local axes — unchanged from
+        # camera.rotation, no axis flip on the Python side.
+        self.assertEqual(entry["rotation"], camera.rotation.tolist())
 
 
 if __name__ == "__main__":

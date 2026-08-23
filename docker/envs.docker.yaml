@@ -21,6 +21,7 @@ envs:
   seedvr2:
     kind: subprocess
     python_bin: /opt/venv_seedvr2/bin/python
-  # No `brush` entry: brush is a Rust binary at /usr/local/bin/brush,
-  # invoked as a subprocess by pipeline/steps/brush.py, which runs
-  # dispatch: in_process. Nothing to configure here.
+  # No `brush` or `brush-splat-render` entries: both are Rust binaries at
+  # /usr/local/bin/, invoked as subprocesses by pipeline/steps/brush.py and
+  # pipeline/steps/splat.py respectively, which run dispatch: in_process.
+  # Nothing to configure here.

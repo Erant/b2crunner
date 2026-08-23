@@ -15,18 +15,34 @@ Every ComfyUI pipeline YAML is built on that loop —
 `outline.json` all call `Body2COLMAP_RenderSplat` — so without this step
 `brush`'s output is a dead end.
 
-As with `steps/render.py`, the real work belongs to body2colmap
-(`SplatScene`, `SplatRenderer`, `OrbitPath`, the `path`/`utils` helpers);
-this module is a thin adapter.
+**Rasterisation is `brush-splat-render`, not gsplat.** gsplat publishes no
+wheel past torch 2.4/cu124, so on a modern stack it JIT-compiles its CUDA
+kernels on first use and needs nvcc at *runtime* — the reason the image had
+to ship a CUDA devel base at all. `brush-splat-render` is a standalone Rust
+CLI (`crates/brush-splat-render` in the Erant/brush fork, built into
+docker/Dockerfile right alongside the `brush` training binary) that loads a
+trained `.ply` and rasterises an explicit camera list via the same
+wgpu/Vulkan renderer `brush` itself uses. This step shells out to it the
+same way `steps/brush.py` shells out to `brush`. See
+`~/Projects/brush/docs/splat-render.md` for the CLI, the `cameras.json`
+schema, and — the part that is easy to get wrong silently — the coordinate
+conversion between body2colmap's OpenGL-convention `Camera` and brush's
+OpenCV-convention one, verified there against a real gsplat oracle (mean
+abs error 0.0008-0.0015 on RGB, comfortably under 1/255).
+
+Everything *except* rasterisation still belongs to body2colmap
+(`SplatScene`, `OrbitPath`, the `path`/`utils` helpers); `SplatRenderer`
+(the gsplat wrapper) is no longer used here at all.
 
 **Verification status.** The camera-path half — which is where all the
 subtle behaviour lives — is verified locally against `cyber_6f`'s real
 recorded metadata (see tests/test_splat.py), including that the anchored
 override path puts a camera exactly on the recorded `anchor_position`.
-PLY load/save is verified by round-trip. The *rasterisation* itself is not:
-`SplatRenderer.render()` needs gsplat and a CUDA device, so it has never
-been executed. It is one unmodified library call at the centre of
-`RenderSplatStep.run()`.
+PLY load/save is verified by round-trip. `brush-splat-render` itself is
+verified against gsplat as described above, but that verification ran
+outside this pipeline (a manual comparison against local data); running
+*through* this step, end to end, on this box's GPU is still pending — see
+docs/docker-build-notes.md.
 
 **Focal-length inheritance** is the one piece here that is easy to get
 wrong and silent when wrong. The resolution order is: the step's own
@@ -41,10 +57,15 @@ about rather than silently honoured.
 
 from __future__ import annotations
 
+import json
 import logging
+import subprocess
+import tempfile
+import threading
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
+import cv2
 import numpy as np
 
 from ..registry import register_step
@@ -132,7 +153,7 @@ class RenderSplatStep(Step):
              pattern-specific params (as steps/render.py), width, height,
              framing, focal_length_mm, fill_ratio, bg_color,
              override_cam_from_mesh, override_pointcloud,
-             pointcloud_samples, device
+             pointcloud_samples, render_path
     outputs: same shape as steps/render.py — {"images", "masks",
              "cameras", "image_names", "points_3d", "resolution",
              "focal_length_mm"} plus "anchor_position" /
@@ -142,15 +163,19 @@ class RenderSplatStep(Step):
     With no `pattern`, the source dataset's cameras are reused verbatim —
     that is how `outline.json` re-renders the exact same views from a
     trained splat so `replace_views` can swap them back in.
+
+    Rasterisation shells out to the `brush-splat-render` binary (a Rust CLI
+    on `PATH`, built into docker/Dockerfile — see the module docstring).
+    `render_path` overrides the binary name/path, same convention as
+    `steps/brush.py`'s `brush_path`.
     """
 
     def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
-        from body2colmap.splat_renderer import SplatRenderer
         from body2colmap.splat_scene import SplatScene
 
         scene = inputs.get("splat_scene")
+        splat_path = inputs.get("splat_path") or params.get("splat_path")
         if scene is None:
-            splat_path = inputs.get("splat_path") or params.get("splat_path")
             if not splat_path:
                 raise ValueError(
                     "render_splat needs a 'splat_scene' input, or a 'splat_path' "
@@ -167,23 +192,26 @@ class RenderSplatStep(Step):
         )
 
         bg_color = tuple(params.get("bg_color", (1.0, 1.0, 1.0)))
-        device = str(params.get("device", "cuda"))
+        render_path = params.get("render_path", "brush-splat-render")
+        image_names = [f"frame_{i + 1:05d}_.png" for i in range(len(cameras))]
 
         logger.info(
-            "render_splat: %d Gaussians (SH degree %d), %d frames at %dx%d on %s",
-            len(scene), scene.sh_degree, len(cameras), width, height, device,
+            "render_splat: %d Gaussians (SH degree %d), %d frames at %dx%d via %s",
+            len(scene), scene.sh_degree, len(cameras), width, height, render_path,
         )
 
-        renderer = SplatRenderer(scene=scene, render_size=(width, height), device=device)
-        rendered = [renderer.render(camera=camera, bg_color=bg_color) for camera in cameras]
-
-        # RGBA uint8 -> this pipeline's BGR images + float foreground masks,
-        # exactly as steps/render.py does.
-        images = [rgba[..., [2, 1, 0]] for rgba in rendered]
-        masks = [rgba[..., 3].astype(np.float32) / 255.0 for rgba in rendered]
+        images, masks = _rasterize(
+            scene=scene,
+            splat_path=splat_path,
+            cameras=cameras,
+            image_names=image_names,
+            width=width,
+            height=height,
+            bg_color=bg_color,
+            render_path=render_path,
+        )
 
         points_3d = _resolve_pointcloud(scene, dataset, params)
-        image_names = [f"frame_{i + 1:05d}_.png" for i in range(len(cameras))]
 
         result: Dict[str, Any] = {
             "images": images,
@@ -211,6 +239,109 @@ class RenderSplatStep(Step):
             )
 
         return result
+
+
+def _rasterize(
+    *, scene, splat_path, cameras, image_names, width, height, bg_color, render_path,
+) -> Tuple[List[np.ndarray], List[np.ndarray]]:
+    """Render `cameras` against `scene` via the `brush-splat-render` CLI.
+
+    Returns (images, masks): BGR uint8 images and float32 [0,1] foreground
+    masks, one per camera, in `cameras` order.
+    """
+    with tempfile.TemporaryDirectory(prefix="b2c_render_splat_") as tmp:
+        tmp_dir = Path(tmp)
+
+        # Reuse an existing PLY on disk rather than re-serializing through
+        # SplatScene when we already have one (the common case: this step
+        # usually follows `brush` training, which writes a PLY directly).
+        ply_path = Path(splat_path) if splat_path and Path(splat_path).exists() else None
+        if ply_path is None:
+            ply_path = tmp_dir / "scene.ply"
+            scene.to_ply(str(ply_path))
+
+        cameras_path = tmp_dir / "cameras.json"
+        _write_cameras_json(cameras, image_names, width, height, cameras_path)
+
+        output_dir = tmp_dir / "renders"
+        cmd = [
+            render_path,
+            "--splat", str(ply_path),
+            "--cameras", str(cameras_path),
+            "--output-dir", str(output_dir),
+            "--background", ",".join(f"{c:.6f}" for c in bg_color),
+        ]
+        _run_render(cmd)
+
+        images: List[np.ndarray] = []
+        masks: List[np.ndarray] = []
+        for name in image_names:
+            png_path = output_dir / name
+            rgba = cv2.imread(str(png_path), cv2.IMREAD_UNCHANGED)
+            if rgba is None:
+                raise RuntimeError(
+                    f"render_splat: brush-splat-render did not produce {png_path}\n"
+                    f"Command: {' '.join(cmd)}"
+                )
+            images.append(rgba[..., :3])
+            masks.append(rgba[..., 3].astype(np.float32) / 255.0)
+
+    return images, masks
+
+
+def _write_cameras_json(cameras, image_names, width: int, height: int, path: Path) -> None:
+    """Write brush-splat-render's cameras.json — see
+    ~/Projects/brush/docs/splat-render.md for the schema. `camera.rotation`
+    is already in the exact row-major, OpenGL-convention c2w form the
+    binary expects; the OpenGL->OpenCV axis conversion happens Rust-side.
+    """
+    payload = {
+        "width": width,
+        "height": height,
+        "cameras": [
+            {
+                "name": name,
+                "fx": float(camera.fx),
+                "fy": float(camera.fy),
+                "cx": float(camera.cx),
+                "cy": float(camera.cy),
+                "position": [float(v) for v in camera.position],
+                "rotation": [[float(v) for v in row] for row in camera.rotation],
+            }
+            for camera, name in zip(cameras, image_names)
+        ],
+    }
+    path.write_text(json.dumps(payload))
+
+
+def _run_render(cmd: List[str]) -> None:
+    try:
+        process = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
+        )
+    except FileNotFoundError:
+        raise RuntimeError(
+            f"brush-splat-render executable not found at: {cmd[0]}\n"
+            f"Please ensure brush-splat-render is installed and the path is correct."
+        )
+
+    output_lines: List[str] = []
+
+    def read_output() -> None:
+        for line in process.stdout:
+            output_lines.append(line)
+
+    output_thread = threading.Thread(target=read_output, daemon=True)
+    output_thread.start()
+    return_code = process.wait()
+    output_thread.join(timeout=5.0)
+
+    if return_code != 0:
+        raise RuntimeError(
+            f"brush-splat-render failed with exit code {return_code}.\n"
+            f"Command: {' '.join(cmd)}\n"
+            f"Output:\n{''.join(output_lines[-50:])}"
+        )
 
 
 def _resolve_cameras(

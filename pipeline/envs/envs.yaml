@@ -15,7 +15,8 @@ envs:
   seedvr2:
     kind: subprocess
     python_bin: pipeline/envs/seedvr2/venv/bin/python
-  # No `brush` entry: targeting RunPod, where a pod is a single container
-  # with no nested Docker daemon (see docker/Dockerfile's comment) — brush
-  # runs `dispatch: in_process` in fast_helical_native.yaml, needing no env
-  # config here at all.
+  # No `brush` or `brush-splat-render` entries: targeting RunPod, where a
+  # pod is a single container with no nested Docker daemon (see
+  # docker/Dockerfile's comment) — both run `dispatch: in_process` (brush
+  # in fast_helical_native.yaml, brush-splat-render via render_splat),
+  # needing no env config here at all.

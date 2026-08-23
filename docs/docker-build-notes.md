@@ -2,9 +2,17 @@
 
 Written for a session that will run on a box with an **RTX 4070 Ti**, which
 is the first machine this project has had with a local GPU. `docker/Dockerfile`
-was rewritten against these notes but **has never been built**. Nothing
-below is a verified recipe; it is a test plan plus the reasoning behind
-every choice that could plausibly be wrong.
+was rewritten against these notes and, as of **2026-08-23, now builds** —
+see the RESULT blocks in each section below for what actually happened,
+including the four fixes the first build needed, a later same-day fix for
+the container Vulkan/EGL graphics problem (moved host Docker from snap to
+`docker-ce`; the actual cause turned out to be a missing `libegl1` package,
+not snap itself — see section 1's second RESULT block), and `brush`/`render`
+both subsequently verified on real GPU hardware in the shipped image.
+
+The original text is left in place as written, because the reasoning behind
+each choice is still what you need when a layer breaks; the RESULT blocks
+say which of those guesses survived contact.
 
 `docs/docker.md` remains the narrative for *why one image*; this file is
 about *getting the thing to build*.
@@ -76,6 +84,169 @@ more reliable than baking `ENV` into the image, because the template value
 is applied at creation time. Try both on RunPod; locally, image `ENV` is
 enough.
 
+#### RESULT (2026-08-23, RTX 4070 Ti box) — ran, but did NOT confirm the mechanism
+
+Driver is **595.71.05 / CUDA 13.2**, comfortably past the >= 580 floor, so
+that worry is closed.
+
+Three things this box taught us, none of them the expected answer.
+
+**`--gpus all` does not work here.** nvidia-container-toolkit is in **CDI**
+mode, and the prestart hook refuses the flag outright:
+
+```
+invoking the NVIDIA Container Runtime Hook directly (e.g. specifying the
+docker --gpus flag) is not supported. Please use the NVIDIA Container
+Runtime (e.g. specify the --runtime=nvidia flag) instead
+```
+
+Every command in this doc therefore needs `--runtime=nvidia -e
+NVIDIA_VISIBLE_DEVICES=all` in place of `--gpus all`. The commands above
+are left as written because that is the right form on RunPod; substitute
+locally.
+
+**`NVIDIA_DRIVER_CAPABILITIES` made no difference at all.** With the
+variable and without it, the result was byte-identical:
+`/etc/vulkan/icd.d/nvidia_icd.json` present either way, and
+`libGLX_nvidia`/`libEGL_nvidia` on the ldconfig path either way. In CDI
+mode the device spec is applied wholesale at creation time and the env var
+is simply not consulted — it is a *legacy-hook-mode* control. So the A/B
+test this section was designed around **cannot be run on this box**, and
+the RunPod question it was meant to settle is still open. The `ENV` line in
+the Dockerfile is harmless and still correct for a legacy-mode host; keep
+it, and still set it in the pod template.
+
+**Docker here is the snap package**, which confines what the daemon and CLI
+can see. Two consequences that cost real time:
+
+- Host driver libraries are injected at
+  `/var/lib/snapd/hostfs/usr/lib/x86_64-linux-gnu/`, not
+  `/usr/lib/x86_64-linux-gnu/`. They *are* on the ldconfig path, so this is
+  cosmetic for loading — but it makes `ls /usr/lib/.../libnvidia*` look
+  alarmingly empty.
+- **Paths outside `$HOME`, and hidden directories inside it, are invisible.**
+  `-v /tmp/...:/probe.sh` silently created `/probe.sh` as an empty
+  *directory* rather than failing, and a build context under
+  `~/.cache/` produced `transferring dockerfile: 2B` and "no such file or
+  directory". Keep probe files in a non-hidden directory under `$HOME`
+  (these used `~/b2c-probe`), or inline the script into `bash -c`.
+
+**Vulkan does not reach the GPU on this host — brush would run on the CPU.**
+This is the one finding that matters beyond local ergonomics. With the
+runtime stage's full package set installed, the chain checks out right up to
+the last step:
+
+- `/etc/vulkan/icd.d/nvidia_icd.json` is injected (library_path
+  `libGLX_nvidia.so.0`, api_version 1.4.329)
+- `libGLX_nvidia.so.0` **dlopens successfully** and `ldd` reports no
+  missing dependencies
+- it **does export** `vk_icdGetInstanceProcAddr` (confirmed with `nm -D`
+  on both the host copy and the container's resolved copy)
+
+and yet the loader reports:
+
+```
+loader_scanned_icd_add: Could not get 'vkCreateInstance' via
+'vk_icdGetInstanceProcAddr' for ICD libGLX_nvidia.so.0
+```
+
+i.e. the ICD loads and is asked for `vkCreateInstance` and returns NULL.
+The only device `vulkaninfo` then enumerates is **llvmpipe (Mesa 25.2.8,
+`PHYSICAL_DEVICE_TYPE_CPU`)**. The GPU is otherwise fully present in the
+container — `nvidia-smi` works, `/proc/driver/nvidia/gpus/0000:01:00.0`
+and `/dev/dri/{card1,renderD128}` are all there — so this is not a missing
+device node.
+
+EGL is in the same state for the same reason: **no `10_nvidia.json` in
+either `/usr/share/glvnd/egl_vendor.d/` or `/etc/glvnd/egl_vendor.d/`**,
+only `50_mesa.json`. `eglQueryDevicesEXT` returns 2 devices, both Mesa
+software. So `render`'s EGL path would get software rasterisation rather
+than the GPU.
+
+One trap worth recording separately, because it wasted a probe: the bare
+CUDA image has no `libXext.so.6`, and `libGLX_nvidia.so.0` links against
+it, so a probe that skips it fails with a *misleading* dlopen error. The
+Dockerfile's runtime stage already installs `libxext6`, so the image is
+fine; only ad-hoc probes need it added.
+
+Leading hypothesis for the Vulkan/EGL failure is the snap confinement —
+the CDI spec injects the libraries and the Vulkan ICD json but not the
+glvnd EGL vendor json, and the driver declines to create an instance from
+its hostfs-relocated libraries. **This is not proven.** The clean test is a
+non-snap `docker-ce` install, which would also settle whether legacy-hook
+mode (and hence a real `NVIDIA_DRIVER_CAPABILITIES` A/B) is available here.
+Until then: **brush and `render` cannot be GPU-validated on this box**,
+which unfortunately is exactly what the "still unverified" list at the
+bottom was hoping this machine would close. The *build* is unaffected —
+this is purely a container-runtime graphics issue.
+
+#### RESULT (2026-08-23, same day): fixed. The snap hypothesis was wrong; the real cause was one missing package.
+
+Switched the host from snap Docker to `docker-ce` (`sudo snap remove docker`,
+then the standard `docker-ce`/`docker-ce-cli`/`containerd.io` apt install),
+installed `nvidia-container-toolkit` from NVIDIA's apt repo (it turned out
+not to be pulled in automatically by the docker-ce install — a separate
+package), and ran `nvidia-ctk runtime configure --runtime=docker` +
+`systemctl restart docker` to register the `nvidia` runtime.
+
+**That alone did not fix it.** Vulkan still enumerated only `llvmpipe`
+afterward, with the exact same `loader_scanned_icd_add: Could not get
+'vkCreateInstance' via 'vk_icdGetInstanceProcAddr'` error as under snap.
+So before chasing the real cause, every remaining container-tooling
+variable was tested and eliminated:
+
+| Variable | Result |
+|---|---|
+| snap Docker → docker-ce | No change |
+| `NVIDIA_DRIVER_CAPABILITIES` under legacy-hook mode (now actually available) | No change — made no difference, same as it made no difference under CDI |
+| Legacy `--runtime=nvidia -e NVIDIA_VISIBLE_DEVICES=all` vs modern CDI (`nvidia-ctk cdi generate` + `--device nvidia.com/gpu=all`) | Identical failure both ways |
+| `--privileged` (rules out cgroup/seccomp device restriction) | No change |
+| Library resolution (`ldd`, `nm -D` on `libGLX_nvidia.so.0`) | Clean in every case — no missing symbols, no missing deps |
+| Vulkan on the **bare host**, no container at all (compiled a minimal `vkCreateInstance`/`vkEnumeratePhysicalDevices` C probe against `libvulkan.so.1`) | **Works.** Correctly lists the RTX 4070 Ti as `PHYSICAL_DEVICE_TYPE_DISCRETE_GPU` |
+
+That last row is what reframed the problem: the driver and host Vulkan
+stack were never broken. Every container-runtime knob (snap vs docker-ce,
+legacy hook vs CDI, privileged vs not, capabilities env var) produced the
+identical failure, which means none of them was the cause.
+
+**The actual cause: `libegl1` was missing from the probe containers.**
+NVIDIA ships one shared driver object, `libGLX_nvidia.so.0`, that backs
+GLX, EGL, *and* the Vulkan ICD. During Vulkan instance creation it runs an
+internal GLVND self-registration step that requires `libEGL.so.1` (the
+glvnd EGL dispatch loader) to be resolvable — even though Vulkan itself has
+no EGL dependency and `ash`/wgpu never call into EGL. Without that library
+present, the check fails closed: `vk_icdGetInstanceProcAddr` silently
+returns NULL for `vkCreateInstance` instead of erroring, and the loader
+falls back to `llvmpipe`. This is exactly the kind of failure that reads
+like a container/runtime problem (silent, no useful error message) but
+isn't one.
+
+Confirmed directly: `apt-get install libvulkan1 vulkan-tools libxext6` (no
+`libegl1`) inside the container → `llvmpipe` only. Same container, same
+run, adding `libegl1` → `vulkaninfo` reports:
+
+```
+GPU0:
+	deviceType         = PHYSICAL_DEVICE_TYPE_DISCRETE_GPU
+	deviceName         = NVIDIA GeForce RTX 4070 Ti
+	driverID           = DRIVER_ID_NVIDIA_PROPRIETARY
+```
+
+Re-verified with the **exact package list from the Dockerfile's runtime
+stage** (`nvidia/cuda:13.0.2-cudnn-runtime-ubuntu24.04` + the full
+`apt-get install` line, not a minimal probe) — same result. **No Dockerfile
+change was needed**: `libegl1` was already being installed there, for the
+unrelated reason of giving `render`'s pyrender/EGL path a real loader. It
+was load-bearing for brush's Vulkan path too, just never verified until
+now.
+
+Net effect: `brush` and `render` are unblocked on this box. Use either
+`--runtime=nvidia -e NVIDIA_VISIBLE_DEVICES=all` or `--device
+nvidia.com/gpu=all` (after `nvidia-ctk cdi generate`) — both now work
+identically. The `NVIDIA_DRIVER_CAPABILITIES` question for RunPod is still
+open (it made no measurable difference in either mode on this box), but
+that was always a secondary question next to this one.
+
 ### 2. The detectron2 probe (~15 min, the highest-risk unknown)
 
 This is the layer most likely to fail, and it is cheap to isolate. Do not
@@ -137,6 +308,130 @@ why the check is spelled out rather than assumed.
 
 Record which rung worked, here, when you find out.
 
+#### RESULT (2026-08-23): **rung 0 — no fallback needed.** Verified on the GPU.
+
+The stack in the Dockerfile as written works. Nothing on the ladder was
+used: CUDA 13.0.2 + torch 2.9.1+cu130 + detectron2 @`a1ce2f9` compiles and
+runs.
+
+```
+torch: 2.9.1+cu130   torch.version.cuda: 13.0
+cuda available: True | NVIDIA GeForce RTX 4070 Ti
+_C.has_cuda(): True
+_C.get_cuda_version(): CUDA 13.0
+nms_rotated on CUDA -> [0]     (kernel actually executed on the GPU)
+```
+
+That last line is the one that matters. `from detectron2 import _C`
+succeeding only proves the extension *loads*; the CPU-only trap this
+section warns about would sail past it. So the probe was extended to (a)
+assert `_C` exports CUDA symbols at build time, and (b) run a real rotated
+NMS on a CUDA tensor in a `--runtime=nvidia` container. `FORCE_CUDA=1`
+demonstrably took.
+
+**The probe recipe printed above is wrong as written — fix it before reuse.**
+It installs detectron2 with `--no-deps` and then immediately does
+`from detectron2 import _C`, but that import runs `detectron2/__init__.py`,
+which needs the runtime deps `--no-deps` just skipped. It fails with:
+
+```
+ModuleNotFoundError: No module named 'fvcore'
+```
+
+which reads like a detectron2 build failure and is nothing of the sort —
+the CUDA wheel had already compiled fine. Add before the check:
+
+```dockerfile
+RUN /opt/v/bin/pip install fvcore omegaconf yacs termcolor tabulate         cloudpickle Pillow matplotlib tqdm
+```
+
+**The real image is not affected by that trap**, because
+`pipeline/envs/sam3dbody/requirements.txt` already lists `fvcore` (and
+`pycocotools`, `tensorboard`, `yacs`) and is installed *before* detectron2.
+The ordering in the Dockerfile is correct as-is.
+
+One cosmetic warning to expect and ignore in the full build — pip prints it
+because `--no-deps` defers the dependency check to a later resolution:
+
+```
+detectron2 0.6 requires iopath<0.1.10,>=0.1.7, but you have iopath 0.1.10
+```
+
+Worth a glance if detectron2 ever misbehaves at runtime, but it did not
+affect the CUDA extension.
+
+Practical note: the probe build takes ~12 min from cold, and the detectron2
+wheel compile alone is ~5 of that with `TORCH_CUDA_ARCH_LIST=8.9`. Widening
+the arch list multiplies that.
+
+#### The brush stage: three things were wrong (2026-08-23)
+
+Not mentioned in the original plan because brush was expected to either
+compile or fail on a missing system library. It did neither — it compiled
+the *wrong source* into a binary that would have failed at runtime.
+
+**1. `rust:1.88` is too old.** Cargo refused to resolve at all:
+
+```
+rerun@0.36.0 requires rustc 1.95
+sysinfo@0.39.6 requires rustc 1.95
+safe_arch@1.2.0 / wide@1.6.1 require rustc 1.89
+```
+
+Now `rust:1.98-slim-bookworm`. Compile takes ~6m20s.
+
+**2. The clone was building upstream, not the fork.** `git clone --depth 1
+https://github.com/Erant/brush.git` takes the *default* branch, and
+`Erant/brush`'s `main` merely tracks upstream ArthurBrussee/brush — the
+HEAD it built was `362dc39`, an upstream PR ("Compile kernels to MSL on
+macOS #519"). The fork's actual work is on the **`normal-map-supervision`**
+branch (`c228531`, "Expose normal-map supervision in the viewer
+settings").
+
+The build *succeeded* and produced a perfectly good 231 MB binary. The
+defect was only visible by diffing `--help` against the argv
+`pipeline/steps/brush.py` actually constructs, which is now worth doing
+whenever the pin moves:
+
+```bash
+docker run --rm --entrypoint /bin/sh b2c/brush-builder -c '/out-brush --help' > help.txt
+grep -oE '"--[a-z-]+"' pipeline/steps/brush.py | sort -u | tr -d '"' | while read f; do
+    grep -q -- "$f" help.txt && echo "OK      $f" || echo "MISSING $f"; done
+```
+
+The Dockerfile now clones `--branch ${BRUSH_BRANCH}`, defaulting to
+`normal-map-supervision`.
+
+**3. `--total-steps` no longer exists — it is `--total-train-iters`.** This
+one is a bug in *our* code, not the Dockerfile, and it survives the branch
+fix. `pipeline/steps/brush.py` was written against an older brush; the fork
+branch is rebased onto an upstream that renamed the flag. The binary
+rejects it outright:
+
+```
+error: unexpected argument '--total-steps' found
+  tip: a similar argument exists: '--total-train-iters'
+```
+
+Fixed in `pipeline/steps/brush.py`. Note the *pipeline param* is still
+`total_steps` — `fast_helical_full.yaml` and `fast_helical_native.yaml`
+pass `total_steps:` and that is unchanged; only the CLI flag string moved.
+
+With the branch fix, all twelve flags the step passes are present.
+
+**Bonus confirmation of the Vulkan finding above.** Running the fixed argv
+gets past clap and dies where section 1 predicted:
+
+```
+No possible adapter available for backend. Falling back to first available.:
+NotFound { active_backends: Backends(0x0), requested_backends: Backends(VULKAN),
+supported_backends: Backends(VULKAN | GL) }
+```
+
+So brush itself independently corroborates that no Vulkan adapter is
+reachable in a container on this box. brush is otherwise built and
+functional; it is the host graphics stack that is the blocker.
+
 ### 3. The full build
 
 Only after 1 and 2 pass. Expect the long poles to be brush's `cargo build
@@ -154,6 +449,61 @@ weights, so it isolates plumbing from models:
 docker run --rm --gpus all -v /path/to/cyber_6f:/data/cyber_6f b2c/pipeline:latest \
     run pipeline/workflows/roundtrip_example.yaml --dataset /data/cyber_6f/initial -v
 ```
+
+#### RESULT (2026-08-23): **the image builds, and the smoke test passes.**
+
+`docker build -f docker/Dockerfile -t b2c/pipeline:latest .` exits 0 with no
+warnings. **15.7 GB on disk / 5.57 GB compressed.** Roughly 35 min cold,
+dominated by the torch/CUDA wheel downloads, brush's ~6m20s compile and
+detectron2's ~2m.
+
+Four fixes were needed to get there — three in the Dockerfile, one in
+pipeline code. They are described in the sections above; in build order:
+
+| Stage | Fix | Failure mode without it |
+|---|---|---|
+| brush | `rust:1.88` -> `1.98` | hard build failure, cargo won't resolve |
+| brush | clone `--branch normal-map-supervision` | *silent*: builds upstream, wrong CLI |
+| python-builder | add `libgl1 libglib2.0-0 libxcb1` | build failure *after* detectron2 compiles |
+| `steps/brush.py` | `--total-steps` -> `--total-train-iters` | runtime "unexpected argument" |
+
+Verified in the built image:
+
+- `22 steps registered`
+- all four child venvs report `shares torch 2.9.1+cu130` — **the `.pth`
+  venv-sharing scheme works as designed**, one torch for four venvs
+- `detectron2 native extension OK`, and `_C.has_cuda()` is True in the
+  *shipped runtime image*, not just the builder
+- all three subprocess envs in `envs.docker.yaml` resolve: each of
+  `/opt/venv_{wan22,sam3dbody,seedvr2}/bin/python` exists, imports
+  `pipeline.worker`, and reports `torch.cuda.is_available() == True`
+- `sam_3d_body` and the vendored `inference_cli` both import
+- `brush` is on PATH at `/usr/local/bin/brush`
+
+The roundtrip smoke test round-trips **exactly**: 86 files in, 86 out; all
+83 PNGs and `prompt.txt` byte-identical; `metadata.json` semantically equal
+(key order only) and `pointcloud.npz` array-for-array equal (positions
+(10000,3) float64, colors (10000,3) uint8) — the container bytes differ
+only because npz is a zip and embeds timestamps.
+
+Two things settled in passing that the requirements files flagged as open:
+
+- **`chump` is correct, not a typo for `chumpy`.** `chump-1.6.0` installed
+  fine as part of the bulk `--no-build-isolation` install. The note in
+  `pipeline/envs/sam3dbody/requirements.txt` can be closed.
+- **The whole sam3dbody ordering dance works as documented.** cython first,
+  bulk install with `--no-build-isolation`, detectron2 last with
+  `--no-deps` — `xtcocotools` 1.14.3 and all the rest built without
+  complaint on Python 3.12.
+
+`--gpus all` in the command above must be `--runtime=nvidia -e
+NVIDIA_VISIBLE_DEVICES=all` on this box; see section 1.
+
+One correctness fix beyond the build: `ENV PYTHONPATH="/opt/vendor/seedvr2:${PYTHONPATH}"`
+expanded to a trailing colon (BuildKit's `UndefinedVar` warning — the only
+warning the build emitted), which Python reads as an extra working-directory
+entry on `sys.path`. Now set literally. It was a duplicate CWD entry rather
+than a stdlib-shadowing hazard; `sys.path[0]` is the script dir either way.
 
 ## Why the CUDA version stopped being a constraint
 
@@ -260,7 +610,7 @@ Dockerfile currently sidesteps it by installing rmbg's two real extras
 (`kornia`, `timm`) directly rather than via the requirements file. Worth
 making the file consistent at some point.
 
-## gsplat: dropped
+## gsplat: dropped, replaced by brush-splat-render
 
 `render_splat` was the only consumer, via body2colmap's `SplatRenderer`.
 gsplat publishes no prebuilt wheel past torch 2.4 / cu124 (checked their
@@ -273,29 +623,94 @@ It is now removed, and the image ships on `cuda:13.0.2-cudnn-runtime`.
 detectron2 still needs nvcc, so it compiles in a `devel` builder stage and
 only the finished venvs are copied forward.
 
-**`render_splat` will therefore fail at import until its replacement
-exists.** Everything else is unaffected — the step's camera-path half is
-still verified, only the rasterisation call is missing a backend. The
-replacement is a standalone Rust utility linking `brush-render`; see
-`docs/brush-render-utility.md` (uncommitted design note).
+**Replacement: `brush-splat-render`, a standalone Rust CLI in the
+Erant/brush fork** (`crates/brush-splat-render`, built in the brush-builder
+stage alongside `brush` itself — see that stage's comments). It loads a
+trained `.ply` and rasterises an explicit camera list through the same
+wgpu/Vulkan renderer `brush` uses, so it needs nothing this image doesn't
+already provide for `brush`. `pipeline/steps/splat.py`'s `RenderSplatStep`
+now shells out to it directly (same pattern as `steps/brush.py` shelling
+out to `brush`), bypassing body2colmap's `SplatRenderer`/gsplat entirely.
+Full design rationale, the `cameras.json` schema, and the OpenGL/OpenCV
+camera-convention derivation (verified against a real gsplat oracle: mean
+abs error 0.0008-0.0015 on RGB) live in
+`~/Projects/brush/docs/splat-render.md`.
 
-One sequencing point from that note, worth repeating here because it is
-easy to miss: **capture gsplat reference renders on the 4070 Ti before
-moving on.** gsplat still installs fine in a scratch venv on a box with a
-CUDA toolchain, and those images are the only oracle the brush renderer can
-be validated against. Once that box is gone, so is the ability to produce
-them.
+**Built, shipped, and verified on GPU** (2026-08-23) — see "Still
+unverified" below for the `render_splat` RESULT block: both the raw
+`brush-splat-render` binary and the `RenderSplatStep` Python integration
+ran a real render against real `cyber_6f` cameras in the shipped image.
+
+The gsplat-reference-render errand from `docs/brush-render-utility.md` is
+now historical: it was **done** as part of building `brush-splat-render` —
+gsplat is CUDA, not Vulkan, so a scratch venv on this box produced the
+oracle images the new renderer was validated against, per
+`~/Projects/brush/docs/splat-render.md`.
 
 ## Still unverified after all of the above
 
-Even with a green build, these remain untested:
+#### UPDATE (2026-08-23, later the same day): the first two are now closed
 
-- `brush` producing an actual splat (never run, on any machine)
-- `render`'s pyrender/EGL rasterisation (never run)
-- `render_splat`'s gsplat call (never run; the camera-path half around it
-  is verified locally against cyber_6f)
-- `generate_firstlast`'s warp against a real `render` output
-- `fast_helical_full.yaml` end to end — every stage now has a native step
-  and the file validates statically, but the sequence has never executed
+Once the docker-ce + `libegl1` fix above landed, both graphics-blocked items
+were re-tested directly against the real shipped image (`b2c/pipeline:latest`,
+`--device nvidia.com/gpu=all`) and both pass on actual GPU hardware:
 
-The first three are exactly what a local GPU box is for.
+- **`brush` producing an actual splat.** A real (short) training run against
+  `cyber_6f/colmap`'s 81-frame COLMAP export — 200 iterations, sh-degree 1,
+  480px max resolution — completed in ~3s and exported a valid `test.ply`
+  (12,463 splats after one refine pass). Full log confirms the COLMAP
+  dataset loaded (81 training views, 10000 seed points) and training ran to
+  completion with no errors.
+- **`render`'s pyrender/EGL rasterisation.** Created a real
+  `pyrender.OffscreenRenderer` inside the container and read back
+  `GL_VENDOR`/`GL_RENDERER` directly from the GL context:
+  `GL_VENDOR: NVIDIA Corporation`, `GL_RENDERER: NVIDIA GeForce RTX 4070
+  Ti/PCIe/SSE2` — hardware rendering, not the Mesa/llvmpipe fallback.
+
+#### UPDATE (2026-08-23, later still): `render_splat` closed out too
+
+The Erant/brush commit adding `brush-splat-render` was pushed to
+`erant/normal-map-supervision`, the image was rebuilt (`docker build
+--no-cache-filter brush-builder ...` — a plain rebuild reuses the cached
+`git clone` layer and silently keeps the pre-push checkout, since BuildKit
+caches on the RUN command text, not remote git state; worth remembering
+next time this stage's source moves upstream without the Dockerfile itself
+changing), and both the raw binary and the actual pipeline step were
+verified on GPU:
+
+- `brush-splat-render` directly, against the `.ply` from the `brush` run
+  above and 4 real cameras from `cyber_6f`: `wgpu_hal::vulkan::adapter`
+  log confirms `backend: Vulkan` on `NVIDIA GeForce RTX 4070 Ti`; output
+  PNGs have real content (RGB std ~32, ~23% alpha coverage — a
+  person-shaped foreground in a portrait frame, not blank).
+- `pipeline.steps.splat.RenderSplatStep` end to end, reusing all 81 of
+  `cyber_6f/initial`'s real cameras: 81 images + 81 masks back, correct
+  `(1280, 720, 3)` BGR uint8 images and `[0, 1]` float32 masks.
+
+`render_splat` is no longer blocked by anything graphics- or
+integration-related. What's left is quality, not plumbing: the smoke test
+above trained for only 200 iterations at 480px max resolution, so the
+render looks like a 200-iteration splat, not a finished one.
+
+The remaining items below were **not** re-tested this session (they need a
+full workflow run, not a targeted smoke test) but are no longer
+graphics-blocked — the thing that was stopping them is fixed.
+
+The build is green and the plumbing is proven (see section 3); these
+remain untested:
+
+- `generate_firstlast`'s warp against a real `render` output.
+- `fast_helical_full.yaml` end to end — every stage has a native step and
+  the file validates statically, but the sequence has never executed.
+
+Unblocking the graphics items was the `docker-ce` + `libegl1` fix described
+above, not a driver downgrade or a RunPod-specific workaround — worth
+retesting the `NVIDIA_DRIVER_CAPABILITIES` question on RunPod with that in
+mind, since it's now known to matter less than expected in every mode
+tested here.
+
+Note the gsplat-reference-render errand from `docs/brush-render-utility.md`
+is separate from all of this: gsplat is CUDA, not Vulkan, so a scratch venv
+on this box can still produce the oracle images the brush renderer was
+validated against (see `~/Projects/brush/docs/splat-render.md`, which
+records that comparison — mean abs error 0.0008-0.0015 on RGB).

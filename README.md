@@ -17,10 +17,10 @@ tracks what is verified against what.
 pip install -r requirements.txt
 ```
 
-The Gaussian-splat steps additionally need `body2colmap[splat]` (gsplat +
-plyfile), kept out of the default install because gsplat requires a CUDA
-toolchain — see `requirements.txt`. Face-landmark detection needs
-`mediapipe` (CPU-only).
+The Gaussian-splat steps additionally need `plyfile` for PLY I/O, and
+`render_splat` needs the `brush-splat-render` binary on `PATH` (built
+alongside `brush` in `docker/Dockerfile`) — see `requirements.txt`.
+Face-landmark detection needs `mediapipe` (CPU-only).
 
 ## Quickstart
 
