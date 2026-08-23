@@ -1,25 +1,46 @@
-# Single-image setup, targeting RunPod (a pod IS one container — no nested
-# Docker daemon to split brush into its own image against, see
-# docker/Dockerfile's file-level comment). Useful for building/testing the
-# image locally before pushing it as a RunPod pod template; RunPod itself
-# doesn't consume this compose file directly.
+# Local build/test of the single image, before pushing it as a RunPod pod
+# template. RunPod does not consume this file — it exists so the image can
+# be built and exercised on a box with a local GPU.
+#
+# READ docs/docker-build-notes.md FIRST. Do not start with a full build:
+# that document has a capability probe and a detectron2 probe that isolate
+# the two most likely failures in about 25 minutes, versus discovering
+# them at the end of a very large build.
 #
 # Usage:
 #   export HF_TOKEN=hf_...
 #   docker compose -f docker/docker-compose.yml build
 #   docker compose -f docker/docker-compose.yml run --rm pipeline \
-#       run pipeline/workflows/fast_helical_native.yaml --dataset /data/some_dataset -v
+#       run pipeline/workflows/roundtrip_example.yaml \
+#       --dataset /data/cyber_6f/initial -v
 
 services:
   pipeline:
     build:
       context: ..
       dockerfile: docker/Dockerfile
+      args:
+        # 8.9 = Ada (RTX 4070 Ti, RTX 4090, L40S). Widen for an image that
+        # has to run on arbitrary rented GPUs, at the cost of build time:
+        #   TORCH_CUDA_ARCH_LIST: "8.0;8.6;8.9;9.0+PTX"
+        TORCH_CUDA_ARCH_LIST: "8.9"
+        # Drop to cu128 + torch 2.8.0 if detectron2 will not build against
+        # CUDA 13 — see the fallback ladder in docs/docker-build-notes.md.
+        TORCH_VERSION: "2.9.1"
+        TORCHVISION_VERSION: "0.24.1"
+        CUDA_WHEEL_INDEX: "https://download.pytorch.org/whl/cu130"
     image: b2c/pipeline:latest
     environment:
+      # Gated models (briaai/RMBG-2.0, facebook/sam-3d-body-dinov3) need a
+      # token from an account that has accepted each licence. Injected at
+      # run time, never baked into an image layer.
       - HF_TOKEN=${HF_TOKEN}
       - HF_HOME=/data/hf_cache
       - HF_HUB_DISABLE_XET=1
+      # Also set in the image, but repeated here because it is read at
+      # container-creation time and this is the layer that creates the
+      # container. Gates brush (Vulkan) and render (EGL) alike.
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics,display
     volumes:
       - b2c_data:/data
     deploy:

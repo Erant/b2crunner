@@ -1,14 +1,28 @@
 # Docker container guide
 
+> **Start with [docker-build-notes.md](docker-build-notes.md).** That file
+> is the current test plan for actually getting the image built — machine
+> requirements, the two cheap probes to run before a full build, the
+> detectron2/CUDA fallback ladder, and what changed in the Dockerfile
+> rewrite. This file is the older narrative on *why the image is shaped
+> the way it is*; where the two disagree, the build notes and the
+> Dockerfile itself are newer.
+
 Real, buildable artifacts live in `docker/`:
 
 - `docker/Dockerfile` — one image, everything: the orchestrator
   (`python -m pipeline.cli`), one venv per `subprocess`-dispatch step
-  (`wan22`, `sam3dbody`, `seedvr2`), one shared `venv_main` for
-  `in_process`-dispatch steps (`rmbg`, `sapiens2`, `brush`) — mirrors
-  `scripts/pod_bootstrap.sh`'s venv layout, just inside a container instead
-  of on a bare pod — plus the `brush` Rust binary itself, built straight
-  into the image.
+  (`wan22`, `sam3dbody`, `seedvr2`), one `venv_main` for
+  `in_process`-dispatch steps, and the `brush` binary. Since the rewrite
+  these venvs are **children of a shared `/opt/venv_base`** created with
+  `--system-site-packages`, so one copy of torch and the CUDA wheels
+  serves all four (~10 GB saved) while each venv can still shadow anything
+  it needs a different version of. brush is built in a separate Rust stage
+  and only the binary is copied, so the toolchain is not shipped.
+- `docker/envs.docker.yaml` — the container's env registry, copied over
+  `pipeline/envs/envs.yaml` during the build. The repo's own copy keeps
+  describing a bare pod; the two named different paths before, which would
+  have broken every `subprocess` step inside the image.
 - `docker/docker-compose.yml` — builds it, useful for local
   build/test before pushing as a RunPod pod template. RunPod itself doesn't
   consume this file directly.
@@ -30,9 +44,12 @@ docker compose -f docker/docker-compose.yml run --rm pipeline \
 The container mounts a shared `/data` volume (weights, HF cache, datasets
 you bind-mount in).
 
-**UNVERIFIED**: the Dockerfile hasn't actually been built end-to-end as of
-this writing — see "What's confirmed vs. not" below for exactly which
-pieces come from real pod-tested commands vs. are still best-guess.
+**UNVERIFIED**: the Dockerfile still has not been built end-to-end. The
+previous version could not have built at all — it installed `python3.12`
+on Ubuntu 22.04, which has no such package, and pinned
+`sageattention>=2.1.1`, which does not exist on PyPI. Both are fixed; see
+docker-build-notes.md for the full list of what changed and what is still
+expected to be risky.
 
 ## Why one image, not brush split out
 

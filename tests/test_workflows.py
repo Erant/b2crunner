@@ -23,6 +23,7 @@ import pipeline.steps  # noqa: F401
 REPO_ROOT = Path(__file__).resolve().parent.parent
 WORKFLOW_DIR = REPO_ROOT / "pipeline" / "workflows"
 ENVS_FILE = REPO_ROOT / "pipeline" / "envs" / "envs.yaml"
+DOCKER_ENVS_FILE = REPO_ROOT / "docker" / "envs.docker.yaml"
 
 VALID_DISPATCH = {"in_process", "subprocess", "service", "docker"}
 
@@ -92,6 +93,35 @@ class TestWorkflowFiles(unittest.TestCase):
                             f"{path.name}: '{step.id}' dispatches "
                             f"{step.dispatch} but names no env",
                         )
+
+    def test_docker_env_registry_matches_the_repo_one(self):
+        """docker/envs.docker.yaml is copied over pipeline/envs/envs.yaml
+        inside the image, so it has to define the same env names.
+
+        These two drifted before: the Dockerfile built /workspace/venv_*
+        while envs.yaml named pipeline/envs/*/venv/bin/python, and every
+        subprocess step in the image would have failed to find an
+        interpreter. Names here, not paths — the paths differ on purpose
+        (bare pod vs container).
+        """
+        repo_envs = set(yaml.safe_load(ENVS_FILE.read_text())["envs"])
+        docker_envs = set(yaml.safe_load(DOCKER_ENVS_FILE.read_text())["envs"])
+        self.assertEqual(
+            repo_envs, docker_envs,
+            "pipeline/envs/envs.yaml and docker/envs.docker.yaml define "
+            "different env names",
+        )
+
+    def test_docker_env_paths_are_absolute(self):
+        """A relative python_bin resolves against the process working
+        directory, which is what made the container paths wrong before."""
+        envs = yaml.safe_load(DOCKER_ENVS_FILE.read_text())["envs"]
+        for name, cfg in envs.items():
+            with self.subTest(env=name):
+                self.assertTrue(
+                    cfg["python_bin"].startswith("/"),
+                    f"{name}: python_bin must be absolute inside the image",
+                )
 
     def test_all_param_templates_resolve(self):
         """A ${params.x} naming a param that doesn't exist is the single

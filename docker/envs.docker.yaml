@@ -1,0 +1,25 @@
+# Env registry for the Docker image ONLY.
+#
+# docker/Dockerfile copies this over pipeline/envs/envs.yaml inside the
+# image, because cli.py's --envs default points there and it would
+# otherwise name the bare-pod paths (/workspace/venv_*), which this image
+# does not create. The repo's own pipeline/envs/envs.yaml keeps describing
+# a bare pod; this file describes the container.
+#
+# The venvs below are children of /opt/venv_base created with
+# --system-site-packages, so they see its torch/CUDA wheels without
+# carrying their own copy. See docker/Dockerfile.
+
+envs:
+  wan22:
+    kind: subprocess
+    python_bin: /opt/venv_wan22/bin/python
+  sam3dbody:
+    kind: subprocess
+    python_bin: /opt/venv_sam3dbody/bin/python
+  seedvr2:
+    kind: subprocess
+    python_bin: /opt/venv_seedvr2/bin/python
+  # No `brush` entry: brush is a Rust binary at /usr/local/bin/brush,
+  # invoked as a subprocess by pipeline/steps/brush.py, which runs
+  # dispatch: in_process. Nothing to configure here.
