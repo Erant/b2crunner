@@ -4,19 +4,30 @@
 # uv pip install -e .   # so `python -m pipeline.worker` is importable here
 #
 # numz/ComfyUI-SeedVR2_VideoUpscaler must be vendored onto this env's
-# PYTHONPATH so `from src.core.generation_utils import ...` resolves
-# (pipeline/steps/seedvr2.py assumes it's importable, not that it's a
-# published PyPI package). Clone it alongside this venv and add it to
-# PYTHONPATH, e.g.:
-#   git clone https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler pipeline/envs/seedvr2/vendor
-#   export PYTHONPATH=$PYTHONPATH:pipeline/envs/seedvr2/vendor
+# PYTHONPATH so `import inference_cli` resolves (pipeline/steps/seedvr2.py
+# imports the vendored repo's CLI script as a module — not a published
+# PyPI package, and not the `src.core.generation_utils` module this file
+# originally assumed; see that module's docstring). See setup.sh.
 #
-# flash-attn/apex are pinned to a specific torch/CUDA ABI upstream — if the
-# pod's CUDA userspace doesn't match, this step needs `docker` dispatch
-# instead of `subprocess` (see pipeline README).
+# Pinned versions below are this repo's actual pip requirements.txt
+# (read directly from github.com/numz/ComfyUI-SeedVR2_VideoUpscaler),
+# corrected from an earlier guess: flash-attn/apex are NOT required —
+# they're optional accelerators behind --attention_mode flash_attn_2/
+# flash_attn_3/sageattn_*, only imported if explicitly requested (see
+# src/optimization/compatibility.py). Default attention_mode is "sdpa",
+# pure PyTorch, no extra ABI-pinned native extension needed.
 
-torch==2.6.0
-torchvision==0.21.0
-torchaudio==2.6.0
-opencv-python>=4.8.0
-numpy>=1.24.0
+torch
+torchvision
+safetensors
+numpy
+tqdm
+psutil
+einops
+omegaconf>=2.3.0
+diffusers>=0.33.1
+peft>=0.17.0
+rotary_embedding_torch>=0.5.3
+opencv-python
+gguf
+matplotlib
