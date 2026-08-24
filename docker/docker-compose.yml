@@ -54,6 +54,16 @@ services:
       # container-creation time and this is the layer that creates the
       # container. Gates brush (Vulkan) and render (EGL) alike.
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics,display
+      # Off by default HERE, on by default on a pod — the one deliberate
+      # difference between this file and a RunPod template. `docker compose
+      # up` on a workstation is normally "let me look at the UI", and
+      # quietly pulling ~65 GB of checkpoints onto a laptop as a side effect
+      # of that is a poor trade. On a pod, where the whole point is to have
+      # the models ready before a run needs them, it stays on.
+      #
+      # Set B2C_PREFETCH=1 in your shell to exercise the real pod behaviour:
+      #   B2C_PREFETCH=1 docker compose -f docker/docker-compose.yml up
+      - B2C_PREFETCH=${B2C_PREFETCH:-0}
     volumes:
       # Everything the pipeline writes — outputs, logs, the HF cache, the
       # dispatchers' IPC pickles — goes here. The container's own writable

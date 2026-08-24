@@ -164,6 +164,26 @@ class TestCompose(unittest.TestCase):
             f"docker-compose.yml does not publish port {port}",
         )
 
+    def test_prefetch_defaults_off_locally_but_on_in_the_image(self):
+        """The one deliberate divergence between this file and a pod.
+
+        `docker compose up` on a workstation is normally "let me look at the
+        UI"; pulling ~65 GB of checkpoints as a side effect of that is a
+        poor trade. On a pod it stays on, so the entrypoint must not have
+        its own default that disagrees.
+        """
+        compose = yaml.safe_load(COMPOSE.read_text())
+        environment = compose["services"]["pipeline"]["environment"]
+        self.assertTrue(
+            any(e.startswith("B2C_PREFETCH=") for e in environment),
+            "docker-compose.yml does not pin B2C_PREFETCH, so a local `up` would "
+            "start a ~65 GB download",
+        )
+        self.assertIn(
+            '"${B2C_PREFETCH:-1}"', ENTRYPOINT.read_text(),
+            "the entrypoint no longer defaults prefetching ON, which is what a pod needs",
+        )
+
     def test_it_grants_the_graphics_driver_capability(self):
         """Without `graphics`, vulkaninfo finds no driver and brush cannot run."""
         compose = yaml.safe_load(COMPOSE.read_text())
