@@ -1,29 +1,36 @@
 #!/bin/bash
 # Run after this env's requirements.txt is installed (see
-# scripts/pod_bootstrap.sh, which calls this automatically). Downloads the
-# WAN2.2 VACE-Fun-14B diffusers checkpoint (only the components
-# wan22_vace_denoise.py actually loads) and the Lightning distill LoRAs.
-# Idempotent: huggingface_hub skips files already present in HF_HOME.
+# scripts/pod_bootstrap.sh, which calls this automatically, and which
+# `pip install -e`s the repo just before this — so `pipeline` is importable
+# here). Downloads everything wan22_vace_denoise loads.
+#
+# This used to inline its own snapshot_download with its own allow_patterns,
+# and it drifted: when the step moved to the pre-quantized fp8 checkpoint,
+# this file kept pulling `transformer/*` and `transformer_2/*` — 69 GB that
+# nothing loads any more — and never fetched the fp8 experts the step now
+# needs, so a bare-pod bootstrap downloaded the wrong 69 GB and still could
+# not run. Now it drives pipeline/models.py's registry, which is the single
+# place that knows what this step needs, so the next change to that set
+# cannot leave this file behind.
+#
+# Idempotent: the registry records readiness per model and huggingface_hub
+# skips files already present in HF_HOME.
 set -euo pipefail
 source /workspace/env.sh
 
 python3 -c "
-from huggingface_hub import snapshot_download, hf_hub_download
+from pipeline.models import prefetch, registry, required_for_steps
 
-path = snapshot_download(
-    'linoyts/Wan2.2-VACE-Fun-14B-diffusers',
-    allow_patterns=[
-        'transformer/*', 'transformer_2/*', 'vae/*',
-        'text_encoder/*', 'tokenizer/*', 'scheduler/*',
-        'model_index.json',
-    ],
-)
-print('checkpoint at', path)
+keys = required_for_steps(['wan22_vace_denoise'])
+known = registry()
+print('fetching for wan22_vace_denoise:', keys,
+      '(~%.1f GB)' % sum(known[k].approx_gb for k in keys))
 
-for f in ['high_noise_model.safetensors', 'low_noise_model.safetensors']:
-    p = hf_hub_download(
-        'lightx2v/Wan2.2-Lightning', f,
-        subfolder='Wan2.2-T2V-A14B-4steps-lora-rank64-Seko-V1.1',
-    )
-    print('lora at', p)
+status = prefetch(keys)
+failed = [k for k, v in status.items() if v.get('status') == 'failed']
+for key in keys:
+    entry = status.get(key, {})
+    print('  %-12s %s %s' % (key, entry.get('status', '?'), entry.get('location', '')))
+if failed:
+    raise SystemExit('failed to fetch: %s' % failed)
 "

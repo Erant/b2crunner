@@ -100,10 +100,23 @@ steps:
   # dataset.masks here is the per-frame reference/denoise flag baked into
   # the loaded frames' alpha — NOT a foreground mask. See
   # steps/wan22_vace_denoise.py's docstring.
+  #
+  # No checkpoint params here on purpose: the step defaults to the
+  # pre-quantized fp8 experts (silveroxides/Wan_2.2-fp8_scaled_hybrid) and
+  # has no bf16 path left to fall back to. Override fp8_checkpoint_high /
+  # fp8_checkpoint_low only to point at local files.
   - id: denoise_pass1
     step: wan22_vace_denoise
     dispatch: subprocess
     env: wan22
+    # Hold the pipeline resident between the two passes: one worker process
+    # serves both, so the ~47 GB of weights come off the network volume
+    # once per run instead of twice. The worker calls the step's
+    # release_vram() after every job, so brush (which trains on the GPU
+    # between these two steps) still finds an empty card — the weights wait
+    # in host RAM, not VRAM. Both passes must declare this; it is what
+    # makes them share one worker.
+    keep_loaded: true
     inputs:
       control_video: dataset.images
       control_masks: dataset.masks
@@ -245,6 +258,14 @@ steps:
     step: wan22_vace_denoise
     dispatch: subprocess
     env: wan22
+    # Hold the pipeline resident between the two passes: one worker process
+    # serves both, so the ~47 GB of weights come off the network volume
+    # once per run instead of twice. The worker calls the step's
+    # release_vram() after every job, so brush (which trains on the GPU
+    # between these two steps) still finds an empty card — the weights wait
+    # in host RAM, not VRAM. Both passes must declare this; it is what
+    # makes them share one worker.
+    keep_loaded: true
     inputs:
       control_video: dataset.images
       control_masks: dataset.masks

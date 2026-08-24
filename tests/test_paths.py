@@ -117,16 +117,26 @@ class TestModelDownloadDestinations(unittest.TestCase):
         )
         self.assertIn("models_dir()", code)
 
+        # B2C_MODELS_DIR must be cleared, not just B2C_DATA_DIR set: this
+        # asserts the *default* lands under the data dir, and an explicit
+        # B2C_MODELS_DIR is designed to win over that default. The Docker
+        # image sets it (to /data/models), so without this the test fails
+        # inside the very image it is meant to reassure you about — which
+        # it did, on both torch floors, looking like a real regression.
         with tempfile.TemporaryDirectory() as tmp:
-            previous = os.environ.get("B2C_DATA_DIR")
+            previous = {
+                k: os.environ.get(k) for k in ("B2C_DATA_DIR", "B2C_MODELS_DIR")
+            }
             os.environ["B2C_DATA_DIR"] = tmp
+            os.environ.pop("B2C_MODELS_DIR", None)
             try:
                 self.assertTrue(str(models_dir()).startswith(tmp))
             finally:
-                if previous is None:
-                    os.environ.pop("B2C_DATA_DIR", None)
-                else:
-                    os.environ["B2C_DATA_DIR"] = previous
+                for k, v in previous.items():
+                    if v is None:
+                        os.environ.pop(k, None)
+                    else:
+                        os.environ[k] = v
 
     def test_face_landmarks_does_not_cache_in_home(self):
         from pipeline.steps import face_landmarks

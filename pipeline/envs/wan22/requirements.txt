@@ -16,12 +16,21 @@ kernels>=0.4.0
 # SM89" Triton kernel below just made set_attention_backend refuse it
 # outright, not use it) — the 1.0.6 pure-Triton package doesn't satisfy
 # diffusers' own version check regardless of which kernel it'd dispatch to.
-# >=2.1.1 gets past that check; whether the Triton kernel path within 2.x
-# actually avoids the SM89 CUDA-kernel correctness bug
-# (thu-ml/SageAttention#360, which is specifically about the CUDA
-# int8+fp8 kernel, not the Triton one) is UNVERIFIED — the fallback in
-# _select_sage_backend() is a try/except either way, so a bad output here
-# would need to be caught by comparing against cyber_6f, not by a crash.
+#
+# THIS LINE CANNOT BE SATISFIED BY pip. PyPI's newest sageattention is
+# 1.0.6 (Nov 2024); 2.x was never published there, only tagged on GitHub.
+# It is kept as documentation of the real requirement. Install it with:
+#   TORCH_CUDA_ARCH_LIST="8.9;12.0" \
+#     pip install 'git+https://github.com/thu-ml/SageAttention.git@v2.2.0'
+# (~4 min of nvcc; 8.0/8.6/8.9/9.0/12.0 only — 10.0 is unsupported and is
+# silently skipped rather than erroring). The Docker image does exactly
+# this in its own layer; see docker/Dockerfile's SAGE_REF.
+#
+# The Triton kernel path IS now verified on SM89 (RTX 4070 Ti,
+# SageAttention 2.2.0): cosine similarity .99991 against SDPA and ~1.75x
+# faster. So is the CUDA int8+fp8 kernel that #360 is about — .9993 and
+# ~2.4x — though _select_sage_backend() still steers away from it on Ada.
+# See its docstring for the numbers and why the caution stands.
 sageattention>=2.1.1
 huggingface_hub>=0.25.0
 hf_transfer

@@ -20,7 +20,10 @@
 #   python-builder  CUDA *devel* base. Compiles detectron2's CUDA kernels,
 #                   which is the only reason nvcc is needed at all.
 #   runtime         CUDA *runtime* base. Receives the finished venvs and
-#                   binaries; carries no compiler, no nvcc, no Rust.
+#                   binaries; carries no nvcc and no Rust. It does carry
+#                   gcc, which is NOT an oversight — Triton (and so
+#                   every SageAttention backend) JIT-builds a CPython
+#                   extension at runtime. See the runtime apt layer.
 #
 # Venv sharing: /opt/venv_base holds one copy of torch and the other heavy
 # packages. Each per-step venv gets a .pth file pointing at venv_base's
@@ -142,8 +145,8 @@ ENV TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST}
 # inference — the single nastiest trap in this file.
 ENV FORCE_CUDA=1
 
-ARG TORCH_VERSION=2.9.1
-ARG TORCHVISION_VERSION=0.24.1
+ARG TORCH_VERSION=2.13.0
+ARG TORCHVISION_VERSION=0.28.0
 ARG CUDA_WHEEL_INDEX=https://download.pytorch.org/whl/cu130
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -188,8 +191,20 @@ import torch, sys; \
 print('torch', torch.__version__, 'cuda', torch.version.cuda); \
 sys.exit(0 if torch.version.cuda and torch.version.cuda.startswith('13') else 1)"
 
-# The rest of the shared set. transformers>=4.56 satisfies every step that
-# asks for it (rmbg/wan22 want >=4.46, sapiens2 wants >=4.56).
+# The rest of the shared set. The transformers floor satisfies every step
+# that asks for it (rmbg/wan22 want >=4.46, sapiens2 wants >=4.56).
+#
+# The <6 ceiling is the same defence as gradio's below, and it is not
+# hypothetical here: this constraint was written as a bare `>=4.56.0` and
+# had already floated to transformers **5.15.1** by the time anyone looked.
+# It happens to work, so the pin records where it landed rather than
+# dragging it back — but a rebuild months from now silently picking up
+# transformers 6 is exactly the class of surprise that costs a pod-hour,
+# and this image is meant to be built once and left alone. It is also the
+# same failure mode that already bit torchao (see venv_wan22 below), where
+# an unpinned floor floated onto a release built for a different torch and
+# took `import diffusers` down with it.
+#
 # opencv-python (not -headless) to match pyproject.toml's declared
 # dependency — pip treats the two as different distributions, so mixing
 # them installs both.
@@ -197,7 +212,7 @@ RUN /opt/venv_base/bin/pip install \
         numpy \
         opencv-python \
         Pillow \
-        transformers>=4.56.0 \
+        'transformers>=4.56.0,<6' \
         huggingface_hub>=0.25.0 \
         hf_transfer \
         safetensors \
@@ -235,40 +250,41 @@ RUN make-child-venv /opt/venv_main \
 
 # venv_wan22: wan22_vace_denoise (subprocess dispatch).
 #
-# torchao is PINNED to 0.15.0, and this is a hard requirement of torch
-# 2.9.1, not a preference. The previous 'torchao>=0.16.0' floated up to
-# 0.18.0, which is built against torch >= 2.11 and dies on import with
+# torchao is PINNED, and the pin must move IN LOCKSTEP with
+# TORCH_VERSION — this is a hard version coupling, not a preference. The
+# failure mode is severe and non-obvious: a torchao built for a newer torch
+# than the one installed dies on import with
 #   ImportError: cannot import name 'ScalingType' from 'torch.nn.functional'
+# and transformers' modeling_utils imports quantizer_torchao
+# unconditionally, so a torchao that is *installed but unimportable* takes
+# `import diffusers` down with it. The whole wan22_vace_denoise step — the
+# single most expensive thing in the pipeline — then cannot import at all.
+# An absent torchao would be fine (the step guards for that); a broken one
+# is not. This actually happened at torch 2.9.1 with an unpinned
+# 'torchao>=0.16.0' floating up to 0.18.0.
 #
-# That is far worse than it sounds. It does not merely break the
-# fp8-quantization path: transformers' modeling_utils imports
-# quantizer_torchao unconditionally, so a torchao that is *installed but
-# unimportable* takes `import diffusers` down with it. The whole
-# wan22_vace_denoise step — the single most expensive thing in the
-# pipeline, and the reason the RunPod round exists — could not import at
-# all in the built image. An absent torchao would have been fine (the
-# guard handles that); a broken one is not.
+# 0.18.0 pairs with torch 2.13.0. (For the record: 0.15.0 was the last
+# release that worked on the old torch 2.9.1 floor, and 0.14.1 pairs with
+# 2.9.0.) Re-check this pin whenever TORCH_VERSION moves.
 #
-# 0.15.0 is the release built for torch 2.9.1 (0.14.1 pairs with 2.9.0).
-# Verified in-container: torchao imports, diffusers imports, and
-# Float8WeightOnlyConfig quantizes a real WanVACETransformer3DModel.
-# Re-check this pin whenever TORCH_VERSION moves.
+# torchao >= 0.16 is also what resolves the "version triangle" that used to
+# make the fp8 path unusable — LoRA onto quantized weights, and safetensors
+# serialization of quantized weights, both of which diffusers gates on
+# exactly that version. See docs/fp8-quant-notes.md.
 #
-# sageattention is deliberately NOT installed: the requirements file asks
-# for >=2.1.1 and PyPI's newest is 1.0.6 — 2.x was never published there,
-# so that constraint is unsatisfiable in a clean build. It is also
-# optional; wan22_vace_denoise.py wraps set_attention_backend in
-# try/except and honours attention_backend: "none". To get the speedup
-# back, build it from source here:
-#   pip install 'git+https://github.com/thu-ml/SageAttention.git'
-# (compiles CUDA kernels, slow, needs TORCH_CUDA_ARCH_LIST — set above).
+# sageattention is NOT installed here — it is built from source in its own
+# layer near the end of this stage (search for SAGE_REF). It cannot come
+# from PyPI at all: the requirements ask for >=2.1.1 and PyPI stops at
+# 1.0.6 (Nov 2024), because 2.x was never published there. It is also
+# deliberately not in THIS layer, which sits upstream of the detectron2
+# compile — see the sage layer's own comment for why.
 RUN make-child-venv /opt/venv_wan22 \
     && /opt/venv_wan22/bin/pip install \
         'diffusers>=0.36.0' \
         'accelerate>=1.0.0' \
         'peft>=0.13.0' \
         ftfy \
-        'torchao==0.15.0' \
+        'torchao==0.18.0' \
         'kernels>=0.4.0'
 
 # venv_seedvr2: seedvr2 (subprocess dispatch).
@@ -349,6 +365,66 @@ from detectron2 import _C; print('detectron2 native extension OK')"
 RUN /opt/venv_main/bin/pip install 'gradio>=5.0,<7.0' \
     && /opt/venv_main/bin/python -c "import gradio; print('gradio', gradio.__version__)"
 
+# -----------------------------------------------------------------------------
+# sageattention — built from source, because there is no other way to get it
+# -----------------------------------------------------------------------------
+# diffusers' attention dispatcher requires sageattention >= 2.1.1 for ANY
+# sage backend variant, and PyPI's newest is 1.0.6: 2.x was never published
+# there, only tagged on GitHub. So `pip install sageattention` can never
+# satisfy the constraint, and the package was simply absent from the image —
+# every sage backend raised, the step's try/except swallowed it, and the
+# most expensive step in the pipeline quietly ran on plain SDPA.
+#
+# Measured on an RTX 4070 Ti (SM89), 40 heads x 128 dim, vs PyTorch SDPA:
+#
+#   seq    SDPA     triton int8+fp16      CUDA int8+fp8
+#   1024   0.37ms   0.26ms (cos .99992)   0.29ms (cos .99930)
+#   4096   4.80ms   2.98ms (cos .99991)   2.51ms (cos .99928)
+#   9216  22.32ms  12.75ms (cos .99991)   9.40ms (cos .99926)
+#
+# i.e. ~1.75x on the Triton kernel the step selects for SM89, ~2.4x on the
+# fp8 CUDA one. Both track SDPA closely. See pipeline/steps/
+# wan22_vace_denoise.py's _select_sage_backend for which is chosen and why.
+#
+# LAST IN THE STAGE, like the gradio layer above and for the same reason:
+# Docker's layer cache is linear, so putting a 4-minute nvcc build ahead of
+# venv_sam3dbody would make every touch of it re-pay detectron2's compile.
+#
+# Arch list is NOT the stage-wide TORCH_CUDA_ARCH_LIST. SageAttention 2.2.0
+# supports {8.0, 8.6, 8.9, 9.0, 12.0} and handles anything else by silently
+# emitting no gencode for it (its SUPPORTED_ARCHS set is declared and then
+# never used, so there is no error to catch — the kernels just aren't
+# there). 10.0 — datacenter Blackwell, B100/B200/GB200 — is in this image's
+# default arch list and is NOT supported, so it is dropped here explicitly
+# rather than silently. On such a pod the sage backends have no kernel and
+# the step falls back to SDPA, which is the pre-existing behaviour.
+# Installed into BOTH venvs that can use it: wan22 dispatches sage through
+# diffusers, and seedvr2's vendored inference_cli probes for it at import
+# time ("SageAttention ❌" in its optimizations banner when absent). The
+# wheel is compiled once and installed twice rather than built per venv.
+ARG SAGE_REF=v2.2.0
+ARG SAGE_CUDA_ARCH_LIST="8.9;12.0"
+# NOTE the deliberate absence of `cd /tmp/SageAttention`: pip is given the
+# source path instead. With the checkout as the working directory, a later
+# `import sageattention` resolves to the SOURCE TREE rather than the
+# installed package, and the source tree has no compiled `_fused`, so the
+# verification below fails with a bogus "cannot import name '_fused' ...
+# most likely due to a circular import" and the whole layer errors out on a
+# perfectly good build. Cost an image build to find; keep pip path-based.
+RUN git clone --depth 1 --branch ${SAGE_REF} \
+        https://github.com/thu-ml/SageAttention.git /tmp/SageAttention \
+    && TORCH_CUDA_ARCH_LIST="${SAGE_CUDA_ARCH_LIST}" MAX_JOBS="$(nproc)" \
+       /opt/venv_wan22/bin/pip wheel --no-build-isolation --no-deps \
+       -w /tmp/sagewheel /tmp/SageAttention \
+    && /opt/venv_wan22/bin/pip install --no-deps /tmp/sagewheel/sageattention-*.whl \
+    && /opt/venv_seedvr2/bin/pip install --no-deps /tmp/sagewheel/sageattention-*.whl \
+    && /opt/venv_wan22/bin/python -c "\
+from diffusers.models.attention_dispatch import _CAN_USE_SAGE_ATTN; \
+import importlib.metadata as md; \
+print('sageattention', md.version('sageattention'), '| diffusers accepts it:', _CAN_USE_SAGE_ATTN); \
+assert _CAN_USE_SAGE_ATTN, 'diffusers still refuses the installed sageattention'" \
+    && rm -rf /tmp/SageAttention /tmp/sagewheel
+
 # Strip build leftovers that would otherwise be copied into the runtime
 # image: pip caches, and the compiled-object trees left by the source
 # builds above.
@@ -410,7 +486,8 @@ ENV PYTHONFAULTHANDLER=1
 # and no mention of TMPDIR anywhere in the output. (The skeleton also means
 # a container run with no volume at all still has somewhere to write, rather
 # than dying on the first mkdir.)
-RUN mkdir -p /data/output /data/logs /data/uploads /data/tmp /data/hf_cache /data/models
+RUN mkdir -p /data/output /data/logs /data/uploads /data/tmp /data/hf_cache /data/models \
+        /data/caches/triton /data/caches/nv /data/caches/torch /data/caches/xdg /data/caches/mpl
 ENV B2C_DATA_DIR=/data
 ENV B2C_OUTPUT_DIR=/data/output
 ENV B2C_LOG_DIR=/data/logs
@@ -435,6 +512,31 @@ ENV HF_HUB_DISABLE_XET=1
 # $HOME. Harmless while Xet is disabled.
 ENV HF_XET_CACHE=/data/hf_cache/xet
 #
+# ---------------------------------------------------------------------------
+# Caches that default into $HOME, i.e. onto the pod's small ephemeral disk.
+# ---------------------------------------------------------------------------
+# Same class of bug as the Xet cache above, found by auditing what a run
+# actually writes outside /data. None of these are large, so this is not a
+# disk-quota fix — it is a "don't redo work every pod restart" fix, plus
+# keeping the ephemeral layer free of anything worth keeping.
+#
+# TRITON_CACHE_DIR is the one that now matters most: every SageAttention
+# backend goes through Triton, which JIT-compiles its kernels on first use
+# and caches them (~1.2 MB) under ~/.triton. On the ephemeral disk that
+# means re-JITting on every single pod start, in the middle of the most
+# expensive step. CUDA_CACHE_PATH is the driver's own PTX JIT cache
+# (~/.nv/ComputeCache), same story.
+#
+# TORCH_HOME, XDG_CACHE_HOME and MPLCONFIGDIR are belt and braces: nothing
+# in the pipeline is known to use torch.hub today, but timm and
+# matplotlib-using vendored code both write under $HOME by default, and a
+# future step that does would silently land on the ephemeral disk.
+ENV TRITON_CACHE_DIR=/data/caches/triton
+ENV CUDA_CACHE_PATH=/data/caches/nv
+ENV TORCH_HOME=/data/caches/torch
+ENV XDG_CACHE_HOME=/data/caches/xdg
+ENV MPLCONFIGDIR=/data/caches/mpl
+
 # HF_HUB_ENABLE_HF_TRANSFER is deliberately NOT set. It looks like free
 # speed and is, in this stack, a no-op that costs clarity: the installed
 # huggingface_hub prints a FutureWarning at every container start saying
@@ -456,9 +558,26 @@ ENV HF_XET_CACHE=/data/hf_cache/xet
 ENV PYTHONPATH=/opt/vendor/seedvr2
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        # python3 only: the venvs carry their own packages, and nothing is
-        # built here. python3-venv/-dev and pip are build-stage concerns.
         python3 \
+        # gcc + python3-dev: a deliberate exception to this stage's "no
+        # compiler" rule, and it is load-bearing, not convenience. EVERY
+        # SageAttention backend routes its per-block int8 quantization
+        # through Triton, and Triton JIT-builds a small `cuda_utils` CPython
+        # extension on first use. With no compiler that dies with
+        #   RuntimeError: Failed to find C compiler
+        # the step's try/except swallows it, and the most expensive step in
+        # the pipeline silently runs on plain SDPA — i.e. the whole
+        # sageattention layer in the builder stage buys exactly nothing.
+        # Verified: all sage backends fail in this image without these and
+        # work with them.
+        #
+        # Cost is ~276 MB (~5% of the image) against ~1.75x on attention in
+        # wan22_vace_denoise. gcc alone is NOT enough: Triton's generated
+        # source needs libc headers (fatal error: stdlib.h) and Python.h,
+        # which is what python3-dev pulls in. There is no build-time
+        # prewarm alternative — that compile needs a live GPU, which a
+        # docker build does not have.
+        gcc python3-dev \
         ca-certificates \
         # Vulkan loader for brush. The ICD/driver is injected by
         # nvidia-container-toolkit; the image supplies only the loader.

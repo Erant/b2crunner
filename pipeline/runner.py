@@ -210,7 +210,15 @@ class WorkflowRunner:
             ctx.set(path, outputs[name])
 
     def _get_dispatcher(self, step_spec: StepSpec) -> Dispatcher:
-        key = (step_spec.dispatch, step_spec.env)
+        # keep_loaded is part of the key, not just an argument to the first
+        # build: two steps sharing an env is exactly how residency happens
+        # (fast_helical_full's denoise_pass1 and denoise_pass2 are both
+        # subprocess/wan22, so they share one dispatcher and therefore one
+        # resident worker). Without keep_loaded in the key, a third step on
+        # the same env that did *not* ask for residency would inherit — or
+        # deny — it purely by declaration order, which is invisible in the
+        # YAML and would show up as a mystery 47 GB reload.
+        key = (step_spec.dispatch, step_spec.env, step_spec.keep_loaded)
         if key not in self._dispatchers:
             env_config = self.envs.get(step_spec.env, {}) if step_spec.env else {}
             if step_spec.env and not env_config and step_spec.dispatch != "in_process":

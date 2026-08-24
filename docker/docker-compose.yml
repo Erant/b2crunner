@@ -35,10 +35,14 @@ services:
         # Narrow to "8.9" alone (this box's RTX 4070 Ti) if compile time
         # matters more than running on whatever RunPod hands out.
         TORCH_CUDA_ARCH_LIST: "8.9;10.0;12.0"
+        # torch 2.13.0 is verified against detectron2 @a1ce2f9 (compiles,
+        # and its CUDA kernels run fwd+bwd on an sm_89 GPU) and against all
+        # four venvs — see docs/docker-build-notes.md. TORCHVISION and the
+        # torchao pin in the Dockerfile move WITH this; they are coupled.
         # Drop to cu128 + torch 2.8.0 if detectron2 will not build against
         # CUDA 13 — see the fallback ladder in docs/docker-build-notes.md.
-        TORCH_VERSION: "2.9.1"
-        TORCHVISION_VERSION: "0.24.1"
+        TORCH_VERSION: "2.13.0"
+        TORCHVISION_VERSION: "0.28.0"
         CUDA_WHEEL_INDEX: "https://download.pytorch.org/whl/cu130"
     image: b2c/pipeline:latest
     ports:

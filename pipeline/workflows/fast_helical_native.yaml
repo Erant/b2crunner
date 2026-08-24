@@ -193,6 +193,8 @@ steps:
       images: dataset.images
       masks: dataset.masks
 
+  # Weights: the step's fp8 defaults (see steps/wan22_vace_denoise.py) —
+  # nothing to configure here, and no bf16 path to fall back to.
   - id: denoise
     step: wan22_vace_denoise
     dispatch: subprocess

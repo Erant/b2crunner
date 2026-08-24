@@ -23,7 +23,7 @@ nothing about whether the step can find them, and "ready" has to mean the
 step will not download anything.
 
 **Blocking is scoped to the workflow, prefetching is not.** Waiting for the
-52 GB Wan2.2 checkpoint before a `fast_helical_local_smoke` run — which
+~47 GB of Wan2.2 weights before a `fast_helical_local_smoke` run — which
 skips both denoise passes on purpose — would be actively wrong. The
 prefetch is greedy by default; `required_for_steps()` decides what a given
 run must actually wait on.
@@ -133,6 +133,40 @@ def _probe_wan22_loras() -> bool:
         return False
 
 
+def _fetch_wan22_fp8() -> str:
+    """The two pre-quantized fp8 experts, 17.58 GB each.
+
+    Through the step's own `resolve_fp8_checkpoint`, so the prefetch cannot
+    disagree with the step about which repo, which filenames, or which
+    cache — the rule this module is built on. These are plain
+    `hf_hub_download`s of two files rather than a snapshot: the repo holds
+    the whole Wan 2.2 fp8 family (T2V, I2V, VACE, several variants of
+    each), and we want exactly two of them.
+    """
+    from .steps.wan22_vace_denoise import (
+        DEFAULT_FP8_HIGH, DEFAULT_FP8_LOW, DEFAULT_FP8_REPO, resolve_fp8_checkpoint,
+    )
+
+    paths = [
+        resolve_fp8_checkpoint(name, DEFAULT_FP8_REPO)
+        for name in (DEFAULT_FP8_HIGH, DEFAULT_FP8_LOW)
+    ]
+    return str(Path(paths[0]).parent)
+
+
+def _probe_wan22_fp8() -> bool:
+    from .steps.wan22_vace_denoise import (
+        DEFAULT_FP8_HIGH, DEFAULT_FP8_LOW, DEFAULT_FP8_REPO, resolve_fp8_checkpoint,
+    )
+
+    try:
+        for name in (DEFAULT_FP8_HIGH, DEFAULT_FP8_LOW):
+            resolve_fp8_checkpoint(name, DEFAULT_FP8_REPO, local_files_only=True)
+        return True
+    except Exception:
+        return False
+
+
 def _fetch_mediapipe() -> str:
     from .steps.face_landmarks import (
         DETECTOR_MODEL_NAME, DETECTOR_MODEL_URL, LANDMARKER_MODEL_NAME,
@@ -196,6 +230,26 @@ def _fetch_seedvr2() -> str:
     return str(target)
 
 
+#: Everything `wan22_vace_denoise` loads from the base diffusers repo —
+#: which is everything EXCEPT the two transformers. Those now come
+#: pre-quantized from a different repo (see `_fetch_wan22_fp8`), and
+#: diffusers does not download a component that is passed to
+#: `from_pretrained` directly, so `transformer/*` and `transformer_2/*`
+#: (34.68 GB EACH) must not be listed here: they would be 69 GB of pod
+#: download and volume for weights nothing opens.
+#:
+#: `transformer/config.json` is the deliberate exception and is NOT
+#: redundant with dropping `transformer/*`: pipeline/wan_fp8.py needs the
+#: model geometry to instantiate WanVACETransformer3DModel, and fetches it
+#: with `hf_hub_download(repo, "config.json", subfolder="transformer")` —
+#: the same cache layout snapshot_download writes, so this pattern is what
+#: makes that call a cache hit instead of a network round trip. Kilobytes.
+WAN22_ALLOW_PATTERNS = [
+    "transformer/config.json", "vae/*",
+    "text_encoder/*", "tokenizer/*", "scheduler/*", "model_index.json",
+]
+
+
 def _registry() -> List[ModelSource]:
     """Built lazily so importing this module never imports a step module."""
     from .steps.rmbg import DEFAULT_CHECKPOINT as RMBG
@@ -203,33 +257,54 @@ def _registry() -> List[ModelSource]:
     from .steps.sapiens2 import DEFAULT_CHECKPOINT as SAPIENS
     from .steps.wan22_vace_denoise import DEFAULT_CHECKPOINT as WAN22
 
-    rmbg_fetch, rmbg_probe = _hf_snapshot(RMBG)
-    sapiens_fetch, sapiens_probe = _hf_snapshot(SAPIENS)
+    # allow_patterns, or these pull the whole repo including formats the
+    # pipeline never loads. Measured against the live repos:
+    #   RMBG-2.0 is 5.37 GB unfiltered but 0.88 GB of it is used — the rest
+    #     is eight ONNX variants and a duplicate pytorch_model.bin. The
+    #     `*.py` are NOT optional: the step loads it with
+    #     trust_remote_code=True, which needs birefnet.py/BiRefNet_config.py.
+    #   sapiens2-normal-0.4b ships the same weights twice (model.safetensors
+    #     and sapiens2_0.4b_normal.safetensors, 1.81 GB each); only the
+    #     first is what from_pretrained loads.
+    # 6.3 GB of pod download and volume, for nothing, on every fresh pod.
+    _WEIGHTS_ONLY = ["*.json", "*.py", "model.safetensors"]
+    rmbg_fetch, rmbg_probe = _hf_snapshot(RMBG, _WEIGHTS_ONLY)
+    sapiens_fetch, sapiens_probe = _hf_snapshot(SAPIENS, _WEIGHTS_ONLY)
     sam3d_fetch, sam3d_probe = _hf_snapshot(SAM3D)
-    # The same allow_patterns pipeline/envs/wan22/setup.sh uses: only the
-    # components the step actually loads. Without it this pulls variants
-    # the pipeline never touches.
-    wan22_fetch, wan22_probe = _hf_snapshot(WAN22, [
-        "transformer/*", "transformer_2/*", "vae/*",
-        "text_encoder/*", "tokenizer/*", "scheduler/*", "model_index.json",
-    ])
+    wan22_fetch, wan22_probe = _hf_snapshot(WAN22, WAN22_ALLOW_PATTERNS)
 
     return [
         ModelSource(
             "rmbg", f"{RMBG} (background removal)", ("rmbg",),
-            rmbg_fetch, rmbg_probe, approx_gb=0.9, gated=True,
+            rmbg_fetch, rmbg_probe, approx_gb=0.9, gated=True,  # accurate once filtered
         ),
         ModelSource(
             "sapiens2", f"{SAPIENS} (normal maps)", ("sapiens2_lite",),
-            sapiens_fetch, sapiens_probe, approx_gb=1.7,
+            sapiens_fetch, sapiens_probe, approx_gb=1.8,
         ),
         ModelSource(
             "sam3dbody", f"{SAM3D} (body reconstruction)", ("sam3d_body",),
-            sam3d_fetch, sam3d_probe, approx_gb=3.0, gated=True,
+            sam3d_fetch, sam3d_probe, approx_gb=2.8, gated=True,
         ),
         ModelSource(
-            "wan22", f"{WAN22} (denoise)", ("wan22_vace_denoise",),
-            wan22_fetch, wan22_probe, approx_gb=52.0,
+            "wan22", f"{WAN22} (denoise: vae, text encoder, scheduler)",
+            ("wan22_vace_denoise",),
+            # 11.89 GB, measured from the repo with exactly the
+            # allow_patterns above: text_encoder 11.36 + vae 0.51 + the
+            # tokenizer/scheduler/config JSONs. It said 81 while the bf16
+            # transformers (34.68 each) were still being pulled from here;
+            # they are not any more. This number is what the prefetch UI
+            # tells you a fresh pod is about to download, so it has to
+            # track the patterns.
+            wan22_fetch, wan22_probe, approx_gb=11.9,
+        ),
+        ModelSource(
+            "wan22_fp8", "silveroxides/Wan_2.2-fp8_scaled_hybrid VACE experts (fp8)",
+            ("wan22_vace_denoise",),
+            # 17.58 GB per expert, measured. Together with `wan22` above
+            # that is ~47 GB for a denoise-capable pod, against 81 GB when
+            # the transformers came down in bf16 to be quantized on load.
+            _fetch_wan22_fp8, _probe_wan22_fp8, approx_gb=35.2,
         ),
         ModelSource(
             "wan22_lora", "lightx2v/Wan2.2-Lightning distill LoRAs",

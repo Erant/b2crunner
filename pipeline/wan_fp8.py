@@ -1,10 +1,12 @@
 """Load a ComfyUI-format fp8_scaled Wan checkpoint into a diffusers model.
 
-The problem this solves: `wan22_vace_denoise` otherwise downloads ~35 GB of
-bf16 weights per expert and spends minutes of GPU time fusing the LoRA and
-fp8-quantizing them, on every cold load. Meanwhile the community has already
+The problem this solves: `wan22_vace_denoise` used to download 34.68 GB of
+bf16 weights per expert and spend minutes of GPU time fusing the LoRA and
+fp8-quantizing them, on every cold load. Meanwhile the community had already
 published fp8 quants of exactly this model — half the download, none of the
 quantization — but only in ComfyUI's format, which diffusers does not read.
+This module is what closed that gap, and since it did, the bf16 path has
+been deleted: this is now the only way the step gets its transformers.
 
 Two gaps sit between that file and `WanVACETransformer3DModel`, and neither
 turns out to need much code:

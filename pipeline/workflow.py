@@ -39,7 +39,32 @@ class StepSpec:
     step: str
     dispatch: str = "in_process"
     env: Optional[str] = None
+
+    # Reuse one loaded Step across every call to this step in the run,
+    # instead of building and loading it again each time. Off by default:
+    # most steps are called once, and for those it only costs a model
+    # sitting in memory for the rest of the run.
+    #
+    # Turn it on when the same `step:` appears more than once in a workflow
+    # and its load() is expensive — fast_helical_full.yaml's two
+    # `wan22_vace_denoise` passes are the case this exists for, where a
+    # reload is ~47 GB re-read off a pod's network volume.
+    #
+    # Honoured by `dispatch: in_process` (one Step instance, see
+    # dispatch/in_process.py) and `dispatch: subprocess` (one long-lived
+    # `pipeline.worker --serve` child, see dispatch/subprocess_python.py).
+    # `service` needs nothing — a model server is already warm — and
+    # `docker` ignores it.
+    #
+    # The reused instance is NOT reloaded when params change, unless the
+    # Step class declares `LOAD_PARAMS` naming the params its load() reads;
+    # see `pipeline.worker.load_signature` for the full rule and why the
+    # default is what it is. Two steps that set this and share a
+    # `dispatch:`/`env:` pair share the loaded model; a step that doesn't
+    # set it gets its own dispatcher either way (runner.py's
+    # _get_dispatcher).
     keep_loaded: bool = False
+
     inputs: Dict[str, str] = field(default_factory=dict)
     outputs: Dict[str, str] = field(default_factory=dict)
     params: Dict[str, Any] = field(default_factory=dict)

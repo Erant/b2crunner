@@ -32,10 +32,17 @@ def build_dispatcher(
     if dispatch == "subprocess":
         if "python_bin" not in env_config:
             raise ValueError("dispatch: subprocess requires env config with 'python_bin'")
+        # keep_loaded is forwarded here too, not only to InProcessDispatcher:
+        # it used to be silently dropped on this branch, which made
+        # `keep_loaded: true` on a subprocess step look like it worked and do
+        # nothing. That is the branch where it matters most — an in-process
+        # step reloading is a Python object; a subprocess step reloading is
+        # ~47 GB off a network volume (see subprocess_python.py).
         return SubprocessPythonDispatcher(
             python_bin=env_config["python_bin"],
             cwd=env_config.get("cwd"),
             env=env_config.get("env"),
+            keep_loaded=keep_loaded,
         )
 
     if dispatch == "service":

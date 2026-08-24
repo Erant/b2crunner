@@ -8,7 +8,7 @@ easy to get subtly wrong:
     marker this code wrote — otherwise a network volume warmed by an
     earlier pod, or by hand, looks completely cold;
   * blocking must be scoped to the workflow, or a local-smoke run waits on
-    52 GB of Wan2.2 it never touches.
+    the ~47 GB of Wan2.2 weights it never touches.
 """
 
 from __future__ import annotations
@@ -71,10 +71,76 @@ class TestRegistry(unittest.TestCase):
         """The registry must not carry its own copy of a checkpoint name."""
         from pipeline.steps.rmbg import DEFAULT_CHECKPOINT as RMBG
         from pipeline.steps.wan22_vace_denoise import DEFAULT_CHECKPOINT as WAN22
+        from pipeline.steps.wan22_vace_denoise import DEFAULT_FP8_REPO
 
         sources = models.registry()
         self.assertIn(RMBG, sources["rmbg"].description)
         self.assertIn(WAN22, sources["wan22"].description)
+        self.assertIn(DEFAULT_FP8_REPO, sources["wan22_fp8"].description)
+
+
+class TestWan22WeightSplit(unittest.TestCase):
+    """The denoise step's weights come from two repos, and only two repos.
+
+    The transformers are pre-quantized fp8 from
+    silveroxides/Wan_2.2-fp8_scaled_hybrid; the base diffusers repo
+    supplies everything else. The bf16 transformers there — 34.68 GB EACH,
+    measured — must never be pulled again: diffusers skips downloading a
+    component passed to `from_pretrained` directly, so they would be 69 GB
+    of pod download for weights nothing opens.
+    """
+
+    def test_the_base_repo_no_longer_supplies_transformers(self):
+        self.assertNotIn("transformer/*", models.WAN22_ALLOW_PATTERNS)
+        self.assertNotIn("transformer_2/*", models.WAN22_ALLOW_PATTERNS)
+
+    def test_but_the_transformer_config_is_still_fetched(self):
+        """pipeline/wan_fp8.py's load_config needs the model geometry to
+        instantiate WanVACETransformer3DModel, and gets it from the base
+        repo's transformer/config.json — kilobytes. Dropping it with the
+        rest of transformer/* would break every load."""
+        self.assertIn("transformer/config.json", models.WAN22_ALLOW_PATTERNS)
+
+    def test_the_fp8_experts_have_their_own_source(self):
+        source = models.registry()["wan22_fp8"]
+        self.assertEqual(source.steps, ("wan22_vace_denoise",))
+
+    def test_the_denoise_total_reflects_the_fp8_download(self):
+        """approx_gb is what the prefetch tells a fresh pod it is about to
+        download, so it has to track what the patterns actually pull:
+        17.58 x 2 fp8 + 11.89 base + 1.2 LoRA, not the old 81 GB."""
+        registry = models.registry()
+        total = sum(registry[key].approx_gb
+                    for key in models.required_for_steps(["wan22_vace_denoise"]))
+        self.assertAlmostEqual(total, 48.3, delta=1.5)
+
+    def test_the_registry_fetches_the_files_the_step_loads(self):
+        """Same rule as the checkpoint names above: one source of truth for
+        which two files these are, or the prefetch warms a cache the step
+        then misses."""
+        from pipeline.steps import wan22_vace_denoise as step
+
+        asked = []
+        with mock.patch.object(step, "resolve_fp8_checkpoint",
+                               side_effect=lambda name, *a, **kw: asked.append((name, a, kw)) or "/cache/f"):
+            models._fetch_wan22_fp8()
+            self.assertTrue(models._probe_wan22_fp8())
+
+        self.assertEqual([name for name, _, _ in asked],
+                         [step.DEFAULT_FP8_HIGH, step.DEFAULT_FP8_LOW] * 2)
+        self.assertEqual([a[0] for _, a, _ in asked], [step.DEFAULT_FP8_REPO] * 4)
+        # The probe must not touch the network; the fetch must.
+        self.assertEqual([kw.get("local_files_only", False) for _, _, kw in asked],
+                         [False, False, True, True])
+
+    def test_a_probe_that_cannot_find_the_files_says_so(self):
+        from pipeline.steps import wan22_vace_denoise as step
+
+        def missing(*a, **kw):
+            raise OSError("not in the local cache")
+
+        with mock.patch.object(step, "resolve_fp8_checkpoint", side_effect=missing):
+            self.assertFalse(models._probe_wan22_fp8())
 
 
 class TestRequiredForSteps(unittest.TestCase):
@@ -82,7 +148,8 @@ class TestRequiredForSteps(unittest.TestCase):
         cases = {
             "roundtrip_example": set(),
             "fast_helical_local_smoke": {"rmbg", "sapiens2"},
-            "fast_helical_full": {"rmbg", "sapiens2", "wan22", "wan22_lora", "seedvr2"},
+            "fast_helical_full": {"rmbg", "sapiens2", "wan22", "wan22_fp8",
+                                  "wan22_lora", "seedvr2"},
         }
         for workflow, expected in cases.items():
             with self.subTest(workflow=workflow):
@@ -92,10 +159,12 @@ class TestRequiredForSteps(unittest.TestCase):
                 )
 
     def test_the_smoke_workflow_does_not_wait_on_wan22(self):
-        """It skips both denoise passes on purpose; waiting on 52 GB it
+        """It skips both denoise passes on purpose; waiting on ~47 GB it
         never touches would defeat the point of having a smoke test."""
         spec = WorkflowSpec.from_yaml(resolve_workflow("fast_helical_local_smoke"))
-        self.assertNotIn("wan22", models.required_for_steps(s.step for s in spec.steps))
+        required = models.required_for_steps(s.step for s in spec.steps)
+        self.assertNotIn("wan22", required)
+        self.assertNotIn("wan22_fp8", required)
 
 
 class TestReadiness(unittest.TestCase):

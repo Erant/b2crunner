@@ -14,10 +14,13 @@ venv_wan22 — same convention as the cyber_6f golden-data tests.
 
 from __future__ import annotations
 
+import ast
 import gzip
 import json
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "wan22_vace_fp8_header.json.gz"
 
@@ -148,6 +151,127 @@ class TestFloat8Reconstruction(unittest.TestCase):
         torch.testing.assert_close(
             rebuilt.dequantize().float(), expected, rtol=0, atol=1e-3
         )
+
+
+class TestCheckpointResolution(unittest.TestCase):
+    """Where the two fp8 expert files come from when nobody says.
+
+    No network and no weights: `resolve_fp8_checkpoint` is a path decision,
+    and the only thing worth pinning is which of the two branches it takes
+    and what it passes on.
+    """
+
+    def test_an_existing_local_file_is_used_as_is(self):
+        from pipeline.steps.wan22_vace_denoise import resolve_fp8_checkpoint
+
+        with tempfile.TemporaryDirectory() as tmp:
+            local = Path(tmp) / "my_own_high_noise.safetensors"
+            local.write_bytes(b"")
+            with mock.patch("huggingface_hub.hf_hub_download") as download:
+                self.assertEqual(resolve_fp8_checkpoint(str(local)), str(local))
+            download.assert_not_called()
+
+    def test_a_bare_filename_is_fetched_from_the_fp8_repo(self):
+        from pipeline.steps.wan22_vace_denoise import (
+            DEFAULT_FP8_HIGH, DEFAULT_FP8_REPO, resolve_fp8_checkpoint,
+        )
+
+        with mock.patch("huggingface_hub.hf_hub_download",
+                        return_value="/cache/high.safetensors") as download:
+            path = resolve_fp8_checkpoint(DEFAULT_FP8_HIGH)
+
+        self.assertEqual(path, "/cache/high.safetensors")
+        download.assert_called_once_with(
+            DEFAULT_FP8_REPO, DEFAULT_FP8_HIGH, local_files_only=False
+        )
+
+    def test_local_files_only_is_forwarded_so_the_probe_stays_offline(self):
+        """pipeline/models.py probes with this on every run; if it stopped
+        being forwarded the probe would silently start downloading."""
+        from pipeline.steps.wan22_vace_denoise import (
+            DEFAULT_FP8_LOW, resolve_fp8_checkpoint,
+        )
+
+        with mock.patch("huggingface_hub.hf_hub_download",
+                        return_value="/cache/low.safetensors") as download:
+            resolve_fp8_checkpoint(DEFAULT_FP8_LOW, local_files_only=True)
+
+        self.assertTrue(download.call_args.kwargs["local_files_only"])
+
+    def test_the_two_experts_are_two_distinct_files(self):
+        """A copy-paste that pointed both experts at the same file would
+        load a working pipeline that silently denoises with the wrong
+        expert on one side of the boundary ratio."""
+        from pipeline.steps.wan22_vace_denoise import DEFAULT_FP8_HIGH, DEFAULT_FP8_LOW
+
+        self.assertNotEqual(DEFAULT_FP8_HIGH, DEFAULT_FP8_LOW)
+        self.assertIn("high_noise", DEFAULT_FP8_HIGH)
+        self.assertIn("low_noise", DEFAULT_FP8_LOW)
+
+
+class TestTheBf16PathIsGone(unittest.TestCase):
+    """The step must never download bf16 weights again.
+
+    It used to: download the bf16 diffusers transformers (34.68 GB each),
+    fuse the Lightning LoRA in, fp8-quantize with torchao at load time, and
+    cache the result under `fused_cache_dir` — 81 GB and minutes of GPU
+    time per cold load, against ~47 GB and no quantization now. That path
+    was deleted on purpose, and this test is the guard rail: restoring any
+    piece of it is a deliberate act, not a helpful cleanup.
+
+    Reads the source rather than the imported module so it holds without
+    diffusers, torch or a GPU anywhere in sight.
+    """
+
+    SOURCE = (Path(__file__).resolve().parent.parent
+              / "pipeline" / "steps" / "wan22_vace_denoise.py")
+
+    def setUp(self):
+        self.tree = ast.parse(self.SOURCE.read_text())
+
+    def _called_names(self):
+        names = set()
+        for node in ast.walk(self.tree):
+            if isinstance(node, ast.Call):
+                func = node.func
+                if isinstance(func, ast.Attribute):
+                    names.add(func.attr)
+                elif isinstance(func, ast.Name):
+                    names.add(func.id)
+        return names
+
+    def _params_read(self):
+        """Every `params.get("x")` the step consults — its param surface."""
+        found = set()
+        for node in ast.walk(self.tree):
+            if (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "get"
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id == "params"
+                    and node.args
+                    and isinstance(node.args[0], ast.Constant)):
+                found.add(node.args[0].value)
+        return found
+
+    def test_nothing_fuses_or_quantizes_at_load_time(self):
+        called = self._called_names()
+        for gone in ("fuse_lora", "unload_lora_weights", "quantize_",
+                     "Float8WeightOnlyConfig", "save_pretrained"):
+            with self.subTest(call=gone):
+                self.assertNotIn(gone, called)
+
+    def test_the_removed_params_are_not_read(self):
+        read = self._params_read()
+        for gone in ("fused_cache_dir", "quantize"):
+            with self.subTest(param=gone):
+                self.assertNotIn(gone, read)
+
+    def test_the_fp8_params_are_the_ones_that_remain(self):
+        read = self._params_read()
+        for kept in ("fp8_checkpoint_high", "fp8_checkpoint_low", "checkpoint"):
+            with self.subTest(param=kept):
+                self.assertIn(kept, read)
 
 
 if __name__ == "__main__":

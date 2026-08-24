@@ -35,6 +35,15 @@ class InProcessDispatcher(Dispatcher):
     def run(self, step_name: str, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
         step = self._get_instance(step_name, params)
         result = step.run(inputs, params)
+        if self.keep_loaded:
+            # Same contract the resident subprocess worker gives (see
+            # pipeline/worker.py's serve loop): a kept-loaded step holds its
+            # weights in host RAM between calls, not on the card, so the
+            # next GPU step finds an empty one. The base Step.release_vram
+            # is a no-op, so this costs nothing for the numpy/cv2 steps
+            # that make up most of the in-process set.
+            step.release_vram()
+            _release_cuda_cache()
         if not self.keep_loaded:
             # A fresh instance per call (the keep_loaded=False default)
             # goes out of scope right after this, but PyTorch's caching

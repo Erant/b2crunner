@@ -155,11 +155,12 @@ comments too:
   does it need `vulkan-sdk` too" is still open. Also open: whether RunPod's
   pod-creation path honors the image-level `NVIDIA_DRIVER_CAPABILITIES` at
   all (see "Why one image" above).
-- The fp8 checkpoint disk cache (`wan22_vace_denoise.py`'s
-  `fused_cache_dir` param) — confirmed broken in the diffusers/torchao
-  version pairing this was tested against (`docs/fp8-quant-notes.md`), so
-  don't bake a pre-fused checkpoint into an image layer expecting it to
-  load correctly without checking that fix first.
+- `wan22_vace_denoise` now loads a **pre-quantized fp8 checkpoint** and no
+  longer downloads bf16 weights, fuses a LoRA into them, or quantizes
+  anything — `fused_cache_dir` and the cache it managed are gone. 47 GB per
+  load rather than 81 GB. It has not yet produced real frames end to end,
+  so look at the first pod run's output before trusting a long one. See
+  `docs/fp8-quant-notes.md`.
 
 ## Gotchas worth knowing before you hit them again
 

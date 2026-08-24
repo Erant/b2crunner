@@ -262,7 +262,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 python3-venv python3-dev git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 RUN python3 -m venv /opt/v && /opt/v/bin/pip install -U pip setuptools wheel \
-    && /opt/v/bin/pip install torch==2.9.1 torchvision==0.24.1 \
+    && /opt/v/bin/pip install torch==2.13.0 torchvision==0.28.0 \
         --index-url https://download.pytorch.org/whl/cu130
 RUN /opt/v/bin/python -c "import torch;print(torch.__version__, torch.version.cuda)"
 RUN /opt/v/bin/pip install cython numpy \
@@ -283,9 +283,9 @@ why the check is spelled out rather than assumed.
 **Fallback ladder if it fails**, in order of increasing deviation:
 
 1. **Older torch, same CUDA 13.** `cu130` publishes torch 2.9.0 → 2.13.0.
-   2.9.1 is already the conservative pick (closest to what an Aug-2025
-   detectron2 commit was developed against). There is nothing older on
-   cu130 to fall back to, so this rung is nearly empty — which is the
+   The image now sits at the *top* of that range (2.13.0), so this rung has
+   real room below it — 2.9.1 was verified working on 2026-08-23 and is the
+   conservative pick. Below 2.9.0 there is nothing on cu130, which is the
    argument for rung 2.
 2. **Drop to CUDA 12.8 + torch 2.7/2.8.** `cu128` has torch 2.7.0 →
    2.11.0, an era detectron2 @a1ce2f9 definitely predates comfortably.
@@ -307,6 +307,119 @@ why the check is spelled out rather than assumed.
    nothing else. The other three venvs keep sharing.
 
 Record which rung worked, here, when you find out.
+
+### SageAttention: was missing entirely, now built from source (2026-08-24)
+
+The image shipped with **no sageattention at all**, so every sage backend
+raised, `wan22_vace_denoise`'s try/except swallowed it, and the most
+expensive step in the pipeline quietly ran on plain PyTorch SDPA. Noticed
+from a `SageAttention ❌` line in seedvr2's optimizations banner.
+
+It cannot come from PyPI: the requirement is `>=2.1.1` (diffusers enforces
+that for *any* sage backend variant) and PyPI stops at 1.0.6, because 2.x
+was only ever tagged on GitHub. The fix is a source build, which turns out
+to be cheap: **3m44s** with `MAX_JOBS=8`, **71 MB** installed, against torch
+2.13.0 + CUDA 13.0 with no patches.
+
+Measured on the RTX 4070 Ti (SM89), 40 heads x 128 dim, vs PyTorch SDPA:
+
+| seq | SDPA | triton int8+fp16 | CUDA int8+fp8 |
+|---|---|---|---|
+| 1024 | 0.37 ms | 0.26 ms (cos .99992) | 0.29 ms (cos .99930) |
+| 4096 | 4.80 ms | 2.98 ms (cos .99991) | 2.51 ms (cos .99928) |
+| 9216 | 22.32 ms | **12.75 ms** (cos .99991) | **9.40 ms** (cos .99926) |
+
+~1.75x on the Triton kernel the step selects for Ada, ~2.4x on the fp8 CUDA
+one. Both track SDPA closely, and notably the fp8 CUDA kernel shows **no
+sign of thu-ml/SageAttention#360** on this card at 2.2.0 — but the steering
+still avoids it, because random tensors are not a 40-block diffusion run and
+that bug would present as corrupted frames, not a bad cosine.
+
+**Two real bugs found while doing this:**
+
+1. **`sage_hub` is broken**, and it was what `_select_sage_backend()`
+   returned for every GPU except Ada. diffusers 0.40.0 pins version 1 of
+   `kernels-community/sage-attention`, and the revision that resolves to
+   has no `build` on the Hub — every call ends in
+   `RemoteEntryNotFoundError: 404`. **This is not a stale pin on our side:
+   0.40.0 is the newest diffusers on PyPI** (2026-08-20), so there is
+   nothing to upgrade to. `_select_sage_backend()` now returns the local
+   `sage` instead.
+2. **SageAttention 2.2.0 does not support sm_100** (datacenter Blackwell,
+   B100/B200/GB200), which *is* in this image's default
+   `TORCH_CUDA_ARCH_LIST`. Its `SUPPORTED_ARCHS` set is declared and then
+   never used, so an unsupported arch emits no gencode and raises nothing —
+   you get a package with no kernel for that card. The Dockerfile therefore
+   passes its own `SAGE_CUDA_ARCH_LIST="8.9;12.0"` rather than inheriting
+   the stage-wide list. On an sm_100 pod the sage backends have no kernel
+   and the step falls back to SDPA.
+
+#### RESULT (2026-08-24): **the torch floor moved to 2.13.0, and detectron2 did not care.**
+
+The premise that detectron2 is what pins this image to torch 2.9.1 was
+tested directly, and it is **false**. detectron2 @`a1ce2f9` compiles against
+torch 2.13.0+cu130 with no source changes, no newer commit, and no separate
+venv — rungs 3 and 4 of the ladder above were not needed and the fp8 work's
+"it is not a free change" caveat turned out to be cheap.
+
+Probed in a `--gpus all` container on the RTX 4070 Ti (sm_89), CUDA 13.0.2
+devel base, `FORCE_CUDA=1`, `TORCH_CUDA_ARCH_LIST=8.9`:
+
+```
+torch 2.13.0+cu130  torchvision 0.28.0+cu130  cuda 13.0  available: True
+detectron2 0.6
+_C OK   has_cuda: True | built against CUDA 13.0 | compiler GCC 13.3
+DeformConv  -> (2, 32, 32, 32) finite: True
+ModulatedDC -> (2, 32, 32, 32) finite: True
+deform_conv backward OK, grad finite: True
+```
+
+Forward **and backward** through the nvcc-compiled kernels, on the GPU —
+not just `import _C`, for the CPU-only-build reason this section keeps
+warning about. (Note this commit's `_C` exports deformable-conv and
+COCOeval symbols only; rotated NMS, which the 2026-08-23 result above
+exercised, now comes from torchvision. The deform-conv kernels are the
+CUDA extension here.)
+
+The full sam-3d-body stack was then installed on top — the whole of
+`pipeline/envs/sam3dbody/requirements.txt`, `--no-build-isolation`, cython
+first, exactly as the Dockerfile does it — and `from sam_3d_body import
+SAM3DBodyEstimator, load_sam_3d_body` succeeds. `xtcocotools`, `pyrender`,
+`pytorch-lightning` 2.6.5 and `networkx==3.2.1` all build/resolve fine
+against torch 2.13 and numpy 2.5.2. The only resolver complaint is the
+pre-existing `detectron2 0.6 requires iopath<0.1.10, but you have 0.1.10`,
+which `setup.sh` already documents as harmless.
+
+The other three venvs were verified on the same base, sharing torch through
+the usual `zz_shared_base.pth`:
+
+| venv | checked | result |
+|---|---|---|
+| `venv_main` | kornia 0.8.3, timm 1.0.28, plyfile, mediapipe 1.0.1 (+ `mediapipe.tasks`), gradio 6.25, cv2 5.0.0 | ✅ |
+| `venv_wan22` | diffusers 0.40.0, torchao **0.18.0**, peft 0.20.0, accelerate 1.14.0 | ✅ |
+| `venv_seedvr2` | omegaconf, gguf, rotary_embedding_torch, and the vendored `inference_cli` / `src.utils.*` | ✅ |
+
+seedvr2's vendored code even recognises the new torch and applies its own
+workaround: `Conv3d workaround active: PyTorch 2.13.0, cuDNN 92000`.
+
+The full image was then rebuilt on it and re-verified on the GPU. In the
+**shipped runtime image** (not the builder): all five venvs report
+`2.13.0+cu130` with `cuda_is_available` True; `_C.has_cuda()` is True and
+DeformConv runs fwd+bwd on the GPU; `sam_3d_body` imports; `torchao 0.18.0`
+and `diffusers 0.40.0` import together and `wan22_vace_denoise` imports;
+`torch.cuda.get_arch_list()` still covers `sm_75/80/86/90/100/120`, so Ada
+and both Blackwell targets are intact. `pipeline.cli doctor` reports **11
+ok, 0 failures** (the one warning is an unset HF_TOKEN, expected locally),
+including Vulkan and EGL. 122 in-image tests pass.
+
+Image size did not move: **5.66 GB content vs 5.67 GB** on torch 2.9.1.
+
+**Why the bump was worth taking:** it resolves the fp8 "version triangle"
+in `docs/fp8-quant-notes.md`. torchao 0.18 (which needs torch ≥ 2.11) is
+what lets diffusers apply a LoRA to quantized weights and serialize them to
+safetensors. Both were verified on GPU, not assumed. The torchao pin moved
+to `0.18.0` in lockstep — **never move one without the other**, or `import
+diffusers` breaks outright.
 
 #### RESULT (2026-08-23): **rung 0 — no fallback needed.** Verified on the GPU.
 
@@ -470,8 +583,9 @@ pipeline code. They are described in the sections above; in build order:
 Verified in the built image:
 
 - `22 steps registered`
-- all four child venvs report `shares torch 2.9.1+cu130` — **the `.pth`
+- all four child venvs report `shares torch 2.13.0+cu130` — **the `.pth`
   venv-sharing scheme works as designed**, one torch for four venvs
+  (originally verified at 2.9.1+cu130; it survived the bump untouched)
 - `detectron2 native extension OK`, and `_C.has_cuda()` is True in the
   *shipped runtime image*, not just the builder
 - all three subprocess envs in `envs.docker.yaml` resolve: each of
@@ -535,12 +649,13 @@ Dockerfile.)
   Launchpad: jammy publishes python3.10 and python3.11, zero python3.12
   sources. The old file's first `apt-get install` could never have
   succeeded. Now on Ubuntu 24.04, where python3 *is* 3.12.
-- **`sageattention>=2.1.1` is unsatisfiable.** PyPI's newest is 1.0.6;
-  2.x was never published there (it is a GitHub source build). It is also
-  optional — the step wraps `set_attention_backend` in try/except and
-  honours `attention_backend: "none"` — so it is dropped, with the git
-  install line recorded in a comment. This would have failed the wan22
-  layer of any clean build.
+- **`sageattention>=2.1.1` is unsatisfiable from PyPI.** PyPI's newest is
+  1.0.6 (Nov 2024); 2.x was never published there, only tagged on GitHub.
+  This would have failed the wan22 layer of any clean build, so it was
+  dropped from that layer — but it is **now built from source** in its own
+  late layer (`SAGE_REF`), because dropping it meant every sage backend
+  raised and the step silently ran on plain SDPA. See "SageAttention: was
+  missing entirely" below.
 - **`FORCE_CUDA=1`** — see the detectron2 probe above.
 - **EGL/GL loaders added.** The old file installed the Vulkan loader
   (correct) but no GL loader, so `render` could never have worked: it

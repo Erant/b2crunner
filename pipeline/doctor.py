@@ -362,6 +362,57 @@ def check_model_caches() -> Check:
     )
 
 
+def check_ephemeral_caches() -> Check:
+    """Caches that default into $HOME, i.e. the pod's ephemeral disk.
+
+    The container sets each of these to a path on the volume. If one is
+    unset — running outside the image, or an ENV dropped from the Dockerfile
+    — the library silently falls back to $HOME, and the work it caches is
+    redone after every pod restart. TRITON_CACHE_DIR is the one that bites:
+    every SageAttention backend JIT-compiles through Triton on first use, in
+    the middle of the most expensive step in the pipeline.
+
+    WARN, not FAIL: none of this stops a run, and on a dev box with no
+    volume the fallback is correct.
+    """
+    from .paths import data_dir
+
+    root = str(data_dir())
+    # (env var, what it caches, whether losing it costs real time)
+    watched = [
+        ("TRITON_CACHE_DIR", "Triton JIT kernels (SageAttention)", True),
+        ("CUDA_CACHE_PATH", "CUDA driver PTX JIT cache", True),
+        ("TORCH_HOME", "torch.hub checkpoints", False),
+        ("XDG_CACHE_HOME", "generic library caches", False),
+        ("MPLCONFIGDIR", "matplotlib font cache", False),
+    ]
+    lines, offenders, costly = [], [], []
+    for var, what, expensive in watched:
+        value = os.environ.get(var)
+        if not value:
+            lines.append(f"{var}: UNSET -> $HOME (ephemeral) — {what}")
+            offenders.append(var)
+            if expensive:
+                costly.append(var)
+        elif not value.startswith(root):
+            lines.append(f"{var}: {value} — NOT under {root} — {what}")
+            offenders.append(var)
+            if expensive:
+                costly.append(var)
+        else:
+            lines.append(f"{var}: {value}")
+
+    if not offenders:
+        return Check("ephemeral caches", OK, "", lines)
+    detail = ", ".join(offenders)
+    return Check(
+        "ephemeral caches", WARN,
+        f"{detail} not on the volume"
+        + (" — Triton/CUDA kernels will re-JIT on every pod start" if costly else ""),
+        lines,
+    )
+
+
 def check_step_registry() -> Check:
     try:
         from . import steps  # noqa: F401
@@ -400,6 +451,7 @@ def run_checks(envs: Optional[Dict[str, Dict[str, Any]]] = None) -> List[Check]:
         ("step venvs", lambda: check_step_venvs(envs or {})),
         ("huggingface", check_huggingface),
         ("model caches", check_model_caches),
+        ("ephemeral caches", check_ephemeral_caches),
         ("step registry", check_step_registry),
         ("ffmpeg", check_ffmpeg),
     ]

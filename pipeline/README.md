@@ -661,13 +661,46 @@ binary call and through the actual pipeline step against all 81 of
    revises the open question from `docs/docker.md` down to "does RunPod's
    toolkit need the same driver-library completeness this box needed", not
    a capabilities-flag question.
-3. **Fix `wan22_vace_denoise`'s fp8-checkpoint disk cache** (currently
-   best-effort/silently skipped — `save_pretrained()` fails on the
-   torchao-quantized tensors in the version pairing this was verified
-   against; see `docs/fp8-quant-notes.md`) so repeated loads skip the
-   LoRA-fuse + quantize step.
-4. **Decide what replaces `submit.py`'s batching and per-stage
+3. **DONE — Wan weights: 81 GB read twice per run -> 47 GB read once.**
+   `fast_helical_full` invokes `wan22_vace_denoise` twice
+   (`denoise_pass1`, `denoise_pass2`), and the two cannot be merged: brush
+   training, splat render, `inject_anchor` and `mask_splat` sit between
+   them. Fixed from both ends:
+   - **The bf16 path was deleted.** The step now loads the pre-quantized
+     fp8 checkpoint only (17.58 GB x 2 in place of 69.36 GB of bf16
+     transformers) and does no LoRA fuse and no quantize. `fused_cache_dir`
+     and `quantize` are gone with it. `pipeline/models.py` moved in step —
+     the wan22 patterns no longer pull `transformer*/` (keeping only
+     `transformer/config.json`, which `wan_fp8.load_config` needs), and a
+     `wan22_fp8` source was added: 82.2 GB -> 48.3 GB of prefetch.
+     `pipeline/envs/wan22/setup.sh` now drives the registry rather than
+     duplicating its pattern list, which is how it drifted in the first
+     place.
+   - **`pipeline.worker` can stay resident.** `keep_loaded: true` on both
+     denoise steps means one worker process serves both, so the weights
+     come off the network volume once. `build_dispatcher` used to drop
+     `keep_loaded` on the floor for subprocess dispatch; that was the bug.
+   - **Residency is DRAM, not VRAM.** `Step.release_vram()` (no-op by
+     default) evicts the card while keeping weights in host RAM, and the
+     resident worker calls it after *every* job — because brush needs the
+     GPU between the two passes, and a worker squatting ~35 GB of VRAM
+     there would be strictly worse than the reloading it replaced. Full
+     eviction stays `unload()`, at shutdown or on a load-param change.
+   What is NOT done: the fp8 path has never produced real frames end to
+   end (verified at key-mapping, load, forward-pass and LoRA level only).
+   **Look at the first pod run's output before trusting a long one** —
+   there is no bf16 fallback behind it any more, by design.
+4. **Verify the resident worker and the fp8 path on a real pod.** Both are
+   green locally and unit-tested, but neither has run against real weights
+   on a network volume. Specifically worth watching on the first run:
+   that `denoise_pass2` logs no checkpoint download; that `brush` gets a
+   clean card after `denoise_pass1` (the `release_vram()` contract — a
+   `CUDA out of memory` in brush is the signature of that failing); that
+   host RAM holds ~47 GB of resident weights across the middle of the run
+   without swapping; and that the denoised frames actually look right,
+   since the fp8 path has no bf16 fallback behind it.
+5. **Decide what replaces `submit.py`'s batching and per-stage
    checkpointing** (see "Orchestration differences"). Deferred
    deliberately; revisit once long pipelines actually run.
-5. **The Gradio frontend last** — mechanical once the model steps behind
+6. **The Gradio frontend last** — mechanical once the model steps behind
    it work.
