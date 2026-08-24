@@ -18,8 +18,9 @@ has and hasn't been verified on real hardware.
 | Container image | your registry's `b2c/pipeline:latest` | |
 | Container start command | **leave empty** | The image's `CMD` is `ui`, which serves the web UI and stays alive. Anything you put here replaces it. |
 | Volume mount path | **`/data`** | Not the `/workspace` default. See below. |
-| Volume size | 100 GB+ | HF checkpoints alone are tens of GB, before any run output. |
+| Volume size | 100 GB+ | HF checkpoints alone are ~60 GB, before any run output. |
 | Container disk | 20 GB | Only the image's own writable layer; nothing the pipeline writes should land here. |
+| **RAM** | **64 GB+** | Not optional for `fast_helical_full`. Its two denoise passes use `keep_loaded: true`, which holds ~47 GB of Wan weights resident in host RAM between them so they come off the volume once instead of twice. Too little and the worker is OOM-killed mid-run, which looks like a mysterious dead worker rather than a sizing mistake. `doctor` warns. Drop `keep_loaded` from the workflow if you must run smaller. |
 | HTTP ports | `7860` | The web UI. RunPod proxies it at `https://<pod-id>-7860.proxy.runpod.net`. |
 | TCP ports | `22` | SSH. Optional, but it is how you get a shell if the UI won't start. |
 
@@ -112,7 +113,7 @@ python -m pipeline.cli run fast_helical_native --reference-image /data/photo.jpg
 
 **Nothing is baked into the image** — two of these are gated (a human has to
 accept the licence), they should not be redistributed inside a shareable
-image, and baking ~65 GB of weights into one makes it painful to push and
+image, and baking ~60 GB of weights into one makes it painful to push and
 pull.
 
 Instead, **the pod pulls everything at start, in the background, and a run
@@ -121,7 +122,7 @@ properties, in order of how much they matter:
 
 - **The UI comes up immediately.** The prefetch is backgrounded on purpose.
   Doing it in the foreground would leave the pod with no UI, no log and no
-  healthcheck for the half hour it takes to pull ~65 GB — indistinguishable
+  healthcheck for the half hour it takes to pull ~60 GB — indistinguishable
   from a pod that failed to start, and on RunPod quite possibly killed as
   one. Watch it on the UI's **Models** tab or in `/data/logs/prefetch.log`.
 - **A run never stalls mid-pipeline.** Submitting while the download is
@@ -131,15 +132,22 @@ properties, in order of how much they matter:
   this replaces, and the expensive one, because by then it has already
   burned GPU time on the stages before it.
 - **Waiting is scoped to the workflow.** `fast_helical_local_smoke` skips
-  both denoise passes on purpose, so it waits on ~3 GB, not on the 52 GB
-  Wan2.2 checkpoint it never touches:
+  both denoise passes on purpose, so it waits on ~3 GB, not on the ~47 GB
+  of Wan2.2 weights it never touches:
 
   | Workflow | Blocks on | Total |
   |---|---|---|
   | `roundtrip_example` | nothing | — |
-  | `fast_helical_local_smoke` | rmbg, sapiens2 | ~3 GB |
-  | `fast_helical_native` | rmbg, sapiens2, sam3dbody, wan22, wan22_lora | ~59 GB |
-  | `fast_helical_full` | rmbg, sapiens2, wan22, wan22_lora, seedvr2 | ~62 GB |
+  | `fast_helical_local_smoke` | rmbg, sapiens2 | ~2.7 GB |
+  | `fast_helical_native` | rmbg, sapiens2, sam3dbody, wan22, wan22_fp8, wan22_lora | ~53.8 GB |
+  | `fast_helical_full` | rmbg, sapiens2, wan22, wan22_fp8, wan22_lora, seedvr2 | ~57.0 GB |
+
+  `wan22` is now only 11.9 GB — the base repo's text_encoder, VAE,
+  tokenizer and scheduler. The transformers come from `wan22_fp8` (35.2 GB
+  of pre-quantized fp8) instead of 69 GB of bf16. **If your volume predates
+  that change it still holds ~69 GB of `transformer/` and `transformer_2/`
+  under `models--linoyts--Wan2.2-VACE-Fun-14B-diffusers` that nothing loads
+  any more** — safe to delete, and worth doing before sizing the volume.
 
 A single model failing does not abort the rest, and does not stop the pod
 coming up: a pod whose token cannot reach the gated SAM-3D-Body repo still
@@ -173,12 +181,16 @@ pod has already pulled:
 
 ```
 ✓ OK    model caches
-          HF cache  /data/hf_cache: 61.4 GB
+          HF cache  /data/hf_cache: 56.8 GB
           models    /data/models: 4.2 GB
             briaai/RMBG-2.0 (0.9 GB)
-            linoyts/Wan2.2-VACE-Fun-14B-diffusers (52.1 GB)
+            linoyts/Wan2.2-VACE-Fun-14B-diffusers (11.9 GB)
+            silveroxides/Wan_2.2-fp8_scaled_hybrid (35.2 GB)
             ...
 ```
+
+A `linoyts/...` line much larger than ~12 GB means the volume still holds
+the bf16 transformers from before the fp8 switch. Nothing loads them.
 
 It WARNs if `HF_HOME` is not on the volume at all, which is the shape of the
 problem above rather than an instance of it.

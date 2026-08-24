@@ -362,6 +362,70 @@ def check_model_caches() -> Check:
     )
 
 
+def check_host_ram() -> Check:
+    """Enough DRAM to hold a resident model set, which is a NEW requirement.
+
+    `keep_loaded: true` (fast_helical_full's two denoise passes) keeps the
+    Wan pipeline alive in host RAM between invocations instead of re-reading
+    ~47 GB off the network volume. That is the whole point — but it means
+    the pod must actually have the RAM. A pod that doesn't gets its worker
+    OOM-killed somewhere in the middle of a long run, or swaps, and neither
+    failure names the cause: you see a worker that died, not "you sized the
+    pod wrong". Cheap to check at start, expensive to diagnose at hour two.
+
+    WARN rather than FAIL because it depends on the workflow — a run that
+    never touches wan22_vace_denoise needs none of this.
+    """
+    from .models import registry
+
+    def _meminfo_gb() -> tuple[float, float]:
+        try:
+            import psutil
+
+            vm = psutil.virtual_memory()
+            return vm.total / 1e9, vm.available / 1e9
+        except ImportError:
+            pass
+        values = {}
+        with open("/proc/meminfo") as f:
+            for line in f:
+                key, _, rest = line.partition(":")
+                parts = rest.split()
+                if parts:
+                    values[key] = int(parts[0]) * 1024 / 1e9
+        return values.get("MemTotal", 0.0), values.get("MemAvailable", 0.0)
+
+    try:
+        total, available = _meminfo_gb()
+    except Exception as exc:  # noqa: BLE001 - a check blowing up is a finding
+        return Check("host RAM", WARN, f"could not read memory info: {exc}")
+
+    # What a resident wan22_vace_denoise actually holds: the fp8 experts
+    # plus the base repo's text_encoder/VAE. Read from the registry so it
+    # tracks the real download set rather than drifting into a stale number.
+    known = registry()
+    resident = sum(known[k].approx_gb for k in ("wan22", "wan22_fp8") if k in known)
+    # Headroom for frame batches, activations, the CUDA host allocator and
+    # the OS. 1.35x is judgement, not measurement — revise it once a real
+    # pod run reports its peak RSS.
+    floor = resident * 1.35
+
+    lines = [
+        f"total {total:.0f} GB, available {available:.0f} GB",
+        f"resident model set for keep_loaded wan22: ~{resident:.0f} GB "
+        f"(suggested floor ~{floor:.0f} GB total)",
+    ]
+    if total and total < floor:
+        return Check(
+            "host RAM", WARN,
+            f"{total:.0f} GB may be too small to hold ~{resident:.0f} GB resident — "
+            "a keep_loaded denoise can be OOM-killed mid-run; size the pod up "
+            "or drop keep_loaded from the workflow",
+            lines,
+        )
+    return Check("host RAM", OK, "", lines)
+
+
 def check_ephemeral_caches() -> Check:
     """Caches that default into $HOME, i.e. the pod's ephemeral disk.
 
@@ -445,6 +509,7 @@ def run_checks(envs: Optional[Dict[str, Dict[str, Any]]] = None) -> List[Check]:
         ("disk", check_disk),
         ("nvidia-smi", check_nvidia_smi),
         ("torch", check_torch),
+        ("host RAM", check_host_ram),
         ("vulkan", check_vulkan),
         ("egl", check_egl),
         ("brush binaries", check_brush_binaries),

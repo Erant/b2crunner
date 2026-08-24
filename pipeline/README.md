@@ -702,5 +702,30 @@ binary call and through the actual pipeline step against all 81 of
 5. **Decide what replaces `submit.py`'s batching and per-stage
    checkpointing** (see "Orchestration differences"). Deferred
    deliberately; revisit once long pipelines actually run.
+
+   **When this happens, do the text-encoder work with it.** After the fp8
+   switch the T5 encoder is the second-largest thing the denoise step
+   pulls — `text_encoder/` is 11.36 GB of the remaining 47, a ~5.7B-param
+   UMT5EncoderModel in bf16 — and all it does is turn a prompt into an
+   embedding. It is loaded, used for a few hundred tokens, and then sits in
+   memory for the whole run. `fast_helical_full` also sets `cfg: 1.0` (the
+   Lightning distill LoRA is what makes 6-step cfg-1.0 sampling work), so
+   there is no classifier-free guidance and the negative prompt is encoded
+   and then contributes nothing at all.
+
+   Batching is what makes the fix clean rather than fiddly. Each dataset
+   carries its own prompt (`subject_desc: dataset.prompt`, substituted into
+   `$SUBJECT_DESC$`), so a batch of N inputs is N prompts — encode all of
+   them in one pass up front, **then discard the encoder before the
+   transformers are loaded**, and its 11.36 GB is neither resident nor
+   re-read for the rest of the batch. Doing this per-single-run instead
+   would mean caching embeddings keyed by prompt, which is more machinery
+   for less benefit; the batch case gets it almost for free.
+
+   Note this interacts with the resident worker: `LOAD_PARAMS` on
+   `Wan22VaceDenoiseStep` currently treats `prompt` as a per-call param
+   (correct today — the two passes share one loaded pipeline). If prompt
+   encoding moves ahead of the transformers, the split between "what
+   load() builds" and "what run() takes" moves with it.
 6. **The Gradio frontend last** — mechanical once the model steps behind
    it work.
