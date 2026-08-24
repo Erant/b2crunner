@@ -111,6 +111,23 @@ def run_workflow(args: argparse.Namespace) -> int:
     envs = load_envs(args.envs)
     logger.info("envs registry: %s (%s)", args.envs, ", ".join(sorted(envs)) or "empty")
 
+    # Block on the models this workflow actually needs, before touching the
+    # GPU. Scoped to the workflow rather than to everything: waiting for the
+    # 52 GB Wan2.2 checkpoint before a fast_helical_local_smoke run — which
+    # skips both denoise passes on purpose — would be actively wrong.
+    if not args.no_wait_for_models:
+        from .models import ModelsUnavailable, required_for_steps, wait_until_ready
+
+        needed = required_for_steps(step.step for step in spec.steps)
+        if needed:
+            logger.info("models this workflow needs: %s", ", ".join(needed))
+            try:
+                wait_until_ready(needed)
+            except ModelsUnavailable as exc:
+                logger.error("%s", exc)
+                return 1
+            logger.info("all required models present")
+
     if args.reference_image:
         dataset = Dataset.from_reference_image(args.reference_image, prompt=args.prompt)
         logger.info(
@@ -155,6 +172,25 @@ def run_workflow(args: argparse.Namespace) -> int:
     if log_path:
         logger.info("log file: %s", log_path)
     return 0
+
+
+def run_prefetch(args: argparse.Namespace) -> int:
+    from .models import FAILED, prefetch, read_status, registry
+
+    setup_logging(verbose=True, log_file=args.log_file, run_name="prefetch")
+    keys = [k.strip() for k in args.only.split(",")] if args.only else None
+
+    if args.status:
+        known = registry()
+        for key, entry in sorted(read_status().items()):
+            print(f"{entry['status']:<9} {key:<12} {known[key].approx_gb:>5.1f} GB  {entry.get('detail', '')}")
+        return 0
+
+    status = prefetch(keys, force=args.force)
+    failures = [k for k, v in status.items() if v["status"] == FAILED]
+    if failures:
+        logger.error("could not download: %s", ", ".join(failures))
+    return 1 if failures else 0
 
 
 def run_doctor(args: argparse.Namespace) -> int:
@@ -220,6 +256,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--param", action="append", metavar="KEY=VALUE",
         help="Override one of the workflow's params; repeatable",
     )
+    run_p.add_argument(
+        "--no-wait-for-models", action="store_true",
+        help="Start immediately instead of waiting for the workflow's checkpoints; "
+             "each step then downloads its own on first use, mid-run",
+    )
     run_p.add_argument("-q", "--quiet", action="store_true", help="Warnings only on the console")
     run_p.add_argument(
         "-v", "--verbose", action="store_true",
@@ -232,6 +273,24 @@ def build_parser() -> argparse.ArgumentParser:
     doctor_p.add_argument("--summary", action="store_true", help="One line per check")
     add_common(doctor_p)
     doctor_p.set_defaults(func=run_doctor)
+
+    prefetch_p = sub.add_parser(
+        "prefetch", help="Download every model checkpoint up front"
+    )
+    prefetch_p.add_argument(
+        "--only", default=None, metavar="KEYS",
+        help="Comma-separated model keys instead of all of them "
+             "(rmbg, sapiens2, sam3dbody, wan22, wan22_lora, seedvr2, mediapipe)",
+    )
+    prefetch_p.add_argument(
+        "--force", action="store_true",
+        help="Re-verify against the network even for models already marked present",
+    )
+    prefetch_p.add_argument(
+        "--status", action="store_true", help="Report what is present and what is not, then exit"
+    )
+    add_common(prefetch_p)
+    prefetch_p.set_defaults(func=run_prefetch)
 
     steps_p = sub.add_parser("steps", help="List registered steps")
     steps_p.set_defaults(func=list_steps)

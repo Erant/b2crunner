@@ -51,6 +51,7 @@ import yaml
 from . import steps  # noqa: F401  registers every Step; the UI is an entrypoint
 from .dataset import Dataset, find_dataset_root
 from .logging_setup import DATE_FORMAT, FORMAT, QueueLogHandler, timestamped_run_name
+from .models import is_ready, registry, required_for_steps, wait_until_ready
 from .paths import data_dir, log_dir, output_dir, upload_dir
 from .runner import RunCancelled, RunEvent, WorkflowRunner
 from .workflow import WorkflowSpec, load_envs
@@ -228,6 +229,27 @@ class RunManager:
             logger.info("run '%s' (%s)", run_name, spec.name)
             logger.info("output: %s", out)
             log_machine_banner()
+
+            # Block here, not at submit time: the wait belongs on the
+            # Progress tab where it is visible and cancellable, not in a
+            # button handler that would just appear to hang. Scoped to what
+            # this workflow needs — a local-smoke run must not wait on the
+            # 52 GB Wan2.2 checkpoint it never touches.
+            needed = required_for_steps(step.step for step in spec.steps)
+            if needed and not all(is_ready(key) for key in needed):
+                def report(missing):
+                    with self._lock:
+                        self.state.message = (
+                            f"waiting for model download: {', '.join(missing)} "
+                            f"(~{sum(registry()[k].approx_gb for k in missing):.0f} GB)"
+                        )
+
+                logger.info("models this workflow needs: %s", ", ".join(needed))
+                report(needed)
+                wait_until_ready(needed, on_wait=report)
+                with self._lock:
+                    self.state.message = ""
+                logger.info("all required models present")
 
             if reference_image is not None:
                 dataset = Dataset.from_reference_image(reference_image, prompt=prompt or None)
@@ -479,6 +501,20 @@ def build_app(envs_path: str) -> gr.Blocks:
             results_gallery = gr.Gallery(label="Frames", columns=6, height=400)
             results_zip = gr.File(label="Download everything (.zip)")
 
+        with gr.Tab("Models"):
+            gr.Markdown(
+                "Checkpoints are pulled at pod start and cached on the volume, so a "
+                "reused network volume only pays for this once. A run blocks until the "
+                "ones **its own workflow** needs are present — it will not stall "
+                "mid-pipeline waiting for a download."
+            )
+            models_refresh = gr.Button("Refresh", variant="primary")
+            models_out = gr.Dataframe(
+                headers=["", "model", "size", "needed by", "detail"],
+                datatype=["str", "str", "str", "str", "str"],
+                interactive=False,
+            )
+
         with gr.Tab("Doctor"):
             gr.Markdown(
                 "Checks the things that break a run 40 minutes in: Vulkan (brush), EGL "
@@ -603,6 +639,21 @@ def build_app(envs_path: str) -> gr.Blocks:
         results_refresh.click(
             on_results, outputs=[results_info, results_gallery, results_zip]
         )
+
+        def on_models():
+            from .models import read_status
+
+            icons = {"ready": "✓", "fetching": "⏳", "pending": "·", "failed": "✗"}
+            known = registry()
+            return [
+                [icons.get(str(entry["status"]), "?"), key,
+                 f"{known[key].approx_gb:.1f} GB",
+                 ", ".join(known[key].steps),
+                 str(entry.get("detail", ""))[:80]]
+                for key, entry in sorted(read_status().items())
+            ]
+
+        models_refresh.click(on_models, outputs=models_out)
 
         def on_doctor():
             from .doctor import format_report, run_checks

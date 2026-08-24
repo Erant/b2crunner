@@ -12,7 +12,7 @@
 #   (no args) | ui         serve the web UI on $B2C_PORT, stay alive
 #   run ...                one workflow run, then exit (the old behaviour;
 #                          docker-compose.yml still uses this form)
-#   doctor | steps | workflows
+#   doctor | steps | workflows | prefetch
 #                          the corresponding CLI subcommand, then exit
 #   bash | sh | shell      a shell; extra arguments are passed through, so
 #                          `bash -c '...'` works
@@ -75,6 +75,36 @@ start_sshd() {
 }
 
 # --------------------------------------------------------------------------
+# model prefetch
+# --------------------------------------------------------------------------
+# In the BACKGROUND, deliberately, even though runs block on it. Doing it in
+# the foreground would leave the pod with no UI, no log and no healthcheck
+# for the half hour it takes to pull ~65 GB — which looks exactly like a pod
+# that failed to start, and on RunPod may well be killed as one. This way
+# the UI comes up immediately, shows the download on its Models tab, and any
+# run submitted meanwhile waits for the subset it actually needs.
+#
+# Skips anything already on the volume, so a reused network volume starts
+# essentially instantly. B2C_PREFETCH=0 turns it off entirely and restores
+# the old lazy behaviour (each step downloads its own, mid-run).
+start_prefetch() {
+    if [ "${B2C_PREFETCH:-1}" = "0" ]; then
+        log "B2C_PREFETCH=0 — not prefetching; steps will download on first use"
+        return 0
+    fi
+    if [ -z "${HF_TOKEN:-}" ]; then
+        log "WARNING: no HF_TOKEN — the gated checkpoints (RMBG-2.0,"
+        log "  sam-3d-body-dinov3) will fail to download. Prefetching the rest."
+    fi
+
+    local log_file="${B2C_LOG_DIR:-$DATA_DIR/logs}/prefetch.log"
+    log "prefetching model checkpoints in the background -> $log_file"
+    nohup "$PYTHON" -m pipeline.cli prefetch --log-file "$log_file" \
+        > /dev/null 2>&1 < /dev/null &
+    disown
+}
+
+# --------------------------------------------------------------------------
 # modes
 # --------------------------------------------------------------------------
 serve_ui() {
@@ -89,6 +119,8 @@ serve_ui() {
     log "preflight:"
     "$PYTHON" -m pipeline.cli doctor --summary || log "doctor reported failures (continuing)"
 
+    start_prefetch
+
     log "starting the web UI on 0.0.0.0:${B2C_PORT}"
     exec "$PYTHON" -m pipeline.cli ui --host 0.0.0.0 --port "$B2C_PORT"
 }
@@ -99,7 +131,7 @@ main() {
             shift || true
             serve_ui
             ;;
-        run|doctor|steps|workflows)
+        run|doctor|steps|workflows|prefetch)
             prepare_volume
             exec "$PYTHON" -m pipeline.cli "$@"
             ;;

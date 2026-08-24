@@ -31,6 +31,7 @@ has and hasn't been verified on real hardware.
 | `NVIDIA_DRIVER_CAPABILITIES` | `compute,utility,graphics,display` | **Set this here even though the image also sets it.** It is read by nvidia-container-toolkit at container-*creation* time, and whether RunPod honours an image-level `ENV` for it is unresolved. Without `graphics`, `vulkaninfo` finds no driver, and `brush` (Vulkan) and `render` (EGL) both fail — 40 minutes into a run, not at startup. |
 | `PUBLIC_KEY` | your SSH public key | RunPod usually injects this. The entrypoint starts `sshd` only when it is present. |
 | `B2C_PORT` | `7860` | Only if you need a different port. |
+| `B2C_PREFETCH` | `0` | Only if you want the old lazy behaviour — each step downloading its own checkpoint mid-run. Default is to pull everything at start. |
 
 ### Why the volume mount path matters
 
@@ -109,15 +110,44 @@ python -m pipeline.cli run fast_helical_native --reference-image /data/photo.jpg
 
 ## When and where the models are downloaded
 
-**Nothing is baked into the image, and nothing downloads at container
-start.** Every checkpoint is fetched lazily, by the step that needs it, the
-first time a run reaches that step — inside `Step.load()`. So a fresh pod's
-first `fast_helical_full` spends its opening stretch downloading, and a
-second run on the same pod skips all of it.
+**Nothing is baked into the image** — two of these are gated (a human has to
+accept the licence), they should not be redistributed inside a shareable
+image, and baking ~65 GB of weights into one makes it painful to push and
+pull.
 
-Deliberate: two of these are gated (a human has to accept the licence), they
-should not be redistributed inside a shareable image, and baking ~60 GB of
-weights into an image makes it painful to push and pull.
+Instead, **the pod pulls everything at start, in the background, and a run
+blocks until the models its own workflow needs have arrived.** Three
+properties, in order of how much they matter:
+
+- **The UI comes up immediately.** The prefetch is backgrounded on purpose.
+  Doing it in the foreground would leave the pod with no UI, no log and no
+  healthcheck for the half hour it takes to pull ~65 GB — indistinguishable
+  from a pod that failed to start, and on RunPod quite possibly killed as
+  one. Watch it on the UI's **Models** tab or in `/data/logs/prefetch.log`.
+- **A run never stalls mid-pipeline.** Submitting while the download is
+  still going is fine: the run waits, says so on the Progress tab, and
+  starts when its models are there. It will not get four stages in and then
+  freeze for twenty minutes while Wan2.2 comes down — which is the failure
+  this replaces, and the expensive one, because by then it has already
+  burned GPU time on the stages before it.
+- **Waiting is scoped to the workflow.** `fast_helical_local_smoke` skips
+  both denoise passes on purpose, so it waits on ~3 GB, not on the 52 GB
+  Wan2.2 checkpoint it never touches:
+
+  | Workflow | Blocks on | Total |
+  |---|---|---|
+  | `roundtrip_example` | nothing | — |
+  | `fast_helical_local_smoke` | rmbg, sapiens2 | ~3 GB |
+  | `fast_helical_native` | rmbg, sapiens2, sam3dbody, wan22, wan22_lora | ~59 GB |
+  | `fast_helical_full` | rmbg, sapiens2, wan22, wan22_lora, seedvr2 | ~62 GB |
+
+A single model failing does not abort the rest, and does not stop the pod
+coming up: a pod whose token cannot reach the gated SAM-3D-Body repo still
+pulls the other five, and only a run that actually needs SAM-3D-Body is
+refused — at submit time, naming the licence you need to accept.
+
+`B2C_PREFETCH=0` turns the whole thing off and restores lazy per-step
+downloading; `--no-wait-for-models` does it for a single CLI run.
 
 | Step | What | From | Lands in |
 |---|---|---|---|
@@ -153,25 +183,36 @@ pod has already pulled:
 It WARNs if `HF_HOME` is not on the volume at all, which is the shape of the
 problem above rather than an instance of it.
 
-### Pre-warming a pod
+### Is it already there?
 
-Nothing requires you to wait for a run to trigger the downloads. Either
-start a run and let it, or pull them ahead of time over SSH — worth doing on
-a fresh pod so the first real run isn't half download:
+Yes — checked, not assumed, and at two levels:
+
+1. A marker file per model under `$B2C_MODELS_DIR/.ready/`, written after a
+   successful download. Cheap, and the common case once a pod has run once.
+2. Failing that, **the loader is asked directly.** Each model's probe is its
+   own loading call restricted to local files — `snapshot_download(...,
+   local_files_only=True)` for the huggingface_hub ones, a file check for
+   the other two. So weights put on the volume by something *other than
+   this prefetch* — an earlier pod, an older image, a hand-run
+   `pipeline/envs/wan22/setup.sh` — are recognised, and the marker is
+   written so the check is cheap from then on.
+
+That second layer is the one that makes a reused network volume worth
+having: **pull once, and every later pod starts warm and begins its first
+run immediately.** Without it a warmed volume would look completely cold and
+re-walk every repo.
+
+Manual control, if you want it:
 
 ```bash
-# gated models: HF_TOKEN must belong to an account that accepted each licence
-/opt/venv_main/bin/python -c "
-from huggingface_hub import snapshot_download
-for repo in ['briaai/RMBG-2.0', 'facebook/sapiens2-normal-0.4b',
-             'facebook/sam-3d-body-dinov3']:
-    print(repo, snapshot_download(repo))
-"
-bash pipeline/envs/wan22/setup.sh   # Wan2.2 checkpoint + Lightning LoRAs
+python -m pipeline.cli prefetch --status          # what's present, what isn't
+python -m pipeline.cli prefetch                   # pull everything now
+python -m pipeline.cli prefetch --only wan22,seedvr2
+python -m pipeline.cli prefetch --force           # re-verify against the network
 ```
 
-Because they land on the volume, a network volume reused across pods keeps
-them: pull once, and every later pod starts warm.
+`--force` is the one to reach for if you suspect a cache was half-deleted:
+it ignores the markers and re-checks every file.
 
 **Budget the volume accordingly.** The Wan2.2 checkpoint alone is the bulk
 of it; 100 GB is a reasonable floor once the whole set plus run output is on
