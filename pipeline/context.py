@@ -30,9 +30,22 @@ class Context:
         if len(parts) == 1:
             self._data[parts[0]] = value
             return
+        # Auto-vivify: a step's first write into a namespace that hasn't
+        # been touched yet (e.g. "scene.vertices" before anything has set
+        # "scene") must create that namespace as a dict, not KeyError.
+        # `dataset` always exists (seeded before the first step runs), but
+        # `scene`-style scratch namespaces are created on demand by
+        # whichever step happens to write into them first.
+        if parts[0] not in self._data:
+            self._data[parts[0]] = {}
         obj = self._data[parts[0]]
         for part in parts[1:-1]:
-            obj = getattr(obj, part) if hasattr(obj, part) else obj[part]
+            if hasattr(obj, part):
+                obj = getattr(obj, part)
+                continue
+            if part not in obj:
+                obj[part] = {}
+            obj = obj[part]
         last = parts[-1]
         if hasattr(obj, last) and not isinstance(obj, dict):
             setattr(obj, last, value)

@@ -4,14 +4,44 @@
 # cyber_6f's initial/ dataset at full 81-frame batch size (see that
 # module's docstring for why frame count matters), rmbg and sapiens2_lite
 # against its output frames (both single-image and batched paths), and
-# sam3d_body against cyber_6f's anchor.png. brush is real code but
-# UNVERIFIED — it needs the Vulkan/graphics capability docker/Dockerfile
-# bakes in via NVIDIA_DRIVER_CAPABILITIES, which is necessary but not yet
-# confirmed sufficient for how RunPod provisions a pod from a custom image
-# (see docs/docker.md). generate_firstlast/inject_anchor (anchor_stub.py)
-# aren't wired into this workflow at all yet — see wan22_vace_denoise.py's
-# mask-semantics note for why a from-scratch dataset needs them before
-# control_masks means anything.
+# sam3d_body against cyber_6f's anchor.png. brush and render_splat are now
+# verified on real GPU hardware too (a local RTX 4070 Ti — see
+# docs/docker-build-notes.md); render's rasterization itself is still
+# UNTESTED (its own module docstring), separate from the EGL capability
+# check that ran fine.
+#
+# render / generate_firstlast / inject_anchor are wired in below (2026-08-
+# 23) — previously this workflow computed sam3d_body's mesh reconstruction
+# into scene.* and then discarded it, jumping straight to `denoise` reading
+# dataset.images/cameras that nothing had ever populated. That's also what
+# every prior verification run sidestepped: everything tested so far used
+# cyber_6f/initial, a pre-existing recorded multi-view dataset, not a
+# dataset this workflow built itself from one photo.
+#
+# What "wired in" does NOT yet mean: a way to invoke this from a bare
+# image. pipeline/dataset.py's Dataset dataclass requires images/cameras/
+# points_3d/resolution up front (no defaults), and pipeline/cli.py only
+# loads a complete on-disk dataset via --dataset — there's no bootstrap
+# path that constructs a Dataset from just a reference photo yet. Until
+# that exists, running this workflow from scratch means seeding a Context
+# by hand (or extending cli.py) with a Dataset stub carrying only
+# reference_image, empty images/cameras/points_3d, before calling
+# WorkflowRunner.run directly — this file's step graph is now correct and
+# complete, but the CLI entrypoint for "just one photo" is a separate,
+# still-open piece of work.
+#
+# pattern/n_frames for render_initial_views below are inferred, not
+# recovered from any source graph: even upstream ComfyUI-Body2COLMAP never
+# scripted this stage as an API JSON (checked workflows/api/ and
+# workflows/pipeline/fast helical.yaml directly — the pipeline runner
+# there also starts from a pre-existing "initial" directory; producing it
+# was apparently always a manual/interactive ComfyUI step). circular/81
+# frames matches cyber_6f/initial/metadata.json's own recorded shape
+# (81 cameras, anchor_frame_index=0, which is what render.py's circular
+# path always produces in override_cam_from_mesh mode) closely enough to
+# use as the default, but treat it as a best-effort match, not a verified
+# recipe — there is no ground truth to diff against here the way brush's
+# branch pin had `--help` to check against.
 name: fast_helical_native
 description: Single-loop helical orbit, no upscale pass.
 params:
@@ -75,6 +105,85 @@ steps:
       cam_t: scene.cam_t
       focal_length: scene.focal_length
       bbox: scene.bbox
+
+  # render's mesh_output wants a dict with vertices/cam_t/faces/
+  # keypoints_3d/focal_length (see render.py's module docstring on why
+  # keypoints_3d specifically, not joints) — reconstruct_body's outputs
+  # above already assembled exactly that dict at the "scene" namespace
+  # (plus a few extra keys render.py ignores), so it's passed straight
+  # through with no reshaping.
+  #
+  # override_cam_from_mesh: true is what makes this the *initial* render —
+  # it anchors one frame exactly at the original SAM-3D-Body camera and
+  # publishes the orbit_target/anchor_position/original_focal_length/
+  # image_warp extras that reinject_anchor_initial and the eventual
+  # render_splat re-render both key off (see splat.py's
+  # override_cam_from_mesh path). Without it this would be a normal
+  # auto-oriented render with no anchor to warp the reference photo onto.
+  - id: render_initial_views
+    step: render
+    dispatch: in_process
+    inputs:
+      mesh_output: scene
+    params:
+      pattern: circular
+      n_frames: 81
+      width: ${params.resolution.0}
+      height: ${params.resolution.1}
+      render_mode: depth+skeleton
+      framing: full
+      override_cam_from_mesh: true
+      fill_ratio: 0.8
+    outputs:
+      images: dataset.images
+      masks: dataset.masks
+      cameras: dataset.cameras
+      image_names: dataset.image_names
+      points_3d: dataset.points_3d
+      resolution: dataset.resolution
+      focal_length_mm: dataset.extras.focal_length_mm
+      orbit_target: dataset.extras.orbit_target
+      forward_azimuth_deg: dataset.extras.forward_azimuth_deg
+      anchor_position: dataset.extras.anchor_position
+      anchor_frame_index: dataset.extras.anchor_frame_index
+      original_focal_length: dataset.extras.original_focal_length
+      framing_bounds: dataset.extras.framing_bounds
+      initial_rotation: dataset.extras.initial_rotation
+      image_warp: scene.image_warp
+
+  # Put the real reference photo, warped to the anchor camera's framing,
+  # onto the render at that frame — this is what makes cyber_6f/initial's
+  # anchor frame byte-identical to anchor.png rather than a mesh render of
+  # it (see pipeline/README.md's inject_anchor verification note).
+  # scene.image_warp's keys (camera/original_focal_length/render_size/
+  # bg_color) are render_initial_views' own image_warp output, unpacked —
+  # see anchor_stub.py's GenerateFirstLastStep for why those specific
+  # fields.
+  - id: warp_reference_to_anchor
+    step: generate_firstlast
+    dispatch: in_process
+    inputs:
+      image: dataset.reference_image
+      camera: scene.image_warp.camera
+      original_focal_length: scene.image_warp.original_focal_length
+      render_size: scene.image_warp.render_size
+      bg_color: scene.image_warp.bg_color
+    outputs:
+      warped_image: dataset.anchor_image
+
+  - id: reinject_anchor_initial
+    step: inject_anchor
+    dispatch: in_process
+    inputs:
+      images: dataset.images
+      cameras: dataset.cameras
+      anchor_position: dataset.extras.anchor_position
+      anchor_image: dataset.anchor_image
+    params:
+      tolerance_pct: 0.1
+    outputs:
+      images: dataset.images
+      masks: dataset.masks
 
   - id: denoise
     step: wan22_vace_denoise

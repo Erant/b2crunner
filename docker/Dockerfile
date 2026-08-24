@@ -106,11 +106,30 @@ RUN cargo build --release -p brush-app -p brush-splat-render \
 FROM nvidia/cuda:13.0.2-cudnn-devel-ubuntu24.04 AS python-builder
 
 # There is no GPU during `docker build`, so the arch list cannot be
-# autodetected and MUST be set or detectron2 guesses badly.
-#   8.9 = Ada: RTX 4070 Ti / 4090 / L40S  (the test box and the pod so far)
-# Widen for a deployable image, at the cost of build time:
-#   --build-arg TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9;9.0+PTX"
-ARG TORCH_CUDA_ARCH_LIST="8.9"
+# autodetected and MUST be set or detectron2 guesses badly. This ONLY
+# affects detectron2's own nvcc-compiled kernels (the one CUDA extension
+# actually built from source in this image) — torch's own prebuilt cu130
+# wheel already ships SASS for sm_75/80/86/90/100/120 plus compute_120 PTX
+# regardless of this ARG (confirmed via torch.cuda.get_arch_list() in the
+# built image), so nothing else here needs widening for a new GPU
+# generation, only this.
+#
+# Default covers Ada and Blackwell, consumer and server, in one image —
+# confirmed RunPod is the deploy target and the next verification round is
+# explicitly "an Ada or Blackwell pod, consumer or server":
+#   8.9  = Ada:       RTX 40-series (consumer) / L40, L40S (server) —
+#          the 4070 Ti this was built and GPU-verified on
+#   10.0 = Blackwell:  B100, B200, GB200 (server/datacenter)
+#   12.0 = Blackwell:  RTX 50-series (consumer)
+# Hopper (9.0 — H100/H200) isn't in the default since it wasn't asked for,
+# but widens the same way if it comes up.
+#
+# Each additional arch is a real cost: detectron2's nvcc compile scales
+# with the arch count (the 8.9-only build took ~2 min — see
+# docs/docker-build-notes.md's detectron2 probe RESULT). Override for a
+# single-arch build if compile time matters more than portability:
+#   --build-arg TORCH_CUDA_ARCH_LIST="8.9"
+ARG TORCH_CUDA_ARCH_LIST="8.9;10.0;12.0"
 ENV TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST}
 
 # detectron2's setup.py compiles its CUDA kernels only if

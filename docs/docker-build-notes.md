@@ -692,22 +692,104 @@ integration-related. What's left is quality, not plumbing: the smoke test
 above trained for only 200 iterations at 480px max resolution, so the
 render looks like a 200-iteration splat, not a finished one.
 
-The remaining items below were **not** re-tested this session (they need a
-full workflow run, not a targeted smoke test) but are no longer
-graphics-blocked — the thing that was stopping them is fixed.
+#### UPDATE (2026-08-23, later still): first full sequence run, and two real bugs it found
 
-The build is green and the plumbing is proven (see section 3); these
-remain untested:
+`fast_helical_local_smoke.yaml` — `fast_helical_full.yaml` minus
+`wan22_vace_denoise` (both passes, too much VRAM for this 12GB card at
+production settings) and `seedvr2`'s upscale — ran **end to end for the
+first time**, against `cyber_6f/initial`, on GPU, at full production
+settings otherwise (30000 brush iterations, sh-degree 3, 1920 max
+resolution): `rmbg` -> `sapiens2_lite` -> `brush` (107,127 Gaussians) ->
+`render_splat` (`brush-splat-render`, helical path, 81 cameras) ->
+`inject_anchor` -> `mask_splat` -> `rmbg` -> `colmap_export`. Output: an 87-
+file dataset and a valid 81-camera/81-image COLMAP directory (10,000 3D
+points, correct PINHOLE intrinsics).
 
-- `generate_firstlast`'s warp against a real `render` output.
-- `fast_helical_full.yaml` end to end — every stage has a native step and
-  the file validates statically, but the sequence has never executed.
+Getting there found two real, previously-undiscovered bugs — exactly what
+"never executed as a sequence" (the caveat on every workflow YAML in this
+repo) predicts, and neither was reachable by unit tests or static
+validation:
+
+1. **`Context.set` crashed on the first write into any not-yet-seeded
+   namespace.** `cli.py` seeds the initial context as `{"dataset": dataset}`
+   only; the first step to write to e.g. `scene.vertices` hit
+   `self._data["scene"]` with a bare `KeyError`, since nothing had created
+   `scene` yet. `test_workflows.py` never caught it because it only
+   validates workflow structure statically — it has never actually run a
+   `WorkflowRunner`. Fixed in `pipeline/context.py`: `Context.set` now
+   auto-vivifies a missing top-level (or intermediate) namespace as an
+   empty dict instead of assuming it already exists. This is a fix every
+   workflow using a `scene.*`-style scratch namespace needed, not something
+   specific to this run.
+2. **`InProcessDispatcher` never freed GPU memory between one-shot steps.**
+   `keep_loaded=False` (the default) makes a fresh `Step` instance per
+   call and never tracks it, so `Dispatcher.close()`'s `unload()` loop —
+   the only place already calling `torch.cuda.empty_cache()` — never runs
+   for it. On this 12GB card, `rmbg` -> `sapiens2_lite` OOM'd because
+   nothing released rmbg's model memory before sapiens2_lite tried to
+   load its own. Fixed in `pipeline/dispatch/in_process.py`: releases the
+   CUDA cache after every non-`keep_loaded` step. Only got the OOM down
+   from ~3.24GB free to ~3.77GB free, though — not the whole story (see
+   next).
+3. **Not a bug, a real capacity limit:** even after (2), `sapiens2_lite`'s
+   own default `batch_size=8` needed 4.53GB for one attention pass at
+   720x1280, more than fit in the remaining headroom. `batch_size: 2` (the
+   step already supported chunking, just wasn't being told to) fixed it
+   with no code change. Left as an explicit override in
+   `fast_helical_local_smoke.yaml`'s `normal_maps` step rather than
+   changing the step's own default, since 8 is presumably fine on a
+   bigger card.
+
+What this run does **not** validate: `wan22_vace_denoise` and `seedvr2`
+were skipped entirely (see above), so denoise quality and the upscale
+stage remain unverified — the frames going into `brush` are `cyber_6f`'s
+own already-denoised frames standing in for "assume denoise produced good
+output," not a real denoise pass. What it does establish: the entire
+*rest* of the pipeline — every step this project could not previously run
+in combination — now runs cleanly together on real GPU hardware.
+
+The remaining items below still need a run this session didn't attempt:
+
+- `generate_firstlast`'s warp against a real `render` output (front-half
+  wiring — see `pipeline/workflows/fast_helical_native.yaml`'s
+  `render_initial_views`/`warp_reference_to_anchor` steps, added this
+  session but not yet run: there's no CLI/Dataset bootstrap path for
+  starting from a bare reference photo yet, only for an existing on-disk
+  dataset — see that file's header comment).
+- `fast_helical_full.yaml` end to end, with `wan22_vace_denoise` and
+  `seedvr2` included — needs a bigger card (an L40S-class RunPod pod) to
+  test at settings that mean anything quality-wise; on this box the two
+  denoise-touching stages are the ones deliberately skipped above.
 
 Unblocking the graphics items was the `docker-ce` + `libegl1` fix described
 above, not a driver downgrade or a RunPod-specific workaround — worth
 retesting the `NVIDIA_DRIVER_CAPABILITIES` question on RunPod with that in
 mind, since it's now known to matter less than expected in every mode
 tested here.
+
+**Widened `TORCH_CUDA_ARCH_LIST` to `8.9;10.0;12.0`** (was `8.9` only), in
+preparation for the next verification round moving to a RunPod Ada or
+Blackwell pod (consumer or server variant of either). This only affects
+detectron2's own nvcc-compiled kernels — torch's own cu130 wheel already
+ships SASS for sm_75/80/86/90/100/120 plus compute_120 PTX regardless of
+this ARG (checked via `torch.cuda.get_arch_list()` in the built image), so
+nothing else needed widening. Real cost, not a free change: the
+sam3dbody/detectron2 layer went from ~120s (single arch) to ~169s (three
+arches) to compile. See `docker/Dockerfile`'s comment on this ARG for the
+per-value breakdown (8.9 = Ada consumer+server, 10.0 = Blackwell server,
+12.0 = Blackwell consumer).
+
+Also worth recording since it came up chasing an unrelated OOM: this box's
+own GPU (RTX 4070 Ti, cap 8.9) is **not** in torch's `get_arch_list()`
+output at all, and no PTX below `compute_120` is embedded either — by the
+letter of that list, this exact wheel should have no way to run a kernel
+on this exact card. It does anyway (confirmed directly: a real
+`torch.matmul` on `cuda:0` succeeded, and the whole smoke-test run above
+did real `rmbg`/`sapiens2_lite` GPU inference throughout) — so whatever
+compatibility path covers 8.9 here isn't reflected in that API's output.
+Not chased further since it's empirically a non-issue, but worth knowing
+`get_arch_list()` isn't a reliable yes/no for "will this run" if it ever
+comes up again.
 
 Note the gsplat-reference-render errand from `docs/brush-render-utility.md`
 is separate from all of this: gsplat is CUDA, not Vulkan, so a scratch venv

@@ -20,10 +20,12 @@ services:
       context: ..
       dockerfile: docker/Dockerfile
       args:
-        # 8.9 = Ada (RTX 4070 Ti, RTX 4090, L40S). Widen for an image that
-        # has to run on arbitrary rented GPUs, at the cost of build time:
-        #   TORCH_CUDA_ARCH_LIST: "8.0;8.6;8.9;9.0+PTX"
-        TORCH_CUDA_ARCH_LIST: "8.9"
+        # Ada + Blackwell, consumer + server, in one image — see
+        # docker/Dockerfile's comment on this ARG for what each value is
+        # and why torch itself needs no widening, only detectron2's build.
+        # Narrow to "8.9" alone (this box's RTX 4070 Ti) if compile time
+        # matters more than running on whatever RunPod hands out.
+        TORCH_CUDA_ARCH_LIST: "8.9;10.0;12.0"
         # Drop to cu128 + torch 2.8.0 if detectron2 will not build against
         # CUDA 13 — see the fallback ladder in docs/docker-build-notes.md.
         TORCH_VERSION: "2.9.1"

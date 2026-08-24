@@ -1,0 +1,191 @@
+# Reduced fast_helical_full.yaml for a 12GB local GPU box (an RTX 4070 Ti,
+# specifically): everything EXCEPT wan22_vace_denoise (both passes) and
+# seedvr2's upscale. Those two are the steps this project's prior
+# verification tuned against a 44GB L40S — see docs/docker-build-notes.md's
+# "The machine" section — and are the ones a 12GB card can't run at
+# production settings without degrading output quality enough that a
+# smoke test here wouldn't mean much anyway.
+#
+# What this validates: the sequencing this pipeline has never run before
+# today — brush training feeding render_splat (brush-splat-render) feeding
+# mask_splat feeding colmap_export, end to end, on real data, on real GPU
+# hardware. What it does NOT validate: denoise quality (both passes are
+# skipped — run against the dataset's own frames as-is, standing in for
+# "already denoised, good output") or upscaling.
+#
+# Run against an existing on-disk dataset (cyber_6f/initial), not a fresh
+# render — pairs with fast_helical_native.yaml's render_initial_views for
+# the from-scratch case, which this intentionally skips to isolate the
+# untested middle of the pipeline from the untested front of it.
+#
+#   docker run --rm --device nvidia.com/gpu=all \
+#       -v $PWD/cyber_6f:/data/cyber_6f:ro \
+#       -v /path/to/output:/data/out \
+#       b2c/pipeline:latest \
+#       run pipeline/workflows/fast_helical_local_smoke.yaml \
+#       --dataset /data/cyber_6f/initial --out /data/out -v
+name: fast_helical_local_smoke
+description: >-
+  fast_helical_full.yaml minus wan22_vace_denoise (both passes) and
+  seedvr2's upscale, for validating the rest of the sequence on a 12GB
+  local GPU. Skipped stages assumed to already be "good output" — the
+  dataset's own frames stand in for what denoise would have produced.
+
+params:
+  resolution: [720, 1280]
+
+  # Stage 2 helical re-render — same values as fast_helical_full.yaml's
+  # resplat_helical.json equivalent.
+  resplat_frames: 81
+  resplat_loops: 2
+  resplat_amplitude_deg: 30.0
+  resplat_lead_in_deg: 30.0
+  resplat_lead_out_deg: 90.0
+
+  mask_filter_size: 6
+  mask_dilation: 2
+
+  brush_path: brush
+  brush_total_steps: 30000
+  brush_sh_degree: 3
+  brush_max_resolution: 1920
+  brush_max_splats: 10000000
+  brush_refine_every: 200
+  brush_normal_loss_strength: 0.05
+  brush_normal_loss_step_start: 5000
+
+  splat_path: output/fast_helical_local_smoke/splat.ply
+  colmap_dir: output/fast_helical_local_smoke/colmap
+
+steps:
+  # ---------------------------------------------------------------- stage 2
+  # (stage 1, wan22_vace_denoise strength 1.0, is skipped — dataset.images
+  # from cyber_6f/initial stands in for its output.)
+  - id: foreground_masks
+    step: rmbg
+    dispatch: in_process
+    inputs:
+      images: dataset.images
+    outputs:
+      masks: dataset.masks
+
+  - id: normal_maps
+    step: sapiens2_lite
+    dispatch: in_process
+    inputs:
+      images: dataset.images
+    params:
+      # Default batch_size=8 OOMs on a 12GB card at this resolution (real
+      # finding, not a guess — 4.53GB for one batch's attention pass
+      # against ~3.7GB free even after in_process.py's fix releases rmbg's
+      # memory first). 2 is comfortably under; raise on a bigger card.
+      batch_size: 2
+    outputs:
+      normal_maps: scene.normal_maps
+
+  - id: train_splat
+    step: brush
+    dispatch: in_process
+    inputs:
+      cameras: dataset.cameras
+      image_names: dataset.image_names
+      points_3d: dataset.points_3d
+      images: dataset.images
+      masks: dataset.masks
+      normal_maps: scene.normal_maps
+    params:
+      brush_path: ${params.brush_path}
+      total_steps: ${params.brush_total_steps}
+      sh_degree: ${params.brush_sh_degree}
+      max_resolution: ${params.brush_max_resolution}
+      max_splats: ${params.brush_max_splats}
+      refine_every: ${params.brush_refine_every}
+      alpha_mode: transparent
+      normal_loss_strength: ${params.brush_normal_loss_strength}
+      normal_loss_step_start: ${params.brush_normal_loss_step_start}
+    outputs:
+      splat_path: dataset.splat_path
+
+  - id: load_trained_splat
+    step: load_splat
+    dispatch: in_process
+    inputs:
+      splat_path: dataset.splat_path
+    outputs:
+      splat_scene: scene.splat
+
+  - id: rerender_splat
+    step: render_splat
+    dispatch: in_process
+    inputs:
+      splat_scene: scene.splat
+      dataset: dataset
+    params:
+      width: ${params.resolution.0}
+      height: ${params.resolution.1}
+      pattern: helical
+      n_frames: ${params.resplat_frames}
+      n_loops: ${params.resplat_loops}
+      amplitude_deg: ${params.resplat_amplitude_deg}
+      lead_in_deg: ${params.resplat_lead_in_deg}
+      lead_out_deg: ${params.resplat_lead_out_deg}
+      framing: full
+      fill_ratio: 0.8
+      focal_length_mm: 0
+      override_pointcloud: false
+    outputs:
+      images: dataset.images
+      masks: dataset.masks
+      cameras: dataset.cameras
+      image_names: dataset.image_names
+      points_3d: dataset.points_3d
+
+  - id: reinject_anchor
+    step: inject_anchor
+    dispatch: in_process
+    inputs:
+      images: dataset.images
+      cameras: dataset.cameras
+      anchor_position: dataset.extras.anchor_position
+      anchor_image: dataset.anchor_image
+    params:
+      tolerance_pct: 0.1
+    outputs:
+      images: dataset.images
+      masks: dataset.masks
+
+  # ---------------------------------------------------------------- stage 3
+  - id: mask_splat_fringes
+    step: mask_splat
+    dispatch: in_process
+    inputs:
+      dataset: dataset
+    params:
+      filter_size: ${params.mask_filter_size}
+      dilation: ${params.mask_dilation}
+    outputs:
+      dataset: dataset
+
+  # (stage 4, wan22_vace_denoise strength 0.8, is skipped.)
+  # (stage 5, seedvr2 upscale, is skipped.)
+
+  # ---------------------------------------------------------------- stage 6
+  - id: export_masks
+    step: rmbg
+    dispatch: in_process
+    inputs:
+      images: dataset.images
+    outputs:
+      masks: dataset.masks
+
+  - id: export_colmap
+    step: colmap_export
+    dispatch: in_process
+    inputs:
+      cameras: dataset.cameras
+      image_names: dataset.image_names
+      points_3d: dataset.points_3d
+      images: dataset.images
+      masks: dataset.masks
+    params:
+      output_dir: ${params.colmap_dir}
