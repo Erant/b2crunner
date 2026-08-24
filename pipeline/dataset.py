@@ -114,6 +114,57 @@ class Dataset:
         return out
 
     @classmethod
+    def from_reference_image(
+        cls,
+        image: "str | Path | np.ndarray",
+        prompt: Optional[str] = None,
+    ) -> "Dataset":
+        """A Dataset carrying nothing but the one photo the pipeline starts from.
+
+        `fast_helical_native.yaml` builds everything else itself — sam3d_body
+        reconstructs a mesh from `reference_image`, and `render` populates
+        images/cameras/points_3d/resolution from that mesh. But the dataclass
+        requires all four up front, and `from_disk` is the only constructor
+        there was, so "run the pipeline from a single photo" had no entry
+        point at all: you had to hand-build a Context and call
+        WorkflowRunner directly. That gap is called out in
+        fast_helical_native.yaml's own header and is what this closes.
+
+        The empty fields are genuinely empty, not placeholder-shaped:
+        `points_3d` is a (0, 3) float32 pair rather than None so that a step
+        which reaches for it before `render` has run fails on a shape it can
+        report, not on `NoneType`.
+
+        `resolution` starts as the photo's own (width, height). `render`
+        overwrites it with the render size; nothing reads it in between.
+        """
+        if isinstance(image, (str, Path)):
+            path = Path(image)
+            loaded = cv2.imread(str(path), cv2.IMREAD_COLOR)
+            if loaded is None:
+                raise FileNotFoundError(f"Could not read reference image: {path}")
+        else:
+            loaded = image
+            if loaded.ndim == 3 and loaded.shape[2] == 4:
+                loaded = cv2.cvtColor(loaded, cv2.COLOR_BGRA2BGR)
+            elif loaded.ndim == 2:
+                loaded = cv2.cvtColor(loaded, cv2.COLOR_GRAY2BGR)
+
+        height, width = loaded.shape[:2]
+        return cls(
+            images=[],
+            image_names=[],
+            cameras=[],
+            points_3d=(
+                np.zeros((0, 3), dtype=np.float32),
+                np.zeros((0, 3), dtype=np.float32),
+            ),
+            resolution=(width, height),
+            reference_image=loaded,
+            prompt=prompt,
+        )
+
+    @classmethod
     def from_disk(cls, directory: str | Path) -> "Dataset":
         src = Path(directory)
         metadata = json.loads((src / "metadata.json").read_text())
@@ -202,3 +253,36 @@ def _deserialize_camera(camera_data: dict, resolution: Tuple[int, int]) -> Camer
         position=np.array(extrinsics["position"], dtype=np.float32),
         rotation=np.array(extrinsics["rotation"], dtype=np.float32),
     )
+
+
+def find_dataset_root(directory: str | Path) -> Path:
+    """Locate the directory holding metadata.json, at or below `directory`.
+
+    Uploaded archives are almost never rooted the way you'd like — a zip of
+    `initial/` unpacks to `initial/metadata.json`, one made on macOS adds
+    `__MACOSX/`, and one made by selecting the files rather than the folder
+    unpacks flat. Rather than making the user get it right, look for the one
+    file that identifies a b2c dataset and use whatever directory holds it.
+
+    Raises FileNotFoundError naming what was actually found, since "no
+    metadata.json anywhere in this archive" is otherwise indistinguishable
+    from "the upload failed".
+    """
+    root = Path(directory)
+    if (root / "metadata.json").exists():
+        return root
+
+    candidates = sorted(
+        p.parent for p in root.rglob("metadata.json")
+        if "__MACOSX" not in p.parts
+    )
+    if not candidates:
+        listing = sorted(p.name for p in root.iterdir())[:20] if root.is_dir() else []
+        raise FileNotFoundError(
+            f"No metadata.json found in {root} or any subdirectory — this does not "
+            f"look like a b2c dataset. Top level contains: {listing or 'nothing'}"
+        )
+    # Shallowest wins: a dataset directory can legitimately contain a nested
+    # one (a checkpoint written inside an output dir), and the outer one is
+    # what was uploaded.
+    return min(candidates, key=lambda p: len(p.parts))

@@ -8,7 +8,14 @@
 name: roundtrip_example
 description: Load a dataset, checkpoint it back to disk under a new name.
 params:
-  output_directory: output/b2c_roundtrip_check
+  # Every path this workflow writes to disk hangs off this one param, and
+  # `pipeline.cli run` repoints it at the run's own directory under
+  # B2C_OUTPUT_DIR (i.e. the mounted volume) unless you pass
+  # `--param output_root=...`. The literal below is only what you get from
+  # a bare `WorkflowRunner` with no CLI: relative to the working directory,
+  # which on a pod is the container's writable layer — small, and gone when
+  # the pod is recycled.
+  output_root: output/roundtrip
 
 steps:
   - id: checkpoint
@@ -17,4 +24,4 @@ steps:
     inputs:
       dataset: dataset
     params:
-      directory: ${params.output_directory}
+      directory: ${params.output_root}/checkpoint

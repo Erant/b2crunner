@@ -59,15 +59,14 @@ from __future__ import annotations
 
 import json
 import logging
-import subprocess
 import tempfile
-import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
 
+from ..proc import stream_command
 from ..registry import register_step
 from ..step import Step
 
@@ -315,33 +314,15 @@ def _write_cameras_json(cameras, image_names, width: int, height: int, path: Pat
 
 
 def _run_render(cmd: List[str]) -> None:
-    try:
-        process = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
-        )
-    except FileNotFoundError:
-        raise RuntimeError(
-            f"brush-splat-render executable not found at: {cmd[0]}\n"
-            f"Please ensure brush-splat-render is installed and the path is correct."
-        )
-
-    output_lines: List[str] = []
-
-    def read_output() -> None:
-        for line in process.stdout:
-            output_lines.append(line)
-
-    output_thread = threading.Thread(target=read_output, daemon=True)
-    output_thread.start()
-    return_code = process.wait()
-    output_thread.join(timeout=5.0)
-
-    if return_code != 0:
-        raise RuntimeError(
-            f"brush-splat-render failed with exit code {return_code}.\n"
-            f"Command: {' '.join(cmd)}\n"
-            f"Output:\n{''.join(output_lines[-50:])}"
-        )
+    # Same live relay as the brush training step — see pipeline/proc.py.
+    stream_command(
+        cmd,
+        log_name="brush-splat-render",
+        not_found_hint=(
+            "It is built into the image at /usr/local/bin/brush-splat-render, "
+            "alongside `brush`, from the same Erant/brush clone."
+        ),
+    )
 
 
 def _resolve_cameras(

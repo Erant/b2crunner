@@ -7,6 +7,10 @@
 # Build (context must be the repo root):
 #   docker build -f docker/Dockerfile -t b2c/pipeline:latest .
 #
+# The container's default mode is the web UI (docker/entrypoint.sh) — a pod
+# started with no arguments serves it on $B2C_PORT and stays alive. See
+# docs/runpod.md for the pod template settings that go with it.
+#
 # READ docs/docker-build-notes.md BEFORE the first build. It has the CUDA/
 # detectron2 test plan, the RTX 4070 Ti specifics, and what to do when a
 # layer fails. Nothing in this file has been built yet.
@@ -161,7 +165,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libgl1 libglib2.0-0 libxcb1 \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /workspace/b2c_runner
+WORKDIR /opt/b2c_runner
 
 # -----------------------------------------------------------------------------
 # venv_base — the one copy of every heavy shared package
@@ -288,7 +292,7 @@ RUN make-child-venv /opt/venv_seedvr2 \
 # explicitly. Copied on its own, not as part of the tree, so editing
 # pipeline code does not invalidate this very expensive layer.
 COPY pipeline/envs/sam3dbody/requirements.txt \
-     /workspace/b2c_runner/pipeline/envs/sam3dbody/requirements.txt
+     /opt/b2c_runner/pipeline/envs/sam3dbody/requirements.txt
 
 RUN make-child-venv /opt/venv_sam3dbody \
     && /opt/venv_sam3dbody/bin/pip install cython \
@@ -303,6 +307,28 @@ RUN make-child-venv /opt/venv_sam3dbody \
     && /opt/venv_sam3dbody/bin/python -c "from sam_3d_body import SAM3DBodyEstimator, load_sam_3d_body" \
     && /opt/venv_sam3dbody/bin/python -c "\
 from detectron2 import _C; print('detectron2 native extension OK')"
+
+# gradio, for pipeline/webui.py — the web UI the container serves by
+# default, and the reason the image can be built once and then driven
+# entirely over HTTP.
+#
+# Installed HERE, in its own layer at the end of the stage, rather than up
+# in the venv_main block where it belongs logically. Docker's layer cache is
+# linear: venv_main is built before venv_wan22/venv_seedvr2/venv_sam3dbody,
+# so touching its RUN invalidates all three, including the detectron2 layer
+# that costs several minutes of nvcc. Putting a UI dependency at the front
+# of that queue would mean every UI tweak pays for a detectron2 rebuild.
+#
+# In venv_main specifically because that is the venv the entrypoint runs the
+# orchestrator with; the isolated step venvs have no use for it.
+#
+# Pinned to a major version: gradio's component API moves between majors
+# (`gr.Timer`, `queue()` arguments and `Dataframe` datatypes have all
+# changed), and this image is meant to be built once and left alone — a
+# rebuild months from now silently picking up gradio 7 is exactly the class
+# of surprise that costs a pod-hour.
+RUN /opt/venv_main/bin/pip install 'gradio>=5.0,<7.0' \
+    && /opt/venv_main/bin/python -c "import gradio; print('gradio', gradio.__version__)"
 
 # Strip build leftovers that would otherwise be copied into the runtime
 # image: pip caches, and the compiled-object trees left by the source
@@ -341,11 +367,56 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV PIP_NO_CACHE_DIR=1
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1
 
+# Python block-buffers stdout whenever it is a pipe, which it always is
+# under `docker logs` and under RunPod's log pane. Without this a step that
+# runs for twenty minutes prints nothing and then prints everything, and a
+# slow run is indistinguishable from a hung one. The single highest-value
+# line in this file for debugging a remote run.
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONFAULTHANDLER=1
+
+# Where the pipeline is allowed to write. pipeline/paths.py reads these; the
+# entrypoint creates them. All of it has to be on the mounted volume: the
+# container's writable layer is small, and an 81-frame batch of IPC pickles
+# or a trained .ply will fill it. TMPDIR matters as much as the rest —
+# SubprocessPythonDispatcher round-trips every step's inputs and outputs
+# through it.
+#
+# The mkdir is not cosmetic and must come BEFORE the ENV: TMPDIR applies to
+# the rest of the build too, and a TMPDIR that does not exist breaks any
+# package whose postinst wants a temp file. Setting it without this line
+# fails the very next apt layer with
+#   dpkg: error processing package ca-certificates (--configure)
+#   dpkg: error processing package openssh-server (--configure)
+# and no mention of TMPDIR anywhere in the output. (The skeleton also means
+# a container run with no volume at all still has somewhere to write, rather
+# than dying on the first mkdir.)
+RUN mkdir -p /data/output /data/logs /data/uploads /data/tmp /data/hf_cache
+ENV B2C_DATA_DIR=/data
+ENV B2C_OUTPUT_DIR=/data/output
+ENV B2C_LOG_DIR=/data/logs
+ENV B2C_UPLOAD_DIR=/data/uploads
+ENV TMPDIR=/data/tmp
+ENV B2C_PORT=7860
+
 # huggingface_hub's Xet backend caches to $HOME regardless of HF_HOME,
 # filling a container's small writable layer while /data sits empty —
 # downloads then die with "Disk quota exceeded". Learned on a real pod.
 ENV HF_HOME=/data/hf_cache
 ENV HF_HUB_DISABLE_XET=1
+# Belt and braces for the same problem: if something ever re-enables Xet
+# (a future huggingface_hub that ignores the flag above, or an explicit
+# override at run time), this keeps its cache on the volume rather than in
+# $HOME. Harmless while Xet is disabled.
+ENV HF_XET_CACHE=/data/hf_cache/xet
+#
+# HF_HUB_ENABLE_HF_TRANSFER is deliberately NOT set. It looks like free
+# speed and is, in this stack, a no-op that costs clarity: the installed
+# huggingface_hub prints a FutureWarning at every container start saying
+# hf_transfer is no longer used and to enable Xet's high-performance mode
+# instead — which is exactly what HF_HUB_DISABLE_XET above turns off, for
+# the documented reason that Xet cached to $HOME regardless of HF_HOME and
+# filled a pod's root disk. Slower downloads, correct ones.
 
 # NOT "...:${PYTHONPATH}": nothing defines PYTHONPATH in the base image, so
 # that expanded to a trailing colon, which BuildKit flags
@@ -378,6 +449,33 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libegl1 libgl1 libglvnd0 libgles2 libosmesa6 \
         libglib2.0-0 libsm6 libxext6 libxrender1 libgomp1 \
         ffmpeg \
+        # ---------------------------------------------------------------
+        # Debugging surface. This image is meant to be built once and then
+        # left alone for the whole verification round, so anything you
+        # might need *while diagnosing a failed run* has to already be
+        # here — discovering that `git` is missing is itself a rebuild.
+        #
+        # git:      lets you `git pull` a fix into /opt/b2c_runner and
+        #           re-run without rebuilding (the package is installed
+        #           editable, so a pulled change takes effect immediately),
+        #           and lets pip install from a git URL at all.
+        # curl/wget/ca-certificates: fetching a checkpoint or poking an
+        #           endpoint by hand.
+        # procps/htop: `ps`, `top` — is the step running or wedged?
+        # lsof:     which process is holding the GPU or a stuck file.
+        # less/nano/vim-tiny: reading and patching a file in place.
+        # rsync/openssh-client: getting results off the pod.
+        # openssh-server: getting *into* the pod at all; a custom image
+        #           has no sshd unless it ships one (see entrypoint.sh).
+        # unzip/zip: the UI's dataset-archive path, by hand.
+        # jq:       metadata.json is the pipeline's own manifest format.
+        # tree:     seeing what a run actually wrote.
+        # ---------------------------------------------------------------
+        git curl wget \
+        procps htop lsof \
+        less nano vim-tiny \
+        rsync openssh-client openssh-server \
+        unzip zip jq tree \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=brush-builder /out-brush /usr/local/bin/brush
@@ -389,20 +487,27 @@ COPY --from=python-builder /opt/venv_seedvr2 /opt/venv_seedvr2
 COPY --from=python-builder /opt/venv_sam3dbody /opt/venv_sam3dbody
 COPY --from=python-builder /opt/vendor /opt/vendor
 
-WORKDIR /workspace/b2c_runner
+# NOT /workspace/b2c_runner, which is where this used to live. RunPod's
+# pod template defaults its network volume's mount path to /workspace, and a
+# volume mounted there shadows everything under it — including, in the old
+# layout, the entire application. The symptom is the container exiting at
+# boot with "No module named pipeline" on a pod that looks correctly
+# configured. /opt is where the venvs already live and nothing mounts over
+# it by default.
+WORKDIR /opt/b2c_runner
 
 # Last, and in its own layer, so editing pipeline code invalidates neither
 # the venv layers nor the brush build. Every venv needs the package:
 # `python -m pipeline.worker` must be importable inside each isolated env,
 # not just the orchestrator's.
-COPY . /workspace/b2c_runner
+COPY . /opt/b2c_runner
 
 # The container's own env registry, pointing at the venv paths this image
 # actually creates. pipeline/envs/envs.yaml in the repo describes a bare
 # pod (/workspace/venv_*) and is left alone for that use; cli.py defaults
 # to that path, so the container copy overwrites it here rather than
 # requiring every invocation to pass --envs.
-COPY docker/envs.docker.yaml /workspace/b2c_runner/pipeline/envs/envs.yaml
+COPY docker/envs.docker.yaml /opt/b2c_runner/pipeline/envs/envs.yaml
 
 # --no-deps: everything is already in venv_base, and there is no compiler
 # here to build anything that isn't.
@@ -420,4 +525,24 @@ print(len(STEP_REGISTRY), 'steps registered')"
 # pipeline/envs/sam3dbody/setup.sh already does exactly this.
 VOLUME ["/data"]
 
-ENTRYPOINT ["/opt/venv_main/bin/python", "-m", "pipeline.cli"]
+# 7860: the web UI. 22: sshd, started by the entrypoint only when RunPod (or
+# you) supplies a PUBLIC_KEY. Both must also be listed in the pod template's
+# exposed ports — EXPOSE alone documents them, it does not publish them.
+EXPOSE 7860 22
+
+# Answers "is the UI up" without a browser, and gives RunPod/compose
+# something to restart on. start-period is generous because the first
+# request imports torch.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=180s --retries=3 \
+    CMD curl -fsS "http://127.0.0.1:${B2C_PORT}/" >/dev/null || exit 1
+
+COPY docker/entrypoint.sh /usr/local/bin/b2c-entrypoint
+RUN chmod +x /usr/local/bin/b2c-entrypoint
+
+# CMD, not a hardcoded ENTRYPOINT argument, so RunPod's "container start
+# command" (which replaces CMD) can select a different mode without having
+# to override the entrypoint too. With no override the pod serves the UI and
+# stays alive; `docker run IMAGE run <workflow> --dataset ...` still works
+# exactly as before.
+ENTRYPOINT ["/usr/local/bin/b2c-entrypoint"]
+CMD ["ui"]

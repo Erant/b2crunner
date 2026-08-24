@@ -40,9 +40,7 @@ supervision inactive, not an error.
 
 from __future__ import annotations
 
-import subprocess
 import tempfile
-import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -50,6 +48,7 @@ from typing import Any, Dict, List, Optional
 import cv2
 import numpy as np
 
+from ..proc import stream_command
 from ..registry import register_step
 from ..step import Step
 
@@ -180,30 +179,16 @@ class BrushStep(Step):
         return {"splat_path": str(ply_path.absolute())}
 
     def _run_brush(self, cmd: List[str]) -> None:
-        try:
-            process = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
-            )
-        except FileNotFoundError:
-            raise RuntimeError(
-                f"Brush executable not found at: {cmd[0]}\n"
-                f"Please ensure brush is installed and the path is correct."
-            )
-
-        output_lines: List[str] = []
-
-        def read_output() -> None:
-            for line in process.stdout:
-                output_lines.append(line)
-
-        output_thread = threading.Thread(target=read_output, daemon=True)
-        output_thread.start()
-        return_code = process.wait()
-        output_thread.join(timeout=5.0)
-
-        if return_code != 0:
-            raise RuntimeError(
-                f"Brush training failed with exit code {return_code}.\n"
-                f"Command: {' '.join(cmd)}\n"
-                f"Output:\n{''.join(output_lines[-50:])}"
-            )
+        # Training output is relayed to the log line by line as it arrives
+        # (see pipeline/proc.py). This used to buffer everything and show
+        # it only on failure, which made a 30,000-iteration run — the
+        # longest single thing in the pipeline — completely silent.
+        stream_command(
+            cmd,
+            log_name="brush",
+            not_found_hint=(
+                "It is built into the image at /usr/local/bin/brush; on a bare "
+                "machine, build it from Erant/brush's normal-map-supervision "
+                "branch or point the step's brush_path param at it."
+            ),
+        )

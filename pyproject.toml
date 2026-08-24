@@ -15,11 +15,21 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# See requirements.txt: needed only by the Gaussian-splat steps, and kept
-# out of the default install because gsplat requires a CUDA toolchain.
+# PLY I/O for load_splat/save_splat. gsplat used to be here too; it is gone
+# because render_splat now shells out to the brush-splat-render binary
+# instead (see requirements.txt and docs/docker-build-notes.md's "gsplat:
+# dropped"), which removed this project's last need for a CUDA toolchain at
+# runtime. Still an extra rather than a hard dependency because the
+# non-splat half of the pipeline works without it.
 splat = [
-    "gsplat>=1.0.0",
     "plyfile>=0.8.0",
+]
+
+# The web UI (pipeline/webui.py), which is what the container serves by
+# default. Optional so a headless CLI install stays small; the Docker image
+# installs it into venv_main.
+ui = [
+    "gradio>=5.0,<7.0",
 ]
 
 [build-system]

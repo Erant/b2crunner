@@ -1,0 +1,165 @@
+# Running the image on RunPod
+
+Everything in this file is a *pod template* concern — settings that live
+outside the image and cannot be baked into it. The image itself is meant to
+be built once per verification round and then left alone; if you find
+yourself wanting to rebuild it to debug something, check the
+[debugging section](#debugging-without-rebuilding) first, because the tools
+are probably already in there.
+
+Companion documents: [docker.md](docker.md) for *why* the image is shaped
+the way it is, and [docker-build-notes.md](docker-build-notes.md) for what
+has and hasn't been verified on real hardware.
+
+## Pod template settings
+
+| Setting | Value | Why |
+|---|---|---|
+| Container image | your registry's `b2c/pipeline:latest` | |
+| Container start command | **leave empty** | The image's `CMD` is `ui`, which serves the web UI and stays alive. Anything you put here replaces it. |
+| Volume mount path | **`/data`** | Not the `/workspace` default. See below. |
+| Volume size | 100 GB+ | HF checkpoints alone are tens of GB, before any run output. |
+| Container disk | 20 GB | Only the image's own writable layer; nothing the pipeline writes should land here. |
+| HTTP ports | `7860` | The web UI. RunPod proxies it at `https://<pod-id>-7860.proxy.runpod.net`. |
+| TCP ports | `22` | SSH. Optional, but it is how you get a shell if the UI won't start. |
+
+### Environment variables
+
+| Variable | Value | Notes |
+|---|---|---|
+| `HF_TOKEN` | `hf_...` | **Required.** From an account that has accepted the licences for `briaai/RMBG-2.0` and `facebook/sam-3d-body-dinov3`; both are gated and a human has to click through each one. `doctor` reports whether the token can actually reach them. |
+| `NVIDIA_DRIVER_CAPABILITIES` | `compute,utility,graphics,display` | **Set this here even though the image also sets it.** It is read by nvidia-container-toolkit at container-*creation* time, and whether RunPod honours an image-level `ENV` for it is unresolved. Without `graphics`, `vulkaninfo` finds no driver, and `brush` (Vulkan) and `render` (EGL) both fail — 40 minutes into a run, not at startup. |
+| `PUBLIC_KEY` | your SSH public key | RunPod usually injects this. The entrypoint starts `sshd` only when it is present. |
+| `B2C_PORT` | `7860` | Only if you need a different port. |
+
+### Why the volume mount path matters
+
+RunPod's template defaults the volume mount path to `/workspace`. A volume
+mounted there shadows everything beneath it. The application used to live at
+`/workspace/b2c_runner`, so a pod left on the default would boot into
+`No module named pipeline` while looking perfectly configured. The
+application now lives at `/opt/b2c_runner` for exactly this reason, but
+mount the volume at `/data` anyway — that is where every `B2C_*` path, the
+HF cache and `TMPDIR` point.
+
+If you must mount elsewhere, set `B2C_DATA_DIR` to match. Everything else
+(`B2C_OUTPUT_DIR`, `B2C_LOG_DIR`, `B2C_UPLOAD_DIR`, `TMPDIR`) derives from
+it unless overridden individually, and all of them have to be on the volume:
+the container's writable layer is small, one 81-frame batch of dispatcher
+IPC pickles is ~220 MB in each direction, and a trained splat is several GB.
+
+## The first sixty seconds
+
+The entrypoint runs `doctor --summary` before starting the UI, so the pod's
+log answers "can this machine actually run the pipeline" before you submit
+anything. Look for:
+
+```
+✓ OK    vulkan           deviceName = NVIDIA ...        <- brush can run
+✓ OK    egl              NVIDIA ... /PCIe/SSE2          <- render can run
+✓ OK    brush binaries   all 5 fork-specific flags present
+✓ OK    step venvs       3 configured
+✓ OK    huggingface      accessible / accessible        <- both gated repos
+```
+
+A `FAIL` on `vulkan` almost always means `NVIDIA_DRIVER_CAPABILITIES` was
+not set on the template. A `WARN` on `huggingface` means the token is
+missing or has not accepted a licence — every model step will 401.
+
+`doctor` is also a tab in the UI, and `docker run IMAGE doctor` (or
+`python -m pipeline.cli doctor` over SSH) from anywhere.
+
+## Submitting work
+
+Open `https://<pod-id>-7860.proxy.runpod.net`. Three input modes:
+
+- **Dataset directory on this machine** — anything under `/data` containing
+  a `metadata.json`. Upload one with `runpodctl send` / `scp` first, or use
+  a network volume that already has it.
+- **Upload a dataset .zip** — the same thing from your laptop. The archive
+  can be rooted at the dataset or one level above it; the extractor finds
+  the `metadata.json` either way.
+- **Single reference photo** — the from-scratch path. Runs
+  `fast_helical_native.yaml`, which renders its own views from a
+  SAM-3D-Body reconstruction. **Least proven of the three**: its front half
+  (`render` → `generate_firstlast` → `inject_anchor`) has never executed
+  end to end. If it falls over, the zip path still exercises everything
+  downstream of it.
+
+The **Params** box is a copy of the workflow's own `params:` block. Edit it
+freely — it is parsed as YAML and layered over the defaults. `output_root`
+is repointed automatically at this run's directory under `/data/output`.
+
+The run happens in a background thread. **Closing the browser tab does not
+stop it** — reopen the page and press *Attach / refresh* on the Progress
+tab. Cancel takes effect at the next step boundary, not mid-step: a step is
+one opaque call, often a subprocess holding the GPU, and tearing one down
+mid-flight risks leaving the card in a state the next run inherits.
+
+The same runs are available from the CLI, which is what you want for
+anything long enough that you would rather have it survive in `tmux`:
+
+```bash
+python -m pipeline.cli run fast_helical_full --dataset /data/my_dataset
+python -m pipeline.cli run fast_helical_full --dataset /data/my_dataset \
+    --param diffusion_steps=8 --param 'resolution=[720, 1280]'
+python -m pipeline.cli run fast_helical_native --reference-image /data/photo.jpg \
+    --prompt "a woman in a red jacket"
+```
+
+## Debugging without rebuilding
+
+The image ships the tools for all of this. Nothing here needs a new build.
+
+**Watch a run.** Every run writes `/data/logs/<workflow>-<timestamp>.log`
+with timestamps, elapsed time, per-step timing and a VRAM summary after each
+step. `tail -f` it, or read it from the UI's log pane. Subprocess steps
+(`wan22_vace_denoise`, `seedvr2`, `sam3d_body`) and the external binaries
+(`brush`, `brush-splat-render`) relay their output line by line as it
+happens — they used to be silent until they finished.
+
+**Get a shell.** SSH if `PUBLIC_KEY` was set; otherwise
+`docker exec`-equivalent through RunPod's web terminal. From a local
+container: `docker run --rm -it b2c/pipeline:latest bash`, or
+`bash -c '...'` for one command.
+
+**Patch the pipeline in place.** The package is installed editable, so an
+edit takes effect on the next run with no rebuild:
+
+```bash
+cd /opt/b2c_runner
+git pull                     # git is in the image
+nano pipeline/steps/brush.py
+python -m pipeline.cli run ...
+```
+
+**Run one step by hand.** Each isolated env's interpreter is a real
+interpreter:
+
+```bash
+/opt/venv_sam3dbody/bin/python -c "from sam_3d_body import load_sam_3d_body; print('ok')"
+/opt/venv_wan22/bin/python -c "import diffusers; print(diffusers.__version__)"
+```
+
+**Check the graphics stack separately from a failing step.**
+
+```bash
+vulkaninfo --summary          # brush's backend
+brush --help                  # does this binary have the fork's flags?
+nvidia-smi
+```
+
+**Raise the log level.** `B2C_DEBUG=1` sets DEBUG everywhere, including
+inside the subprocess workers.
+
+**Get results off the pod.** `/data/output/<run>/` holds the final dataset,
+the splat and the COLMAP export. The UI's Results tab zips it for download;
+`rsync`, `scp` and `runpodctl send` are all in the image.
+
+## Cost safety
+
+The image does **not** arm an auto-shutdown. `scripts/pod_bootstrap.sh` has
+one (`runpodctl stop pod` after `AUTO_SHUTDOWN_HOURS`) that predates the
+container, and it is worth copying onto the pod for an unattended run —
+`fast_helical_full.yaml` at production settings is hours of GPU time, and a
+step that hangs bills exactly like a step that works.

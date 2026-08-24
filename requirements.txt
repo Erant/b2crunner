@@ -21,3 +21,9 @@ requests>=2.31.0
 # build) is no longer needed here at all:
 #
 #   pip install plyfile
+
+# The web UI (pipeline/webui.py) — `python -m pipeline.cli ui`. Not a hard
+# requirement because every CLI path works without it; the Docker image
+# installs it, since serving the UI is what the container does by default.
+#
+#   pip install 'gradio>=5.0,<7.0'

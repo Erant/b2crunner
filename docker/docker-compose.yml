@@ -10,9 +10,18 @@
 # Usage:
 #   export HF_TOKEN=hf_...
 #   docker compose -f docker/docker-compose.yml build
+#
+#   # the web UI on http://localhost:7860 (the default mode, same as a pod)
+#   docker compose -f docker/docker-compose.yml up
+#
+#   # or one-shot CLI runs, unchanged from before the entrypoint existed
 #   docker compose -f docker/docker-compose.yml run --rm pipeline \
-#       run pipeline/workflows/roundtrip_example.yaml \
-#       --dataset /data/cyber_6f/initial -v
+#       doctor
+#   docker compose -f docker/docker-compose.yml run --rm pipeline \
+#       run fast_helical_local_smoke --dataset /data/cyber_6f/initial
+#
+#   # a shell, without needing --entrypoint
+#   docker compose -f docker/docker-compose.yml run --rm pipeline bash
 
 services:
   pipeline:
@@ -32,19 +41,28 @@ services:
         TORCHVISION_VERSION: "0.24.1"
         CUDA_WHEEL_INDEX: "https://download.pytorch.org/whl/cu130"
     image: b2c/pipeline:latest
+    ports:
+      # The web UI. On RunPod this is the template's "HTTP Ports" entry
+      # instead; here it is a plain publish.
+      - "7860:7860"
     environment:
       # Gated models (briaai/RMBG-2.0, facebook/sam-3d-body-dinov3) need a
       # token from an account that has accepted each licence. Injected at
       # run time, never baked into an image layer.
       - HF_TOKEN=${HF_TOKEN}
-      - HF_HOME=/data/hf_cache
-      - HF_HUB_DISABLE_XET=1
       # Also set in the image, but repeated here because it is read at
       # container-creation time and this is the layer that creates the
       # container. Gates brush (Vulkan) and render (EGL) alike.
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics,display
     volumes:
+      # Everything the pipeline writes — outputs, logs, the HF cache, the
+      # dispatchers' IPC pickles — goes here. The container's own writable
+      # layer is small enough that a single 81-frame batch can fill it.
       - b2c_data:/data
+      # Bind the local reference dataset in read-only so the UI's dataset
+      # picker finds cyber_6f/initial without a copy. Drop this line on a
+      # machine that doesn't have it; the volume above is what matters.
+      - ../cyber_6f:/data/cyber_6f:ro
     deploy:
       resources:
         reservations:

@@ -1,5 +1,9 @@
 # Docker container guide
 
+> **Deploying to RunPod? [runpod.md](runpod.md) is the file you want** —
+> pod template settings, the environment variables that have to be set
+> outside the image, and how to debug a run without rebuilding.
+>
 > **Start with [docker-build-notes.md](docker-build-notes.md).** That file
 > is the current test plan for actually getting the image built — machine
 > requirements, the two cheap probes to run before a full build, the
@@ -37,19 +41,42 @@ match, not the other way around.
 ```bash
 export HF_TOKEN=hf_...
 docker compose -f docker/docker-compose.yml build
+
+# the web UI on http://localhost:7860 — this is also what a pod does with
+# no arguments at all
+docker compose -f docker/docker-compose.yml up
+
+# or one-shot CLI runs
+docker compose -f docker/docker-compose.yml run --rm pipeline doctor
 docker compose -f docker/docker-compose.yml run --rm pipeline \
-    run pipeline/workflows/fast_helical_native.yaml --dataset /data/some_dataset -v
+    run fast_helical_native --dataset /data/some_dataset
+docker compose -f docker/docker-compose.yml run --rm pipeline bash
 ```
 
 The container mounts a shared `/data` volume (weights, HF cache, datasets
-you bind-mount in).
+you bind-mount in, and everything a run writes).
 
-**UNVERIFIED**: the Dockerfile still has not been built end-to-end. The
-previous version could not have built at all — it installed `python3.12`
-on Ubuntu 22.04, which has no such package, and pinned
-`sageattention>=2.1.1`, which does not exist on PyPI. Both are fixed; see
-docker-build-notes.md for the full list of what changed and what is still
-expected to be risky.
+## What the container does when you start it
+
+`docker/entrypoint.sh` picks a mode from the first argument:
+
+| Argument | Behaviour |
+|---|---|
+| none, or `ui` | Serves the web UI on `$B2C_PORT` and **stays alive**. The default. |
+| `run ...` | One workflow run, then exits. |
+| `doctor` / `steps` / `workflows` | The matching CLI subcommand, then exits. |
+| `bash` / `sh` / `shell` | A shell; extra arguments pass through, so `bash -c '...'` works. |
+| anything else | Exec'd verbatim — `docker run IMAGE nvidia-smi` needs no `--entrypoint`. |
+
+Whichever mode, it first creates the volume's directory layout and reports
+how much space is on it, then (for the UI) runs `doctor --summary` so the
+pod's log records what the machine could actually do *before* anything
+depends on it.
+
+The previous entrypoint was `python -m pipeline.cli` with no arguments,
+which meant a pod started with no start command printed an argparse usage
+error and exited. A pod whose container exits is a dead pod: no UI, no SSH,
+and the only diagnosis available is that same usage error.
 
 ## Why one image, not brush split out
 

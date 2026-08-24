@@ -25,9 +25,33 @@ Face-landmark detection needs `mediapipe` (CPU-only).
 ## Quickstart
 
 ```bash
-python -m pipeline.cli run pipeline/workflows/roundtrip_example.yaml \
-    --dataset path/to/existing/b2c_dataset -v
+# run a workflow against an existing dataset
+python -m pipeline.cli run roundtrip_example --dataset path/to/b2c_dataset
+
+# or from a single photo — the workflow renders its own views
+python -m pipeline.cli run fast_helical_native --reference-image photo.jpg \
+    --prompt "a woman in a red jacket"
+
+# what can this machine actually run? (GPU, Vulkan, EGL, venvs, HF access)
+python -m pipeline.cli doctor
+
+# the web UI: submit a dataset, a .zip of one, or a photo; watch progress
+python -m pipeline.cli ui            # needs `pip install 'gradio>=5.0,<7.0'`
+
+python -m pipeline.cli workflows     # what's available
+python -m pipeline.cli steps
 ```
+
+Runs write to `$B2C_OUTPUT_DIR` (default `/data/output`, falling back to a
+repo-local directory when there's no volume), and each one leaves a
+timestamped log under `$B2C_LOG_DIR`. See [pipeline/paths.py](pipeline/paths.py).
+
+## Deploying
+
+One image holds every step's venv plus the `brush` binaries, and serves the
+web UI by default. [docs/runpod.md](docs/runpod.md) has the pod template
+settings and the debugging recipes; [docs/docker.md](docs/docker.md) has the
+design rationale.
 
 ## Tests
 

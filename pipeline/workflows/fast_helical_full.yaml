@@ -69,8 +69,14 @@ params:
   # See steps/seedvr2.py.
   upscale_resolution: 1440
 
-  splat_path: output/fast_helical/splat.ply
-  colmap_dir: output/fast_helical/colmap
+  # Every path this workflow writes to disk hangs off this one param, and
+  # `pipeline.cli run` repoints it at the run's own directory under
+  # B2C_OUTPUT_DIR (i.e. the mounted volume) unless you pass
+  # `--param output_root=...`. The literal below is only what you get from
+  # a bare `WorkflowRunner` with no CLI: relative to the working directory,
+  # which on a pod is the container's writable layer — small, and gone when
+  # the pod is recycled.
+  output_root: output/fast_helical
 
   # Exact strings from the live ComfyUI graph (workflows/api/denoise.json,
   # nodes 6/7/188) — $SUBJECT_DESC$ is filled in from dataset.prompt.
@@ -155,6 +161,10 @@ steps:
       max_resolution: ${params.brush_max_resolution}
       max_splats: ${params.brush_max_splats}
       refine_every: ${params.brush_refine_every}
+      # Without this brush exports into tempfile.gettempdir() (see
+      # steps/brush.py) — the trained .ply then only survives because
+      # Dataset.to_disk copies it at the very end.
+      output_dir: ${params.output_root}
       alpha_mode: transparent
       normal_loss_strength: ${params.brush_normal_loss_strength}
       normal_loss_step_start: ${params.brush_normal_loss_step_start}
@@ -287,4 +297,4 @@ steps:
       images: dataset.images
       masks: dataset.masks
     params:
-      output_dir: ${params.colmap_dir}
+      output_dir: ${params.output_root}/colmap
