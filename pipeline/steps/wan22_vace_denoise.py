@@ -129,6 +129,33 @@ class Wan22VaceDenoiseStep(Step):
 
         checkpoint = params.get("checkpoint", DEFAULT_CHECKPOINT)
         cache_dir = params.get("fused_cache_dir")
+
+        # Optional: skip the bf16 download and the quantize entirely by
+        # loading a community ComfyUI-format fp8_scaled checkpoint straight
+        # into the diffusers model (see pipeline/wan_fp8.py). Half the
+        # download, no quantization at all.
+        #
+        # READ THIS BEFORE ENABLING IT: it is incompatible with the Lightning
+        # LoRA on the current torch. diffusers refuses to apply a LoRA to
+        # torchao-quantized weights below torchao 0.16, and torchao above
+        # 0.15 will not import on torch 2.9.1 (see docker/Dockerfile's pin) —
+        # a genuine version triangle, not a missing flag. Since the 6-step
+        # cfg=1.0 sampling this pipeline uses depends on that LoRA, enabling
+        # this without `use_lora: false` gets you a model that loads and
+        # produces poor output. Guarded below rather than left to discover.
+        fp8_high = params.get("fp8_checkpoint_high")
+        fp8_low = params.get("fp8_checkpoint_low")
+        if fp8_high or fp8_low:
+            if params.get("use_lora", True):
+                raise ValueError(
+                    "fp8_checkpoint_high/low cannot be combined with use_lora=true: "
+                    "diffusers cannot apply a LoRA to already-quantized weights on "
+                    "torchao<0.16, and torchao>0.15 does not import on torch 2.9.1. "
+                    "Set use_lora: false (and raise the step count — the Lightning "
+                    "LoRA is what makes 6 steps at cfg 1.0 work), or use the default "
+                    "bf16 + fused_cache_dir path. See docs/fp8-quant-notes.md."
+                )
+            return self._load_from_fp8(params, checkpoint, fp8_high, fp8_low)
         # Checks for the weight file, not just the directory: a save that
         # failed halfway (or the pre-fix save, which always failed) leaves
         # the directories present and empty, and a "cache hit" on an empty
@@ -265,6 +292,72 @@ class Wan22VaceDenoiseStep(Step):
             pipe.enable_model_cpu_offload()
         else:
             pipe.to(params.get("device", "cuda"))
+
+        self._pipe = pipe
+
+    def _load_from_fp8(
+        self,
+        params: Dict[str, Any],
+        checkpoint: str,
+        fp8_high: Optional[str],
+        fp8_low: Optional[str],
+    ) -> None:
+        """Build the pipeline around pre-quantized fp8 transformers.
+
+        Verified end to end against
+        silveroxides/Wan_2.2-fp8_scaled_hybrid's VACE files: all 1331
+        tensors map, and a full 40-block forward pass produces finite,
+        correctly-shaped output. See pipeline/wan_fp8.py for how the key
+        naming and the per-tensor scales are handled.
+        """
+        import torch
+        from diffusers import WanVACEPipeline
+
+        from ..wan_fp8 import load_config, load_fp8_transformer
+
+        if not (fp8_high and fp8_low):
+            raise ValueError(
+                "fp8_checkpoint_high and fp8_checkpoint_low must both be set — "
+                "the high- and low-noise experts are separate files."
+            )
+
+        config = load_config(params.get("fp8_config", checkpoint))
+        device = params.get("device", "cuda")
+        transformer = load_fp8_transformer(fp8_high, config, device="cpu")
+        transformer_2 = load_fp8_transformer(fp8_low, config, device="cpu")
+
+        # VAE/text_encoder/tokenizer/scheduler still come from the base
+        # repo; only the two transformers are replaced, and they are the
+        # only things the fp8 files contain.
+        pipe = WanVACEPipeline.from_pretrained(
+            checkpoint,
+            transformer=transformer,
+            transformer_2=transformer_2,
+            torch_dtype=torch.bfloat16,
+        )
+        self._finish_load(pipe, params, device)
+
+    def _finish_load(self, pipe, params: Dict[str, Any], device: str) -> None:
+        """Attention backend + offload, shared by both load paths."""
+        attention_backend = params.get("attention_backend", "auto")
+        if attention_backend and attention_backend != "none":
+            backend_name = (
+                _select_sage_backend() if attention_backend == "auto" else attention_backend
+            )
+            if backend_name:
+                try:
+                    pipe.transformer.set_attention_backend(backend_name)
+                    pipe.transformer_2.set_attention_backend(backend_name)
+                except Exception as e:  # noqa: BLE001 - best-effort optimization
+                    print(
+                        f"wan22_vace_denoise: set_attention_backend({backend_name!r}) failed "
+                        f"({e!r}), falling back to PyTorch native SDPA"
+                    )
+
+        if params.get("cpu_offload", True):
+            pipe.enable_model_cpu_offload()
+        else:
+            pipe.to(device)
 
         self._pipe = pipe
 
