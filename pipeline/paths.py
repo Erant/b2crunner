@@ -17,6 +17,7 @@ the same code runs unchanged on a laptop with no /data at all:
     B2C_OUTPUT_DIR  $DATA/output    workflow outputs (splats, COLMAP, frames)
     B2C_LOG_DIR     $DATA/logs      one log file per run
     B2C_UPLOAD_DIR  $DATA/uploads   what the web UI receives
+    B2C_MODELS_DIR  $DATA/models    weights whose downloader ignores HF_HOME
     TMPDIR          $DATA/tmp       dispatcher IPC pickles (stdlib reads this)
 
 If B2C_DATA_DIR doesn't exist and can't be created (a dev box with no
@@ -69,6 +70,28 @@ def log_dir() -> Path:
 
 def upload_dir() -> Path:
     return _sub("B2C_UPLOAD_DIR", "uploads")
+
+
+def models_dir() -> Path:
+    """Weights that do NOT come down through huggingface_hub.
+
+    Most of the pipeline's checkpoints are `from_pretrained`/
+    `snapshot_download` calls, which honour HF_HOME and so land in
+    $DATA/hf_cache without anyone thinking about it. Two do not:
+
+      * seedvr2 hands its vendored downloader an explicit `model_dir` that
+        bypasses HF_HOME entirely, and it defaulted to the RELATIVE path
+        "models/SEEDVR2" — which resolves against the worker subprocess's
+        working directory, i.e. inside the container. Several GB of DiT
+        and VAE weights into a pod's 20 GB container disk, re-downloaded
+        from scratch every time the pod is recycled.
+      * face_landmarks fetches MediaPipe's .task/.tflite files straight
+        from a Google Storage URL into ~/.cache, with the same problem in
+        miniature.
+
+    Both now default under here.
+    """
+    return _sub("B2C_MODELS_DIR", "models")
 
 
 def configure_tmpdir() -> Path:

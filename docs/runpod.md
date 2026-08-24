@@ -107,6 +107,76 @@ python -m pipeline.cli run fast_helical_native --reference-image /data/photo.jpg
     --prompt "a woman in a red jacket"
 ```
 
+## When and where the models are downloaded
+
+**Nothing is baked into the image, and nothing downloads at container
+start.** Every checkpoint is fetched lazily, by the step that needs it, the
+first time a run reaches that step — inside `Step.load()`. So a fresh pod's
+first `fast_helical_full` spends its opening stretch downloading, and a
+second run on the same pod skips all of it.
+
+Deliberate: two of these are gated (a human has to accept the licence), they
+should not be redistributed inside a shareable image, and baking ~60 GB of
+weights into an image makes it painful to push and pull.
+
+| Step | What | From | Lands in |
+|---|---|---|---|
+| `rmbg` | `briaai/RMBG-2.0` **(gated)** | `from_pretrained` | `$HF_HOME` = `/data/hf_cache` |
+| `sapiens2_lite` | `facebook/sapiens2-normal-0.4b` | `from_pretrained` | `$HF_HOME` |
+| `sam3d_body` | `facebook/sam-3d-body-dinov3` **(gated)** | `snapshot_download` | `$HF_HOME` |
+| `wan22_vace_denoise` | `linoyts/Wan2.2-VACE-Fun-14B-diffusers` + `lightx2v/Wan2.2-Lightning` LoRAs | `from_pretrained` / `hf_hub_download` | `$HF_HOME` |
+| `seedvr2` | `seedvr2_ema_3b_fp8_e4m3fn` + `ema_vae_fp16` | its vendored downloader | `$B2C_MODELS_DIR` = `/data/models/SEEDVR2` |
+| `detect_face_landmarks` | MediaPipe `.task` / `.tflite` | Google Storage URL | `$B2C_MODELS_DIR/mediapipe` |
+| `brush`, `render`, `render_splat`, `colmap_export`, … | nothing | — | — |
+
+The last two rows are the ones that needed fixing. Both bypass
+`huggingface_hub` and so ignore `HF_HOME`: seedvr2 hands its vendored
+downloader an explicit `model_dir` which defaulted to the *relative* path
+`models/SEEDVR2`, resolving against the worker subprocess's working
+directory — several GB of DiT and VAE weights inside the container, on the
+20 GB container disk, re-downloaded from scratch after every pod restart.
+MediaPipe's did the same into `~/.cache`. Both now default under
+`$B2C_MODELS_DIR`.
+
+`doctor` reports both caches and their current size, so you can see what a
+pod has already pulled:
+
+```
+✓ OK    model caches
+          HF cache  /data/hf_cache: 61.4 GB
+          models    /data/models: 4.2 GB
+            briaai/RMBG-2.0 (0.9 GB)
+            linoyts/Wan2.2-VACE-Fun-14B-diffusers (52.1 GB)
+            ...
+```
+
+It WARNs if `HF_HOME` is not on the volume at all, which is the shape of the
+problem above rather than an instance of it.
+
+### Pre-warming a pod
+
+Nothing requires you to wait for a run to trigger the downloads. Either
+start a run and let it, or pull them ahead of time over SSH — worth doing on
+a fresh pod so the first real run isn't half download:
+
+```bash
+# gated models: HF_TOKEN must belong to an account that accepted each licence
+/opt/venv_main/bin/python -c "
+from huggingface_hub import snapshot_download
+for repo in ['briaai/RMBG-2.0', 'facebook/sapiens2-normal-0.4b',
+             'facebook/sam-3d-body-dinov3']:
+    print(repo, snapshot_download(repo))
+"
+bash pipeline/envs/wan22/setup.sh   # Wan2.2 checkpoint + Lightning LoRAs
+```
+
+Because they land on the volume, a network volume reused across pods keeps
+them: pull once, and every later pod starts warm.
+
+**Budget the volume accordingly.** The Wan2.2 checkpoint alone is the bulk
+of it; 100 GB is a reasonable floor once the whole set plus run output is on
+there.
+
 ## Debugging without rebuilding
 
 The image ships the tools for all of this. Nothing here needs a new build.

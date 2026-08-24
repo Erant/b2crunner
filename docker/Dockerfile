@@ -391,11 +391,17 @@ ENV PYTHONFAULTHANDLER=1
 # and no mention of TMPDIR anywhere in the output. (The skeleton also means
 # a container run with no volume at all still has somewhere to write, rather
 # than dying on the first mkdir.)
-RUN mkdir -p /data/output /data/logs /data/uploads /data/tmp /data/hf_cache
+RUN mkdir -p /data/output /data/logs /data/uploads /data/tmp /data/hf_cache /data/models
 ENV B2C_DATA_DIR=/data
 ENV B2C_OUTPUT_DIR=/data/output
 ENV B2C_LOG_DIR=/data/logs
 ENV B2C_UPLOAD_DIR=/data/uploads
+# Weights whose downloader ignores HF_HOME — seedvr2's vendored one takes an
+# explicit model_dir, and face_landmarks fetches MediaPipe's files straight
+# from a URL. Both defaulted somewhere inside the container (a relative path
+# and ~/.cache respectively), which on a pod means several GB on the small
+# container disk, re-downloaded after every restart. See pipeline/paths.py.
+ENV B2C_MODELS_DIR=/data/models
 ENV TMPDIR=/data/tmp
 ENV B2C_PORT=7860
 

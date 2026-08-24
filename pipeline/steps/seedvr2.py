@@ -51,6 +51,7 @@ from typing import Any, Dict
 import cv2
 import numpy as np
 
+from ..paths import models_dir
 from ..registry import register_step
 from ..step import Step
 
@@ -71,7 +72,14 @@ class SeedVR2Step(Step):
         self._debug = Debug(enabled=params.get("debug", False))
         self._dit_model = params.get("dit_model", DEFAULT_DIT)
         self._vae_model = params.get("vae_model", DEFAULT_VAE)
-        self._model_dir = params.get("model_dir", "models/SEEDVR2")
+        # NOT the relative "models/SEEDVR2" this used to default to: the
+        # vendored download_weight() treats model_dir as its whole cache
+        # root and never consults HF_HOME, so a relative path resolved
+        # against the worker subprocess's cwd and put several GB of DiT and
+        # VAE weights inside the container rather than on the volume — lost
+        # on every pod restart, and enough to exhaust a default container
+        # disk on its own.
+        self._model_dir = params.get("model_dir") or str(models_dir() / "SEEDVR2")
 
         # main() calls this before ever touching _process_frames_core;
         # _process_frames_core itself assumes the weights are already on

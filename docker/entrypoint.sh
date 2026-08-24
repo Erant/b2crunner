@@ -36,7 +36,7 @@ log() { echo "[entrypoint] $*"; }
 # volume layout
 # --------------------------------------------------------------------------
 prepare_volume() {
-    if ! mkdir -p "$DATA_DIR"/{output,logs,uploads,tmp,hf_cache} 2>/dev/null; then
+    if ! mkdir -p "$DATA_DIR"/{output,logs,uploads,tmp,hf_cache,models} 2>/dev/null; then
         log "WARNING: $DATA_DIR is not writable."
         log "  On RunPod this usually means the template has no volume, or its mount"
         log "  path is not $DATA_DIR. Everything will fall back to the container's"

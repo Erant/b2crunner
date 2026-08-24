@@ -71,9 +71,24 @@ DETECTOR_MODEL_URL = (
     "https://storage.googleapis.com/mediapipe-models/"
     "face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite"
 )
-MODEL_CACHE_DIR = Path.home() / ".cache" / "body2colmap"
-LANDMARKER_MODEL_PATH = MODEL_CACHE_DIR / "face_landmarker.task"
-DETECTOR_MODEL_PATH = MODEL_CACHE_DIR / "blaze_face_short_range.tflite"
+LANDMARKER_MODEL_NAME = "face_landmarker.task"
+DETECTOR_MODEL_NAME = "blaze_face_short_range.tflite"
+
+
+def _model_path(filename: str) -> Path:
+    """Where a MediaPipe model file is cached.
+
+    Resolved lazily rather than at import time: every step module is
+    imported in every isolated venv (see pipeline/steps/__init__.py), and
+    a module-level call would mkdir on the volume just to answer "which
+    step class is this", in processes that will never touch MediaPipe.
+
+    On the volume, not in ~/.cache — the latter is inside the container on
+    a pod, so these re-download on every restart.
+    """
+    from ..paths import models_dir
+
+    return models_dir() / "mediapipe" / filename
 
 # MediaPipe landmark indices used for frontality scoring.
 _MP_RIGHT_EYE_OUTER = 33
@@ -125,8 +140,8 @@ class DetectFaceLandmarksStep(Step):
             width, height, min_confidence,
         )
 
-        landmarker_path = str(_ensure_model(LANDMARKER_MODEL_URL, LANDMARKER_MODEL_PATH))
-        detector_path = str(_ensure_model(DETECTOR_MODEL_URL, DETECTOR_MODEL_PATH))
+        landmarker_path = str(_ensure_model(LANDMARKER_MODEL_URL, _model_path(LANDMARKER_MODEL_NAME)))
+        detector_path = str(_ensure_model(DETECTOR_MODEL_URL, _model_path(DETECTOR_MODEL_NAME)))
 
         lm_options = vision.FaceLandmarkerOptions(
             base_options=python.BaseOptions(model_asset_path=landmarker_path),

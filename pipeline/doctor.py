@@ -61,7 +61,7 @@ def _run(cmd: List[str], timeout: int = 60) -> subprocess.CompletedProcess:
 
 def check_environment() -> Check:
     interesting = [
-        "B2C_DATA_DIR", "B2C_OUTPUT_DIR", "B2C_LOG_DIR", "TMPDIR",
+        "B2C_DATA_DIR", "B2C_OUTPUT_DIR", "B2C_LOG_DIR", "B2C_MODELS_DIR", "TMPDIR",
         "HF_HOME", "HF_HUB_DISABLE_XET", "HF_HUB_ENABLE_HF_TRANSFER",
         "NVIDIA_DRIVER_CAPABILITIES", "CUDA_VISIBLE_DEVICES",
         "PYTHONPATH", "PYOPENGL_PLATFORM",
@@ -76,13 +76,14 @@ def check_environment() -> Check:
 
 
 def check_disk() -> Check:
-    from .paths import data_dir, log_dir, output_dir
+    from .paths import data_dir, log_dir, models_dir, output_dir
 
     targets = {
         "/": Path("/"),
         "data": data_dir(),
         "output": output_dir(),
         "logs": log_dir(),
+        "models": models_dir(),
         "tmp": Path(os.environ.get("TMPDIR", "/tmp")),
     }
     lines, status = [], OK
@@ -103,7 +104,7 @@ def check_disk() -> Check:
             status = FAIL
         # A brush .ply plus a COLMAP export plus a checkpointed dataset runs
         # to a few GB; under 10 free is where runs start dying halfway.
-        elif free_gb < 10 and label in ("data", "output", "tmp"):
+        elif free_gb < 10 and label in ("data", "output", "tmp", "models"):
             status = WARN if status == OK else status
     return Check("disk", status, "", lines)
 
@@ -321,6 +322,46 @@ def check_huggingface() -> Check:
     return Check("huggingface", status, "", lines)
 
 
+def check_model_caches() -> Check:
+    """How much of the model set is already on the volume.
+
+    The pipeline downloads every checkpoint lazily, on the first run that
+    reaches the step needing it — so a fresh pod's first
+    `fast_helical_full` spends its opening half-hour downloading, and it is
+    worth being able to see that state rather than inferring it from a
+    stalled progress bar.
+    """
+    from .paths import data_dir, models_dir
+
+    def _size(path: Path) -> float:
+        if not path.exists():
+            return 0.0
+        return sum(f.stat().st_size for f in path.rglob("*") if f.is_file()) / 1e9
+
+    hf_home = Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface"))
+    lines = [
+        f"HF cache  {hf_home}: {_size(hf_home):.1f} GB",
+        f"models    {models_dir()}: {_size(models_dir()):.1f} GB",
+    ]
+
+    hub = hf_home / "hub"
+    if hub.exists():
+        for repo in sorted(hub.glob("models--*")):
+            lines.append(f"  {repo.name.replace('models--', '').replace('--', '/')}"
+                         f" ({_size(repo):.1f} GB)")
+
+    # Not a FAIL when empty: an empty cache is the correct state of a fresh
+    # pod, not a fault. It is just slow, and worth knowing about in advance.
+    inside_container = not str(hf_home).startswith(str(data_dir()))
+    return Check(
+        "model caches",
+        WARN if inside_container else OK,
+        "HF_HOME is NOT on the volume — downloads will fill the container disk"
+        if inside_container else "",
+        lines,
+    )
+
+
 def check_step_registry() -> Check:
     try:
         from . import steps  # noqa: F401
@@ -358,6 +399,7 @@ def run_checks(envs: Optional[Dict[str, Dict[str, Any]]] = None) -> List[Check]:
         ("brush binaries", check_brush_binaries),
         ("step venvs", lambda: check_step_venvs(envs or {})),
         ("huggingface", check_huggingface),
+        ("model caches", check_model_caches),
         ("step registry", check_step_registry),
         ("ffmpeg", check_ffmpeg),
     ]

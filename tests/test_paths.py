@@ -79,3 +79,79 @@ class TestPaths(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestModelDownloadDestinations(unittest.TestCase):
+    """No step may cache weights inside the container.
+
+    Most checkpoints come down through huggingface_hub and land in HF_HOME
+    without anyone thinking about it. The exceptions are the ones that bit:
+    seedvr2 hands its vendored downloader an explicit `model_dir` that
+    ignores HF_HOME (it defaulted to the relative "models/SEEDVR2", i.e.
+    inside the container, several GB of it), and face_landmarks fetches
+    MediaPipe's files from a URL into what used to be ~/.cache. Both are
+    lost on every pod restart and both eat the container disk.
+
+    A static check, because reaching either code path for real needs a GPU
+    and a licence-accepted HF token.
+    """
+
+    def test_seedvr2_model_dir_defaults_onto_the_volume(self):
+        import inspect
+        import os
+        import tempfile
+
+        from pipeline.paths import models_dir
+        from pipeline.steps.seedvr2 import SeedVR2Step
+
+        # Comment lines stripped first: the code carries an explanation of
+        # what the old default was and why it moved, which would otherwise
+        # trip this check on its own prose.
+        source = inspect.getsource(SeedVR2Step.load)
+        code = "\n".join(
+            line for line in source.splitlines() if not line.lstrip().startswith("#")
+        )
+        self.assertNotIn(
+            '"models/SEEDVR2"', code,
+            "seedvr2 is back to a relative model_dir, which resolves inside the container",
+        )
+        self.assertIn("models_dir()", code)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            previous = os.environ.get("B2C_DATA_DIR")
+            os.environ["B2C_DATA_DIR"] = tmp
+            try:
+                self.assertTrue(str(models_dir()).startswith(tmp))
+            finally:
+                if previous is None:
+                    os.environ.pop("B2C_DATA_DIR", None)
+                else:
+                    os.environ["B2C_DATA_DIR"] = previous
+
+    def test_face_landmarks_does_not_cache_in_home(self):
+        from pipeline.steps import face_landmarks
+
+        source = Path(face_landmarks.__file__).read_text()
+        self.assertNotIn(
+            "Path.home()", source,
+            "face_landmarks caches MediaPipe models under ~/.cache, which is inside "
+            "the container on a pod",
+        )
+
+    def test_no_step_module_names_a_relative_models_directory(self):
+        import re
+
+        steps_dir = Path(__file__).resolve().parent.parent / "pipeline" / "steps"
+        offenders = []
+        for path in sorted(steps_dir.glob("*.py")):
+            for number, line in enumerate(path.read_text().splitlines(), start=1):
+                if line.lstrip().startswith("#"):
+                    continue
+                if re.search(r'["\'](?!/)[\w./-]*models?/[\w./-]+["\']', line):
+                    offenders.append(f"{path.name}:{number}: {line.strip()}")
+        self.assertEqual(
+            offenders, [],
+            "a step names a relative model directory; it resolves against the worker "
+            "subprocess's cwd, which on a pod is inside the container:\n  "
+            + "\n  ".join(offenders),
+        )
