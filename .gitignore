@@ -37,3 +37,6 @@ temp/
 # Local reference data (not part of the pipeline)
 cyber_6f.zip
 /cyber_6f/
+
+# Local scratch for the fp8 checkpoint experiments (tens of GB)
+.fp8-scratch/

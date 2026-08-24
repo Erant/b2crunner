@@ -235,6 +235,25 @@ RUN make-child-venv /opt/venv_main \
 
 # venv_wan22: wan22_vace_denoise (subprocess dispatch).
 #
+# torchao is PINNED to 0.15.0, and this is a hard requirement of torch
+# 2.9.1, not a preference. The previous 'torchao>=0.16.0' floated up to
+# 0.18.0, which is built against torch >= 2.11 and dies on import with
+#   ImportError: cannot import name 'ScalingType' from 'torch.nn.functional'
+#
+# That is far worse than it sounds. It does not merely break the
+# fp8-quantization path: transformers' modeling_utils imports
+# quantizer_torchao unconditionally, so a torchao that is *installed but
+# unimportable* takes `import diffusers` down with it. The whole
+# wan22_vace_denoise step — the single most expensive thing in the
+# pipeline, and the reason the RunPod round exists — could not import at
+# all in the built image. An absent torchao would have been fine (the
+# guard handles that); a broken one is not.
+#
+# 0.15.0 is the release built for torch 2.9.1 (0.14.1 pairs with 2.9.0).
+# Verified in-container: torchao imports, diffusers imports, and
+# Float8WeightOnlyConfig quantizes a real WanVACETransformer3DModel.
+# Re-check this pin whenever TORCH_VERSION moves.
+#
 # sageattention is deliberately NOT installed: the requirements file asks
 # for >=2.1.1 and PyPI's newest is 1.0.6 — 2.x was never published there,
 # so that constraint is unsatisfiable in a clean build. It is also
@@ -249,7 +268,7 @@ RUN make-child-venv /opt/venv_wan22 \
         'accelerate>=1.0.0' \
         'peft>=0.13.0' \
         ftfy \
-        'torchao>=0.16.0' \
+        'torchao==0.15.0' \
         'kernels>=0.4.0'
 
 # venv_seedvr2: seedvr2 (subprocess dispatch).

@@ -129,7 +129,15 @@ class Wan22VaceDenoiseStep(Step):
 
         checkpoint = params.get("checkpoint", DEFAULT_CHECKPOINT)
         cache_dir = params.get("fused_cache_dir")
-        cache_hit = bool(cache_dir) and Path(cache_dir, "transformer").is_dir() and Path(cache_dir, "transformer_2").is_dir()
+        # Checks for the weight file, not just the directory: a save that
+        # failed halfway (or the pre-fix save, which always failed) leaves
+        # the directories present and empty, and a "cache hit" on an empty
+        # directory fails deep inside from_pretrained instead of quietly
+        # falling back to rebuilding.
+        cache_hit = bool(cache_dir) and all(
+            any(Path(cache_dir, sub).glob("diffusion_pytorch_model*.bin"))
+            for sub in ("transformer", "transformer_2")
+        )
 
         if cache_hit:
             # Skip base-checkpoint download of the transformers entirely —
@@ -137,11 +145,18 @@ class Wan22VaceDenoiseStep(Step):
             # prior run below. VAE/text_encoder/tokenizer/scheduler still
             # come from the base checkpoint (never modified, so never cached
             # separately).
+            # use_safetensors=False to match how the cache is written
+            # above: the quantized weights are a torch.save pickle, because
+            # safetensors cannot serialize torchao's tensor subclass on this
+            # torch/torchao pairing. Without this, from_pretrained looks for
+            # a .safetensors that is not there.
             transformer = WanVACETransformer3DModel.from_pretrained(
-                cache_dir, subfolder="transformer", torch_dtype=torch.bfloat16
+                cache_dir, subfolder="transformer",
+                torch_dtype=torch.bfloat16, use_safetensors=False,
             )
             transformer_2 = WanVACETransformer3DModel.from_pretrained(
-                cache_dir, subfolder="transformer_2", torch_dtype=torch.bfloat16
+                cache_dir, subfolder="transformer_2",
+                torch_dtype=torch.bfloat16, use_safetensors=False,
             )
             pipe = WanVACEPipeline.from_pretrained(
                 checkpoint, transformer=transformer, transformer_2=transformer_2, torch_dtype=torch.bfloat16
@@ -207,8 +222,27 @@ class Wan22VaceDenoiseStep(Step):
             # quantized tensor subclass's storage) — never let a caching
             # failure take down an otherwise-working run.
             try:
-                pipe.transformer.save_pretrained(str(Path(cache_dir) / "transformer"))
-                pipe.transformer_2.save_pretrained(str(Path(cache_dir) / "transformer_2"))
+                # safe_serialization=False is the whole fix, and it is not
+                # optional. safetensors cannot introspect the storage of
+                # torchao's quantized tensor subclass, so the default
+                # safetensors path dies with "Attempted to access the data
+                # pointer on an invalid python storage" — which is what made
+                # this cache never once succeed. diffusers knows: it reports
+                # "not serializable with safe serialization without
+                # safetensors support from the installed torchao version".
+                # That support needs a torchao newer than torch 2.9 admits
+                # (see docker/Dockerfile's pin), so torch.save is the
+                # available path until the torch floor moves.
+                #
+                # The cost is a pickle rather than safetensors. Acceptable
+                # for a cache this process wrote to its own volume; if these
+                # weights are ever published, see docs/fp8-quant-notes.md.
+                pipe.transformer.save_pretrained(
+                    str(Path(cache_dir) / "transformer"), safe_serialization=False
+                )
+                pipe.transformer_2.save_pretrained(
+                    str(Path(cache_dir) / "transformer_2"), safe_serialization=False
+                )
             except Exception as e:  # noqa: BLE001 - caching is an optimization, never fatal
                 print(f"wan22_vace_denoise: failed to cache fused weights to {cache_dir!r}: {e!r}")
 

@@ -40,3 +40,6 @@ htmlcov/
 output/
 temp/
 *.pkl
+
+# Local fp8 checkpoint experiments
+.fp8-scratch/
