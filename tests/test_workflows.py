@@ -184,14 +184,32 @@ class TestWorkflowFiles(unittest.TestCase):
                 self.assertEqual(step.when, twin.when)
                 self.assertEqual(step.keep_loaded, twin.keep_loaded)
 
-    def test_every_workflow_declares_the_output_switches(self):
-        """A shipped workflow that silently ignores the UI's Outputs
-        checkboxes would run for an hour and hand back the wrong thing."""
+    def test_output_switches_and_the_steps_they_guard_agree(self):
+        """A workflow declares `export_colmap`/`export_ply` exactly when it
+        has steps guarded by them.
+
+        Both directions are a real failure. A param with no step behind it
+        puts a checkbox in the UI that silently does nothing. A guarded step
+        whose param is undeclared is caught by `test_when_conditions_resolve`
+        above, but the pairing is what keeps the UI honest: the checkboxes
+        are derived from the params, so params that do not match the steps
+        mean the UI is offering the wrong choices.
+
+        Not every workflow has to produce deliverables — fast_helical_native
+        is a single forward pass that ends at a checkpoint, and correctly
+        declares neither.
+        """
+        switches = ("export_colmap", "export_ply")
         for path in _workflows():
             spec = WorkflowSpec.from_yaml(str(path))
-            with self.subTest(workflow=path.name):
-                self.assertIn("export_colmap", spec.params)
-                self.assertIn("export_ply", spec.params)
+            for switch in switches:
+                guarded = [s.id for s in spec.steps if f"params.{switch}" in str(s.when)]
+                with self.subTest(workflow=path.name, param=switch):
+                    self.assertEqual(
+                        switch in spec.params, bool(guarded),
+                        f"{path.name}: declares {switch}={switch in spec.params} "
+                        f"but the steps it guards are {guarded or 'none'}",
+                    )
 
     def test_context_paths_look_like_paths(self):
         for path in _workflows():

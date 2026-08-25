@@ -1,10 +1,9 @@
 """Starting a run from something other than a complete on-disk dataset.
 
 Two entry points the pipeline did not have before: a Dataset built from a
-bare reference photo (the from-scratch path — no shipped workflow consumes
-it now that fast_helical_native.yaml is gone, but it is the hard half of
-putting one back), and locating the dataset root inside an uploaded
-archive.
+bare reference photo (the from-scratch path fast_helical_native.yaml needs,
+called out as missing in that file's own header), and locating the dataset
+root inside an uploaded archive.
 """
 
 from __future__ import annotations

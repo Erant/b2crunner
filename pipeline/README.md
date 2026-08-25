@@ -136,11 +136,17 @@ pipeline/
 │   │                            ComfyUI `fast helical` pipeline; every
 │   │                            step exists and the file validates, but
 │   │                            it has never been executed
-│   └── fast_helical.yaml        the same file minus the SeedVR2 upscale
-│                                (and the camera rescale that repairs
-│                                what the upscale invalidates), for
-│                                isolating the upscaler when output looks
-│                                wrong
+│   ├── fast_helical.yaml        the same file minus the SeedVR2 upscale
+│   │                            (and the camera rescale that repairs
+│   │                            what the upscale invalidates), for
+│   │                            isolating the upscaler when output looks
+│   │                            wrong
+│   └── fast_helical_native.yaml single forward pass from one photo;
+│                                rmbg/wan22_vace_denoise/sapiens2/
+│                                sam3d_body verified on real hardware,
+│                                render's own rasterisation not. Predates
+│                                the export conventions the two above
+│                                use — see its STATUS note
 └── tests/                 stdlib unittest, no pytest dependency. Run with
                            `python -m unittest discover -s tests -t .`.
                            Most tests are golden-output tests against
@@ -272,7 +278,7 @@ falsy as *strings* too — a `when:` usually resolves through a param
 somebody typed, and `bool("false")` is `True`.
 
 See `pipeline/workflows/fast_helical_full.yaml` for a full multi-step
-example.
+example, and `fast_helical_native.yaml` for the from-a-photo shape.
 
 ### envs.yaml
 
@@ -344,7 +350,7 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   (v1) "lite" torchscript path this step's name originally referenced. Ran
   against `wan22_vace_denoise` output frames on an L40S pod, both
   single-image and batched paths; output correctly shaped and L2-normalized.
-- both workflow YAMLs load and their step names resolve against the
+- every workflow YAML loads and its step names resolve against the
   registry.
 - `sam3d_body` — SAM-3D-Body mesh/joint reconstruction. Ran real inference
   on an L40S pod against `cyber_6f`'s `anchor.png`: 18439 vertices, 36874
@@ -393,8 +399,9 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   `overlap=1`-circular-path case where frame 0 and the last frame share a
   position); the no-`anchor_image` case passes inputs through with an
   all-1.0 mask instead of failing. Not yet run against a real `render`
-  output (`render` itself is unverified — see below); `inject_anchor` is
-  wired into both `fast_helical` workflows, `generate_firstlast` is not.
+  output (`render` itself is unverified — see below). Both are wired into
+  `fast_helical_native.yaml`; the `fast_helical` files use `inject_anchor`
+  only, since they start from a dataset that already has its anchor.
 
 - `colmap_export` — verified against `cyber_6f/colmap`, the real COLMAP
   directory the ComfyUI stage produced from `cyber_6f/upscaled`.

@@ -4,20 +4,23 @@ Standalone (non-ComfyUI) execution engine for the Body2COLMAP pipeline,
 extracted from `ComfyUI-Body2COLMAP/pipeline`. See [pipeline/README.md](pipeline/README.md)
 for the full design doc, module map, and current status.
 
-Every node in the ComfyUI pack now has a native counterpart. Two workflows
-ship, and they differ in exactly one stage:
+Every node in the ComfyUI pack now has a native counterpart. Three
+workflows ship:
 
-| workflow | stages | for |
+| workflow | starts from | stages |
 |---|---|---|
-| `fast_helical_full` | six — includes the SeedVR2 upscale | the full port of the ComfyUI `fast helical` pipeline |
-| `fast_helical` | five — no upscale | the same run with the upscaler taken out, to isolate it when output looks wrong |
+| `fast_helical_full` | an existing dataset | six — the full port of the ComfyUI `fast helical` pipeline, upscale included |
+| `fast_helical` | an existing dataset | five — the same run with the SeedVR2 upscale taken out, to isolate it when output looks wrong |
+| `fast_helical_native` | a single photo | one forward pass — reconstruct a body, render its own views, denoise, train a splat |
 
-**Neither has been run end-to-end on a pod.** The
+**None has been run end-to-end on a pod**, and `fast_helical_native` is the
+least proven of the three: it is the next piece of work, and predates the
+export conventions the other two use. The
 [coverage section](pipeline/README.md#coverage-vs-the-comfyui-node-pack)
 tracks what is verified against what.
 
-Both end by producing whichever deliverables you ask for, under the run's
-output directory:
+The two `fast_helical` workflows end by producing whichever deliverables
+you ask for, under the run's output directory:
 
 ```
 <run>/colmap/   cameras.txt, images.txt, points3D.txt, images/, normals/
@@ -49,11 +52,15 @@ python -m pipeline.cli run fast_helical --dataset path/to/b2c_dataset
 python -m pipeline.cli run fast_helical --dataset path/to/b2c_dataset \
     --param export_ply=false
 
+# or from a single photo — the workflow renders its own views
+python -m pipeline.cli run fast_helical_native --reference-image photo.jpg \
+    --prompt "a woman in a red jacket"
+
 # what can this machine actually run? (GPU, Vulkan, EGL, venvs, HF access)
 python -m pipeline.cli doctor
 
-# the web UI: submit a dataset or a .zip of one, watch progress, pull the
-# result back as one .zip
+# the web UI: submit a dataset, a .zip of one, or a photo; watch progress,
+# pull the result back as one .zip
 python -m pipeline.cli ui            # needs `pip install 'gradio>=5.0,<7.0'`
 
 python -m pipeline.cli workflows     # what's available

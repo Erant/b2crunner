@@ -14,16 +14,18 @@ Three shapes of input, per what the pipeline can start from:
   * **an uploaded .zip** of such a directory — the same thing when the
     dataset lives on your laptop rather than the pod;
   * **a single reference photo** — the from-scratch path, via
-    `Dataset.from_reference_image`.
+    `Dataset.from_reference_image` and `fast_helical_native.yaml`.
 
-No shipped workflow currently takes the third: both `fast_helical` files
-begin from a complete dataset, and the one that rendered its own views
-(`fast_helical_native.yaml`) was dropped as irrelevant to the pod image.
-The control stays, because the plumbing behind it is the expensive half and
-adding such a workflow back is a YAML file — but picking it against a
-workflow that cannot use it is refused at submit time (see
-`workflow_needs_a_dataset`) rather than failing on a bare KeyError one step
-in.
+Only that last workflow takes a photo; both `fast_helical` files begin from
+a complete dataset. Picking the photo input against one of those is refused
+at submit time (see `workflow_needs_a_dataset`, which reads it off the
+steps rather than off a flag) instead of failing on a bare KeyError one
+step in.
+
+The photo path is the least proven of the three — its front half (render /
+generate_firstlast / inject_anchor) has never executed end to end — which
+is exactly why the other two are here: if it falls over, the rest of the
+pipeline is still exercisable from a zip without touching the image.
 
 **The run is a background thread, the UI only ever polls it.** A Gradio
 generator holds an SSE connection for as long as it yields, and a browser
@@ -490,27 +492,36 @@ def workflow_outputs(name: str) -> List[str]:
     return [label for label, param in OUTPUT_PARAMS.items() if param in spec.params]
 
 
-def workflow_needs_a_dataset(name: str) -> bool:
-    """Whether this workflow reads frames it does not itself produce.
+# Exactly the fields `Dataset.from_reference_image` cannot fill in: a
+# photo gives you `reference_image`, `prompt` and a resolution, and nothing
+# else. A workflow that reads one of these before a step has written it is
+# a workflow that needs a real dataset handed to it.
+_NEEDS_A_REAL_DATASET = {
+    "dataset.images", "dataset.image_names", "dataset.cameras", "dataset.points_3d",
+}
 
-    A workflow that starts from a photo renders its own views first
-    (sam3d_body -> render), so nothing reads `dataset.images` until
-    something has written it. One that starts from a dataset reads it
-    immediately. Walking the steps in order and asking which comes first
-    answers "can this run from a photo?" without a flag in the YAML that
-    could disagree with the steps under it.
+
+def workflow_needs_a_dataset(name: str) -> bool:
+    """Whether this workflow reads frames or cameras it does not produce.
+
+    A from-a-photo workflow renders its own views first (sam3d_body ->
+    render), so nothing reads `dataset.images` until something has written
+    it. One that starts from a dataset reads it immediately. Walking the
+    steps in order and asking which comes first answers "can this run from
+    a photo?" from the steps themselves, rather than from a flag in the
+    YAML that could disagree with them.
+
+    A bare `dataset` read (what `save_dataset` takes) is deliberately not a
+    trip: by the time a checkpoint runs, the earlier steps have populated
+    the object it is handed.
     """
     from .cli import resolve_workflow
 
     spec = WorkflowSpec.from_yaml(resolve_workflow(name))
     written = set()
     for step in spec.steps:
-        for path in step.inputs.values():
-            root = path.split(".")[0]
-            if root == "dataset" and path not in written and path not in (
-                "dataset.reference_image", "dataset.prompt", "dataset.anchor_image",
-            ):
-                return True
+        if any(path in _NEEDS_A_REAL_DATASET - written for path in step.inputs.values()):
+            return True
         written.update(step.outputs.values())
     return False
 
@@ -870,10 +881,10 @@ def build_app(envs_path: str) -> gr.Blocks:
                     raise gr.Error("Upload a reference photo.")
                 if workflow_needs_a_dataset(workflow):
                     raise gr.Error(
-                        f"'{workflow}' starts from an existing dataset — its first "
-                        "step reads frames it does not render. A photo needs a "
-                        "workflow that begins with sam3d_body + render; none is "
-                        "shipped. Pick a dataset directory or upload a .zip."
+                        f"'{workflow}' starts from an existing dataset — it reads "
+                        "frames and cameras it does not render. Use "
+                        "fast_helical_native, which builds its own views from a "
+                        "photo, or pick a dataset directory / upload a .zip."
                     )
                 reference_image = save_upload(photo, "reference")
 

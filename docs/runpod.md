@@ -96,13 +96,14 @@ Open `https://<pod-id>-7860.proxy.runpod.net`. Three input modes:
 - **Upload a dataset .zip** — the same thing from your laptop. The archive
   can be rooted at the dataset or one level above it; the extractor finds
   the `metadata.json` either way.
-- **Single reference photo** — the from-scratch path, which needs a
-  workflow that renders its own views from a SAM-3D-Body reconstruction.
-  **No shipped workflow does** — the one that did
-  (`fast_helical_native.yaml`) was dropped as irrelevant to this image — so
-  picking this against either `fast_helical` file is refused at submit
-  time. The plumbing stays because adding such a workflow back is a YAML
-  file.
+- **Single reference photo** — the from-scratch path. Runs
+  `fast_helical_native.yaml`, which renders its own views from a
+  SAM-3D-Body reconstruction. **Least proven of the three**: its front half
+  (`render` → `generate_firstlast` → `inject_anchor`) has never executed
+  end to end, and it predates the export conventions the two `fast_helical`
+  files use — so it produces a splat and a checkpoint, not a `colmap/` and
+  `ply/`. Picking this input against either `fast_helical` file is refused
+  at submit time: those read frames and cameras they do not render.
 
 The **Params** box is a copy of the workflow's own `params:` block. Edit it
 freely — it is parsed as YAML and layered over the defaults. `output_root`
@@ -111,7 +112,10 @@ is repointed automatically at this run's directory under `/data/output`.
 **Outputs** picks what the run produces: the COLMAP dataset, the trained
 `.ply`, or both. This is a real switch, not a filter on the result — the
 .ply is a second full 30,000-iteration brush training, and unchecking it
-skips that step outright. At least one has to be checked.
+skips that step outright. At least one has to be checked. The control only
+appears for a workflow that declares those switches, which today means the
+two `fast_helical` files; `fast_helical_native` produces a splat and a
+dataset checkpoint instead, and hides it.
 
 The **Results** tab has three things: the one `.zip` of the run's
 deliverables (`colmap/` and/or `ply/`, and nothing else — the run
@@ -141,6 +145,10 @@ python -m pipeline.cli run fast_helical --dataset /data/my_dataset
 # the same output switches the UI's Outputs checkboxes drive
 python -m pipeline.cli run fast_helical_full --dataset /data/my_dataset \
     --param export_ply=false
+
+# from a single photo instead
+python -m pipeline.cli run fast_helical_native --reference-image /data/photo.jpg \
+    --prompt "a woman in a red jacket"
 ```
 
 ## When and where the models are downloaded
@@ -174,6 +182,7 @@ properties, in order of how much they matter:
   |---|---|---|
   | `fast_helical` | rmbg, sapiens2, wan22, wan22_fp8, wan22_lora | ~51.0 GB |
   | `fast_helical_full` | rmbg, sapiens2, wan22, wan22_fp8, wan22_lora, seedvr2 | ~57.0 GB |
+  | `fast_helical_native` | rmbg, sapiens2, sam3dbody, wan22, wan22_fp8, wan22_lora | ~53.8 GB |
 
   `wan22` is now only 11.9 GB — the base repo's text_encoder, VAE,
   tokenizer and scheduler. The transformers come from `wan22_fp8` (35.2 GB

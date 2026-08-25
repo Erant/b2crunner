@@ -128,19 +128,35 @@ class TestOutputSelection(unittest.TestCase):
 
     def test_a_workflow_without_the_params_offers_nothing(self):
         """The control hides itself rather than pretending to switch
-        something the workflow has never heard of. Both shipped workflows
-        declare the params, so this needs one that doesn't."""
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "no_outputs.yaml"
-            path.write_text(
-                "name: no_outputs\n"
-                "params:\n  seed: 0\n"
-                "steps:\n"
-                "  - id: only\n    step: save_dataset\n"
-                "    inputs:\n      dataset: dataset\n"
-                "    params:\n      output_dir: /tmp/nowhere\n"
-            )
-            self.assertEqual(webui.workflow_outputs(str(path)), [])
+        something the workflow has never heard of. fast_helical_native ends
+        at a checkpoint, with no COLMAP export and no ply/."""
+        self.assertEqual(webui.workflow_outputs("fast_helical_native"), [])
+
+    def test_which_workflows_can_start_from_a_photo(self):
+        """The gate on the UI's photo input, pinned to the real shipped
+        files. It got this wrong once by treating `save_dataset`'s bare
+        `dataset` input as an unmet read of the frames — a checkpoint at
+        the end of a from-a-photo workflow is handed a dataset the earlier
+        steps built, not one the caller had to supply."""
+        self.assertFalse(webui.workflow_needs_a_dataset("fast_helical_native"))
+        self.assertTrue(webui.workflow_needs_a_dataset("fast_helical"))
+        self.assertTrue(webui.workflow_needs_a_dataset("fast_helical_full"))
+
+    def test_the_photo_gate_keys_off_the_fields_a_photo_cannot_fill(self):
+        """`Dataset.from_reference_image` leaves exactly these empty, so
+        these are the reads that mean 'a real dataset was required'. If that
+        constructor ever fills one in, this set is what has to change."""
+        from pipeline.dataset import Dataset
+
+        import numpy as np
+
+        seeded = Dataset.from_reference_image(np.zeros((8, 8, 3), np.uint8))
+        for path in webui._NEEDS_A_REAL_DATASET:
+            field = path.split(".", 1)[1]
+            with self.subTest(field=field):
+                value = getattr(seeded, field)
+                empty = len(value) == 0 if field != "points_3d" else len(value[0]) == 0
+                self.assertTrue(empty, f"{field} is no longer empty on a photo-seeded Dataset")
 
     def test_the_switches_are_not_also_editable_in_the_params_box(self):
         """Two editable homes for one setting disagree the moment someone

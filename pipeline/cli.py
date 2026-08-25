@@ -248,10 +248,9 @@ def build_parser() -> argparse.ArgumentParser:
     source.add_argument("--dataset", help="An existing on-disk b2c dataset directory")
     source.add_argument(
         "--reference-image",
-        help="A single photo to start from, for a workflow that renders its own "
-             "views (sam3d_body -> render). No shipped workflow does — both "
-             "fast_helical files begin from an existing dataset — so this needs "
-             "a workflow of your own; see Dataset.from_reference_image",
+        help="A single photo to start from; the workflow renders its own views "
+             "(fast_helical_native.yaml). The fast_helical workflows cannot take "
+             "this — they begin from an existing dataset",
     )
     run_p.add_argument("--prompt", default=None, help="Subject description used by the denoise steps")
     run_p.add_argument("--out", default=None, help="Directory to save the final dataset to")
