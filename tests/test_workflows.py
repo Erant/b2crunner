@@ -170,8 +170,9 @@ class TestWorkflowFiles(unittest.TestCase):
             [s.id for s in short.steps],
         )
         self.assertEqual(
-            set(full.params) - set(short.params), {"upscale_resolution"},
-            "the only param either file should have to itself is the upscale's",
+            set(full.params) - set(short.params),
+            {"upscale_resolution", "upscale_batch_size"},
+            "the only params either file should have to itself are the upscale's",
         )
         for step in short.steps:
             twin = next(s for s in full.steps if s.id == step.id)

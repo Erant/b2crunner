@@ -85,6 +85,11 @@ params:
   # ComfyUI-era upscale produced (cyber_6f/upscaled).
   upscale_resolution: 1080
 
+  # steps/seedvr2.py defaults batch_size to 5 when the param is absent
+  # entirely; 1 here is this workflow's own choice, not that default —
+  # raise it once a real VRAM budget for the upscale step is known.
+  upscale_batch_size: 1
+
   # Which deliverables stage 6 produces. Both default on; the web UI drives
   # them from its Outputs checkboxes, and `--param export_ply=false` does
   # the same from the CLI. Turning one off skips its steps entirely (see
@@ -318,6 +323,7 @@ steps:
       images: dataset.images
     params:
       resolution: ${params.upscale_resolution}
+      batch_size: ${params.upscale_batch_size}
       vae_encode_tiled: true
       vae_decode_tiled: true
     outputs:
