@@ -159,6 +159,71 @@ def check_torch() -> Check:
     return Check("torch", OK, f"{torch.__version__} / cu{torch.version.cuda}", lines)
 
 
+def _vulkan_chain() -> List[str]:
+    """Why Vulkan failed, link by link. See scripts/vulkan_probe.sh for the
+    full version — this is the subset cheap enough to run at every start."""
+    import ctypes
+    import glob
+    import re
+
+    lines = []
+
+    # Link 1: did nvidia-container-toolkit mount an ICD manifest at all? If
+    # not, either `graphics` was missing from the capabilities OR the host's
+    # driver install has no graphics userspace to mount. Neither is fixable
+    # from inside the image.
+    manifests = sorted(
+        glob.glob("/usr/share/vulkan/icd.d/*nvidia*.json")
+        + glob.glob("/etc/vulkan/icd.d/*nvidia*.json")
+    )
+    if manifests:
+        lines.append(f"ICD manifest: {', '.join(manifests)}")
+    else:
+        lines.append("ICD manifest: ABSENT — the toolkit mounted no NVIDIA ICD.")
+        lines.append(f"  NVIDIA_DRIVER_CAPABILITIES={os.environ.get('NVIDIA_DRIVER_CAPABILITIES', '(unset)')}")
+        lines.append("  It must include 'graphics', and it is read at container-CREATION")
+        lines.append("  time — setting it inside a running pod does nothing. If it is")
+        lines.append("  already set, the HOST driver has no graphics userspace to inject.")
+
+    # Link 2: the driver's own libraries. libnvidia-gpucomp is the shader
+    # compiler, split out of glcore in the 550+ drivers; a libnvidia-container
+    # older than 1.17 does not know to inject it, which breaks Vulkan on
+    # newer-driver hosts only.
+    for pattern, label in (
+        ("libGLX_nvidia.so*", "libGLX_nvidia (the ICD itself)"),
+        ("libnvidia-glcore.so.*", "libnvidia-glcore"),
+        ("libnvidia-gpucomp.so*", "libnvidia-gpucomp (driver >= 550)"),
+    ):
+        found = glob.glob(f"/usr/lib/x86_64-linux-gnu/{pattern}") + glob.glob(f"/usr/lib64/{pattern}")
+        lines.append(f"{label}: {', '.join(sorted(found)) if found else 'ABSENT'}")
+
+    # The version string's position in this line moves between driver
+    # branches (the open-kernel-module builds insert "Open" and "for"), so
+    # match the number rather than a field index.
+    try:
+        text = Path("/proc/driver/nvidia/version").read_text()
+        match = re.search(r"\b(\d+\.\d+(?:\.\d+)?)\b", text)
+        if match:
+            lines.append(f"kernel module driver version: {match.group(1)}")
+            lines.append("  every injected .so above must carry this exact version")
+    except OSError:
+        pass
+
+    # Link 3: the dependency that has already caught this project once. The
+    # NVIDIA ICD runs a GLVND self-registration during vkCreateInstance that
+    # needs libEGL.so.1 resolvable, even though Vulkan never calls EGL.
+    # Without it vk_icdGetInstanceProcAddr returns NULL for vkCreateInstance,
+    # with no error, and the loader falls back to llvmpipe.
+    for lib in ("libEGL.so.1", "libGLdispatch.so.0", "libXext.so.6"):
+        try:
+            ctypes.CDLL(lib)
+            lines.append(f"{lib}: loads")
+        except OSError as exc:
+            lines.append(f"{lib}: FAILS TO LOAD — {exc}")
+
+    return lines
+
+
 def check_vulkan() -> Check:
     """Gates `brush`. See docs/docker.md's NVIDIA_DRIVER_CAPABILITIES note."""
     if not shutil.which("vulkaninfo"):
@@ -169,21 +234,32 @@ def check_vulkan() -> Check:
         return Check("vulkan", FAIL, "vulkaninfo timed out")
 
     output = result.stdout + result.stderr
-    lines = [line.rstrip() for line in output.splitlines() if "deviceName" in line or "driverName" in line]
+    lines = [
+        line.rstrip() for line in output.splitlines()
+        if "deviceName" in line or "driverName" in line or "deviceType" in line
+    ]
+
+    # A software fallback is the failure mode this check exists to catch, and
+    # it is NOT a non-zero exit: when the NVIDIA ICD declines to create an
+    # instance the loader quietly enumerates llvmpipe and vulkaninfo succeeds.
+    # Matching on "a deviceName line exists" would pass that. Require a real
+    # GPU device type instead.
+    gpu = "PHYSICAL_DEVICE_TYPE_DISCRETE_GPU" in output or "PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU" in output
+    software = "llvmpipe" in output.lower() or "PHYSICAL_DEVICE_TYPE_CPU" in output
+
     if result.returncode != 0 or "ERROR_INCOMPATIBLE_DRIVER" in output or not lines:
-        capabilities = os.environ.get("NVIDIA_DRIVER_CAPABILITIES", "(unset)")
         return Check(
-            "vulkan", FAIL,
-            "no Vulkan device — brush cannot run",
-            [
-                f"NVIDIA_DRIVER_CAPABILITIES={capabilities}",
-                "It must include 'graphics'. It is read by nvidia-container-toolkit at",
-                "container-CREATION time, so setting it inside a running pod does nothing —",
-                "set it in the RunPod template's environment variables.",
-                *output.splitlines()[:10],
-            ],
+            "vulkan", FAIL, "no Vulkan device at all — brush cannot run",
+            [*_vulkan_chain(), "", "full walk: bash scripts/vulkan_probe.sh", *output.splitlines()[:10]],
         )
-    return Check("vulkan", OK, lines[0].strip() if lines else "device found", lines)
+    if not gpu:
+        detail = "Vulkan found only a software rasteriser — brush would run on the CPU" if software \
+            else "Vulkan found no GPU device — brush would run on the CPU"
+        return Check(
+            "vulkan", FAIL, detail,
+            [*lines, "", *_vulkan_chain(), "", "full walk: bash scripts/vulkan_probe.sh"],
+        )
+    return Check("vulkan", OK, lines[0].strip(), lines)
 
 
 def check_egl() -> Check:
