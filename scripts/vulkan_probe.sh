@@ -34,7 +34,13 @@ echo "/proc/driver/nvidia/version: ${KERNEL_DRIVER:-(absent)}"
 
 section "1. device nodes"
 ls -l /dev/nvidia* 2>/dev/null || echo "no /dev/nvidia* — nothing is going to work"
-ls -l /dev/dri/ 2>/dev/null || echo "no /dev/dri (not fatal for NVIDIA's ICD)"
+# /dev/dri: its absence is NOT automatically the cause. Tested directly on
+# an RTX 4070 Ti (driver 595.71.05) by deleting /dev/dri inside this very
+# image: vulkaninfo still enumerated the GPU and EGL still initialised. So
+# on Ada it is a soft probe. Whether Blackwell's graphics userspace needs it
+# is UNVERIFIED — the one Blackwell pod available lacked both /dev/dri and
+# CAP_MKNOD, so the experiment could not be run there.
+ls -l /dev/dri/ 2>/dev/null || echo "no /dev/dri (soft probe on Ada; unverified on Blackwell)"
 
 section "2. the ICD manifest (injected by nvidia-container-toolkit)"
 # `graphics` in NVIDIA_DRIVER_CAPABILITIES is what makes the toolkit mount
@@ -105,6 +111,63 @@ fi
 section "5. loader version vs ICD api_version"
 have vulkaninfo && vulkaninfo --summary 2>/dev/null | grep -iE 'Vulkan Instance Version' | sed 's/^/   /'
 dpkg-query -W -f='   libvulkan1 ${Version}\n' libvulkan1 2>/dev/null
+
+section "5b. does the NVIDIA GRAPHICS userspace initialise at all"
+# The check that localised the Blackwell failure, and the one worth running
+# first next time. libGLX_nvidia.so.0 backs GLX, EGL *and* Vulkan, so if the
+# driver's graphics stack is dead you see it here without any Vulkan in the
+# picture: NVIDIA contributes zero EGL devices and only Mesa's software
+# device is enumerated. That distinguishes "the whole graphics userspace
+# declined" from "the Vulkan loader mis-scanned an ICD", which look
+# identical from vulkaninfo alone.
+#
+# On the failing RTX PRO 6000 pod this printed exactly one device, vendor
+# "Mesa Project" — while nvidia-smi, CUDA and 369 successful ioctls on
+# /dev/nvidiactl all said the GPU was fine.
+for PY in /opt/venv_main/bin/python /usr/bin/python3; do
+    [ -x "$PY" ] || continue
+    "$PY" - 2>/dev/null <<'PYEOF'
+import ctypes
+try:
+    egl = ctypes.CDLL("libEGL.so.1")
+except OSError as exc:
+    raise SystemExit(f"   libEGL.so.1 will not load: {exc}")
+egl.eglGetProcAddress.restype = ctypes.c_void_p
+egl.eglQueryString.restype = ctypes.c_char_p
+gp = egl.eglGetProcAddress
+addr = gp(b"eglQueryDevicesEXT")
+if not addr:
+    raise SystemExit("   eglQueryDevicesEXT unavailable — no EGL_EXT_device_base")
+qd = ctypes.CFUNCTYPE(ctypes.c_uint, ctypes.c_int,
+                      ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(ctypes.c_int))(addr)
+n = ctypes.c_int(0)
+qd(0, None, ctypes.byref(n))
+arr = (ctypes.c_void_p * max(1, n.value))()
+got = ctypes.c_int(0)
+qd(n.value, arr, ctypes.byref(got))
+print(f"   EGL devices enumerated: {got.value}")
+gpd = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p,
+                       ctypes.c_void_p)(gp(b"eglGetPlatformDisplayEXT"))
+nvidia = 0
+for i in range(got.value):
+    dpy = gpd(0x313F, arr[i], None)          # EGL_PLATFORM_DEVICE_EXT
+    maj, mnr = ctypes.c_int(), ctypes.c_int()
+    if egl.eglInitialize(ctypes.c_void_p(dpy), ctypes.byref(maj), ctypes.byref(mnr)):
+        vendor = (egl.eglQueryString(ctypes.c_void_p(dpy), 0x3053) or b"?").decode()
+        print(f"   device[{i}]: EGL {maj.value}.{mnr.value}, vendor {vendor}")
+        if "nvidia" in vendor.lower():
+            nvidia += 1
+    else:
+        print(f"   device[{i}]: failed to initialise")
+print("   NVIDIA-backed EGL devices:", nvidia)
+if nvidia == 0:
+    print("   ^ ZERO. The NVIDIA graphics userspace is not initialising at all.")
+    print("     This is NOT a Vulkan problem — Vulkan is downstream of it. Every")
+    print("     library check above can pass and this still be zero. It is host-")
+    print("     side: the driver has the GPU (CUDA works) but declines graphics.")
+PYEOF
+    break
+done
 
 section "6. what the loader actually decides, with its reasoning"
 if have vulkaninfo; then
