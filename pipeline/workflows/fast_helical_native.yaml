@@ -167,6 +167,25 @@ steps:
       framing: full
       override_cam_from_mesh: true
       fill_ratio: 0.8
+      # Mid grey, not the step's default white. This does NOT change the
+      # rendered background — `depth+skeleton`'s base layer is render_depth,
+      # which takes no bg_color — it changes the ONE other thing render.py
+      # spends this param on: it publishes it as `image_warp["bg_color"]`
+      # (render.py's `if image_warp is not None` block), which is where
+      # warp_reference_to_anchor below gets the border colour it fills
+      # around the warped reference photo.
+      #
+      # 0.5 rather than a literal 127/255, because the recorded run shows
+      # both roundings and 0.5 is what produces them: the renderer does
+      # `int(bg*255)` = 127 and generate_firstlast does `round(bg*255)` =
+      # 128. cyber2_6f/initial has mesh frames at 127 and an anchor.png at
+      # 128 — the same 0.5 down two code paths, which is the evidence that
+      # 0.5 is the value the reference pipeline used.
+      #
+      # White is the value that cannot be right: the anchor frame reaches
+      # denoise_pass2 sitting among grey renders, and a white border is the
+      # largest possible disagreement with them.
+      bg_color: [0.5, 0.5, 0.5]
     outputs:
       images: dataset.images
       masks: dataset.masks

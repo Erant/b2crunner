@@ -290,5 +290,52 @@ class TestWorkflowFiles(unittest.TestCase):
                     )
 
 
+    def test_a_warped_anchor_is_bordered_in_grey_not_white(self):
+        """generate_firstlast's border colour has no literal in the YAML —
+        it arrives as `image_warp["bg_color"]`, which render.py copies from
+        the render step's own `bg_color` param. So the workflow-level
+        statement of "grey" is that param on whichever render step feeds
+        the warp, and its default (white) is wrong here: the anchor frame
+        reaches the diffusion pass among renders on mid grey.
+
+        Asserted as "not white and mid-ish" rather than exactly 0.5, since
+        the pixel-level value is pinned in test_anchor.py; this guards the
+        wiring, which is the part that silently reverts.
+        """
+        for path in _workflows():
+            spec = WorkflowSpec.from_yaml(str(path))
+            warps = [s for s in spec.steps if s.step == "generate_firstlast"]
+            if not warps:
+                continue
+            for warp in warps:
+                source = warp.inputs.get("bg_color")
+                with self.subTest(workflow=path.name, step=warp.id):
+                    self.assertIsNotNone(
+                        source, f"'{warp.id}' does not wire bg_color at all, so it "
+                        f"falls back to the step's white default",
+                    )
+                    # e.g. "scene.image_warp.bg_color" -> the step that wrote it
+                    producers = [
+                        s for s in spec.steps
+                        if source in s.outputs.values() or
+                        any(source.startswith(v + ".") for v in s.outputs.values())
+                    ]
+                    self.assertTrue(
+                        producers, f"nothing in {path.name} writes '{source}'",
+                    )
+                    bg = producers[0].params.get("bg_color")
+                    self.assertIsNotNone(
+                        bg, f"'{producers[0].id}' does not set bg_color, so "
+                        f"'{warp.id}' borders the warped photo in white",
+                    )
+                    self.assertNotEqual(
+                        [float(c) for c in bg], [1.0, 1.0, 1.0],
+                        "white is the one value that cannot be right here",
+                    )
+                    for c in bg:
+                        self.assertGreater(float(c), 0.0)
+                        self.assertLess(float(c), 1.0)
+
+
 if __name__ == "__main__":
     unittest.main()

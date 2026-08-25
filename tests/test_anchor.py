@@ -315,5 +315,63 @@ class TestMaskThenInjectAgainstCyber2(unittest.TestCase):
         self.assertEqual(int(expected[0, 0, 3]), 0)
 
 
+class TestAnchorBorderColour(unittest.TestCase):
+    """The colour generate_firstlast fills around the warped photo.
+
+    The warp maps a photo taken at one focal length into the orbit
+    camera's framing, which leaves border. That border travels all the way
+    to denoise_pass2 as part of the anchor frame, sitting among renders on
+    a mid-grey background — so white, the step's old effective value in
+    fast_helical_native.yaml, is the largest possible disagreement with
+    its neighbours.
+
+    0.5 is pinned rather than a literal 127 or 128 because the recorded run
+    shows BOTH numbers and 0.5 is what produces them: the renderer
+    truncates (`int(bg*255)` = 127) and this step rounds (`round(bg*255)`
+    = 128). cyber2_6f/initial has its mesh frames at 127 and its
+    anchor.png at 128, which is the evidence that 0.5 is the value the
+    reference pipeline used.
+    """
+
+    def _border(self, bg_color):
+        from body2colmap.camera import Camera
+
+        camera = Camera(
+            focal_length=(400.0, 400.0), image_size=(600, 900),
+            principal_point=(300.0, 450.0),
+            position=np.zeros(3, dtype=np.float32),
+            rotation=np.eye(3, dtype=np.float32),
+        )
+        out = get_step_class("generate_firstlast")().run(
+            {
+                "image": np.full((200, 200, 3), 200, np.uint8),
+                "camera": camera,
+                "original_focal_length": 800.0,
+                "render_size": (600, 900),
+                "bg_color": bg_color,
+            },
+            {},
+        )["warped_image"]
+        return [int(v) for v in out[0, 0]]
+
+    def test_half_grey_paints_the_recorded_anchor_border(self):
+        self.assertEqual(self._border((0.5, 0.5, 0.5)), [128, 128, 128])
+
+    def test_the_recorded_anchor_really_is_that_colour(self):
+        """The premise, read off the recorded run rather than asserted."""
+        import cv2
+
+        initial = require_stage2("initial")
+        anchor = cv2.imread(str(initial / "anchor.png"), cv2.IMREAD_UNCHANGED)
+        for corner in (anchor[0, 0, :3], anchor[0, -1, :3], anchor[-1, -1, :3]):
+            self.assertEqual([int(v) for v in corner], [128, 128, 128])
+
+    def test_the_step_still_defaults_to_white(self):
+        """Unchanged: the default belongs to callers that render on white.
+        fast_helical_native.yaml overrides it via the render step's
+        bg_color, which render.py publishes as image_warp["bg_color"]."""
+        self.assertEqual(self._border((1.0, 1.0, 1.0)), [255, 255, 255])
+
+
 if __name__ == "__main__":
     unittest.main()
