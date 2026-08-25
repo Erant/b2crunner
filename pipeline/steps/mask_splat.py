@@ -80,9 +80,20 @@ class MaskSplatStep(Step):
              sigma_color (float, default 0.5, in [0,1] image units),
              sigma_space (float, default 100.0)
     outputs: {"dataset": Dataset} — masked/filtered images, and masks set
-             fully opaque (the next denoise pass must not treat the blacked
-             -out region as "already reference material"; the ComfyUI graph
-             does the same by saving an all-zero MASK)
+             uniformly to 1.0, i.e. VACE "denoise every one of these
+             frames" (the next pass must not treat the blacked-out region
+             as "already reference material"; the ComfyUI graph says the
+             same thing by saving an all-zero MASK, which SaveDataset
+             re-inverts to alpha 255). Matches all 80 non-anchor frames of
+             cyber2_6f/masked_splatted.
+
+             The anchor frame is NOT this step's business, and must not be:
+             in the recorded run frame_00038_ is the real photo verbatim at
+             alpha 0, neither composited nor filtered. `inject_anchor` puts
+             it back afterwards. Run that step BEFORE this one and it
+             overwrites dataset.masks — the splat alpha this step reads —
+             with an all-1.0 batch, and everything below silently becomes a
+             no-op. See steps/anchor_stub.py.
 
     The pipeline YAMLs use filter_size/dilation of 6/2 (`fast helical`),
     12/4 (`helical`, `tiered` first pass) and 4/0 (`tiered` second pass) —

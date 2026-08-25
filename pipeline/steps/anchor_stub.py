@@ -46,14 +46,47 @@ Unlike the original ComfyUI nodes, this port works in cv2 BGR uint8
 throughout (no RGB<->BGR/float<->uint8 tensor conversion needed — that
 was purely for ComfyUI's IMAGE tensor convention) and masks are float32
 [0,1] with foreground=1, matching rmbg.py/brush.py's convention rather
-than ComfyUI's inverted MASK (1.0=background) — InjectAnchorStep marks
-the injected anchor frame's mask 0.0 (nothing to remove-background), the
-same value the original node used, but for the opposite reason: there
-it meant "fully opaque" under ComfyUI's inverted convention, here it
-means "no synthetic content to denoise" under wan22_vace_denoise's
-control_masks convention (see that module's docstring) — the two
-conventions happen to agree at this one value, not a coincidence to lean
-on elsewhere.
+than ComfyUI's inverted MASK (1.0=background).
+
+**At every call site of this step, the mask is the VACE mask.**
+`dataset.masks` is overloaded across the pipeline as a whole — rmbg puts a
+foreground silhouette there for brush, render_splat puts the splat's alpha
+there for mask_splat — but this step only ever runs immediately before a
+diffusion pass, where the field is the frame's alpha on disk and
+`wan22_vace_denoise`'s `control_masks`: 1.0 "synthetic, denoise this", 0.0
+"a real photograph, keep it". So the value written at an injected frame is
+0.0, in every caller, because an injected frame is by definition the real
+photo. (The ComfyUI node writes 0.0 too, but arrives
+there backwards: its MASK is inverted and `SaveDataset` re-inverts on the
+way to disk, `alpha = (1 - mask) * 255`. Two inversions, same number, and
+reasoning from the graph alone gets the opposite answer — check the
+recorded alpha instead: `cyber2_6f/masked_splatted/frame_00038_.png` is
+byte-identical to that stage's `anchor.png` and carries a uniform alpha of
+0, while all 80 other frames are 255.)
+
+**This step must run after `mask_splat`, not before it.** That ordering is
+load-bearing and was wrong, at the cost of a whole run's output quality.
+`Body2COLMAP_InjectAnchor` takes `masks` as an *input* and clones it; this
+port took no masks at all and manufactured an all-1.0 batch on every call.
+Placed between `render_splat` and `mask_splat` — where the mask field is
+carrying the splat render's per-*pixel* alpha, the thing `mask_splat`
+exists to threshold — that wiped the alpha out. `mask_splat`'s keep-test
+then passed everywhere: ~78% of each frame that the reference flow blacks
+out survived into `denoise_pass2`, soft Gaussian fringes and all, and pass
+2 hallucinated around them differently per frame. That view disagreement is
+the ghosting in the final splat.
+
+Ordering it after `mask_splat` also matches the recorded run frame for
+frame, and dissolves the conflict rather than managing it: `mask_splat`
+consumes the spatial alpha and emits the all-1.0 VACE mask, and this step
+only ever sees and writes VACE masks. It reproduces
+`cyber2_6f/masked_splatted` exactly — every frame masked and filtered at
+alpha 255, except the anchor frame, which is `anchor.png` verbatim (not
+composited, not filtered) at alpha 0.
+
+`masks` stays an optional input regardless. When it is supplied it is
+passed through untouched; a step handed somebody else's data should not
+destroy it, which is the general form of the bug above.
 """
 
 from __future__ import annotations
@@ -136,16 +169,22 @@ class InjectAnchorStep(Step):
 
     inputs: {"images": List[np.ndarray], "cameras": List[Camera],
              "anchor_position": Optional[np.ndarray],
-             "anchor_image": Optional[np.ndarray]}
+             "anchor_image": Optional[np.ndarray],
+             "masks": Optional[List[np.ndarray]] — the VACE mask batch to
+             inject into, passed through untouched except at the matched
+             frames. Omit it and an all-1.0 batch is manufactured instead
+             ("everything is synthetic, denoise it"), which is what the
+             pre-denoise callers want.}
     params: {"tolerance_pct": float, default 0.1 — match tolerance as a
              percentage of the camera bounding-box diagonal}
     outputs: {"images": List[np.ndarray], "masks": List[np.ndarray]}
-             (masks: float32 [0,1], foreground=1 elsewhere, 0.0 at the
-             injected anchor frame(s) — see module docstring)
+             (masks: float32 [0,1] VACE masks — the supplied batch where
+             there was one, all-1.0 otherwise, and 0.0 at the injected
+             anchor frame(s): a real photograph, do not denoise it)
 
     With no anchor_image/anchor_position (a dataset with no anchor frame,
     or generate_firstlast simply not wired in), the inputs pass through
-    with an all-1.0 mask rather than failing the workflow.
+    rather than failing the workflow — masks included, untouched.
     """
 
     def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
@@ -153,9 +192,18 @@ class InjectAnchorStep(Step):
         cameras = inputs["cameras"]
         anchor_position = inputs.get("anchor_position")
         anchor_image = inputs.get("anchor_image")
+        in_masks = inputs.get("masks")
+
+        # Supplied masks are somebody else's data: pass them through rather
+        # than manufacturing a batch over the top of them. With none
+        # supplied, all-1.0 is the right VACE mask for a batch of renders.
+        if in_masks is None:
+            masks = [np.ones(img.shape[:2], dtype=np.float32) for img in images]
+        else:
+            masks = [np.asarray(m, dtype=np.float32) for m in in_masks]
 
         if anchor_image is None or anchor_position is None:
-            return {"images": images, "masks": [np.ones(img.shape[:2], dtype=np.float32) for img in images]}
+            return {"images": images, "masks": masks}
 
         anchor_position = np.asarray(anchor_position, dtype=np.float32)
         positions = np.stack([cam.position for cam in cameras], axis=0)
@@ -166,7 +214,6 @@ class InjectAnchorStep(Step):
         distances = np.linalg.norm(positions - anchor_position, axis=1)
         matches = [int(i) for i in np.flatnonzero(distances <= threshold)]
 
-        masks = [np.ones(img.shape[:2], dtype=np.float32) for img in images]
         if not matches:
             return {"images": images, "masks": masks}
 
@@ -181,6 +228,9 @@ class InjectAnchorStep(Step):
         out_images = list(images)
         for idx in matches:
             out_images[idx] = anchor_image
+            # 0.0 = "a real photograph, keep it" in VACE's control-mask
+            # sense. Uniform over the frame: this is a per-frame flag, not a
+            # silhouette. See the module docstring.
             masks[idx] = np.zeros(anchor_image.shape[:2], dtype=np.float32)
 
         return {"images": out_images, "masks": masks}

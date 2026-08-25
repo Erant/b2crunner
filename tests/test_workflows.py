@@ -224,6 +224,71 @@ class TestWorkflowFiles(unittest.TestCase):
                         self.assertFalse(ctx_path.startswith("."))
                         self.assertFalse(ctx_path.endswith("."))
 
+    def test_nothing_clobbers_the_splat_alpha_before_mask_splat(self):
+        """Between render_splat and mask_splat, dataset.masks is carrying
+        the splat render's per-pixel alpha, and mask_splat exists to
+        threshold it. Any step in that gap that writes the field without
+        reading it destroys that alpha.
+
+        This is the bug that cost a run's output quality: `inject_anchor`
+        sat there and manufactured an all-1.0 batch, so mask_splat's
+        keep-test passed on every pixel and the stage that blacks out the
+        Gaussians' low-confidence fringes became a bare bilateral filter.
+        Fixed by moving inject_anchor after mask_splat — the assertion
+        below holds either by the gap being empty or by a step in it
+        reading what it overwrites.
+        """
+        for path in _workflows():
+            spec = WorkflowSpec.from_yaml(str(path))
+            ids = [s.id for s in spec.steps]
+            producers = [s for s in spec.steps if s.step == "render_splat"]
+            consumers = [s for s in spec.steps if s.step == "mask_splat"]
+            if not producers or not consumers:
+                continue
+            start = ids.index(producers[0].id)
+            end = ids.index(consumers[0].id)
+            self.assertLess(start, end, f"{path.name}: mask_splat precedes render_splat")
+            self.assertIn(
+                "dataset.masks", producers[0].outputs.values(),
+                f"{path.name}: render_splat does not publish its alpha as dataset.masks",
+            )
+            for step in spec.steps[start + 1:end]:
+                if "dataset.masks" not in step.outputs.values():
+                    continue
+                with self.subTest(workflow=path.name, step=step.id):
+                    self.assertIn(
+                        "dataset.masks", step.inputs.values(),
+                        f"step '{step.id}' overwrites dataset.masks between "
+                        f"render_splat and mask_splat without reading it, so the "
+                        f"splat render's alpha never reaches mask_splat",
+                    )
+
+    def test_the_anchor_is_reinjected_after_masking(self):
+        """Ordering, stated directly, because the pixel-level guard for it
+        (tests/test_anchor.py) skips when the recorded run is absent.
+
+        cyber2_6f/masked_splatted/frame_00038_.png is that stage's
+        anchor.png byte for byte — the injected photo is not composited
+        over black and not bilateral-filtered, which only happens if
+        inject_anchor runs after mask_splat.
+        """
+        for path in _workflows():
+            spec = WorkflowSpec.from_yaml(str(path))
+            ids = [s.id for s in spec.steps]
+            if "mask_splat" not in [s.step for s in spec.steps]:
+                continue
+            mask_at = min(i for i, s in enumerate(spec.steps) if s.step == "mask_splat")
+            for i, step in enumerate(spec.steps):
+                if step.step != "inject_anchor":
+                    continue
+                with self.subTest(workflow=path.name, step=step.id):
+                    self.assertGreater(
+                        i, mask_at,
+                        f"'{step.id}' runs before mask_splat ('{ids[mask_at]}'); the "
+                        f"injected anchor photo would be composited over black and "
+                        f"bilateral-filtered, and the splat alpha would be gone",
+                    )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -214,6 +214,10 @@ steps:
       anchor_image: dataset.anchor_image
     params:
       tolerance_pct: 0.1
+      # No `masks` input: the batch this writes is manufactured here, and
+      # it is wan22_vace_denoise's per-frame VACE mask — 1.0 "synthetic,
+      # denoise it" for the renders, 0.0 "a real photo, keep it" at the
+      # injected anchor. See steps/anchor_stub.py.
     outputs:
       images: dataset.images
       masks: dataset.masks

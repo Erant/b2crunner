@@ -237,22 +237,6 @@ steps:
       image_names: dataset.image_names
       points_3d: dataset.points_3d
 
-  # Put the warped reference photo back onto whichever new frames landed on
-  # the original camera. Matches by position, so it survives the reorbit.
-  - id: reinject_anchor
-    step: inject_anchor
-    dispatch: in_process
-    inputs:
-      images: dataset.images
-      cameras: dataset.cameras
-      anchor_position: dataset.extras.anchor_position
-      anchor_image: dataset.anchor_image
-    params:
-      tolerance_pct: 0.1
-    outputs:
-      images: dataset.images
-      masks: dataset.masks
-
   # ---------------------------------------------------------------- stage 3
   # mask_splat.json: drop the splat's low-confidence fringes.
   - id: mask_splat_fringes
@@ -265,6 +249,38 @@ steps:
       dilation: ${params.mask_dilation}
     outputs:
       dataset: dataset
+
+  # Put the warped reference photo back onto whichever new frames landed on
+  # the original camera. Matches by position, so it survives the reorbit.
+  #
+  # AFTER mask_splat, not before it — the ordering is load-bearing and was
+  # wrong. Before mask_splat this step sits where dataset.masks is carrying
+  # rerender_splat's per-pixel splat alpha, and it would overwrite exactly
+  # the input mask_splat exists to threshold. Here it only ever sees VACE
+  # masks: mask_splat has already consumed the alpha and emitted all-1.0.
+  #
+  # This reproduces cyber2_6f/masked_splatted frame for frame: 80 frames
+  # masked and filtered at alpha 255, and frame_00038_ the anchor.png
+  # verbatim — not composited over black, not bilateral-filtered — at
+  # alpha 0.
+  - id: reinject_anchor
+    step: inject_anchor
+    dispatch: in_process
+    inputs:
+      images: dataset.images
+      cameras: dataset.cameras
+      anchor_position: dataset.extras.anchor_position
+      anchor_image: dataset.anchor_image
+      # mask_splat's all-1.0 batch, passed through with 0.0 written at the
+      # anchor frame. Manufacturing it here instead would give the same
+      # values today; wiring it keeps the step from silently destroying a
+      # mask that matters if anything is ever inserted above it.
+      masks: dataset.masks
+    params:
+      tolerance_pct: 0.1
+    outputs:
+      images: dataset.images
+      masks: dataset.masks
 
   # ---------------------------------------------------------------- stage 4
   # denoise.json again, strength 0.8 — clean up the re-render.
