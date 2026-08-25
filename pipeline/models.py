@@ -42,6 +42,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -429,8 +430,128 @@ def summary_line() -> str:
 
 
 # --------------------------------------------------------------------------
-# fetching
+# fetching, and reporting progress while it happens
 # --------------------------------------------------------------------------
+
+#: Seconds between progress lines while a model downloads.
+PROGRESS_INTERVAL = float(os.environ.get("B2C_PREFETCH_PROGRESS_INTERVAL", "30"))
+
+
+def _cache_roots() -> List[Path]:
+    """Where downloaded bytes actually land, for measuring growth.
+
+    The HF hub cache and $B2C_MODELS_DIR, NOT $HF_HOME wholesale: the Xet
+    chunk cache lives under HF_HOME too, and chunks are written there as
+    well as into the blob, so including it would double-count every byte.
+    """
+    roots = [Path(models_dir())]
+    try:
+        from huggingface_hub.constants import HF_HUB_CACHE
+
+        roots.append(Path(HF_HUB_CACHE))
+    except Exception:
+        pass
+    # NOT filtered on exists(): on a cold pod neither directory has been
+    # created yet when the first fetch starts, so filtering here would leave
+    # nothing to measure and every interval would report 0 MB/s forever.
+    # _bytes_under tolerates a missing root instead.
+    return roots
+
+
+def _bytes_under(roots: Sequence[Path]) -> int:
+    total = 0
+    for root in roots:
+        for dirpath, _dirnames, filenames in os.walk(root, onerror=lambda _: None):
+            for name in filenames:
+                try:
+                    total += os.lstat(os.path.join(dirpath, name)).st_size
+                except OSError:
+                    # A blob being written can vanish between walk and stat.
+                    continue
+    return total
+
+
+def _size(num_bytes: float) -> str:
+    """GB once there is a GB to show, MB below that — mediapipe is 10 MB and
+    `0.0 GB` says nothing about whether it is moving."""
+    if num_bytes >= 1e9:
+        return f"{num_bytes / 1e9:.1f} GB"
+    return f"{num_bytes / 1e6:.0f} MB"
+
+
+def _humanize(seconds: float) -> str:
+    if seconds < 90:
+        return f"{seconds:.0f}s"
+    if seconds < 5400:
+        return f"{seconds / 60:.0f}m"
+    return f"{seconds / 3600:.1f}h"
+
+
+class _DownloadProgress:
+    """Log "how far along, how fast" every PROGRESS_INTERVAL while a fetch runs.
+
+    Measures growth of the cache directories rather than hooking a
+    downloader, because the three fetchers in this module do not share one:
+    huggingface_hub has its own tqdm, seedvr2's vendored `download_weight`
+    has another, and MediaPipe's is a plain urlretrieve. Directory growth is
+    the one signal all three produce.
+
+    Two things that surprised us and are worth expecting in the output:
+
+      * Xet writes in bursts, not a steady stream — it holds chunks in
+        memory and flushes them, so an interval can legitimately report
+        ~0 MB/s and the next one report double. The average since start is
+        the number to trust; the instantaneous one is for spotting a stall.
+      * `approx_gb` is a registry constant, not a content-length. Percentages
+        can drift past 100 or stop short; they are for orientation, not
+        accounting.
+    """
+
+    def __init__(self, key: str, approx_gb: float, interval: float = PROGRESS_INTERVAL):
+        self._key = key
+        self._approx_bytes = int(approx_gb * 1e9)
+        self._interval = interval
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    def __enter__(self) -> "_DownloadProgress":
+        if self._interval <= 0:
+            return self
+        self._roots = _cache_roots()
+        self._baseline = _bytes_under(self._roots)
+        self._started = time.time()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=5)
+
+    def _run(self) -> None:
+        last_bytes, last_time = self._baseline, self._started
+        while not self._stop.wait(self._interval):
+            now = time.time()
+            try:
+                current = _bytes_under(self._roots)
+            except Exception:
+                continue
+            fetched = max(0, current - self._baseline)
+            recent = (current - last_bytes) / max(1e-6, now - last_time)
+            average = fetched / max(1e-6, now - self._started)
+            last_bytes, last_time = current, now
+
+            line = f"{self._key}: {_size(fetched)}"
+            if self._approx_bytes:
+                line += f" of ~{_size(self._approx_bytes)} ({100 * fetched / self._approx_bytes:.0f}%)"
+            line += f" — {recent / 1e6:.0f} MB/s now, {average / 1e6:.0f} MB/s avg"
+            if self._approx_bytes and average > 1e6:
+                remaining = (self._approx_bytes - fetched) / average
+                if remaining > 0:
+                    line += f", ETA {_humanize(remaining)}"
+            logger.info("%s", line)
+
 
 def prefetch(
     keys: Optional[Sequence[str]] = None,
@@ -473,7 +594,8 @@ def prefetch(
 
         started = time.time()
         try:
-            location = source.fetch()
+            with _DownloadProgress(key, source.approx_gb):
+                location = source.fetch()
         except Exception as exc:
             detail = f"{type(exc).__name__}: {exc}"
             if source.gated:
@@ -489,7 +611,11 @@ def prefetch(
             continue
 
         elapsed = time.time() - started
-        logger.info("%s: ready in %.0fs (%s)", key, elapsed, location)
+        if source.approx_gb and elapsed > 1:
+            logger.info("%s: ready in %s (~%.0f MB/s avg) (%s)", key,
+                        _humanize(elapsed), source.approx_gb * 1e9 / elapsed / 1e6, location)
+        else:
+            logger.info("%s: ready in %.0fs (%s)", key, elapsed, location)
         mark_ready(key, location)
         status[key] = {"status": READY, "detail": location, "seconds": round(elapsed, 1)}
         _write_status(status)

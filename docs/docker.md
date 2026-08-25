@@ -172,12 +172,24 @@ print(torch.__version__)"`) rather than trusting the index name — this
 matters for `sageattention` and any other package that checks the installed
 CUDA ABI at import/install time.
 
-**HuggingFace's Xet backend ignores `HF_HOME`**: it caches to `$HOME`
-regardless, which fills a container's small writable layer even when
-`/data` (a large mounted volume) has plenty of room — downloads die with
-"Disk quota exceeded" in a way that's confusing to debug from the error
-alone. `docker/Dockerfile` sets `HF_HUB_DISABLE_XET=1` to route around this
-entirely.
+**HuggingFace's Xet backend used to ignore `HF_HOME`**: it cached to
+`$HOME` regardless, which fills a container's small writable layer even
+when `/data` (a large mounted volume) has plenty of room — downloads die
+with "Disk quota exceeded" in a way that's confusing to debug from the
+error alone. `docker/Dockerfile` used to set `HF_HUB_DISABLE_XET=1` to
+route around this.
+
+It no longer does. huggingface_hub now derives the Xet cache from `HF_HOME`
+(`default_xet_cache_path = os.path.join(HF_HOME, "xet")`), and the
+Dockerfile pins `HF_XET_CACHE=/data/hf_cache/xet` on top of that, so the
+cache cannot land on the root disk whichever hub version the build
+resolves. Disabling Xet was expensive: it does not fall back to "the old
+way", it falls back to the `xet-bridge-*` CDN endpoint, which serves a file
+as **one HTTP stream**. `wan22_vace_denoise`'s two fp8 experts are 17.58 GB
+each and sit in a Xet-backed repo, so the workaround was costing ~35 GB of
+single-stream transfer on every cold pod. `HF_XET_HIGH_PERFORMANCE=1` is
+set alongside it; `HF_HUB_ENABLE_HF_TRANSFER` is not, because the installed
+hub reads that variable only to warn you to use the former.
 
 **`briaai/RMBG-2.0` and `facebook/sam-3d-body-dinov3` are gated**: a human
 must click "agree" on each model's HF page from an account before that

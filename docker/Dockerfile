@@ -509,16 +509,38 @@ ENV B2C_MODELS_DIR=/data/models
 ENV TMPDIR=/data/tmp
 ENV B2C_PORT=7860
 
-# huggingface_hub's Xet backend caches to $HOME regardless of HF_HOME,
-# filling a container's small writable layer while /data sits empty —
-# downloads then die with "Disk quota exceeded". Learned on a real pod.
 ENV HF_HOME=/data/hf_cache
-ENV HF_HUB_DISABLE_XET=1
-# Belt and braces for the same problem: if something ever re-enables Xet
-# (a future huggingface_hub that ignores the flag above, or an explicit
-# override at run time), this keeps its cache on the volume rather than in
-# $HOME. Harmless while Xet is disabled.
+# Xet used to cache to $HOME regardless of HF_HOME, filling a container's
+# small writable layer while /data sat empty — downloads died with "Disk
+# quota exceeded", learned on a real pod. That is why this file used to set
+# HF_HUB_DISABLE_XET=1.
+#
+# It no longer does, because the cost of that workaround turned out to be
+# large and the reason for it has gone away:
+#
+#   * The bug is fixed upstream. huggingface_hub now derives the Xet cache
+#     from HF_HOME (`default_xet_cache_path = os.path.join(HF_HOME, "xet")`
+#     in huggingface_hub/constants.py), so it lands on the volume by
+#     default. HF_XET_CACHE below pins it there explicitly anyway, which
+#     makes this independent of which hub version the build resolves.
+#   * Disabling Xet does not mean "download the old way". A Xet-backed repo
+#     redirects a non-Xet client to the `xet-bridge-*` CDN endpoint, which
+#     serves the file as ONE HTTP stream. wan22_vace_denoise's two fp8
+#     experts are 17.58 GB each and live in a Xet-backed repo
+#     (silveroxides/Wan_2.2-fp8_scaled_hybrid — a HEAD on either file
+#     returns x-xet-hash and a rel="xet-auth" link), so that workaround was
+#     costing ~35 GB of single-stream transfer on every cold pod, which is
+#     most of the prefetch wall time.
 ENV HF_XET_CACHE=/data/hf_cache/xet
+# HF_XET_HIGH_PERFORMANCE is deliberately NOT set, and this is measured
+# rather than assumed. Downloading one 17.58 GB fp8 expert with it on: RSS
+# tracked bytes-downloaded 1:1 and NOTHING reached disk until the end
+# (4.52 GB resident at 110s, i.e. a ~17.6 GB peak projected for the full
+# file). With it off, the same download flushes progressively — resident
+# set sawtooths between 0.7 and 2.4 GB while the blob grows on disk — at
+# the same throughput. On a link fast enough to be the bottleneck the mode
+# may still be worth it, but not on a pod where `doctor` already WARNs that
+# host RAM is tight against wan22's ~47 GB resident set.
 #
 # ---------------------------------------------------------------------------
 # Caches that default into $HOME, i.e. onto the pod's small ephemeral disk.
@@ -545,13 +567,13 @@ ENV TORCH_HOME=/data/caches/torch
 ENV XDG_CACHE_HOME=/data/caches/xdg
 ENV MPLCONFIGDIR=/data/caches/mpl
 
-# HF_HUB_ENABLE_HF_TRANSFER is deliberately NOT set. It looks like free
-# speed and is, in this stack, a no-op that costs clarity: the installed
-# huggingface_hub prints a FutureWarning at every container start saying
-# hf_transfer is no longer used and to enable Xet's high-performance mode
-# instead — which is exactly what HF_HUB_DISABLE_XET above turns off, for
-# the documented reason that Xet cached to $HOME regardless of HF_HOME and
-# filled a pod's root disk. Slower downloads, correct ones.
+# HF_HUB_ENABLE_HF_TRANSFER is deliberately NOT set, and the `hf_transfer`
+# package installed above is now dead weight. The installed huggingface_hub
+# does not read that variable as a transfer backend at all — it only checks
+# it in order to print a FutureWarning telling you to use
+# HF_XET_HIGH_PERFORMANCE instead, which is what the Xet block above now
+# sets. Left uninstalled-but-unremoved only because several child venvs'
+# requirements.txt still list it; removing it there is a separate change.
 
 # NOT "...:${PYTHONPATH}": nothing defines PYTHONPATH in the base image, so
 # that expanded to a trailing colon, which BuildKit flags

@@ -65,7 +65,7 @@ def _run(cmd: List[str], timeout: int = 60) -> subprocess.CompletedProcess:
 def check_environment() -> Check:
     interesting = [
         "B2C_DATA_DIR", "B2C_OUTPUT_DIR", "B2C_LOG_DIR", "B2C_MODELS_DIR", "TMPDIR",
-        "HF_HOME", "HF_HUB_DISABLE_XET", "HF_HUB_ENABLE_HF_TRANSFER",
+        "HF_HOME", "HF_HUB_DISABLE_XET", "HF_XET_CACHE", "HF_XET_HIGH_PERFORMANCE",
         "NVIDIA_DRIVER_CAPABILITIES", "CUDA_VISIBLE_DEVICES",
         "PYTHONPATH", "PYOPENGL_PLATFORM",
     ]

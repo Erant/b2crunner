@@ -45,12 +45,19 @@ mkdir -p /workspace/hf_cache
 cat > /workspace/env.sh <<ENVEOF
 export HF_HOME=/workspace/hf_cache
 export HF_TOKEN=${HF_TOKEN}
-export HF_HUB_ENABLE_HF_TRANSFER=1
-# huggingface_hub's Xet backend caches to ~/.cache regardless of HF_HOME —
-# on a pod with a small root disk and a large /workspace volume, that fills
-# the root disk and downloads die with "Disk quota exceeded" even though
-# /workspace has plenty of room. Disable it.
-export HF_HUB_DISABLE_XET=1
+# Xet, not hf_transfer. huggingface_hub no longer uses HF_HUB_ENABLE_HF_TRANSFER
+# as a transfer backend — it reads it only to warn you to set
+# HF_XET_HIGH_PERFORMANCE instead. Xet matters here because the big weights
+# (wan22's two 17.58 GB fp8 experts) live in Xet-backed repos, and a client
+# with Xet disabled gets redirected to the xet-bridge CDN and pulls them as
+# a single HTTP stream.
+# HF_XET_HIGH_PERFORMANCE is deliberately not set — it buffers the whole
+# file in RAM instead of flushing to disk as it goes. See docker/Dockerfile.
+# Xet used to cache to ~/.cache regardless of HF_HOME, which on a pod with a
+# small root disk and a large /workspace volume filled the root disk and
+# killed downloads with "Disk quota exceeded". It now derives its cache from
+# HF_HOME; this pins it onto the volume regardless of hub version.
+export HF_XET_CACHE=/workspace/hf_cache/xet
 ENVEOF
 source /workspace/env.sh
 
