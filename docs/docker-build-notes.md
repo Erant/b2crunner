@@ -551,9 +551,26 @@ Only after 1 and 2 pass. Expect the long poles to be brush's `cargo build
 --release` and the sam3dbody layer.
 
 ```bash
-docker build -f docker/Dockerfile -t b2c/pipeline:latest .
+docker build -f docker/Dockerfile -t b2c/pipeline:latest \
+  --build-arg GIT_SHA="$(git rev-parse HEAD)" \
+  --build-arg GIT_DIRTY="$([ -n "$(git status --porcelain)" ] && echo -dirty)" \
+  --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  .
 docker run --rm --gpus all b2c/pipeline:latest --help
 ```
+
+The `--build-arg` lines stamp the commit onto the image as an OCI label. They
+are optional, but without them the image carries only the labels inherited
+from the `nvidia/cuda` base, and two builds from different commits are
+indistinguishable to `docker inspect` — telling them apart then means hashing
+`/opt/b2c_runner` inside each candidate image. Check the stamp with:
+
+```bash
+docker inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' b2c/pipeline:latest
+```
+
+A `-dirty` suffix means the tree had uncommitted changes at build time, so the
+image does not correspond to that commit alone.
 
 Then a real smoke test — the roundtrip workflow needs no GPU and no
 weights, so it isolates plumbing from models:

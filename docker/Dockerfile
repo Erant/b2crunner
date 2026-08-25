@@ -5,7 +5,15 @@
 # — see docs/docker.md's "Why one image".
 #
 # Build (context must be the repo root):
-#   docker build -f docker/Dockerfile -t b2c/pipeline:latest .
+#   docker build -f docker/Dockerfile -t b2c/pipeline:latest \
+#     --build-arg GIT_SHA="$(git rev-parse HEAD)" \
+#     --build-arg GIT_DIRTY="$([ -n "$(git status --porcelain)" ] && echo -dirty)" \
+#     --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+#     .
+#
+# The three --build-arg lines are optional (the build works without them) but
+# stamp the commit onto the image as OCI labels — see "Build provenance" at
+# the bottom of this file for why that is worth the typing.
 #
 # The container's default mode is the web UI (docker/entrypoint.sh) — a pod
 # started with no arguments serves it on $B2C_PORT and stays alive. See
@@ -682,6 +690,31 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=180s --retries=3 \
 
 COPY docker/entrypoint.sh /usr/local/bin/b2c-entrypoint
 RUN chmod +x /usr/local/bin/b2c-entrypoint
+
+# Build provenance. Deliberately the LAST thing in the file: a LABEL makes a
+# layer, and every layer after it would be invalidated by a new SHA. Here, a
+# rebuild at a different commit redoes this metadata layer and nothing else.
+#
+# Without these, the only labels on the image are the ones inherited from the
+# nvidia/cuda base (maintainer, cudnn.version, ...), every build looks
+# identical to `docker inspect`, and identifying which image matches the
+# working tree means hashing /opt/b2c_runner inside each one by hand.
+#
+# All three default to empty so a bare `docker build -f docker/Dockerfile .`
+# still succeeds; the header's build command fills them in. GIT_DIRTY is the
+# "-dirty" suffix `git describe` would add — an image built from an unclean
+# tree does NOT correspond to its commit, and that has to be visible on the
+# image, not just remembered.
+#
+# Read it back with:
+#   docker inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' b2c/pipeline:latest
+ARG GIT_SHA=""
+ARG GIT_DIRTY=""
+ARG BUILD_DATE=""
+LABEL org.opencontainers.image.title="b2c/pipeline" \
+      org.opencontainers.image.source="https://github.com/Erant/b2crunner" \
+      org.opencontainers.image.revision="${GIT_SHA}${GIT_DIRTY}" \
+      org.opencontainers.image.created="${BUILD_DATE}"
 
 # CMD, not a hardcoded ENTRYPOINT argument, so RunPod's "container start
 # command" (which replaces CMD) can select a different mode without having
