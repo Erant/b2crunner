@@ -454,127 +454,16 @@ RUN find /opt/venv_* -type d -name '__pycache__' -prune -exec rm -rf {} + \
 # symlinks and pyvenv.cfg `home` entries stay valid.
 FROM nvidia/cuda:13.0.2-cudnn-runtime-ubuntu24.04 AS runtime
 
-# Read by nvidia-container-toolkit at CONTAINER-CREATION time to decide
-# which driver components to expose. Without `graphics` the driver's Vulkan
-# and EGL ICDs are not wired up even though the .so files are present —
-# confirmed on a real RunPod pod, where vulkaninfo failed with
-# ERROR_INCOMPATIBLE_DRIVER under the default compute,utility set.
-#
-# This gates BOTH brush (Vulkan) and render (EGL). Whether RunPod honours
-# an image-level ENV for it is unresolved; setting it in the pod template's
-# own environment variables is the more reliable path, since that is
-# applied at creation time. See docs/docker-build-notes.md.
-ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics,display
-
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PIP_NO_CACHE_DIR=1
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# Python block-buffers stdout whenever it is a pipe, which it always is
-# under `docker logs` and under RunPod's log pane. Without this a step that
-# runs for twenty minutes prints nothing and then prints everything, and a
-# slow run is indistinguishable from a hung one. The single highest-value
-# line in this file for debugging a remote run.
-ENV PYTHONUNBUFFERED=1
-ENV PYTHONFAULTHANDLER=1
-
-# Where the pipeline is allowed to write. pipeline/paths.py reads these; the
-# entrypoint creates them. All of it has to be on the mounted volume: the
-# container's writable layer is small, and an 81-frame batch of IPC pickles
-# or a trained .ply will fill it. TMPDIR matters as much as the rest —
-# SubprocessPythonDispatcher round-trips every step's inputs and outputs
-# through it.
-#
-# The mkdir is not cosmetic and must come BEFORE the ENV: TMPDIR applies to
-# the rest of the build too, and a TMPDIR that does not exist breaks any
-# package whose postinst wants a temp file. Setting it without this line
-# fails the very next apt layer with
-#   dpkg: error processing package ca-certificates (--configure)
-#   dpkg: error processing package openssh-server (--configure)
-# and no mention of TMPDIR anywhere in the output. (The skeleton also means
-# a container run with no volume at all still has somewhere to write, rather
-# than dying on the first mkdir.)
+# The /data skeleton. Stays HERE, above the apt layer, rather than moving
+# down with the ENVs that name these paths: a container run with no volume
+# mounted still needs somewhere to write, and this is a filesystem layer, not
+# metadata — moving it would rebuild everything below for no benefit.
 RUN mkdir -p /data/output /data/logs /data/uploads /data/tmp /data/hf_cache /data/models \
         /data/caches/triton /data/caches/nv /data/caches/torch /data/caches/xdg /data/caches/mpl
-ENV B2C_DATA_DIR=/data
-ENV B2C_OUTPUT_DIR=/data/output
-ENV B2C_LOG_DIR=/data/logs
-ENV B2C_UPLOAD_DIR=/data/uploads
-# Weights whose downloader ignores HF_HOME — seedvr2's vendored one takes an
-# explicit model_dir, and face_landmarks fetches MediaPipe's files straight
-# from a URL. Both defaulted somewhere inside the container (a relative path
-# and ~/.cache respectively), which on a pod means several GB on the small
-# container disk, re-downloaded after every restart. See pipeline/paths.py.
-ENV B2C_MODELS_DIR=/data/models
-ENV TMPDIR=/data/tmp
-ENV B2C_PORT=7860
-
-ENV HF_HOME=/data/hf_cache
-# Xet used to cache to $HOME regardless of HF_HOME, filling a container's
-# small writable layer while /data sat empty — downloads died with "Disk
-# quota exceeded", learned on a real pod. That is why this file used to set
-# HF_HUB_DISABLE_XET=1.
-#
-# It no longer does, because the cost of that workaround turned out to be
-# large and the reason for it has gone away:
-#
-#   * The bug is fixed upstream. huggingface_hub now derives the Xet cache
-#     from HF_HOME (`default_xet_cache_path = os.path.join(HF_HOME, "xet")`
-#     in huggingface_hub/constants.py), so it lands on the volume by
-#     default. HF_XET_CACHE below pins it there explicitly anyway, which
-#     makes this independent of which hub version the build resolves.
-#   * Disabling Xet does not mean "download the old way". A Xet-backed repo
-#     redirects a non-Xet client to the `xet-bridge-*` CDN endpoint, which
-#     serves the file as ONE HTTP stream. wan22_vace_denoise's two fp8
-#     experts are 17.58 GB each and live in a Xet-backed repo
-#     (silveroxides/Wan_2.2-fp8_scaled_hybrid — a HEAD on either file
-#     returns x-xet-hash and a rel="xet-auth" link), so that workaround was
-#     costing ~35 GB of single-stream transfer on every cold pod, which is
-#     most of the prefetch wall time.
-ENV HF_XET_CACHE=/data/hf_cache/xet
-# HF_XET_HIGH_PERFORMANCE is deliberately NOT set, and this is measured
-# rather than assumed. Downloading one 17.58 GB fp8 expert with it on: RSS
-# tracked bytes-downloaded 1:1 and NOTHING reached disk until the end
-# (4.52 GB resident at 110s, i.e. a ~17.6 GB peak projected for the full
-# file). With it off, the same download flushes progressively — resident
-# set sawtooths between 0.7 and 2.4 GB while the blob grows on disk — at
-# the same throughput. On a link fast enough to be the bottleneck the mode
-# may still be worth it, but not on a pod where `doctor` already WARNs that
-# host RAM is tight against wan22's ~47 GB resident set.
-#
-# ---------------------------------------------------------------------------
-# Caches that default into $HOME, i.e. onto the pod's small ephemeral disk.
-# ---------------------------------------------------------------------------
-# Same class of bug as the Xet cache above, found by auditing what a run
-# actually writes outside /data. None of these are large, so this is not a
-# disk-quota fix — it is a "don't redo work every pod restart" fix, plus
-# keeping the ephemeral layer free of anything worth keeping.
-#
-# TRITON_CACHE_DIR is the one that now matters most: every SageAttention
-# backend goes through Triton, which JIT-compiles its kernels on first use
-# and caches them (~1.2 MB) under ~/.triton. On the ephemeral disk that
-# means re-JITting on every single pod start, in the middle of the most
-# expensive step. CUDA_CACHE_PATH is the driver's own PTX JIT cache
-# (~/.nv/ComputeCache), same story.
-#
-# TORCH_HOME, XDG_CACHE_HOME and MPLCONFIGDIR are belt and braces: nothing
-# in the pipeline is known to use torch.hub today, but timm and
-# matplotlib-using vendored code both write under $HOME by default, and a
-# future step that does would silently land on the ephemeral disk.
-ENV TRITON_CACHE_DIR=/data/caches/triton
-ENV CUDA_CACHE_PATH=/data/caches/nv
-ENV TORCH_HOME=/data/caches/torch
-ENV XDG_CACHE_HOME=/data/caches/xdg
-ENV MPLCONFIGDIR=/data/caches/mpl
-
-# HF_HUB_ENABLE_HF_TRANSFER is deliberately NOT set, and the `hf_transfer`
-# package installed above is now dead weight. The installed huggingface_hub
-# does not read that variable as a transfer backend at all — it only checks
-# it in order to print a FutureWarning telling you to use
-# HF_XET_HIGH_PERFORMANCE instead, which is what the Xet block above now
-# sets. Left uninstalled-but-unremoved only because several child venvs'
-# requirements.txt still list it; removing it there is a separate change.
-
 # NOT "...:${PYTHONPATH}": nothing defines PYTHONPATH in the base image, so
 # that expanded to a trailing colon, which BuildKit flags
 # (UndefinedVar, the build's only warning) and which Python reads as an
@@ -730,6 +619,142 @@ RUN chmod +x /usr/local/bin/b2c-entrypoint
 #
 # Read it back with:
 #   docker inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' b2c/pipeline:latest
+
+# ---------------------------------------------------------------------------
+# Runtime configuration. LAST ON PURPOSE — same reasoning as the LABEL block
+# below, and it is the more expensive of the two to get wrong.
+# ---------------------------------------------------------------------------
+# ENV does not create a filesystem layer, but it does change the image config
+# that every subsequent RUN and COPY is cache-keyed on. This block used to sit
+# near the top of the stage, above the apt layer and above the six
+# `COPY --from=python-builder` venv copies. That meant editing one variable
+# rebuilt all of it — and, worse, re-uploaded it: a re-executed COPY produces
+# a fresh layer digest even when the source tree is byte-identical, so the
+# registry saw new blobs rather than deduplicating.
+#
+# Measured on two consecutive builds of the same image. Editing
+# HF_HUB_DISABLE_XET here (two lines) rebuilt 25 of 26 layers and pushed
+# 7.97 GB. The next commit touched only `COPY . /opt/b2c_runner` near the end
+# and pushed 26 MB. Same image, same size; the whole difference was where the
+# edited line sat.
+#
+# So: anything read only by a RUNNING container belongs here. Anything the
+# BUILD reads — DEBIAN_FRONTEND for apt, PIP_* for the editable installs,
+# PYTHONPATH for the step-registry smoke test — has to stay above its
+# consumer, and does.
+#
+# One behaviour change fell out of the move, and it is an improvement: TMPDIR
+# no longer applies during the build. It used to, and the comment on the mkdir
+# above records what that cost — a TMPDIR pointing at a directory that did not
+# exist yet failed the next apt layer with an unrelated-looking dpkg error.
+# The build now uses the default /tmp and cannot hit that at all.
+
+# Read by nvidia-container-toolkit at CONTAINER-CREATION time to decide
+# which driver components to expose. Without `graphics` the driver's Vulkan
+# and EGL ICDs are not wired up even though the .so files are present —
+# confirmed on a real RunPod pod, where vulkaninfo failed with
+# ERROR_INCOMPATIBLE_DRIVER under the default compute,utility set.
+#
+# This gates BOTH brush (Vulkan) and render (EGL). Whether RunPod honours
+# an image-level ENV for it is unresolved; setting it in the pod template's
+# own environment variables is the more reliable path, since that is
+# applied at creation time. See docs/docker-build-notes.md.
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics,display
+
+# Python block-buffers stdout whenever it is a pipe, which it always is
+# under `docker logs` and under RunPod's log pane. Without this a step that
+# runs for twenty minutes prints nothing and then prints everything, and a
+# slow run is indistinguishable from a hung one. The single highest-value
+# line in this file for debugging a remote run.
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONFAULTHANDLER=1
+
+# Where the pipeline is allowed to write. pipeline/paths.py reads these; the
+# entrypoint creates them. All of it has to be on the mounted volume: the
+# container's writable layer is small, and an 81-frame batch of IPC pickles
+# or a trained .ply will fill it. TMPDIR matters as much as the rest —
+# SubprocessPythonDispatcher round-trips every step's inputs and outputs
+# through it.
+#
+ENV B2C_DATA_DIR=/data
+ENV B2C_OUTPUT_DIR=/data/output
+ENV B2C_LOG_DIR=/data/logs
+ENV B2C_UPLOAD_DIR=/data/uploads
+# Weights whose downloader ignores HF_HOME — seedvr2's vendored one takes an
+# explicit model_dir, and face_landmarks fetches MediaPipe's files straight
+# from a URL. Both defaulted somewhere inside the container (a relative path
+# and ~/.cache respectively), which on a pod means several GB on the small
+# container disk, re-downloaded after every restart. See pipeline/paths.py.
+ENV B2C_MODELS_DIR=/data/models
+ENV TMPDIR=/data/tmp
+ENV B2C_PORT=7860
+
+ENV HF_HOME=/data/hf_cache
+# Xet used to cache to $HOME regardless of HF_HOME, filling a container's
+# small writable layer while /data sat empty — downloads died with "Disk
+# quota exceeded", learned on a real pod. That is why this file used to set
+# HF_HUB_DISABLE_XET=1.
+#
+# It no longer does, because the cost of that workaround turned out to be
+# large and the reason for it has gone away:
+#
+#   * The bug is fixed upstream. huggingface_hub now derives the Xet cache
+#     from HF_HOME (`default_xet_cache_path = os.path.join(HF_HOME, "xet")`
+#     in huggingface_hub/constants.py), so it lands on the volume by
+#     default. HF_XET_CACHE below pins it there explicitly anyway, which
+#     makes this independent of which hub version the build resolves.
+#   * Disabling Xet does not mean "download the old way". A Xet-backed repo
+#     redirects a non-Xet client to the `xet-bridge-*` CDN endpoint, which
+#     serves the file as ONE HTTP stream. wan22_vace_denoise's two fp8
+#     experts are 17.58 GB each and live in a Xet-backed repo
+#     (silveroxides/Wan_2.2-fp8_scaled_hybrid — a HEAD on either file
+#     returns x-xet-hash and a rel="xet-auth" link), so that workaround was
+#     costing ~35 GB of single-stream transfer on every cold pod, which is
+#     most of the prefetch wall time.
+ENV HF_XET_CACHE=/data/hf_cache/xet
+# HF_XET_HIGH_PERFORMANCE is deliberately NOT set, and this is measured
+# rather than assumed. Downloading one 17.58 GB fp8 expert with it on: RSS
+# tracked bytes-downloaded 1:1 and NOTHING reached disk until the end
+# (4.52 GB resident at 110s, i.e. a ~17.6 GB peak projected for the full
+# file). With it off, the same download flushes progressively — resident
+# set sawtooths between 0.7 and 2.4 GB while the blob grows on disk — at
+# the same throughput. On a link fast enough to be the bottleneck the mode
+# may still be worth it, but not on a pod where `doctor` already WARNs that
+# host RAM is tight against wan22's ~47 GB resident set.
+#
+# ---------------------------------------------------------------------------
+# Caches that default into $HOME, i.e. onto the pod's small ephemeral disk.
+# ---------------------------------------------------------------------------
+# Same class of bug as the Xet cache above, found by auditing what a run
+# actually writes outside /data. None of these are large, so this is not a
+# disk-quota fix — it is a "don't redo work every pod restart" fix, plus
+# keeping the ephemeral layer free of anything worth keeping.
+#
+# TRITON_CACHE_DIR is the one that now matters most: every SageAttention
+# backend goes through Triton, which JIT-compiles its kernels on first use
+# and caches them (~1.2 MB) under ~/.triton. On the ephemeral disk that
+# means re-JITting on every single pod start, in the middle of the most
+# expensive step. CUDA_CACHE_PATH is the driver's own PTX JIT cache
+# (~/.nv/ComputeCache), same story.
+#
+# TORCH_HOME, XDG_CACHE_HOME and MPLCONFIGDIR are belt and braces: nothing
+# in the pipeline is known to use torch.hub today, but timm and
+# matplotlib-using vendored code both write under $HOME by default, and a
+# future step that does would silently land on the ephemeral disk.
+ENV TRITON_CACHE_DIR=/data/caches/triton
+ENV CUDA_CACHE_PATH=/data/caches/nv
+ENV TORCH_HOME=/data/caches/torch
+ENV XDG_CACHE_HOME=/data/caches/xdg
+ENV MPLCONFIGDIR=/data/caches/mpl
+
+# HF_HUB_ENABLE_HF_TRANSFER is deliberately NOT set, and the `hf_transfer`
+# package installed above is now dead weight. The installed huggingface_hub
+# does not read that variable as a transfer backend at all — it only checks
+# it in order to print a FutureWarning telling you to use
+# HF_XET_HIGH_PERFORMANCE instead, which is what the Xet block above now
+# sets. Left uninstalled-but-unremoved only because several child venvs'
+# requirements.txt still list it; removing it there is a separate change.
+
 ARG GIT_SHA=""
 ARG GIT_DIRTY=""
 ARG BUILD_DATE=""
