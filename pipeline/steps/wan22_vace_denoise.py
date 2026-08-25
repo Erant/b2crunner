@@ -127,6 +127,10 @@ volume makes the second load free.
 
 from __future__ import annotations
 
+import contextlib
+import functools
+import logging
+import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -136,6 +140,8 @@ import numpy as np
 from ..masks import normalize_mask
 from ..registry import register_step
 from ..step import Step
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_CHECKPOINT = "linoyts/Wan2.2-VACE-Fun-14B-diffusers"
 # The transformers, pre-quantized. Two separate files because the model is
@@ -396,6 +402,7 @@ class Wan22VaceDenoiseStep(Step):
         # unbatched per-frame arrays.
         from PIL import Image
 
+        converting = time.time()
         video = [Image.fromarray(_bgr_to_rgb(frame)) for frame in inputs["control_video"]]
         # Passed through as-is (not inverted — see module docstring) and
         # normalized to [0, 1] regardless of whether the source mask is
@@ -407,6 +414,7 @@ class Wan22VaceDenoiseStep(Step):
         # lists thereof) specifically — unlike video/mask, a raw ndarray is
         # rejected outright.
         reference_images = [Image.fromarray(_bgr_to_rgb(ref_img))] if ref_img is not None else None
+        logger.info("  frame conversion: %.1fs", time.time() - converting)
 
         generator = torch.Generator(device=params.get("device", "cuda"))
         generator.manual_seed(int(params.get("seed", 0)))
@@ -416,25 +424,119 @@ class Wan22VaceDenoiseStep(Step):
         if subject_desc and "$SUBJECT_DESC$" in prompt:
             prompt = prompt.replace("$SUBJECT_DESC$", subject_desc)
 
-        result = pipe(
-            prompt=prompt,
-            negative_prompt=params.get("negative_prompt", ""),
-            video=video,
-            mask=masks,
-            reference_images=reference_images,
-            conditioning_scale=params.get("strength", 1.0),
-            height=params["height"],
-            width=params["width"],
-            num_frames=params.get("length", len(video)),
-            num_inference_steps=params.get("steps", 6),
-            guidance_scale=params.get("cfg", 1.0),
-            generator=generator,
-            output_type="np",
-        )
+        # Timings, not just a call. Everything up to the progress bar's
+        # "0%" is silent otherwise, which on a resident worker's second
+        # pass reads as a two-minute hang — see _PRE_LOOP_PHASES.
+        started = time.time()
+        with _timed_phases(pipe):
+            result = pipe(
+                prompt=prompt,
+                negative_prompt=params.get("negative_prompt", ""),
+                video=video,
+                mask=masks,
+                reference_images=reference_images,
+                conditioning_scale=params.get("strength", 1.0),
+                height=params["height"],
+                width=params["width"],
+                num_frames=params.get("length", len(video)),
+                num_inference_steps=params.get("steps", 6),
+                guidance_scale=params.get("cfg", 1.0),
+                generator=generator,
+                output_type="np",
+            )
+        # Total minus the phases above minus the progress bar's own total
+        # is the VAE *decode* of the finished latents, which is inline in
+        # __call__ rather than a method and so cannot be wrapped.
+        logger.info("  pipe() total: %.1fs", time.time() - started)
 
         frames = result.frames[0] if hasattr(result, "frames") else result[0]
         images = [_rgb_float_to_bgr_uint8(frame) for frame in frames]
         return {"images": images}
+
+
+# The phases of WanVACEPipeline.__call__ that run BEFORE the denoise loop's
+# progress bar exists, in the order they run. Wrapped by _timed_phases()
+# below so the two minutes between "reusing loaded" and "0%" stop being one
+# opaque block. Named rather than derived because only these four can
+# plausibly dominate:
+#
+#   encode_prompt         the T5 text encoder — 11.36 GB — coming back
+#                         over PCIe under enable_model_cpu_offload before
+#                         it runs a ~1s forward. release_vram() evicted it
+#                         after the previous job, so every pass pays this.
+#   preprocess_conditions diffusers resizing all 81 video frames AND all
+#                         81 masks to width x height. CPU only, and the
+#                         second time the frames get walked (run() already
+#                         converted each one to PIL).
+#   prepare_video_latents the expensive one. VACE splits the control video
+#                         by the mask into `inactive` and `reactive` and
+#                         encodes EACH through the VAE, and
+#                         AutoencoderKLWan encodes in 1 + (frames - 1) // 4
+#                         temporal chunks with tiling off by default — so
+#                         81 frames at 720x1280 is 2 x 21 full-resolution
+#                         encoder passes, plus one more for the reference
+#                         image, before a single denoise step happens.
+#   prepare_masks         an interpolate to latent resolution. Cheap; here
+#                         to prove it is cheap.
+#
+# The two 17.58 GB transformers are deliberately NOT in this list: under
+# cpu_offload they upload lazily on their first forward, which is inside
+# the loop. If the gap between "0%" and "1/6" is the long one, that upload
+# is what you are looking at, not anything timed here.
+_PRE_LOOP_PHASES = (
+    "encode_prompt",
+    "preprocess_conditions",
+    "prepare_video_latents",
+    "prepare_masks",
+)
+
+
+def _sync() -> None:
+    """Wait for the GPU before reading the clock.
+
+    CUDA work is queued, not finished, when the Python call that submitted
+    it returns. Without this the VAE encode would bill its time to
+    whatever ran next, and the numbers would say prepare_video_latents is
+    instant and the first denoise step takes a minute.
+    """
+    import torch
+
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+
+
+@contextlib.contextmanager
+def _timed_phases(pipe, names=_PRE_LOOP_PHASES):
+    """Log how long each named phase of `pipe.__call__` took.
+
+    Wrapping the bound methods for the duration of one call, rather than
+    reimplementing __call__ here, keeps this indifferent to the diffusers
+    version: a phase that has been renamed upstream is skipped (one fewer
+    line in the log), and the run itself is byte-for-byte unaffected
+    either way. The instance attribute shadows the class method and is
+    deleted afterwards, uncovering the original.
+    """
+    patched = []
+    for name in names:
+        original = getattr(pipe, name, None)
+        if original is None:
+            continue
+
+        def timed(*args, _name=name, _original=original, **kwargs):
+            started = time.time()
+            try:
+                return _original(*args, **kwargs)
+            finally:
+                _sync()
+                logger.info("  %s: %.1fs", _name, time.time() - started)
+
+        setattr(pipe, name, functools.wraps(original)(timed))
+        patched.append(name)
+    try:
+        yield
+    finally:
+        for name in patched:
+            delattr(pipe, name)
 
 
 def _select_sage_backend() -> Optional[str]:
