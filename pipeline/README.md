@@ -346,7 +346,7 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   not a bug, just an invalid test size for this model/LoRA pairing).
 - `sapiens2_lite` — Sapiens2 surface-normal estimation via transformers'
   first-class support (`AutoModelForNormalEstimation`,
-  `facebook/sapiens2-normal-0.4b`) — not the older facebookresearch/sapiens
+  `facebook/sapiens2-normal-0.8b`) — not the older facebookresearch/sapiens
   (v1) "lite" torchscript path this step's name originally referenced. Ran
   against `wan22_vace_denoise` output frames on an L40S pod, both
   single-image and batched paths; output correctly shaped and L2-normalized.

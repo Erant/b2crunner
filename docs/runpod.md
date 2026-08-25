@@ -180,9 +180,9 @@ properties, in order of how much they matter:
 
   | Workflow | Blocks on | Total |
   |---|---|---|
-  | `fast_helical` | rmbg, sapiens2, wan22, wan22_fp8, wan22_lora | ~51.0 GB |
-  | `fast_helical_full` | rmbg, sapiens2, wan22, wan22_fp8, wan22_lora, seedvr2 | ~57.0 GB |
-  | `fast_helical_native` | rmbg, sapiens2, sam3dbody, wan22, wan22_fp8, wan22_lora | ~53.8 GB |
+  | `fast_helical` | rmbg, sapiens2, wan22, wan22_fp8, wan22_lora | ~52.7 GB |
+  | `fast_helical_full` | rmbg, sapiens2, wan22, wan22_fp8, wan22_lora, seedvr2 | ~58.7 GB |
+  | `fast_helical_native` | rmbg, sapiens2, sam3dbody, wan22, wan22_fp8, wan22_lora | ~55.5 GB |
 
   `wan22` is now only 11.9 GB — the base repo's text_encoder, VAE,
   tokenizer and scheduler. The transformers come from `wan22_fp8` (35.2 GB
@@ -202,7 +202,7 @@ downloading; `--no-wait-for-models` does it for a single CLI run.
 | Step | What | From | Lands in |
 |---|---|---|---|
 | `rmbg` | `briaai/RMBG-2.0` **(gated)** | `from_pretrained` | `$HF_HOME` = `/data/hf_cache` |
-| `sapiens2_lite` | `facebook/sapiens2-normal-0.4b` | `from_pretrained` | `$HF_HOME` |
+| `sapiens2_lite` | `facebook/sapiens2-normal-0.8b` | `from_pretrained` | `$HF_HOME` |
 | `sam3d_body` | `facebook/sam-3d-body-dinov3` **(gated)** | `snapshot_download` | `$HF_HOME` |
 | `wan22_vace_denoise` | `linoyts/Wan2.2-VACE-Fun-14B-diffusers` + `lightx2v/Wan2.2-Lightning` LoRAs | `from_pretrained` / `hf_hub_download` | `$HF_HOME` |
 | `seedvr2` | `seedvr2_ema_3b_fp8_e4m3fn` + `ema_vae_fp16` | its vendored downloader | `$B2C_MODELS_DIR` = `/data/models/SEEDVR2` |

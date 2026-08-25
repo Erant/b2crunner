@@ -265,9 +265,10 @@ def _registry() -> List[ModelSource]:
     #     is eight ONNX variants and a duplicate pytorch_model.bin. The
     #     `*.py` are NOT optional: the step loads it with
     #     trust_remote_code=True, which needs birefnet.py/BiRefNet_config.py.
-    #   sapiens2-normal-0.4b ships the same weights twice (model.safetensors
-    #     and sapiens2_0.4b_normal.safetensors, 1.81 GB each); only the
-    #     first is what from_pretrained loads.
+    #   sapiens2-normal-* ships the same weights twice (model.safetensors
+    #     and sapiens2_<size>_normal.safetensors — 3.54 GB each on the 0.8b
+    #     default, 1.81 GB each on 0.4b); only the first is what
+    #     from_pretrained loads.
     # 6.3 GB of pod download and volume, for nothing, on every fresh pod.
     _WEIGHTS_ONLY = ["*.json", "*.py", "model.safetensors"]
     rmbg_fetch, rmbg_probe = _hf_snapshot(RMBG, _WEIGHTS_ONLY)
@@ -282,7 +283,7 @@ def _registry() -> List[ModelSource]:
         ),
         ModelSource(
             "sapiens2", f"{SAPIENS} (normal maps)", ("sapiens2_lite",),
-            sapiens_fetch, sapiens_probe, approx_gb=1.8,
+            sapiens_fetch, sapiens_probe, approx_gb=3.5,
         ),
         ModelSource(
             "sam3dbody", f"{SAM3D} (body reconstruction)", ("sam3d_body",),

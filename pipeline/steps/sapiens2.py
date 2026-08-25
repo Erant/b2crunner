@@ -3,9 +3,11 @@
 Verified against real inference on an L40S pod: both the single-image
 (`inputs["image"]`) and batched (`inputs["images"]`) paths run cleanly
 against real wan22_vace_denoise output frames, producing correctly-shaped,
-properly L2-normalized (min/max within [-1, 1]) normal maps. Model loads in
-well under a second (0.4B checkpoint) — cheap enough to not bother with a
-disk-cached/pre-warmed instance.
+properly L2-normalized (min/max within [-1, 1]) normal maps. That run used
+the 0.4B checkpoint, which loaded in well under a second — cheap enough to
+not bother with a disk-cached/pre-warmed instance. The default is now 0.8B
+(see below), which is ~2x the weights; the "don't bother pre-warming"
+conclusion has not been re-measured against it.
 
 Uses transformers' first-class Sapiens2 support (added to the library
 directly — see the model doc at
@@ -17,10 +19,18 @@ stack; transformers' AutoModel path achieves the same "no heavy CV
 framework" goal for free, so the "lite" framing in this step's registered
 name is about that outcome, not about using the old inference script.
 
-Default checkpoint is the smallest (0.4B) normal-estimation variant —
-facebook/sapiens2-normal-0.4b — for speed; pass params["checkpoint"] for a
-larger one (0.4b/0.6b/1b/2b/2b are documented as the available sizes but
-only 0.4b's exact repo id is confirmed from the model doc directly).
+Default checkpoint is the 0.8B normal-estimation variant —
+facebook/sapiens2-normal-0.8b — chosen over the smaller 0.4B for normal
+quality. Pass params["checkpoint"] for another size: the family is
+0.4b/0.8b/1b/5b, all four confirmed present on the Hub as
+facebook/sapiens2-normal-<size> (an earlier version of this docstring
+listed "0.4b/0.6b/1b/2b/2b" from the model doc, which is wrong).
+
+Size is a VRAM decision as well as a quality one: 0.8B is 3.54 GB of
+weights against 0.4B's 1.81 GB, on top of activations that already needed
+`batch_size: 2` rather than the step's default of 8 to fit a 12 GB card at
+720x1280 (see docs/docker-build-notes.md). On a 48 GB L40S or larger this
+is not a concern.
 
 Output is raw (unnormalized) XYZ normals in camera space, L2-normalized to
 [-1, 1] via the image processor's post_process_normal_estimation and
@@ -41,7 +51,7 @@ import numpy as np
 from ..registry import register_step
 from ..step import Step
 
-DEFAULT_CHECKPOINT = "facebook/sapiens2-normal-0.4b"
+DEFAULT_CHECKPOINT = "facebook/sapiens2-normal-0.8b"
 
 
 @register_step("sapiens2_lite")
