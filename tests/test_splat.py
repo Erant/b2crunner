@@ -21,6 +21,8 @@ import unittest
 from pathlib import Path
 
 import numpy as np
+import cv2
+from unittest import mock
 
 from pipeline.dataset import Dataset
 from pipeline.registry import get_step_class
@@ -311,3 +313,92 @@ class TestCamerasJson(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRenderSplatBackground(unittest.TestCase):
+    """The splat render's background colour, which is a real output decision.
+
+    It was white, and white is the one value that cannot be right here:
+    mask_splat composites this render over black one step later, so a white
+    background maximises the gap between the colour a fringe pixel is
+    rendered at and the colour it ends at. Those partial-alpha fringes are
+    then bilateral-filtered across the silhouette before anything blacks
+    them out, so a white halo survived into denoise_pass2's input. Pinned
+    because it is a one-line default that is easy to regress and whose
+    effect only shows up several steps downstream.
+    """
+
+    def _captured_argv(self, bg_color):
+        """Build the brush-splat-render argv without running the binary."""
+        from body2colmap.camera import Camera
+
+        from pipeline.steps import splat as splat_module
+
+        seen = {}
+
+        def fake_render(cmd):
+            seen["cmd"] = cmd
+            out = Path(cmd[cmd.index("--output-dir") + 1])
+            out.mkdir(parents=True, exist_ok=True)
+            cv2.imwrite(str(out / "frame_00001_.png"), np.zeros((4, 4, 4), np.uint8))
+
+        camera = Camera(
+            focal_length=(4.0, 4.0),
+            image_size=(4, 4),
+            principal_point=(2.0, 2.0),
+            position=np.array([0.0, 0.0, 1.0], dtype=np.float32),
+            rotation=np.eye(3, dtype=np.float32),
+        )
+        scene = _synthetic_scene()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ply = Path(tmp) / "s.ply"
+            get_step_class("save_splat")().run({"splat_scene": scene}, {"filepath": str(ply)})
+            with mock.patch.object(splat_module, "_run_render", fake_render):
+                splat_module._rasterize(
+                    scene=scene,
+                    splat_path=str(ply),
+                    cameras=[camera],
+                    image_names=["frame_00001_.png"],
+                    width=4,
+                    height=4,
+                    bg_color=bg_color,
+                    render_path="brush-splat-render",
+                )
+        return seen["cmd"]
+
+    def test_the_shipped_default_is_black(self):
+        """The default the step applies, read from the step rather than
+        restated here — a test that hardcodes (0,0,0) on both sides passes
+        even if the step's default goes back to white."""
+        from pipeline.steps.splat import RenderSplatStep  # noqa: F401
+
+        default = _render_splat_default_bg()
+        self.assertEqual(tuple(default), (0.0, 0.0, 0.0))
+
+        argv = self._captured_argv(default)
+        self.assertEqual(argv[argv.index("--background") + 1], "0.000000,0.000000,0.000000")
+
+    def test_an_explicit_background_still_wins(self):
+        argv = self._captured_argv((0.25, 0.5, 1.0))
+        self.assertEqual(argv[argv.index("--background") + 1], "0.250000,0.500000,1.000000")
+
+
+def _render_splat_default_bg():
+    """The bg_color render_splat falls back to, extracted from its source.
+
+    The default lives in a params.get() call inside run(), which needs a
+    scene, a splat file and cameras to reach. Reading it out of the source
+    keeps this test pinned to the shipped value without standing up all of
+    that.
+    """
+    import inspect
+    import re
+
+    from pipeline.steps.splat import RenderSplatStep
+
+    source = inspect.getsource(RenderSplatStep.run)
+    match = re.search(r'params\.get\("bg_color",\s*\(([^)]*)\)\)', source)
+    if match is None:
+        raise AssertionError("render_splat no longer defaults bg_color via params.get")
+    return tuple(float(x) for x in match.group(1).split(","))

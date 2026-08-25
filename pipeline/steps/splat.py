@@ -190,7 +190,28 @@ class RenderSplatStep(Step):
             scene=scene, dataset=dataset, params=params, width=width, height=height
         )
 
-        bg_color = tuple(params.get("bg_color", (1.0, 1.0, 1.0)))
+        # BLACK, not white. Two reasons, and the second is the one that
+        # actually bit:
+        #
+        #   * mask_splat composites this render over black a step later, so
+        #     anything the mask drops ends at 0 regardless. Rendering white
+        #     just guarantees the largest possible disagreement between the
+        #     colour a pixel is rendered and the colour it ends up.
+        #   * That disagreement is visible, not academic. A splat render has
+        #     soft partial-alpha fringes wherever the Gaussians are uncertain
+        #     (thin hair, silhouettes). On white those fringes are BRIGHT, and
+        #     mask_splat's bilateral filter smooths them across the silhouette
+        #     before anything blacks them out — so a white halo survives into
+        #     the frames denoise_pass2 sees. On black there is nothing to
+        #     bleed: fringe and background are the same colour.
+        #
+        # The recorded ComfyUI run rendered this stage on 127 grey with
+        # alpha=0 in the background (cyber_6f/splatted), and its masked output
+        # is black RGB with alpha=255 everywhere (cyber_6f/masked_splatted).
+        # Black matches where that pipeline ENDS up, which is what matters
+        # here — matching its intermediate grey would reintroduce the same
+        # halo, just dimmer.
+        bg_color = tuple(params.get("bg_color", (0.0, 0.0, 0.0)))
         render_path = params.get("render_path", "brush-splat-render")
         image_names = [f"frame_{i + 1:05d}_.png" for i in range(len(cameras))]
 

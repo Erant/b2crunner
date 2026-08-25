@@ -48,6 +48,7 @@ from typing import Any, Dict, List, Optional
 import cv2
 import numpy as np
 
+from ..masks import mask_to_alpha_u8
 from ..proc import stream_command
 from ..registry import register_step
 from ..step import Step
@@ -131,7 +132,14 @@ class BrushStep(Step):
 
             alpha_channel = None
             if masks is not None:
-                alpha_channel = [np.clip(m * 255.0, 0, 255).astype(np.uint8) for m in masks]
+                # mask_to_alpha_u8, not an inline np.clip(m * 255.0, ...):
+                # a mask that came from disk is uint8 [0,255], and scaling
+                # that by 255 saturates every non-zero value to opaque,
+                # throwing away exactly the soft silhouette edge normal
+                # supervision cares about. pipeline/masks.py's docstring
+                # names this line as the bug it exists to prevent;
+                # colmap_export was fixed and this was missed.
+                alpha_channel = [mask_to_alpha_u8(m) for m in masks]
 
             for i, (img, filename) in enumerate(zip(images, image_names)):
                 if alpha_channel is not None:
