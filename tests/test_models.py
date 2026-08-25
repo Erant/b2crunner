@@ -146,8 +146,7 @@ class TestWan22WeightSplit(unittest.TestCase):
 class TestRequiredForSteps(unittest.TestCase):
     def test_blocking_is_scoped_to_the_workflow(self):
         cases = {
-            "roundtrip_example": set(),
-            "fast_helical_local_smoke": {"rmbg", "sapiens2"},
+            "fast_helical": {"rmbg", "sapiens2", "wan22", "wan22_fp8", "wan22_lora"},
             "fast_helical_full": {"rmbg", "sapiens2", "wan22", "wan22_fp8",
                                   "wan22_lora", "seedvr2"},
         }
@@ -158,13 +157,28 @@ class TestRequiredForSteps(unittest.TestCase):
                     set(models.required_for_steps(s.step for s in spec.steps)), expected
                 )
 
-    def test_the_smoke_workflow_does_not_wait_on_wan22(self):
-        """It skips both denoise passes on purpose; waiting on ~47 GB it
-        never touches would defeat the point of having a smoke test."""
-        spec = WorkflowSpec.from_yaml(resolve_workflow("fast_helical_local_smoke"))
-        required = models.required_for_steps(s.step for s in spec.steps)
-        self.assertNotIn("wan22", required)
-        self.assertNotIn("wan22_fp8", required)
+    def test_the_non_upscaling_workflow_does_not_wait_on_seedvr2(self):
+        """fast_helical exists to run without the upscaler; blocking on the
+        upscaler's 6 GB before it starts would defeat that."""
+        spec = WorkflowSpec.from_yaml(resolve_workflow("fast_helical"))
+        self.assertNotIn("seedvr2", models.required_for_steps(s.step for s in spec.steps))
+
+    def test_a_when_skipped_step_is_not_waited_on(self):
+        """The prefetch reads enabled_steps(), so switching an output off
+        also drops whatever only that output needed."""
+        spec = WorkflowSpec.from_yaml(resolve_workflow("fast_helical_full"))
+        spec.params["export_colmap"] = False
+        spec.params["export_ply"] = False
+        # export_normals is the last sapiens2 use outside stage 2, so this
+        # only proves the plumbing; the assertion that matters is that the
+        # skipped steps are gone from what gets scanned at all.
+        enabled = {s.id for s in spec.enabled_steps()}
+        self.assertNotIn("export_colmap", enabled)
+        self.assertNotIn("train_final_splat", enabled)
+        self.assertEqual(
+            set(models.required_for_steps(s.step for s in spec.enabled_steps())),
+            {"rmbg", "sapiens2", "wan22", "wan22_fp8", "wan22_lora", "seedvr2"},
+        )
 
 
 class TestReadiness(unittest.TestCase):

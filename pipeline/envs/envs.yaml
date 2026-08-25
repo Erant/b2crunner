@@ -18,5 +18,5 @@ envs:
   # No `brush` or `brush-splat-render` entries: targeting RunPod, where a
   # pod is a single container with no nested Docker daemon (see
   # docker/Dockerfile's comment) — both run `dispatch: in_process` (brush
-  # in fast_helical_native.yaml, brush-splat-render via render_splat),
-  # needing no env config here at all.
+  # via the brush step, brush-splat-render via render_splat), needing no
+  # env config here at all.

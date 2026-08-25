@@ -23,10 +23,11 @@ nothing about whether the step can find them, and "ready" has to mean the
 step will not download anything.
 
 **Blocking is scoped to the workflow, prefetching is not.** Waiting for the
-~47 GB of Wan2.2 weights before a `fast_helical_local_smoke` run — which
-skips both denoise passes on purpose — would be actively wrong. The
-prefetch is greedy by default; `required_for_steps()` decides what a given
-run must actually wait on.
+~47 GB of Wan2.2 weights before a run whose denoise passes are switched
+off would be actively wrong. The prefetch is greedy by default;
+`required_for_steps()` decides what a given run must actually wait on —
+fed from `WorkflowSpec.enabled_steps()`, so a `when:`-skipped step's
+checkpoint is not waited on either.
 
 Readiness is a marker file per model under `$B2C_MODELS_DIR/.ready/`,
 written only after a fetch returns successfully. It is what makes a warm

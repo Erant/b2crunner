@@ -22,7 +22,7 @@ from typing import Any, Callable, Dict, Optional
 from .context import Context
 from .dispatch import Dispatcher, build_dispatcher
 from .templating import resolve
-from .workflow import StepSpec, WorkflowSpec
+from .workflow import StepSpec, WorkflowSpec, step_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +42,8 @@ class RunCancelled(Exception):
 class RunEvent:
     """One boundary in a run. `kind` is the only field always meaningful."""
 
-    kind: str  # workflow_start | step_start | step_end | step_error | workflow_end
+    kind: str  # workflow_start | step_start | step_end | step_error |
+               # step_skipped | workflow_end
     workflow: str
     index: int = 0          # 1-based position of the step, 0 for workflow events
     total: int = 0
@@ -50,6 +51,16 @@ class RunEvent:
     step_name: str = ""
     elapsed: float = 0.0
     error: str = ""
+
+    # The live Context, on step_end only. A reference, not a copy — an
+    # observer must read what it needs and not hold on to it.
+    #
+    # It is here so the web UI can snapshot a few frames after every step
+    # without the runner knowing anything about previews, and without the
+    # workflow needing a save_dataset checkpoint between every pair of
+    # steps (which would defeat the in-memory design outright). An observer
+    # that ignores it costs nothing.
+    context: Optional[Any] = None
 
 
 EventCallback = Callable[[RunEvent], None]
@@ -108,16 +119,41 @@ class WorkflowRunner:
         total = len(self.spec.steps)
         started = time.time()
 
+        # Resolved once, up front: a `when:` naming a param that doesn't
+        # exist should stop the run here, not forty minutes in when the
+        # step it guards is finally reached.
+        enabled = [step_enabled(step_spec, self.spec.params) for step_spec in self.spec.steps]
+
         logger.info("=" * 72)
-        logger.info("workflow '%s': %d steps", self.spec.name, total)
+        logger.info(
+            "workflow '%s': %d steps%s",
+            self.spec.name, total,
+            f" ({enabled.count(False)} skipped by `when:`)" if not all(enabled) else "",
+        )
         for index, step_spec in enumerate(self.spec.steps, start=1):
             where = f"{step_spec.dispatch}" + (f":{step_spec.env}" if step_spec.env else "")
-            logger.info("  %2d. %-24s %-22s [%s]", index, step_spec.id, step_spec.step, where)
+            logger.info(
+                "  %2d. %-24s %-22s [%s]%s",
+                index, step_spec.id, step_spec.step, where,
+                "" if enabled[index - 1] else "  SKIPPED",
+            )
         logger.info("=" * 72)
         self._emit(RunEvent(kind="workflow_start", workflow=self.spec.name, total=total))
 
         try:
             for index, step_spec in enumerate(self.spec.steps, start=1):
+                if not enabled[index - 1]:
+                    logger.info(
+                        "--- [%d/%d] %s skipped (when: %r) ------------------",
+                        index, total, step_spec.id, step_spec.when,
+                    )
+                    self._emit(
+                        RunEvent(
+                            kind="step_skipped", workflow=self.spec.name, index=index,
+                            total=total, step_id=step_spec.id, step_name=step_spec.step,
+                        )
+                    )
+                    continue
                 self._run_one(step_spec, index, total, ctx, template_scope)
         finally:
             for dispatcher in self._dispatchers.values():
@@ -177,6 +213,7 @@ class WorkflowRunner:
             RunEvent(
                 kind="step_end", workflow=self.spec.name, index=index, total=total,
                 step_id=step_spec.id, step_name=step_spec.step, elapsed=elapsed,
+                context=ctx,
             )
         )
 

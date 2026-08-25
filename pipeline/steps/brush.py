@@ -66,8 +66,17 @@ class BrushStep(Step):
              "max_resolution": int, "max_splats": int, "refine_every": int,
              "alpha_mode": str, "normal_loss_strength": float,
              "normal_loss_step_start": int, "with_viewer": bool,
-             "output_dir": str}
+             "output_dir": str, "export_dir": str, "export_name": str}
     outputs: {"splat_path": str}
+
+    `output_dir` puts the run under `<output_dir>/brush/training_<ms>/`,
+    which is what an intermediate training wants: several of them in one
+    workflow can't collide, and which is which is recoverable from the
+    timestamps. `export_dir` instead names the directory to export straight
+    into, for the one training whose .ply is a deliverable and therefore
+    needs a predictable path — it is the whole reason the final splat can
+    be `ply/scene.ply` and not `brush/training_1756042129481/export.ply`.
+    Set one or the other; `export_dir` wins if both are given.
     """
 
     def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
@@ -99,8 +108,15 @@ class BrushStep(Step):
         normal_loss_step_start = int(params.get("normal_loss_step_start", 5000))
         with_viewer = bool(params.get("with_viewer", False))
 
-        timestamp = int(time.time() * 1000)
-        out_root = Path(params.get("output_dir", tempfile.gettempdir())) / "brush" / f"training_{timestamp}"
+        export_dir = params.get("export_dir")
+        if export_dir:
+            out_root = Path(export_dir)
+        else:
+            timestamp = int(time.time() * 1000)
+            out_root = (
+                Path(params.get("output_dir", tempfile.gettempdir()))
+                / "brush" / f"training_{timestamp}"
+            )
         out_root.mkdir(parents=True, exist_ok=True)
 
         with tempfile.TemporaryDirectory(prefix="b2c_colmap_") as temp_dir:
@@ -145,7 +161,7 @@ class BrushStep(Step):
                     normal_path = normals_dir / Path(filename).with_suffix(".png").name
                     cv2.imwrite(str(normal_path), out)
 
-            ply_output_name = "export.ply"
+            ply_output_name = params.get("export_name", "export.ply")
             cmd = [
                 brush_path,
                 str(colmap_dir),

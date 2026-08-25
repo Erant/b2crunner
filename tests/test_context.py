@@ -1,9 +1,8 @@
 """Context.set/get, including the auto-vivify fix for scratch namespaces.
 
-Found by trying to actually run fast_helical_native.yaml (never previously
-executed — see that file's STATUS comment and pipeline/README.md): its
-first step writes to `scene.vertices`, but `scene` is never seeded in the
-initial context (cli.py seeds only `{"dataset": dataset}`). Context.set
+Found by trying to actually run the since-removed fast_helical_native.yaml:
+its first step writes to `scene.vertices`, but `scene` is never seeded in
+the initial context (cli.py seeds only `{"dataset": dataset}`). Context.set
 KeyError'd on that first write. test_workflows.py never caught this because
 it only validates workflow structure statically, never actually runs one.
 """

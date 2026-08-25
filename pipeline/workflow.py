@@ -1,6 +1,6 @@
 """Workflow YAML schema and loader.
 
-Example (see pipeline/workflows/example_helical.yaml for a full one):
+Example (see pipeline/workflows/fast_helical_full.yaml for a full one):
 
     name: fast_helical
     params:
@@ -19,6 +19,7 @@ Example (see pipeline/workflows/example_helical.yaml for a full one):
           width: ${params.resolution.0}
         outputs:
           denoised: dataset.images    # written back into the shared Context
+        when: ${params.run_denoise}   # optional; skip the step when falsy
 
 Only a step whose Step subclass actually writes to disk (e.g. `save_dataset`)
 touches disk — everything else stays in the in-memory Context between steps.
@@ -65,6 +66,18 @@ class StepSpec:
     # _get_dispatcher).
     keep_loaded: bool = False
 
+    # Run this step only if this resolves truthy. Anything `params:` accepts
+    # works — a literal `false`, or a `${params.x}` reference, which is the
+    # case it exists for: a workflow that ends in several optional exports
+    # (fast_helical.yaml's COLMAP dataset and trained .ply) needs the caller
+    # to pick which ones to pay for, and a 30,000-iteration brush run is not
+    # something to start and throw away.
+    #
+    # A skipped step still occupies its slot in the run — the runner reports
+    # it as skipped rather than renumbering around it, so a step list in the
+    # UI matches the YAML.
+    when: Any = True
+
     inputs: Dict[str, str] = field(default_factory=dict)
     outputs: Dict[str, str] = field(default_factory=dict)
     params: Dict[str, Any] = field(default_factory=dict)
@@ -77,6 +90,7 @@ class StepSpec:
             dispatch=data.get("dispatch", "in_process"),
             env=data.get("env"),
             keep_loaded=data.get("keep_loaded", False),
+            when=data.get("when", True),
             inputs=data.get("inputs", {}),
             outputs=data.get("outputs", {}),
             params=data.get("params", {}),
@@ -99,6 +113,40 @@ class WorkflowSpec:
             params=data.get("params", {}),
             steps=[StepSpec.from_dict(s) for s in data["steps"]],
         )
+
+    def enabled_steps(self) -> List[StepSpec]:
+        """The steps this spec's current params actually select.
+
+        The runner skips the rest as it walks the list; this is for the
+        callers that need to know *before* the run starts — chiefly model
+        prefetching, which must not block on SeedVR2's 6 GB for a workflow
+        whose upscale is switched off.
+        """
+        return [step for step in self.steps if step_enabled(step, self.params)]
+
+
+# A `when:` that resolves to a string is almost always a `${params.x}`
+# pointing at a value someone typed into a text box, so "false" has to mean
+# false — bool("false") is True, and silently running a step the caller
+# switched off is the one failure mode this whole mechanism exists to
+# prevent. Everything else goes through plain truthiness.
+_FALSE_STRINGS = {"", "0", "false", "no", "off", "none", "null"}
+
+
+def step_enabled(step: StepSpec, params: Dict[str, Any]) -> bool:
+    """Whether `step`'s `when:` selects it, given a workflow's params."""
+    from .templating import resolve
+
+    try:
+        value = resolve(step.when, {"params": params})
+    except (KeyError, IndexError, AttributeError, TypeError) as exc:
+        raise KeyError(
+            f"Step '{step.id}' has a `when:` of {step.when!r}, which does not "
+            f"resolve: {exc}. Workflow params: {sorted(params)}"
+        ) from exc
+    if isinstance(value, str):
+        return value.strip().lower() not in _FALSE_STRINGS
+    return bool(value)
 
 
 def load_envs(path: str | Path) -> Dict[str, Dict[str, Any]]:

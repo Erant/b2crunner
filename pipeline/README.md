@@ -97,7 +97,10 @@ pipeline/
 │                      cyber_6f's real photos
 │   ├── views.py         drop_views / filter_fov / rotate_views /
 │                      replace_views / merge_datasets — real, verified
-│                      locally against cyber_6f's 81 real cameras
+│                      locally against cyber_6f's 81 real cameras — plus
+│                      fit_cameras_to_images, which rescales intrinsics
+│                      to the size the frames actually are (what the
+│                      SeedVR2 upscale silently invalidates)
 │   ├── mask_splat.py    real, verified against cyber_6f's recorded
 │                      splatted/ -> masked_splatted/ stage output
 │   ├── splat.py         load_splat / save_splat / render_splat — camera
@@ -129,14 +132,15 @@ pipeline/
 │   └── seedvr2/         requirements.txt + setup.sh (vendors
 │                      numz/ComfyUI-SeedVR2_VideoUpscaler)
 ├── workflows/
-│   ├── roundtrip_example.yaml   in-process-only smoke test (no model deps)
-│   ├── fast_helical_native.yaml single forward pass; rmbg/
-│   │                            wan22_vace_denoise/sapiens2/sam3d_body
-│   │                            verified on real hardware, brush not
-│   └── fast_helical_full.yaml   full six-stage native port of the
-│                                ComfyUI `fast helical` pipeline; every
-│                                step exists and the file validates, but
-│                                it has never been executed
+│   ├── fast_helical_full.yaml   full six-stage native port of the
+│   │                            ComfyUI `fast helical` pipeline; every
+│   │                            step exists and the file validates, but
+│   │                            it has never been executed
+│   └── fast_helical.yaml        the same file minus the SeedVR2 upscale
+│                                (and the camera rescale that repairs
+│                                what the upscale invalidates), for
+│                                isolating the upscaler when output looks
+│                                wrong
 └── tests/                 stdlib unittest, no pytest dependency. Run with
                            `python -m unittest discover -s tests -t .`.
                            Most tests are golden-output tests against
@@ -227,7 +231,7 @@ in-memory between steps; disk only enters the picture via a `save_dataset`/
 ### Workflow YAML
 
 ```yaml
-name: fast_helical_native
+name: fast_helical_full
 params:                      # workflow-level knobs, referenced via ${params.x}
   resolution: [512, 512]
   diffusion_steps: 6
@@ -250,11 +254,25 @@ steps:
       steps: ${params.diffusion_steps}
     outputs:                     # step's returned name -> dotted Context path (written after the call)
       images: dataset.images
+    when: ${params.export_ply}   # optional; skip this step when falsy
 ```
 
-See `pipeline/workflows/fast_helical_native.yaml` for a full multi-step
-example and `pipeline/workflows/roundtrip_example.yaml` for the minimal
-smoke-test shape.
+`when:` is what makes a workflow's tail optional. It resolves like any
+param value, and a falsy result skips the step entirely — its inputs are
+never read, its outputs never written, and `WorkflowSpec.enabled_steps()`
+leaves it out, so the model prefetch does not block on a checkpoint only
+that step needs. The runner still reports it, as `step_skipped` at its own
+index, so a step list built from the YAML lines up with the run.
+
+The case it exists for is the two deliverables both `fast_helical`
+workflows end with (`export_colmap` / `export_ply`): the .ply is a full
+30,000-iteration brush training, and starting one you are going to discard
+is an hour of GPU. `false`, `no`, `off`, `0` and the empty string are all
+falsy as *strings* too — a `when:` usually resolves through a param
+somebody typed, and `bool("false")` is `True`.
+
+See `pipeline/workflows/fast_helical_full.yaml` for a full multi-step
+example.
 
 ### envs.yaml
 
@@ -284,15 +302,14 @@ uv pip install -e .                              # this pipeline package, so `pi
 ## Running today
 
 ```bash
-# Smoke test — no model deps needed, proves the plumbing end-to-end
-python -m pipeline.cli run pipeline/workflows/roundtrip_example.yaml \
+python -m pipeline.cli run fast_helical_full \
     --dataset path/to/existing/b2c_dataset -v
 
 # Validate a workflow references only real, registered steps (doesn't execute)
 python -c "
 from pipeline import steps
 from pipeline.workflow import WorkflowSpec
-spec = WorkflowSpec.from_yaml('pipeline/workflows/fast_helical_native.yaml')
+spec = WorkflowSpec.from_yaml('pipeline/workflows/fast_helical_full.yaml')
 print(spec.name, [s.step for s in spec.steps])
 "
 ```
@@ -327,7 +344,7 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   (v1) "lite" torchscript path this step's name originally referenced. Ran
   against `wan22_vace_denoise` output frames on an L40S pod, both
   single-image and batched paths; output correctly shaped and L2-normalized.
-- `fast_helical_native.yaml` loads and its step names resolve against the
+- both workflow YAMLs load and their step names resolve against the
   registry.
 - `sam3d_body` — SAM-3D-Body mesh/joint reconstruction. Ran real inference
   on an L40S pod against `cyber_6f`'s `anchor.png`: 18439 vertices, 36874
@@ -376,15 +393,18 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   `overlap=1`-circular-path case where frame 0 and the last frame share a
   position); the no-`anchor_image` case passes inputs through with an
   all-1.0 mask instead of failing. Not yet run against a real `render`
-  output (`render` itself is unverified — see below) or wired into
-  `fast_helical_native.yaml`.
+  output (`render` itself is unverified — see below); `inject_anchor` is
+  wired into both `fast_helical` workflows, `generate_firstlast` is not.
 
 - `colmap_export` — verified against `cyber_6f/colmap`, the real COLMAP
   directory the ComfyUI stage produced from `cyber_6f/upscaled`.
   cameras.txt and points3D.txt come out byte-identical; images.txt agrees
   to 2.4e-7 per value (the poses have been through metadata.json's float
   round-trip). The exported PNGs are not compared — that stage runs RMBG
-  first.
+  first. Two layouts: `flat` (the default, and what that golden comparison
+  is against — frames beside the .txt files, as the ComfyUI stage wrote
+  them) and `brush` (`images/` and `normals/` subdirectories), which is
+  what both workflows use for the COLMAP dataset they hand back.
 - `mask_splat` — new step, no single node behind it: it collapses the
   eight-node subgraph of `workflows/api/mask_splat.json`. Verified against
   `cyber_6f/splatted` -> `cyber_6f/masked_splatted` at the `fast helical`

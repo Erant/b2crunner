@@ -121,14 +121,19 @@ class Dataset:
     ) -> "Dataset":
         """A Dataset carrying nothing but the one photo the pipeline starts from.
 
-        `fast_helical_native.yaml` builds everything else itself — sam3d_body
+        A from-a-photo workflow builds everything else itself — sam3d_body
         reconstructs a mesh from `reference_image`, and `render` populates
         images/cameras/points_3d/resolution from that mesh. But the dataclass
         requires all four up front, and `from_disk` is the only constructor
         there was, so "run the pipeline from a single photo" had no entry
         point at all: you had to hand-build a Context and call
-        WorkflowRunner directly. That gap is called out in
-        fast_helical_native.yaml's own header and is what this closes.
+        WorkflowRunner directly. This closes that.
+
+        Nothing shipped uses it at the moment: both `fast_helical` workflows
+        start from an existing dataset, and the from-a-photo workflow that
+        did (`fast_helical_native.yaml`) was dropped as irrelevant to the
+        pod image. The constructor stays because it is the hard half of
+        putting such a workflow back.
 
         The empty fields are genuinely empty, not placeholder-shaped:
         `points_3d` is a (0, 3) float32 pair rather than None so that a step

@@ -49,7 +49,7 @@ docker compose -f docker/docker-compose.yml up
 # or one-shot CLI runs
 docker compose -f docker/docker-compose.yml run --rm pipeline doctor
 docker compose -f docker/docker-compose.yml run --rm pipeline \
-    run fast_helical_native --dataset /data/some_dataset
+    run fast_helical_full --dataset /data/some_dataset
 docker compose -f docker/docker-compose.yml run --rm pipeline bash
 ```
 
@@ -115,8 +115,8 @@ the way a plain `docker run --gpus all` against a locally-built image does
 is unresolved. If it turns out RunPod doesn't honor it, the fallback is
 switching brush back to `dispatch: docker` against a target that does
 expose a Docker daemon (a self-hosted box, a different provider) — the
-dispatcher already supports this, it's a one-line change in
-`fast_helical_native.yaml`, not a rewrite.
+dispatcher already supports this, it's a one-line change in the
+workflow YAML, not a rewrite.
 
 ## What's confirmed vs. not
 

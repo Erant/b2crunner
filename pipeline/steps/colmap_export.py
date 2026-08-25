@@ -3,6 +3,22 @@ brush and other 3DGS tools consume directly (cameras.txt/images.txt/
 points3D.txt + frame_NNNNN_.png, optionally RGBA with masks as alpha, plus
 an optional normals/ directory).
 
+Two layouts, via `params["layout"]`:
+
+    flat    frames beside the .txt files. What the ComfyUI colmap.json
+            stage wrote (cyber_6f/colmap), and the default, because that
+            is what the golden comparison below is against.
+    brush   frames in images/, normals in normals/, .txt files at the
+            root — what steps/brush.py builds in its tempdir before
+            invoking the trainer, and what the `fast_helical` workflows
+            use for the COLMAP dataset a run hands back.
+
+Note what neither layout does: rescale intrinsics. The cameras written
+here are whatever the dataset holds, so a dataset whose frames were
+resized without its cameras being updated exports a cameras.txt that
+disagrees with its own images — see steps/views.py's
+`fit_cameras_to_images`, which is the workflow-level fix.
+
 Ported from nodes/export_node.py in the original ComfyUI-Body2COLMAP repo,
 minus the ComfyUI-specific parts (folder_paths output-dir resolution,
 INPUT_IS_LIST batch merging, tensor conversion). The actual export is
@@ -32,6 +48,9 @@ from ..registry import register_step
 from ..step import Step
 
 
+LAYOUTS = ("flat", "brush")
+
+
 @register_step("colmap_export")
 class ColmapExportStep(Step):
     """Write a COLMAP sparse reconstruction directory.
@@ -41,7 +60,7 @@ class ColmapExportStep(Step):
              "images": Optional[List[np.ndarray]] BGR(A),
              "masks": Optional[List[np.ndarray]] float32 [0,1], foreground=1,
              "normal_maps": Optional[List[np.ndarray]] HxWx3 float32 [-1,1]}
-    params: {"output_dir": str}
+    params: {"output_dir": str, "layout": "flat" | "brush"}
     outputs: {"output_path": str}
     """
 
@@ -63,8 +82,22 @@ class ColmapExportStep(Step):
                 f"({len(images)}). Every training view needs a matching normal map."
             )
 
+        layout = params.get("layout", "flat")
+        if layout not in LAYOUTS:
+            raise ValueError(f"Unknown layout {layout!r}; expected one of {LAYOUTS}.")
+
         output_path = Path(params["output_dir"])
         output_path.mkdir(parents=True, exist_ok=True)
+
+        # `flat` is what the ComfyUI colmap.json stage wrote (frames sitting
+        # beside the .txt files — see cyber_6f/colmap), and stays the default
+        # so the golden comparison in tests/test_colmap_export.py keeps
+        # meaning what it says. `brush` is the layout a dataset meant to be
+        # handed to somebody wants: images and normals in their own
+        # directories, which is also exactly what steps/brush.py builds in
+        # its tempdir before invoking the trainer.
+        images_dir = output_path / "images" if layout == "brush" else output_path
+        images_dir.mkdir(parents=True, exist_ok=True)
 
         ColmapExporter(cameras=cameras, image_names=image_names, points_3d=points_3d).export(
             output_dir=output_path
@@ -87,9 +120,9 @@ class ColmapExportStep(Step):
                         rgba = np.dstack([img, alpha])
                     else:
                         raise ValueError(f"Unexpected image channels: {img.shape[-1]} (expected 3 or 4)")
-                    cv2.imwrite(str(output_path / filename), rgba)
+                    cv2.imwrite(str(images_dir / filename), rgba)
                 else:
-                    cv2.imwrite(str(output_path / filename), img)
+                    cv2.imwrite(str(images_dir / filename), img)
 
         if normal_maps is not None and images is not None:
             normals_dir = output_path / "normals"

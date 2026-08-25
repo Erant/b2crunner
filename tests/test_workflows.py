@@ -141,6 +141,58 @@ class TestWorkflowFiles(unittest.TestCase):
                             f"template: {exc}"
                         )
 
+    def test_when_conditions_resolve(self):
+        """Same reasoning as the params check above, and more load-bearing:
+        an unresolvable `when:` guards a step, and the whole point of
+        resolving them up front in the runner is that this fails at the
+        start of a run rather than an hour into one."""
+        from pipeline.workflow import step_enabled
+
+        for path in _workflows():
+            spec = WorkflowSpec.from_yaml(str(path))
+            for step in spec.steps:
+                with self.subTest(workflow=path.name, step=step.id):
+                    try:
+                        step_enabled(step, spec.params)
+                    except Exception as exc:  # noqa: BLE001
+                        self.fail(f"{path.name}: step '{step.id}': {exc}")
+
+    def test_the_two_fast_helical_files_differ_only_by_the_upscale(self):
+        """They are maintained as copies — there is no include mechanism —
+        so the thing worth checking is that they have not drifted into two
+        different pipelines that happen to share a name."""
+        full = WorkflowSpec.from_yaml(str(WORKFLOW_DIR / "fast_helical_full.yaml"))
+        short = WorkflowSpec.from_yaml(str(WORKFLOW_DIR / "fast_helical.yaml"))
+
+        upscale_only = {"upscale", "rescale_cameras"}
+        self.assertEqual(
+            [s.id for s in full.steps if s.id not in upscale_only],
+            [s.id for s in short.steps],
+        )
+        self.assertEqual(
+            set(full.params) - set(short.params), {"upscale_resolution"},
+            "the only param either file should have to itself is the upscale's",
+        )
+        for step in short.steps:
+            twin = next(s for s in full.steps if s.id == step.id)
+            with self.subTest(step=step.id):
+                self.assertEqual(step.step, twin.step)
+                self.assertEqual(step.dispatch, twin.dispatch)
+                self.assertEqual(step.env, twin.env)
+                self.assertEqual(step.inputs, twin.inputs)
+                self.assertEqual(step.outputs, twin.outputs)
+                self.assertEqual(step.when, twin.when)
+                self.assertEqual(step.keep_loaded, twin.keep_loaded)
+
+    def test_every_workflow_declares_the_output_switches(self):
+        """A shipped workflow that silently ignores the UI's Outputs
+        checkboxes would run for an hour and hand back the wrong thing."""
+        for path in _workflows():
+            spec = WorkflowSpec.from_yaml(str(path))
+            with self.subTest(workflow=path.name):
+                self.assertIn("export_colmap", spec.params)
+                self.assertIn("export_ply", spec.params)
+
     def test_context_paths_look_like_paths(self):
         for path in _workflows():
             spec = WorkflowSpec.from_yaml(str(path))

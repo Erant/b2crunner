@@ -16,6 +16,9 @@ alone:
     didn't survive a stage copy.
   * a gated checkpoint 401ing because HF_TOKEN belongs to an account that
     never accepted the licence.
+  * SageAttention selected but not importable, so every denoise silently
+    ran on PyTorch native SDPA — the same output, an hour slower, and
+    nothing in the log said so above WARNING.
   * downloads dying with "Disk quota exceeded" because HF cached to the
     container's overlay instead of the volume.
 
@@ -285,6 +288,112 @@ def check_step_venvs(envs: Dict[str, Dict[str, Any]]) -> Check:
     return Check("step venvs", status, f"{len(envs)} configured", lines)
 
 
+# Run inside the wan22 venv, not here: SageAttention, Triton and diffusers
+# live in that venv, and the main one has none of them. Prints one `key=value`
+# per line so the parent does not have to care about import noise on stdout.
+_ATTENTION_PROBE = r"""
+import json, sys
+out = {}
+try:
+    import torch
+    out["torch"] = torch.__version__
+    if torch.cuda.is_available():
+        major, minor = torch.cuda.get_device_capability()
+        out["gpu"] = torch.cuda.get_device_name(0)
+        out["sm"] = f"sm_{major}{minor}"
+except Exception as exc:
+    out["error"] = f"torch: {exc}"
+
+for module, key in (("sageattention", "sageattention"), ("triton", "triton"),
+                    ("diffusers", "diffusers")):
+    try:
+        mod = __import__(module)
+        out[key] = getattr(mod, "__version__", "present")
+    except Exception as exc:
+        out[key] = f"MISSING ({type(exc).__name__})"
+
+try:
+    from pipeline.steps.wan22_vace_denoise import _select_sage_backend
+    out["selected"] = _select_sage_backend() or "none (PyTorch native SDPA)"
+except Exception as exc:
+    out["selected"] = f"could not resolve: {exc}"
+
+print("B2C_ATTENTION " + json.dumps(out))
+"""
+
+
+def check_attention(envs: Dict[str, Dict[str, Any]]) -> Check:
+    """Which attention kernel the denoise step will actually use.
+
+    Worth a check of its own because the answer is arrived at in three
+    hops and silently degrades at each one: `_select_sage_backend()` picks
+    a backend from the GPU's compute capability, diffusers'
+    `set_attention_backend` is asked for it, and if that raises — a
+    SageAttention that did not compile for this arch, a missing Triton, a
+    diffusers too old to know the name — the step logs a warning and
+    carries on with PyTorch native SDPA. A run that quietly took the slow
+    path looks exactly like one that took the fast path, only longer, and
+    the image builds SageAttention from source specifically so it does not
+    have to.
+
+    The probe runs inside the wan22 venv, since that is where those
+    packages are; the main venv has none of them.
+    """
+    import json
+
+    config = (envs or {}).get("wan22", {})
+    python_bin = config.get("python_bin")
+    if not python_bin:
+        return Check("attention", SKIP, "no wan22 env in the registry")
+    if not Path(python_bin).exists():
+        return Check("attention", FAIL, f"{python_bin} does not exist")
+
+    result = _run([python_bin, "-c", _ATTENTION_PROBE], timeout=180)
+    marker = "B2C_ATTENTION "
+    line = next(
+        (l for l in (result.stdout or "").splitlines() if l.startswith(marker)), None
+    )
+    if line is None:
+        detail = "probe failed inside the wan22 venv"
+        return Check("attention", FAIL, detail,
+                     [f"    {l}" for l in (result.stderr or "").splitlines()[-5:]])
+
+    found = json.loads(line[len(marker):])
+    selected = str(found.get("selected", "unknown"))
+    lines = [
+        f"gpu: {found.get('gpu', 'none')} {found.get('sm', '')}".rstrip(),
+        f"wan22 denoise will request: {selected}",
+        f"sageattention: {found.get('sageattention')}",
+        f"triton: {found.get('triton')}",
+        f"diffusers: {found.get('diffusers')}",
+        # Not a guess: this is seedvr2's own default, and unlike wan22 it
+        # has no auto-selection — flash-attn/apex are optional accelerators
+        # behind non-default attention_mode values. See steps/seedvr2.py.
+        "seedvr2 upscale: sdpa (PyTorch native; its attention_mode default)",
+    ]
+
+    # A sage backend that was asked for but whose package is missing means
+    # the step falls back to SDPA at load time, having said nothing until
+    # then. That is the case this check exists to make visible.
+    status = OK
+    if selected.startswith("could not resolve"):
+        # check_step_venvs already FAILs on a wan22 venv that cannot import
+        # torch, so this stays a WARN rather than reporting the same broken
+        # venv twice.
+        status = WARN
+    if selected.startswith(("sage", "_sage")) and "MISSING" in str(found.get("sageattention")):
+        status = WARN
+        lines.append(
+            "SageAttention is selected for this GPU but not importable — the "
+            "step will fall back to PyTorch native SDPA at load time"
+        )
+    if selected.startswith("_sage") and "MISSING" in str(found.get("triton")):
+        status = WARN
+        lines.append("the selected kernel is Triton-based, and Triton is missing")
+
+    return Check("attention", status, selected, lines)
+
+
 def check_huggingface() -> Check:
     """A token that works, and access to the two gated repos the pipeline needs."""
     token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
@@ -514,6 +623,7 @@ def run_checks(envs: Optional[Dict[str, Dict[str, Any]]] = None) -> List[Check]:
         ("egl", check_egl),
         ("brush binaries", check_brush_binaries),
         ("step venvs", lambda: check_step_venvs(envs or {})),
+        ("attention", lambda: check_attention(envs or {})),
         ("huggingface", check_huggingface),
         ("model caches", check_model_caches),
         ("ephemeral caches", check_ephemeral_caches),

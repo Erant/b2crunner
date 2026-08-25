@@ -110,6 +110,55 @@ class TestColmapExportGolden(unittest.TestCase):
             written = sorted(p.name for p in Path(tmp).glob("frame_*.png"))
             self.assertEqual(written, self.masked_ds.image_names[:3])
 
+    def test_brush_layout_puts_frames_and_normals_in_their_own_dirs(self):
+        """`layout: brush` is what the deliverable COLMAP dataset uses —
+        the flat default is only kept because the golden comparison above
+        is against a flat directory."""
+        import numpy as np
+
+        frames = 2
+        with tempfile.TemporaryDirectory() as tmp:
+            get_step_class("colmap_export")().run(
+                {
+                    "cameras": self.masked_ds.cameras[:frames],
+                    "image_names": self.masked_ds.image_names[:frames],
+                    "points_3d": self.masked_ds.points_3d,
+                    "images": self.masked_ds.images[:frames],
+                    "masks": self.masked_ds.masks[:frames],
+                    "normal_maps": [
+                        np.zeros((*img.shape[:2], 3), dtype=np.float32)
+                        for img in self.masked_ds.images[:frames]
+                    ],
+                },
+                {"output_dir": tmp, "layout": "brush"},
+            )
+            root = Path(tmp)
+            for name in ("cameras.txt", "images.txt", "points3D.txt"):
+                self.assertTrue((root / name).exists(), f"{name} belongs at the root")
+            self.assertEqual(
+                sorted(p.name for p in (root / "images").glob("*.png")),
+                self.masked_ds.image_names[:frames],
+            )
+            self.assertEqual(
+                sorted(p.name for p in (root / "normals").glob("*.png")),
+                self.masked_ds.image_names[:frames],
+            )
+            # Nothing left loose beside the .txt files — that is the whole
+            # difference from the flat layout.
+            self.assertEqual(sorted(root.glob("frame_*.png")), [])
+
+    def test_an_unknown_layout_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(ValueError):
+                get_step_class("colmap_export")().run(
+                    {
+                        "cameras": self.ds.cameras[:1],
+                        "image_names": self.ds.image_names[:1],
+                        "points_3d": self.ds.points_3d,
+                    },
+                    {"output_dir": tmp, "layout": "sparse0"},
+                )
+
     def test_masks_from_disk_keep_their_soft_edge(self):
         """Regression: alpha was computed as `mask * 255` regardless of the
         mask's range, so a uint8 mask straight off disk saturated to a hard

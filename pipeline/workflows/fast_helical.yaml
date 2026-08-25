@@ -1,34 +1,30 @@
-# Native port of ComfyUI-Body2COLMAP's `workflows/pipeline/fast helical.yaml`.
-#
-# That file is six ComfyUI stages, each a separate API graph reading and
-# writing a stage directory on disk:
+# `fast_helical_full.yaml` minus the SeedVR2 upscale — five stages, not six.
 #
 #   denoise.json          initial -> circular          (strength 1.0)
 #   resplat_helical.json  circular -> splatted
 #   mask_splat.json       splatted -> masked_splatted  (filter 6, dilation 2)
 #   denoise.json          masked_splatted -> helical   (strength 0.8)
-#   upscale.json          helical -> upscaled
-#   colmap.json           upscaled -> colmap
+#   colmap.json           helical -> colmap
 #
-# fast_helical.yaml is this file with the upscale stage taken out — five
-# stages instead of six, and otherwise identical. The two are maintained as
-# copies (there is no include mechanism), so keep them in step when editing
-# either; tests/test_workflows.py checks that they have not drifted.
+# WHY THIS EXISTS: to answer "is it the upscaler?". The final output of the
+# full pipeline is not quite right, and the upscale is both the least
+# examined step in it and the one that changes the frames the most —
+# SeedVR2 is a one-step diffusion model, so it is free to invent detail,
+# and it resamples every frame to a resolution nothing else in the
+# pipeline was tuned at. Running this and the full version over the same
+# input dataset isolates that one variable; everything else here is
+# byte-for-byte the same file.
 #
-# Here it is one in-memory run: the stage directories become Context state,
-# and nothing touches disk except the explicit checkpoint steps below (which
-# are optional — delete them and the whole pipeline stays in memory).
+# Two differences from fast_helical_full.yaml, and only two:
 #
-# STATUS: never executed end-to-end. Every step it references is registered
-# and its param names match the step's own docstring, and the file itself is
-# checked by tests/test_workflows.py (it loads, resolves against the
-# registry, and its templates expand). But the GPU steps in it —
-# wan22_vace_denoise, sapiens2_lite, seedvr2, brush, render_splat — have
-# never run in this sequence, and brush + render_splat have never run at
-# all. Treat this as the thing to debug first on a GPU pod, not as a
-# working recipe.
+#   * no `upscale` step (seedvr2), and no `upscale_resolution` param;
+#   * no `rescale_cameras` step (fit_cameras_to_images) — it exists solely
+#     to repair the intrinsics the upscale invalidates, and with no upscale
+#     the cameras already match the frames.
 #
-# Stage 6 produces the run's deliverables, under output_root:
+# Keep the two files in step when editing either.
+#
+# Stage 5 produces the run's deliverables, under output_root:
 #
 #   colmap/   cameras.txt + images.txt + points3D.txt, images/, normals/
 #   ply/      scene.ply — a second brush training, normal-supervised
@@ -36,13 +32,17 @@
 # Either can be switched off with the export_colmap / export_ply params;
 # the web UI's Outputs checkboxes are exactly those two.
 #
+# STATUS: shares every step with fast_helical_full.yaml. The file is checked
+# by tests/test_workflows.py (it loads, resolves against the registry, and
+# its templates expand), which is not the same as having run.
+#
 # Expects a dataset rendered with override_cam_from_mesh (its extras carry
 # orbit_target / anchor_position / focal_length_mm / original_focal_length),
 # i.e. what `render` produces and what cyber_6f/initial is.
-name: fast_helical_full
+name: fast_helical
 description: >-
-  Full six-stage fast-helical pipeline: denoise, train+re-render a splat,
-  mask, denoise again, upscale, then export a COLMAP dataset and/or a
+  fast_helical_full without the SeedVR2 upscale: denoise, train+re-render a
+  splat, mask, denoise again, then export a COLMAP dataset and/or a
   normal-supervised trained .ply.
 
 params:
@@ -73,17 +73,6 @@ params:
   brush_refine_every: 200
   brush_normal_loss_strength: 0.05
   brush_normal_loss_step_start: 5000
-
-  # SeedVR2's `resolution` is the target output *shortest edge*, not a
-  # multiplier — asking for less than the input's shortest edge downscales.
-  # See steps/seedvr2.py.
-  #
-  # 1080, not the 1440 this was: the frames feed a Gaussian splat, and a
-  # splat does not resolve detail the way a video does — past roughly the
-  # native render size the extra pixels mostly buy training time and VRAM.
-  # 720x1280 in, 1080x1920 out, which is also what the recorded
-  # ComfyUI-era upscale produced (cyber_6f/upscaled).
-  upscale_resolution: 1080
 
   # Which deliverables stage 6 produces. Both default on; the web UI drives
   # them from its Outputs checkboxes, and `--param export_ply=false` does
@@ -309,43 +298,6 @@ steps:
       images: dataset.images
 
   # ---------------------------------------------------------------- stage 5
-  # upscale.json
-  - id: upscale
-    step: seedvr2
-    dispatch: subprocess
-    env: seedvr2
-    inputs:
-      images: dataset.images
-    params:
-      resolution: ${params.upscale_resolution}
-      vae_encode_tiled: true
-      vae_decode_tiled: true
-    outputs:
-      images: dataset.images
-
-  # seedvr2 resamples the frames and cannot return cameras — it runs in its
-  # own venv, and that IPC boundary carries plain arrays, not Camera
-  # objects. So without this step the dataset now holds 1080x1920 images
-  # described by 720x1280 intrinsics, and both stage-6 consumers believe
-  # the wrong focal length: cameras.txt would claim a 720x1280 PINHOLE
-  # camera, and brush would fit a splat at half the focal length the images
-  # were rendered with. The recorded ComfyUI-era export has exactly this
-  # mismatch (cyber_6f/colmap: 720x1280 intrinsics, 1080x1920 frames), so
-  # this is an inherited bug, not a new one — and a prime suspect for
-  # output that looks *almost* right.
-  #
-  # Delete this step (or run fast_helical.yaml, which has no upscale at
-  # all) to reproduce the old behaviour for comparison. It is a no-op on
-  # a dataset whose frames already match its cameras.
-  - id: rescale_cameras
-    step: fit_cameras_to_images
-    dispatch: in_process
-    inputs:
-      dataset: dataset
-    outputs:
-      dataset: dataset
-
-  # ---------------------------------------------------------------- stage 6
   # colmap.json: background-remove, re-estimate normals against the frames
   # as they finally are, then emit whichever deliverables were selected.
   - id: export_masks
@@ -358,19 +310,14 @@ steps:
 
   # NOT the stage-2 normal maps (scene.normal_maps): those describe the
   # pre-re-render frames, which rerender_splat replaced wholesale with a
-  # different, longer orbit — a different count, different poses, and after
-  # the upscale a different resolution. Both deliverables below want
-  # normals for *these* frames, so they are estimated again here.
+  # different, longer orbit — a different count and different poses. Both
+  # deliverables below want normals for *these* frames, so they are
+  # estimated again here.
   - id: export_normals
     step: sapiens2_lite
     dispatch: in_process
     inputs:
       images: dataset.images
-    params:
-      # Smaller than the stage-2 default of 8: at the upscaled resolution
-      # these are 1080x1920 float32 maps, and the returned list alone is
-      # ~2 GB of host RAM.
-      batch_size: 4
     outputs:
       normal_maps: scene.export_normal_maps
 
@@ -396,7 +343,7 @@ steps:
 
   # Deliverable 2: a trained splat, normal-supervised. This is a second
   # full brush training — the stage-2 one exists to drive the helical
-  # re-render and predates the second denoise pass and the upscale, so it
+  # re-render and predates the second denoise pass, so it
   # is not the splat anyone wants to keep. `export_dir` puts this one at a
   # predictable path instead of brush/training_<ms>/.
   - id: train_final_splat

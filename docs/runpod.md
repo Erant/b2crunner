@@ -61,12 +61,27 @@ anything. Look for:
 ✓ OK    egl              NVIDIA ... /PCIe/SSE2          <- render can run
 ✓ OK    brush binaries   all 5 fork-specific flags present
 ✓ OK    step venvs       3 configured
+✓ OK    attention        _sage_qk_int8_pv_fp16_triton   <- the denoise kernel
 ✓ OK    huggingface      accessible / accessible        <- both gated repos
 ```
 
 A `FAIL` on `vulkan` almost always means `NVIDIA_DRIVER_CAPABILITIES` was
 not set on the template. A `WARN` on `huggingface` means the token is
 missing or has not accepted a licence — every model step will 401.
+
+`attention` names the kernel `wan22_vace_denoise` will actually ask
+diffusers for on this GPU, and what it found to back it (SageAttention,
+Triton, diffusers versions), plus the upscaler's own backend. It is here
+because that answer degrades silently: the step picks a backend from the
+GPU's compute capability, and if `set_attention_backend` raises — a
+SageAttention that did not compile for this arch, a missing Triton — it
+logs a warning and runs on PyTorch native SDPA instead. Same output, an
+hour longer, nothing obvious in the log. `none (PyTorch native SDPA)` is a
+fine answer on a pre-Ampere card; a `WARN` here means a sage kernel was
+selected and then could not be loaded, which is worth chasing.
+
+Run it in full (`docker run IMAGE doctor`, or the UI's **Doctor** tab) for
+the version lines behind each of those.
 
 `doctor` is also a tab in the UI, and `docker run IMAGE doctor` (or
 `python -m pipeline.cli doctor` over SSH) from anywhere.
@@ -81,16 +96,30 @@ Open `https://<pod-id>-7860.proxy.runpod.net`. Three input modes:
 - **Upload a dataset .zip** — the same thing from your laptop. The archive
   can be rooted at the dataset or one level above it; the extractor finds
   the `metadata.json` either way.
-- **Single reference photo** — the from-scratch path. Runs
-  `fast_helical_native.yaml`, which renders its own views from a
-  SAM-3D-Body reconstruction. **Least proven of the three**: its front half
-  (`render` → `generate_firstlast` → `inject_anchor`) has never executed
-  end to end. If it falls over, the zip path still exercises everything
-  downstream of it.
+- **Single reference photo** — the from-scratch path, which needs a
+  workflow that renders its own views from a SAM-3D-Body reconstruction.
+  **No shipped workflow does** — the one that did
+  (`fast_helical_native.yaml`) was dropped as irrelevant to this image — so
+  picking this against either `fast_helical` file is refused at submit
+  time. The plumbing stays because adding such a workflow back is a YAML
+  file.
 
 The **Params** box is a copy of the workflow's own `params:` block. Edit it
 freely — it is parsed as YAML and layered over the defaults. `output_root`
 is repointed automatically at this run's directory under `/data/output`.
+
+**Outputs** picks what the run produces: the COLMAP dataset, the trained
+`.ply`, or both. This is a real switch, not a filter on the result — the
+.ply is a second full 30,000-iteration brush training, and unchecking it
+skips that step outright. At least one has to be checked.
+
+The **Results** tab has three things: the one `.zip` of the run's
+deliverables (`colmap/` and/or `ply/`, and nothing else — the run
+directory's own frames and the intermediate splat stay on the volume), the
+final frames, and a **per-step contact sheet**: eight frames spaced evenly
+through the batch, captured after every step, one row per step in run
+order. That last one is for answering "which step broke it" by looking
+rather than by reading the log; it fills in while the run is going.
 
 The run happens in a background thread. **Closing the browser tab does not
 stop it** — reopen the page and press *Attach / refresh* on the Progress
@@ -105,8 +134,13 @@ anything long enough that you would rather have it survive in `tmux`:
 python -m pipeline.cli run fast_helical_full --dataset /data/my_dataset
 python -m pipeline.cli run fast_helical_full --dataset /data/my_dataset \
     --param diffusion_steps=8 --param 'resolution=[720, 1280]'
-python -m pipeline.cli run fast_helical_native --reference-image /data/photo.jpg \
-    --prompt "a woman in a red jacket"
+
+# without the upscaler, to see whether that is what is degrading the output
+python -m pipeline.cli run fast_helical --dataset /data/my_dataset
+
+# the same output switches the UI's Outputs checkboxes drive
+python -m pipeline.cli run fast_helical_full --dataset /data/my_dataset \
+    --param export_ply=false
 ```
 
 ## When and where the models are downloaded
@@ -131,15 +165,14 @@ properties, in order of how much they matter:
   freeze for twenty minutes while Wan2.2 comes down — which is the failure
   this replaces, and the expensive one, because by then it has already
   burned GPU time on the stages before it.
-- **Waiting is scoped to the workflow.** `fast_helical_local_smoke` skips
-  both denoise passes on purpose, so it waits on ~3 GB, not on the ~47 GB
-  of Wan2.2 weights it never touches:
+- **Waiting is scoped to the workflow** — and, past that, to the steps a
+  run's params actually select, since a `when:`-skipped step's checkpoint
+  is not waited on either. `fast_helical` never touches the upscaler, so it
+  does not block on SeedVR2's 6 GB:
 
   | Workflow | Blocks on | Total |
   |---|---|---|
-  | `roundtrip_example` | nothing | — |
-  | `fast_helical_local_smoke` | rmbg, sapiens2 | ~2.7 GB |
-  | `fast_helical_native` | rmbg, sapiens2, sam3dbody, wan22, wan22_fp8, wan22_lora | ~53.8 GB |
+  | `fast_helical` | rmbg, sapiens2, wan22, wan22_fp8, wan22_lora | ~51.0 GB |
   | `fast_helical_full` | rmbg, sapiens2, wan22, wan22_fp8, wan22_lora, seedvr2 | ~57.0 GB |
 
   `wan22` is now only 11.9 GB — the base repo's text_encoder, VAE,

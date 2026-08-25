@@ -112,13 +112,15 @@ def run_workflow(args: argparse.Namespace) -> int:
     logger.info("envs registry: %s (%s)", args.envs, ", ".join(sorted(envs)) or "empty")
 
     # Block on the models this workflow actually needs, before touching the
-    # GPU. Scoped to the workflow rather than to everything: waiting for the
-    # 52 GB Wan2.2 checkpoint before a fast_helical_local_smoke run — which
-    # skips both denoise passes on purpose — would be actively wrong.
+    # GPU. Scoped to the workflow rather than to everything: a workflow that
+    # skips both denoise passes must not wait on the ~47 GB of Wan2.2
+    # weights it never touches.
     if not args.no_wait_for_models:
         from .models import ModelsUnavailable, required_for_steps, wait_until_ready
 
-        needed = required_for_steps(step.step for step in spec.steps)
+        # enabled_steps(), not steps: a run with export_ply switched off
+        # must not block on a checkpoint only the skipped step needs.
+        needed = required_for_steps(step.step for step in spec.enabled_steps())
         if needed:
             logger.info("models this workflow needs: %s", ", ".join(needed))
             try:
@@ -246,8 +248,10 @@ def build_parser() -> argparse.ArgumentParser:
     source.add_argument("--dataset", help="An existing on-disk b2c dataset directory")
     source.add_argument(
         "--reference-image",
-        help="A single photo to start from; the workflow renders its own views "
-             "(fast_helical_native.yaml)",
+        help="A single photo to start from, for a workflow that renders its own "
+             "views (sam3d_body -> render). No shipped workflow does — both "
+             "fast_helical files begin from an existing dataset — so this needs "
+             "a workflow of your own; see Dataset.from_reference_image",
     )
     run_p.add_argument("--prompt", default=None, help="Subject description used by the denoise steps")
     run_p.add_argument("--out", default=None, help="Directory to save the final dataset to")
