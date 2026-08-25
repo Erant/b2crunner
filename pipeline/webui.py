@@ -533,7 +533,20 @@ def workflow_params_yaml(name: str) -> str:
     # The output switches are deliberately left out: they have a dedicated
     # control, and showing them here too would give the same setting two
     # editable homes that disagree the moment someone touches one.
-    params = {k: v for k, v in spec.params.items() if k not in OUTPUT_PARAMS.values()}
+    #
+    # output_root is left out too, but for a sharper reason: `start()` only
+    # repoints it at the run's own timestamped directory when the submitted
+    # params do NOT already contain the key (mirroring `pipeline.cli run`'s
+    # `--param output_root=...` override). Showing the workflow's literal
+    # default here (`output/fast_helical`, relative to the process's cwd)
+    # meant every run round-tripped it back through `on_start`'s params dict
+    # whether the box was touched or not, permanently defeating that
+    # repoint — colmap_export and the final brush training wrote under the
+    # cwd instead of the run directory, and the Results tab reported "the
+    # run produced neither" even though the run had completed and written
+    # real output, just not where anything was looking for it.
+    excluded = set(OUTPUT_PARAMS.values()) | {"output_root"}
+    params = {k: v for k, v in spec.params.items() if k not in excluded}
     if not params:
         return "# this workflow declares no params\n"
     return yaml.safe_dump(params, sort_keys=False, allow_unicode=True, width=100)
