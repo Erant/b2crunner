@@ -66,8 +66,9 @@ class BrushStep(Step):
     params: {"brush_path": str, "total_steps": int, "sh_degree": int,
              "max_resolution": int, "max_splats": int, "refine_every": int,
              "alpha_mode": str, "normal_loss_strength": float,
-             "normal_loss_step_start": int, "with_viewer": bool,
-             "output_dir": str, "export_dir": str, "export_name": str}
+             "normal_loss_step_start": int, "normal_loss_every": int,
+             "with_viewer": bool, "output_dir": str, "export_dir": str,
+             "export_name": str}
     outputs: {"splat_path": str}
 
     `output_dir` puts the run under `<output_dir>/brush/training_<ms>/`,
@@ -107,6 +108,12 @@ class BrushStep(Step):
         alpha_mode = params.get("alpha_mode", "transparent")
         normal_loss_strength = float(params.get("normal_loss_strength", 0.05))
         normal_loss_step_start = int(params.get("normal_loss_step_start", 5000))
+        # Evaluate the normal loss every Nth step instead of every step; brush
+        # multiplies the sampled loss by N, so the expected gradient is
+        # unchanged and only the extra normal render and its autodiff graph are
+        # skipped in between. 1 is brush's own default and means every step,
+        # i.e. the behaviour this step had before the flag existed.
+        normal_loss_every = int(params.get("normal_loss_every", 1))
         with_viewer = bool(params.get("with_viewer", False))
 
         export_dir = params.get("export_dir")
@@ -190,6 +197,7 @@ class BrushStep(Step):
                 cmd.extend([
                     "--normal-loss-weight", str(normal_loss_strength),
                     "--normal-loss-start-iter", str(normal_loss_step_start),
+                    "--normal-loss-every", str(normal_loss_every),
                 ])
 
             self._run_brush(cmd)

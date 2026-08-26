@@ -82,6 +82,11 @@ params:
   brush_refine_every: 200
   brush_normal_loss_strength: 0.05
   brush_normal_loss_step_start: 5000
+  # How often the normal loss is actually evaluated, in training steps.
+  # 1 is brush's own default (every step); raising it skips the extra
+  # normal render on the steps in between, and brush scales the sampled
+  # loss by the same factor so the expected gradient does not change.
+  brush_normal_loss_every: 1
   # Every path this workflow writes to disk hangs off this one param, and
   # `pipeline.cli run` repoints it at the run's own directory under
   # B2C_OUTPUT_DIR (i.e. the mounted volume) unless you pass
@@ -320,6 +325,7 @@ steps:
       alpha_mode: transparent
       normal_loss_strength: ${params.brush_normal_loss_strength}
       normal_loss_step_start: ${params.brush_normal_loss_step_start}
+      normal_loss_every: ${params.brush_normal_loss_every}
     outputs:
       splat_path: dataset.splat_path
 

@@ -303,9 +303,17 @@ def check_brush_binaries() -> Check:
     default branch builds a binary that runs fine and then rejects the argv
     steps/brush.py constructs. Verified here instead of at minute 40 of a
     training run.
+
+    It catches a stale fork build too, not just a `main` one:
+    `--normal-loss-every` only landed on normal-map-supervision on
+    2026-08-25, and the Dockerfile's `git clone` is cached on the RUN text
+    rather than on remote git state, so an image rebuilt without
+    `--no-cache-filter brush-builder` keeps whatever checkout it first
+    cached (see docs/docker-build-notes.md).
     """
     required_flags = [
         "--normal-loss-weight", "--normal-loss-start-iter",
+        "--normal-loss-every",
         "--alpha-mode", "--export-name", "--total-train-iters",
     ]
     lines, status = [], OK
@@ -328,8 +336,10 @@ def check_brush_binaries() -> Check:
             missing = [flag for flag in required_flags if flag not in help_text]
             if missing:
                 lines.append(
-                    f"  MISSING FLAGS {', '.join(missing)} — this binary was probably built "
-                    f"from Erant/brush's `main`, not the normal-map-supervision branch"
+                    f"  MISSING FLAGS {', '.join(missing)} — this binary was built from "
+                    f"Erant/brush's `main`, or from a normal-map-supervision checkout "
+                    f"older than the flags above; rebuild the brush-builder stage with "
+                    f"--no-cache-filter"
                 )
                 status = FAIL
             else:

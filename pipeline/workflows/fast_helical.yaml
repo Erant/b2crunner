@@ -73,6 +73,11 @@ params:
   brush_refine_every: 200
   brush_normal_loss_strength: 0.05
   brush_normal_loss_step_start: 5000
+  # How often the normal loss is actually evaluated, in training steps.
+  # 1 is brush's own default (every step); raising it skips the extra
+  # normal render on the steps in between, and brush scales the sampled
+  # loss by the same factor so the expected gradient does not change.
+  brush_normal_loss_every: 1
 
   # Which deliverables stage 6 produces. Both default on; the web UI drives
   # them from its Outputs checkboxes, and `--param export_ply=false` does
@@ -195,6 +200,7 @@ steps:
       alpha_mode: transparent
       normal_loss_strength: ${params.brush_normal_loss_strength}
       normal_loss_step_start: ${params.brush_normal_loss_step_start}
+      normal_loss_every: ${params.brush_normal_loss_every}
     outputs:
       splat_path: dataset.splat_path
 
@@ -385,6 +391,7 @@ steps:
       alpha_mode: transparent
       normal_loss_strength: ${params.brush_normal_loss_strength}
       normal_loss_step_start: ${params.brush_normal_loss_step_start}
+      normal_loss_every: ${params.brush_normal_loss_every}
     outputs:
       # Overwrites the stage-2 intermediate, so Dataset.to_disk's splat.ply
       # and the CLI's closing "splat:" line both name the final one.
