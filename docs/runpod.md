@@ -96,10 +96,15 @@ Open `https://<pod-id>-7860.proxy.runpod.net`. Three input modes:
 - **Upload a dataset .zip** — the same thing from your laptop. The archive
   can be rooted at the dataset or one level above it; the extractor finds
   the `metadata.json` either way.
-- **Single reference photo** — the from-scratch path. Runs
-  `fast_helical_native.yaml`, which renders its own views from a
-  SAM-3D-Body reconstruction. **Least proven of the three**: its front half
-  (`render` → `generate_firstlast` → `inject_anchor`) has never executed
+- **Front/back reference sheet** — the from-scratch path. One square image
+  with the subject facing front on the left and seen from behind on the
+  right, as a diffusion model generates it. Runs
+  `fast_helical_native.yaml`, which splits it (front half to the
+  SAM-3D-Body reconstruction and the anchor warp, back half to the denoise
+  pass as its reference view) and renders its own views. **Least proven of
+  the three**: its front half
+  (`split_reference_sheet` → `render` → `generate_firstlast` →
+  `inject_anchor`) has never executed
   end to end, and it predates the export conventions the two `fast_helical`
   files use — so it produces a splat and a checkpoint, not a `colmap/` and
   `ply/`. Picking this input against either `fast_helical` file is refused
@@ -146,8 +151,8 @@ python -m pipeline.cli run fast_helical --dataset /data/my_dataset
 python -m pipeline.cli run fast_helical_full --dataset /data/my_dataset \
     --param export_ply=false
 
-# from a single photo instead
-python -m pipeline.cli run fast_helical_native --reference-image /data/photo.jpg \
+# from a front/back reference sheet instead
+python -m pipeline.cli run fast_helical_native --reference-image /data/sheet.png \
     --prompt "a woman in a red jacket"
 ```
 

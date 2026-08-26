@@ -382,5 +382,77 @@ class TestWorkflowFiles(unittest.TestCase):
                     spec.params["denoise_negative_prompt"], DENOISE_NEGATIVE_PROMPT
                 )
 
+    def test_a_mesh_is_reconstructed_from_the_sheet_s_front_half(self):
+        """The from-an-image path is handed the two-panel front/back sheet,
+        never a photo of the subject, so every consumer of a single view
+        has to read one half or the other — and which half is not
+        interchangeable:
+
+          * sam3d_body and generate_firstlast want the FRONT. A mesh
+            reconstructed from the sheet would be fitted to two people, and
+            the anchor warp would paste both panels over the anchor frame.
+          * wan22_vace_denoise wants the BACK, and gets it from
+            dataset.reference_image, which the split overwrites. The front
+            view already reaches that pass as the injected anchor frame, so
+            the reference slot carries the one view nothing else supplies.
+
+        Stated at the workflow level because nothing downstream can detect
+        the mistake: a sheet is a valid image everywhere it would be used.
+        """
+        for path in _workflows():
+            spec = WorkflowSpec.from_yaml(str(path))
+            splits = [s for s in spec.steps if s.step == "split_reference_sheet"]
+            reconstructions = [s for s in spec.steps if s.step == "sam3d_body"]
+            if not reconstructions:
+                self.assertFalse(
+                    splits, f"{path.name}: splits a reference sheet but never "
+                    f"reconstructs a body from it",
+                )
+                continue
+
+            with self.subTest(workflow=path.name):
+                self.assertEqual(
+                    len(splits), 1,
+                    f"{path.name}: sam3d_body runs on an image that was never "
+                    f"split out of the front/back sheet",
+                )
+                split = splits[0]
+                self.assertEqual(
+                    spec.steps.index(split), 0,
+                    f"{path.name}: '{split.id}' must run first — anything ahead "
+                    f"of it reads the unsplit sheet",
+                )
+                front = split.outputs["front"]
+                back = split.outputs["back"]
+                self.assertEqual(
+                    back, "dataset.reference_image",
+                    "the back half is what wan22_vace_denoise conditions on, and "
+                    "it reads dataset.reference_image",
+                )
+                self.assertNotEqual(front, back)
+
+                wants_the_front = {"sam3d_body": "image", "generate_firstlast": "image"}
+                for step in spec.steps:
+                    key = wants_the_front.get(step.step)
+                    if key is None:
+                        continue
+                    with self.subTest(step=step.id):
+                        self.assertEqual(
+                            step.inputs.get(key), front,
+                            f"'{step.id}' reads '{step.inputs.get(key)}' where it "
+                            f"needs the sheet's front half ('{front}')",
+                        )
+                for step in spec.steps:
+                    if step.step != "wan22_vace_denoise":
+                        continue
+                    with self.subTest(step=step.id):
+                        self.assertEqual(
+                            step.inputs.get("reference_image"), back,
+                            f"'{step.id}' conditions on "
+                            f"'{step.inputs.get('reference_image')}' rather than the "
+                            f"sheet's back half ('{back}')",
+                        )
+
+
 if __name__ == "__main__":
     unittest.main()

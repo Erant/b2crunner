@@ -37,10 +37,13 @@ says which frames the ComfyUI flow injected into, and this step finds the
 same two from camera positions alone, including after a rotate_views
 reordering. `generate_firstlast`'s warp is still verified on synthetic
 data only, and cannot be checked against cyber_6f: the image it warps is
-the single photo SAM-3D-Body ran on, which the dataset does not keep
-(reference.png is a two-panel front/back sheet for Wan-VACE conditioning,
-framed differently). It needs a real render.py `image_warp` output, so it
-waits on a pod. See tests/test_anchor.py.
+the front view SAM-3D-Body ran on, which that dataset does not keep — its
+reference.png is the whole two-panel front/back sheet, framed differently.
+(Current runs split that sheet up front and keep only the back half as
+reference.png; the front half lives at `scene.front_image` for this step
+and is likewise not persisted. See steps/reference_sheet.py.) It needs a
+real render.py `image_warp` output, so it waits on a pod. See
+tests/test_anchor.py.
 
 Unlike the original ComfyUI nodes, this port works in cv2 BGR uint8
 throughout (no RGB<->BGR/float<->uint8 tensor conversion needed — that

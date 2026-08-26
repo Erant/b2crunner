@@ -42,13 +42,21 @@
 # use as the default, but treat it as a best-effort match, not a verified
 # recipe — there is no ground truth to diff against here the way brush's
 # branch pin had `--help` to check against.
-# STATUS (2026-08-24): this is the next piece of work, not a working
-# recipe. It is the only workflow that starts from a single photo — the web
-# UI's "Single reference photo" input is refused against any other — and
-# `Dataset.from_reference_image` (added since the header above was written)
-# now closes the bootstrap gap that paragraph describes, so
-# `pipeline.cli run fast_helical_native --reference-image photo.jpg` at
+# STATUS (2026-08-25): this is the next piece of work, not a working
+# recipe. It is the only workflow that starts from an image rather than a
+# dataset — the web UI's front/back sheet input is refused against any
+# other — and `Dataset.from_reference_image` (added since the header above
+# was written) now closes the bootstrap gap that paragraph describes, so
+# `pipeline.cli run fast_helical_native --reference-image sheet.png` at
 # least has an entry point.
+#
+# What that image is was settled on 2026-08-25: the two-panel front/back
+# sheet a diffusion model generates, split down the middle by the first
+# step below. The front half feeds the mesh and the anchor warp; the back
+# half becomes dataset.reference_image and is all VACE conditions on. See
+# steps/reference_sheet.py — and note that cyber_6f's recorded
+# reference.png (the whole sheet) is the older convention, not the target
+# for this path.
 #
 # It PREDATES the deliverable conventions the two fast_helical files use
 # and does not follow them yet:
@@ -56,21 +64,24 @@
 #   * it ends at `train_splat` + a `save_dataset` checkpoint, with no
 #     COLMAP export and no `ply/` — so it declares neither `export_colmap`
 #     nor `export_ply`, and the UI's Outputs checkboxes hide for it;
-#   * `resolution` is [512, 512], not the [720, 1280] the helical files
-#     run at;
 #   * it is a single forward pass — it stops where fast_helical's second
 #     half (re-render, mask, denoise again) begins.
 #
 # The plan is to get the helical flow right first and then bring this one
-# up to it. Until then, treat every number in here as inherited rather than
-# chosen.
+# up to it. Until then, treat the numbers in here as inherited rather than
+# chosen wherever a comment does not say otherwise.
 name: fast_helical_native
 description: >-
-  From-a-photo single forward pass: reconstruct a body, render its own
-  views, denoise, train a splat. Predates the export conventions the
-  fast_helical files use — see the STATUS note in the file.
+  From-a-sheet single forward pass: split the front/back reference sheet,
+  reconstruct a body, render its own views, denoise, train a splat.
+  Predates the export conventions the fast_helical files use — see the
+  STATUS note in the file.
 params:
-  resolution: [512, 512]
+  # [720, 1280], the same portrait frame the helical files render and
+  # denoise at (2026-08-25; this file inherited [512, 512] from an earlier
+  # draft). It sets both the render size and wan22_vace_denoise's
+  # width/height, so the two cannot drift apart here.
+  resolution: [720, 1280]
   diffusion_steps: 6
   cfg: 1.0
   seed: 0
@@ -123,6 +134,32 @@ params:
     动, 小头, 小脸"
 
 steps:
+  # The input is not a photo of the subject: it is the two-panel sheet a
+  # diffusion model generates, the subject facing front on the left and
+  # seen from behind on the right. Nothing downstream wants both panels,
+  # and the two halves go to opposite places (steps/reference_sheet.py):
+  #
+  #   front -> scene.front_image        rmbg / sam3d_body / generate_firstlast
+  #   back  -> dataset.reference_image  wan22_vace_denoise's reference_image
+  #
+  # Writing the back half over dataset.reference_image is deliberate, and
+  # it is what makes `save_dataset`'s reference.png the back view: with the
+  # anchor injected, the front already reaches the diffusion pass as a real
+  # photograph at the anchor frame, so the reference slot is spent on the
+  # one view nothing else in the batch can supply. (cyber_6f's recorded
+  # reference.png is the whole sheet — the older convention, from before
+  # anchor injection. Don't take it as the target.)
+  - id: split_sheet
+    step: split_reference_sheet
+    dispatch: in_process
+    inputs:
+      sheet: dataset.reference_image
+    params:
+      front_side: left
+    outputs:
+      front: scene.front_image
+      back: dataset.reference_image
+
   # rmbg's foreground/background mask is for the Gaussian-splat stage
   # (brush's --alpha-mode, not yet a step in this workflow) — NOT for
   # wan22_vace_denoise's control_masks below, which needs a different thing
@@ -135,7 +172,7 @@ steps:
     step: rmbg
     dispatch: in_process
     inputs:
-      image: dataset.reference_image
+      image: scene.front_image
     outputs:
       mask: scene.foreground_mask
 
@@ -144,7 +181,7 @@ steps:
     dispatch: subprocess
     env: sam3dbody
     inputs:
-      image: dataset.reference_image
+      image: scene.front_image
     outputs:
       vertices: scene.vertices
       faces: scene.faces
@@ -231,7 +268,7 @@ steps:
     step: generate_firstlast
     dispatch: in_process
     inputs:
-      image: dataset.reference_image
+      image: scene.front_image
       camera: scene.image_warp.camera
       original_focal_length: scene.image_warp.original_focal_length
       render_size: scene.image_warp.render_size

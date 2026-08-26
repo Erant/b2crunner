@@ -11,7 +11,7 @@ workflows ship:
 |---|---|---|
 | `fast_helical_full` | an existing dataset | six — the full port of the ComfyUI `fast helical` pipeline, upscale included |
 | `fast_helical` | an existing dataset | five — the same run with the SeedVR2 upscale taken out, to isolate it when output looks wrong |
-| `fast_helical_native` | a single photo | one forward pass — reconstruct a body, render its own views, denoise, train a splat |
+| `fast_helical_native` | a front/back reference sheet | one forward pass — split the sheet, reconstruct a body, render its own views, denoise, train a splat |
 
 **None has been run end-to-end on a pod**, and `fast_helical_native` is the
 least proven of the three: it is the next piece of work, and predates the
@@ -52,14 +52,15 @@ python -m pipeline.cli run fast_helical --dataset path/to/b2c_dataset
 python -m pipeline.cli run fast_helical --dataset path/to/b2c_dataset \
     --param export_ply=false
 
-# or from a single photo — the workflow renders its own views
-python -m pipeline.cli run fast_helical_native --reference-image photo.jpg \
+# or from a front/back reference sheet (subject facing front on the left,
+# seen from behind on the right) — the workflow splits it and renders its own views
+python -m pipeline.cli run fast_helical_native --reference-image sheet.png \
     --prompt "a woman in a red jacket"
 
 # what can this machine actually run? (GPU, Vulkan, EGL, venvs, HF access)
 python -m pipeline.cli doctor
 
-# the web UI: submit a dataset, a .zip of one, or a photo; watch progress,
+# the web UI: submit a dataset, a .zip of one, or a reference sheet; watch progress,
 # pull the result back as one .zip
 python -m pipeline.cli ui            # needs `pip install 'gradio>=5.0,<7.0'`
 

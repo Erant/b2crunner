@@ -1,13 +1,14 @@
 """CLI entrypoint for the pipeline.
 
     python -m pipeline.cli run <workflow> --dataset <dir>
-    python -m pipeline.cli run <workflow> --reference-image <photo.jpg>
+    python -m pipeline.cli run <workflow> --reference-image <sheet.png>
     python -m pipeline.cli doctor
     python -m pipeline.cli steps | workflows
     python -m pipeline.cli ui
 
 `run` loads a starting Dataset — either a complete on-disk one, or a
-bootstrap carrying only a reference photo (see Dataset.from_reference_image)
+bootstrap carrying only the front/back reference sheet (see
+Dataset.from_reference_image)
 — runs the workflow, and writes the final in-memory dataset to `--out` so a
 run always leaves something on disk to inspect.
 
@@ -133,7 +134,7 @@ def run_workflow(args: argparse.Namespace) -> int:
     if args.reference_image:
         dataset = Dataset.from_reference_image(args.reference_image, prompt=args.prompt)
         logger.info(
-            "starting from a reference photo: %s (%dx%d)",
+            "starting from a reference sheet: %s (%dx%d)",
             args.reference_image, *dataset.resolution,
         )
     else:
@@ -248,7 +249,9 @@ def build_parser() -> argparse.ArgumentParser:
     source.add_argument("--dataset", help="An existing on-disk b2c dataset directory")
     source.add_argument(
         "--reference-image",
-        help="A single photo to start from; the workflow renders its own views "
+        help="The front/back reference sheet to start from: one image with the "
+             "subject facing front on the left and seen from behind on the right. "
+             "The workflow halves it and renders its own views "
              "(fast_helical_native.yaml). The fast_helical workflows cannot take "
              "this — they begin from an existing dataset",
     )

@@ -112,11 +112,16 @@ pipeline/
 │   ├── colmap_export.py real, verified against cyber_6f's recorded
 │                      colmap/ export (cameras.txt and points3D.txt
 │                      byte-identical, images.txt to 2.4e-7)
-│   └── anchor_stub.py   generate_firstlast / inject_anchor — real,
+│   ├── anchor_stub.py   generate_firstlast / inject_anchor — real,
 │                      verified locally (pure numpy/cv2 logic, no GPU
 │                      needed): affine + homography warp paths, anchor
 │                      position-matching incl. duplicate cameras, no-anchor
 │                      passthrough
+│   └── reference_sheet.py split_reference_sheet — halves the two-panel
+│                      front/back sheet the from-an-image path starts
+│                      from: front to sam3d_body/generate_firstlast/rmbg,
+│                      back over dataset.reference_image (all VACE
+│                      conditions on). Pure numpy, verified locally
 ├── envs/
 │   ├── envs.yaml        Per-machine registry: env name -> {python_bin |
 │                      image | base_url}
@@ -141,7 +146,7 @@ pipeline/
 │   │                            what the upscale invalidates), for
 │   │                            isolating the upscaler when output looks
 │   │                            wrong
-│   └── fast_helical_native.yaml single forward pass from one photo;
+│   └── fast_helical_native.yaml single forward pass from a front/back sheet;
 │                                rmbg/wan22_vace_denoise/sapiens2/
 │                                sam3d_body verified on real hardware,
 │                                render's own rasterisation not. Predates
@@ -278,7 +283,7 @@ falsy as *strings* too — a `when:` usually resolves through a param
 somebody typed, and `bool("false")` is `True`.
 
 See `pipeline/workflows/fast_helical_full.yaml` for a full multi-step
-example, and `fast_helical_native.yaml` for the from-a-photo shape.
+example, and `fast_helical_native.yaml` for the from-an-image shape.
 
 ### envs.yaml
 
@@ -389,7 +394,7 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   flash-attn/apex are NOT required — they're optional accelerators behind
   non-default `attention_mode` values; the default `sdpa` is pure PyTorch.
 - `generate_firstlast`/`inject_anchor` (`anchor_stub.py`) — warp the
-  reference photo to the anchor camera and inject it into the frame batch,
+  sheet's front half to the anchor camera and inject it into the frame batch,
   producing the per-frame reference/denoise mask `wan22_vace_denoise`
   consumes. Pure numpy/cv2 logic with no GPU/model dependency, so verified
   locally against synthetic data (no pod needed): the affine
@@ -402,6 +407,20 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   output (`render` itself is unverified — see below). Both are wired into
   `fast_helical_native.yaml`; the `fast_helical` files use `inject_anchor`
   only, since they start from a dataset that already has its anchor.
+
+- `split_reference_sheet` (`reference_sheet.py`) — new step, no node
+  behind it: in ComfyUI the cut lives in the interactive graph that
+  produces an `initial/` directory, built from stock image nodes, and none
+  of the checked-in API JSONs cover it. Halves the two-panel front/back
+  sheet the from-an-image path starts from — front to `sam3d_body` /
+  `generate_firstlast` / `rmbg`, back over `dataset.reference_image`, which
+  is all `wan22_vace_denoise` conditions on. Pure numpy, verified locally
+  (`tests/test_reference_sheet.py`), including over `cyber_6f`'s recorded
+  sheet. Note that what that dataset does with its sheet is the older
+  convention: `reference.png` there is both panels, joined, and
+  `workflows/api/denoise.json` feeds the lot to `WanVaceToVideo`. The back
+  half alone is what the current flow conditions on, because the anchor
+  injection already puts the front view in the batch as a real photograph.
 
 - `colmap_export` — verified against `cyber_6f/colmap`, the real COLMAP
   directory the ComfyUI stage produced from `cyber_6f/upscaled`.
@@ -601,12 +620,14 @@ verified both as a raw binary call and through the step itself against all
 framing, anchoring, metadata, point clouds — was already verified.
 
 **`generate_firstlast`'s warp.** Verified against synthetic data only. It
-cannot be checked against `cyber_6f`: the image it warps is the single
-photo SAM-3D-Body ran on, and that image is not in the dataset.
-`reference.png` is a two-panel front/back sheet used for Wan-VACE
-conditioning — a different image with different framing (the subject's
-bounding box scales by 0.59 horizontally against 0.84 vertically, so no
-uniform warp maps one to the other).
+cannot be checked against `cyber_6f`: the image it warps is the front view
+SAM-3D-Body ran on, and that image is not in the dataset. `reference.png`
+there is the whole two-panel front/back sheet, fed to Wan-VACE as-is under
+the older convention — a different image with different framing (the
+subject's bounding box scales by 0.59 horizontally against 0.84
+vertically, so no uniform warp maps one to the other). Current runs split
+that sheet in `split_reference_sheet` and keep only the back half as
+`reference.png`, so the front view it warps is not persisted there either.
 
 ### Orchestration differences (intentional)
 

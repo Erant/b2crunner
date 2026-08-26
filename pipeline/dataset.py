@@ -44,6 +44,13 @@ class Dataset:
     points_3d: Tuple[np.ndarray, np.ndarray]
     resolution: Tuple[int, int]
     masks: Optional[List[np.ndarray]] = None
+    # The view wan22_vace_denoise conditions on, saved as reference.png.
+    # In a from-a-sheet run this is the BACK half of the input sheet, put
+    # there by `split_reference_sheet`: the front already reaches the
+    # diffusion pass as the injected anchor frame, so the reference slot
+    # carries the one view nothing else in the batch can supply. Between
+    # `from_reference_image` and that first step it briefly holds the
+    # whole two-panel sheet instead.
     reference_image: Optional[np.ndarray] = None
     anchor_image: Optional[np.ndarray] = None
     prompt: Optional[str] = None
@@ -119,10 +126,18 @@ class Dataset:
         image: "str | Path | np.ndarray",
         prompt: Optional[str] = None,
     ) -> "Dataset":
-        """A Dataset carrying nothing but the one photo the pipeline starts from.
+        """A Dataset carrying nothing but the one image the pipeline starts from.
+
+        That image is the two-panel front/back sheet, not a photo of the
+        subject — `fast_helical_native.yaml`'s first step splits it and
+        overwrites `reference_image` with the back half (see
+        steps/reference_sheet.py). This constructor stays deliberately
+        ignorant of that: it validates nothing about the panels, so the
+        error for a single portrait photo comes from the step that can
+        name the problem rather than from here.
 
         `fast_helical_native.yaml` builds everything else itself — sam3d_body
-        reconstructs a mesh from `reference_image`, and `render` populates
+        reconstructs a mesh from the sheet's front half, and `render` populates
         images/cameras/points_3d/resolution from that mesh. But the dataclass
         requires all four up front, and `from_disk` is the only constructor
         there was, so "run the pipeline from a single photo" had no entry
