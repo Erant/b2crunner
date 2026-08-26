@@ -972,10 +972,21 @@ docker build -f docker/Dockerfile -t b2c/pipeline:latest \
 ```
 
 Naming the *consuming* stage as well forces the COPY to re-run against
-whatever `brush-builder` produced in that same build. The runtime stage is
-cheap to redo — its expensive inputs are `COPY --from=python-builder` layers
-that stay cached and re-copy byte-identically — so this is minutes, not a
-full rebuild.
+whatever `brush-builder` produced in that same build.
+
+It is not free, though, and the cost lands on the **push**, not the build.
+Re-executing the runtime stage gives every layer in it a new digest even
+where the bytes are unchanged, so the registry sees 15 blobs it has never
+held — 7 GB uncompressed, of which `COPY --from=python-builder /opt/venv_base`
+alone is 5 GB, copied from a stage that was fully cached and byte-identical
+to what is already stored. Only ~321 MB of that 7 GB is the brush binaries
+that actually changed. Locally the rebuild is minutes; the upload that
+follows it is not.
+
+That asymmetry is the strongest argument for pinning `BRUSH_REF`: an ARG
+change invalidates `brush-builder` and the two `COPY --from=brush-builder`
+layers that consume it, and nothing else — so the push carries the ~321 MB
+that changed instead of re-uploading every venv.
 
 The durable fix is to pin `BRUSH_REF` to a SHA instead of tracking a branch:
 an `ARG` value is part of the stage's cache key, so moving the pin
