@@ -98,20 +98,31 @@ params:
   output_root: output/fast_helical
 
   # Exact strings from the live ComfyUI graph (workflows/api/denoise.json,
-  # nodes 6/7/188) — $SUBJECT_DESC$ is filled in from dataset.prompt.
-  denoise_prompt: >-
-    The subject is $SUBJECT_DESC$. An unmoving wax statue of the subject
-    undergoes a 360 degree rotation. The subject is unmoving and unblinking,
-    their expression frozen as the camera continues to rotate around them.
-    Their eyes fixed in place. The camera rotates at a constant speed,
-    smoothly completing an orbit around the subject. The subject remains
-    consistent throughout the rotation. 人物正面朝向，表情中性，目光固定，眼睛保持静止，
-    无眨眼，面部完全静止，如雕像般静止，画面无时间变化
-  denoise_negative_prompt: >-
-    色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，
-    低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，
-    毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走,
-    chewing, tattoos, 眼球运动，眨眼，眼动追踪，微表情，面部抽动，头部移动, 小头, 小脸
+  # nodes 6/7/188) — $SUBJECT_DESC$ gets filled in from dataset.prompt.
+  #
+  # Double-quoted with escaped line breaks rather than YAML's `>-`, and that
+  # matters: a folded scalar turns every line break into a space, which
+  # inside the Chinese runs silently inserts spaces that are not in the
+  # graph's string. `\` at end of line drops the break and the next line's
+  # indent instead, so what loads is the prompt character for character.
+  # tests/test_workflows.py pins both against the strings below.
+  denoise_prompt: "时间静止，人物完全静止。身体如雕塑般僵硬，胸口没有起伏，头部保持固定\
+    角度，面部肌肉完全不动，维持单一的中性表情。双眼一眨不眨，眼睑保持张\
+    开且稳定，目光空洞而固定，锁定远处墙面上的一个点，对镜头毫无察觉、毫\
+    无反应。镜头以匀速、固定焦距围绕主体平滑移动。 Time is frozen and only \
+    the camera moves. The gaze stays anchored to that point on the wall \
+    as the camera passes, so the eyes slide across the frame, always aimed \
+    past the lens at the wall behind it. Eyelids stay open and steady, the \
+    expression holds without a single micro-movement, and the head keeps \
+    its exact angle throughout. The frozen subject is $SUBJECT_DESC$, lit \
+    by even soft studio light against a plain seamless backdrop, photorealistic, \
+    sharp focus, identical face and clothing in every frame."
+  denoise_negative_prompt: "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静\
+    止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的\
+    手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体\
+    ，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走, \
+    chewing, tattoos, 眼球运动，眨眼，眼动追踪，微表情，面部抽动，头部移\
+    动, 小头, 小脸"
 
 steps:
   # ---------------------------------------------------------------- stage 1

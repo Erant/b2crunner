@@ -27,6 +27,38 @@ DOCKER_ENVS_FILE = REPO_ROOT / "docker" / "envs.docker.yaml"
 
 VALID_DISPATCH = {"in_process", "subprocess", "service", "docker"}
 
+# The denoise prompts, character for character, as
+# ComfyUI-Body2COLMAP's workflows/api/denoise.json carries them (the
+# positive template is node 188's string, before StringReplace fills in
+# $SUBJECT_DESC$; the negative is node 7's text). Pinned here because the
+# failure mode is silent: YAML's folded `>-` scalar turns each line break
+# into a space, which inside the Chinese runs produces a prompt that still
+# loads, still runs, and is not the one the graph sends.
+DENOISE_PROMPT = (
+    "时间静止，人物完全静止。身体如雕塑般僵硬，胸口没有起伏，头部"
+    "保持固定角度，面部肌肉完全不动，维持单一的中性表情。双眼一眨"
+    "不眨，眼睑保持张开且稳定，目光空洞而固定，锁定远处墙面上的一"
+    "个点，对镜头毫无察觉、毫无反应。镜头以匀速、固定焦距围绕主体"
+    "平滑移动。 Time is frozen and only the camera moves. The gaze "
+    "stays anchored to that point on the wall as the camera passes, "
+    "so the eyes slide across the frame, always aimed past the lens "
+    "at the wall behind it. Eyelids stay open and steady, the expression "
+    "holds without a single micro-movement, and the head keeps its "
+    "exact angle throughout. The frozen subject is $SUBJECT_DESC$, "
+    "lit by even soft studio light against a plain seamless backdrop, "
+    "photorealistic, sharp focus, identical face and clothing in "
+    "every frame."
+)
+
+DENOISE_NEGATIVE_PROMPT = (
+    "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，"
+    "画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的"
+    "，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的"
+    "，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背"
+    "景，三条腿，背景人很多，倒着走, chewing, tattoos, 眼球运动，"
+    "眨眼，眼动追踪，微表情，面部抽动，头部移动, 小头, 小脸"
+)
+
 
 def _workflows():
     return sorted(WORKFLOW_DIR.glob("*.yaml"))
@@ -336,6 +368,19 @@ class TestWorkflowFiles(unittest.TestCase):
                         self.assertGreater(float(c), 0.0)
                         self.assertLess(float(c), 1.0)
 
+
+    def test_denoise_prompts_match_the_graph_character_for_character(self):
+        """See DENOISE_PROMPT's comment: the way this breaks is whitespace,
+        so compare the whole string rather than eyeballing the YAML."""
+        for path in _workflows():
+            spec = WorkflowSpec.from_yaml(str(path))
+            if "denoise_prompt" not in spec.params:
+                continue
+            with self.subTest(workflow=path.name):
+                self.assertEqual(spec.params["denoise_prompt"], DENOISE_PROMPT)
+                self.assertEqual(
+                    spec.params["denoise_negative_prompt"], DENOISE_NEGATIVE_PROMPT
+                )
 
 if __name__ == "__main__":
     unittest.main()
