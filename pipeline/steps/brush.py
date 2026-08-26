@@ -29,6 +29,16 @@ a build), so treat this module the same way as the pod-untested steps
 (sam3d_body, seedvr2) even though its logic is a close port of code that
 does run in production via ComfyUI.
 
+**A non-zero exit is not automatically a failed training.** brush has been
+seen taking SIGSEGV (exit code -11) during shutdown, *after* it has already
+written the export — the .ply on disk is complete and the training is done.
+So a failed exit is checked against the artefact rather than trusted on its
+own: if the export exists, is non-empty, and was written by this run (its
+mtime changed, so a stale .ply left in an `export_dir` from a previous run
+cannot stand in for a crashed one), the run is treated as successful and the
+whole failure — exit code and output tail — is logged at WARNING. Any other
+non-zero exit still raises, as does one that left no export behind.
+
 Normal-map supervision: per the original node's behavior, a normal map
 that already carries an alpha channel keeps it; otherwise the RGB frame's
 own foreground mask (rmbg's output) is reused as the normal map's alpha,
@@ -40,6 +50,7 @@ supervision inactive, not an error.
 
 from __future__ import annotations
 
+import logging
 import tempfile
 import time
 from pathlib import Path
@@ -49,9 +60,11 @@ import cv2
 import numpy as np
 
 from ..masks import mask_to_alpha_u8
-from ..proc import stream_command
+from ..proc import ProcessFailed, stream_command
 from ..registry import register_step
 from ..step import Step
+
+logger = logging.getLogger(__name__)
 
 
 @register_step("brush")
@@ -177,6 +190,7 @@ class BrushStep(Step):
                     cv2.imwrite(str(normal_path), out)
 
             ply_output_name = params.get("export_name", "export.ply")
+            ply_path = out_root / ply_output_name
             cmd = [
                 brush_path,
                 str(colmap_dir),
@@ -200,9 +214,8 @@ class BrushStep(Step):
                     "--normal-loss-every", str(normal_loss_every),
                 ])
 
-            self._run_brush(cmd)
+            self._run_brush(cmd, ply_path)
 
-        ply_path = out_root / ply_output_name
         if not ply_path.exists():
             raise RuntimeError(
                 f"Expected output PLY file not found: {ply_path}\nBrush may not have exported successfully."
@@ -210,17 +223,55 @@ class BrushStep(Step):
 
         return {"splat_path": str(ply_path.absolute())}
 
-    def _run_brush(self, cmd: List[str]) -> None:
+    def _run_brush(self, cmd: List[str], ply_path: Path) -> None:
+        # What "this run wrote it" means, captured before launching: an
+        # export_dir is reused across runs (${output_root}/ply), so a .ply
+        # sitting there already is a previous training's, and accepting it
+        # after a crash would hand back a stale splat as if it were new.
+        before = ply_path.stat().st_mtime_ns if ply_path.exists() else None
+
         # Training output is relayed to the log line by line as it arrives
         # (see pipeline/proc.py). This used to buffer everything and show
         # it only on failure, which made a 30,000-iteration run — the
         # longest single thing in the pipeline — completely silent.
-        stream_command(
-            cmd,
-            log_name="brush",
-            not_found_hint=(
-                "It is built into the image at /usr/local/bin/brush; on a bare "
-                "machine, build it from Erant/brush's normal-map-supervision "
-                "branch or point the step's brush_path param at it."
-            ),
-        )
+        try:
+            stream_command(
+                cmd,
+                log_name="brush",
+                not_found_hint=(
+                    "It is built into the image at /usr/local/bin/brush; on a bare "
+                    "machine, build it from Erant/brush's normal-map-supervision "
+                    "branch or point the step's brush_path param at it."
+                ),
+            )
+        except ProcessFailed as exc:
+            # brush segfaults on shutdown sometimes, with the export already
+            # complete on disk (see the module docstring). The artefact is
+            # the better witness than the exit code — but only the artefact
+            # this run produced.
+            if not _exported_this_run(ply_path, before):
+                raise
+            logger.warning(
+                "brush exited non-zero but %s is complete (%d bytes, written by "
+                "this run) — treating the training as successful. This is the "
+                "known shutdown crash if the output below ends after the export; "
+                "anything else here is a real failure that happened to leave a "
+                "usable .ply. Suppressed failure follows.\n%s",
+                ply_path, ply_path.stat().st_size, exc,
+            )
+
+
+def _exported_this_run(ply_path: Path, before_mtime_ns: Optional[int]) -> bool:
+    """Whether `ply_path` is an export the just-finished brush call wrote.
+
+    Non-empty and newer than whatever was there before it started. Both
+    halves matter: a zero-byte file is a crash mid-write, and an unchanged
+    mtime is a previous run's .ply that this one never got as far as
+    overwriting.
+    """
+    if not ply_path.exists():
+        return False
+    stat = ply_path.stat()
+    if stat.st_size == 0:
+        return False
+    return before_mtime_ns is None or stat.st_mtime_ns != before_mtime_ns

@@ -498,6 +498,14 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   bake this paragraph originally described — that variable made no
   measurable difference in the end. Whether RunPod's provisioning needs
   anything beyond what this image already does is still open.
+  **Update (2026-08-25):** a non-zero exit is no longer trusted on its own.
+  brush has been seen taking SIGSEGV (exit -11) during shutdown with the
+  export already complete, so the step weighs a failed exit against the
+  artefact: an export that exists, is non-empty, and was written by this
+  run (mtime changed — a stale `.ply` in a reused `export_dir` does not
+  count) means the training succeeded, and the whole failure is logged at
+  WARNING instead. Anything else still raises. See
+  `tests/test_brush_exit.py`.
 - `render` — camera-path generation (circular/sinusoidal/helical,
   `override_cam_from_mesh` anchor mode) + mesh/depth/skeleton rendering +
   point-cloud sampling, ported from `nodes/render_node.py`. The geometry
