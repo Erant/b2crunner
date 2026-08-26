@@ -807,8 +807,9 @@ The Erant/brush commit adding `brush-splat-render` was pushed to
 `git clone` layer and silently keeps the pre-push checkout, since BuildKit
 caches on the RUN command text, not remote git state; worth remembering
 next time this stage's source moves upstream without the Dockerfile itself
-changing), and both the raw binary and the actual pipeline step were
-verified on GPU:
+changing **— but that flag alone is NOT enough to change what lands in the
+image; see the 2026-08-25 update at the end of this file**), and both the
+raw binary and the actual pipeline step were verified on GPU:
 
 - `brush-splat-render` directly, against the `.ply` from the `brush` run
   above and 4 real cameras from `cyber_6f`: `wgpu_hal::vulkan::adapter`
@@ -928,3 +929,61 @@ is separate from all of this: gsplat is CUDA, not Vulkan, so a scratch venv
 on this box can still produce the oracle images the brush renderer was
 validated against (see `~/Projects/brush/docs/splat-render.md`, which
 records that comparison — mean abs error 0.0008-0.0015 on RGB).
+
+#### UPDATE (2026-08-25): `--no-cache-filter brush-builder` does not do what
+the note above says it does
+
+The image pushed as `erantimus/b2crunner:c35b577` shipped a `brush` built
+from `67e22e3`, two commits behind `normal-map-supervision`, and nothing
+caught it. Reconstructing which commit a binary came from meant diffing its
+`--help` against the branch's history — the flag `--normal-loss-every`
+(added by `e20ac1f`) was absent, and `brush-splat-render` (added by
+`67e22e3`) was present, which brackets it exactly.
+
+The correction to the note above: `--no-cache-filter brush-builder` **does**
+re-execute the stage — a full `cargo build --release`, 412s, observable in
+the log — and it **does** produce a new binary. It then gets thrown away.
+The runtime stage's
+
+```dockerfile
+COPY --from=brush-builder /out-brush /usr/local/bin/brush
+```
+
+still reports `CACHED`, and the image keeps the old binary. Verified by mtime
+and md5: after a `--no-cache-filter brush-builder` rebuild, `/usr/local/bin/brush`
+inside the image still had the *previous* build's mtime and checksum, while
+`docker build --target brush-builder` on the very same cache showed
+`/out-brush` freshly built, from a clone at the right commit, carrying the
+flag. Two different binaries, and the image took the wrong one.
+
+The reason is that a `COPY --from=<stage>` cache key is derived from the
+producing stage's *cache key*, not from a content hash of what the stage
+produced. `--no-cache-filter` forces re-execution without changing that key,
+so every downstream consumer still matches its old record. A second plain
+rebuild does not fix it either — the stale record is still the match.
+
+What actually works, and is what the currently pushed image was built with:
+
+```bash
+docker build -f docker/Dockerfile -t b2c/pipeline:latest \
+  --no-cache-filter brush-builder,runtime \
+  --build-arg GIT_SHA="$(git rev-parse HEAD)" \
+  ...
+```
+
+Naming the *consuming* stage as well forces the COPY to re-run against
+whatever `brush-builder` produced in that same build. The runtime stage is
+cheap to redo — its expensive inputs are `COPY --from=python-builder` layers
+that stay cached and re-copy byte-identically — so this is minutes, not a
+full rebuild.
+
+The durable fix is to pin `BRUSH_REF` to a SHA instead of tracking a branch:
+an `ARG` value is part of the stage's cache key, so moving the pin
+invalidates brush-builder *and* everything downstream, correctly and without
+any `--no-cache-filter`. Deliberately not done yet.
+
+Until then, `pipeline/doctor.py`'s brush check is the backstop: it asserts
+every flag `steps/brush.py` constructs is in `brush --help`, so a stale
+binary fails at container start rather than mid-training. That only covers
+staleness that changes the CLI surface — two commits that alter training
+behaviour without touching argv would still pass it silently.

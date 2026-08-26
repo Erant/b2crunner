@@ -307,9 +307,12 @@ def check_brush_binaries() -> Check:
     It catches a stale fork build too, not just a `main` one:
     `--normal-loss-every` only landed on normal-map-supervision on
     2026-08-25, and the Dockerfile's `git clone` is cached on the RUN text
-    rather than on remote git state, so an image rebuilt without
-    `--no-cache-filter brush-builder` keeps whatever checkout it first
-    cached (see docs/docker-build-notes.md).
+    rather than on remote git state. Rebuilding does not reliably shake
+    that loose — `--no-cache-filter brush-builder` re-runs the stage but
+    the runtime stage's `COPY --from=brush-builder` still matches its old
+    cache record, so the fresh binary is built and discarded; the
+    consuming stage has to be named too. See docs/docker-build-notes.md's
+    2026-08-25 update.
     """
     required_flags = [
         "--normal-loss-weight", "--normal-loss-start-iter",
@@ -338,8 +341,10 @@ def check_brush_binaries() -> Check:
                 lines.append(
                     f"  MISSING FLAGS {', '.join(missing)} — this binary was built from "
                     f"Erant/brush's `main`, or from a normal-map-supervision checkout "
-                    f"older than the flags above; rebuild the brush-builder stage with "
-                    f"--no-cache-filter"
+                    f"older than the flags above. Rebuild with "
+                    f"`--no-cache-filter brush-builder,runtime`: naming brush-builder "
+                    f"alone rebuilds the binary but the runtime stage's COPY keeps "
+                    f"serving the cached one."
                 )
                 status = FAIL
             else:
