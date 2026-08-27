@@ -550,6 +550,24 @@ COPY --from=python-builder /opt/venv_seedvr2 /opt/venv_seedvr2
 COPY --from=python-builder /opt/venv_sam3dbody /opt/venv_sam3dbody
 COPY --from=python-builder /opt/vendor /opt/vendor
 
+# body2colmap is pip-installed unpinned in python-builder's venv_base, and
+# BuildKit caches that layer: a rebuild that changes only application code
+# ships whatever commit venv_base first resolved (the `COPY --from` keys on
+# python-builder's cache key, not on what it produced — the same trap the
+# brush notes describe). Pull the intended commit forward here in a cheap
+# late layer so the image can track it without a full python-builder
+# rebuild. The child venvs see it through their .pth into venv_base.
+# --no-deps: body2colmap's deps (numpy, pyrender, trimesh, opencv-python)
+# are unchanged and already present. Bump this SHA when the pipeline needs
+# a newer body2colmap; drop the layer once the python-builder install is
+# itself pinned.
+RUN /opt/venv_base/bin/pip install --force-reinstall --no-deps \
+        'body2colmap @ git+https://github.com/Erant/body2colmap.git@a3a498d878947a6d2dc5b9cd10052db67b797e08' \
+    && /opt/venv_base/bin/python -c "\
+import body2colmap.face as f; \
+assert f.EYE_STYLES == ('shape', 'dots'), f.EYE_STYLES; \
+print('body2colmap eye_style default:', f.DEFAULT_EYE_STYLE)"
+
 # NOT /workspace/b2c_runner, which is where this used to live. RunPod's
 # pod template defaults its network volume's mount path to /workspace, and a
 # volume mounted there shadows everything under it — including, in the old
