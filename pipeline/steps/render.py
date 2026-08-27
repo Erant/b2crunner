@@ -130,6 +130,22 @@ class RenderStep(Step):
               choices=("mesh", "depth", "skeleton", "mesh+skeleton", "depth+skeleton")),
         Param("framing", str, "full", "How much of the body fills the frame",
               choices=("full", "torso", "bust", "head")),
+        Param("eye_style", str, "shape",
+              "How the face overlay draws the eyes: 'shape' fills each eye as a "
+              "flat sclera with a pupil disc (a stronger gaze cue at the "
+              "resolutions the diffusion pass conditions on), 'dots' is the "
+              "older landmark-dot rendering. Only takes effect with a "
+              "face_landmarks input",
+              choices=("shape", "dots")),
+        Param("eye_color", list, [1.0, 1.0, 1.0],
+              "RGB in [0,1] for the filled eye shape (sclera). eye_style "
+              "'shape' only"),
+        Param("pupil_color", list, [0.0, 0.0, 0.0],
+              "RGB in [0,1] for the pupil disc. eye_style 'shape' only"),
+        Param("pupil_scale", float, 0.75,
+              "Pupil diameter as a fraction of the eye height measured at the "
+              "pupil; 1.0 is a disc touching both lids. eye_style 'shape' only",
+              minimum=0.0, maximum=1.0),
         Param("override_cam_from_mesh", bool, False,
               "Anchor one frame exactly at the original SAM-3D-Body camera, so a "
               "reference photo can be warped onto it. Circular or helical only, and "
@@ -363,6 +379,18 @@ class RenderStep(Step):
         joint_radius = params["joint_radius"]
         bone_radius = params["bone_radius"]
 
+        # Eye appearance for the face overlay. body2colmap ignores these
+        # unless a face_landmarks input makes the face visible, so they are
+        # always passed rather than gated here. eye_style "shape" fills each
+        # eye as a sclera plus a pupil disc; "dots" restores body2colmap's
+        # older landmark-dot rendering.
+        eye_opts = {
+            "eye_style": params["eye_style"],
+            "eye_color": tuple(params["eye_color"]),
+            "pupil_color": tuple(params["pupil_color"]),
+            "pupil_scale": params["pupil_scale"],
+        }
+
         # Optional face-landmark overlay, from steps/face_landmarks.py.
         # MediaPipe's raw points are converted to OpenPose Face 70 here
         # rather than in that step, because the conversion needs the image
@@ -406,6 +434,7 @@ class RenderStep(Step):
                     face_mode=face_mode,
                     face_landmarks=openpose_face_70,
                     face_max_angle=face_max_angle,
+                    **eye_opts,
                 )
             elif render_mode in ("mesh+skeleton", "depth+skeleton"):
                 composite_modes: Dict[str, Any] = {
@@ -424,6 +453,7 @@ class RenderStep(Step):
                         "face_mode": face_mode,
                         "face_landmarks": openpose_face_70,
                         "face_max_angle": face_max_angle,
+                        **eye_opts,
                     }
                 img = renderer.render_composite(camera=camera, modes=composite_modes)
             else:
