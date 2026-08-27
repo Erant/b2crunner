@@ -251,6 +251,55 @@ class TestWorkflowFiles(unittest.TestCase):
                 self.assertEqual(step.when, twin.when)
                 self.assertEqual(step.keep_loaded, twin.keep_loaded)
 
+    def test_native_mirrors_full_from_denoise_pass1_on(self):
+        """fast_helical_native is a bootstrap prologue (split_sheet ->
+        reconstruct_body -> render_initial_views -> warp_reference_to_anchor
+        -> reinject_anchor_initial) followed by a verbatim copy of
+        fast_helical_full.yaml's steps. There is no include mechanism, so the
+        thing worth checking is that the copy has not drifted.
+
+        Everything but `output_root` (deliberately native-specific) is
+        compared: step id, class, dispatch, env, inputs, outputs, when,
+        keep_loaded, and the raw params block.
+        """
+        full = WorkflowSpec.from_yaml(str(WORKFLOW_DIR / "fast_helical_full.yaml"))
+        native = WorkflowSpec.from_yaml(str(WORKFLOW_DIR / "fast_helical_native.yaml"))
+
+        bootstrap = [
+            "split_sheet", "reconstruct_body", "render_initial_views",
+            "warp_reference_to_anchor", "reinject_anchor_initial",
+        ]
+        native_ids = [s.id for s in native.steps]
+        self.assertEqual(
+            native_ids[: len(bootstrap)], bootstrap,
+            "fast_helical_native's bootstrap prologue has changed shape",
+        )
+        tail = native.steps[len(bootstrap):]
+        self.assertEqual(
+            [s.id for s in tail], [s.id for s in full.steps],
+            "fast_helical_native's tail has drifted from fast_helical_full's steps",
+        )
+        for step in tail:
+            twin = next(s for s in full.steps if s.id == step.id)
+            with self.subTest(step=step.id):
+                self.assertEqual(step.step, twin.step)
+                self.assertEqual(step.dispatch, twin.dispatch)
+                self.assertEqual(step.env, twin.env)
+                self.assertEqual(step.inputs, twin.inputs)
+                self.assertEqual(step.outputs, twin.outputs)
+                self.assertEqual(step.when, twin.when)
+                self.assertEqual(step.keep_loaded, twin.keep_loaded)
+                self.assertEqual(step.params, twin.params)
+
+        for key, value in full.globals.items():
+            if key == "output_root":
+                continue
+            with self.subTest(glob=key):
+                self.assertEqual(
+                    native.globals.get(key), value,
+                    f"global '{key}' differs between the two files",
+                )
+
     def test_output_switches_and_the_steps_they_guard_agree(self):
         """A workflow's globals carry `export_colmap`/`export_ply` exactly
         when it has steps guarded by them.
@@ -262,9 +311,10 @@ class TestWorkflowFiles(unittest.TestCase):
         are derived from the globals, so globals that do not match the steps
         mean the UI is offering the wrong choices.
 
-        Not every workflow has to produce deliverables — fast_helical_native
-        is a single forward pass that ends at a checkpoint, and correctly
-        declares neither.
+        All three shipped workflows now declare both: fast_helical_native
+        mirrors fast_helical_full after its bootstrap prologue, exports
+        included. A workflow that declared a switch with no guarded step
+        (or the reverse) is what this still guards against.
         """
         switches = ("export_colmap", "export_ply")
         for path in _workflows():
@@ -335,25 +385,49 @@ class TestWorkflowFiles(unittest.TestCase):
 
         cyber2_6f/masked_splatted/frame_00038_.png is that stage's
         anchor.png byte for byte — the injected photo is not composited
-        over black and not bilateral-filtered, which only happens if
-        inject_anchor runs after mask_splat.
+        over black and not bilateral-filtered, which only happens if the
+        stage-3 inject_anchor runs *after* mask_splat.
+
+        Two distinct checks, because fast_helical_native legitimately has a
+        SECOND inject_anchor: the pre-denoise one in its bootstrap, which
+        builds the anchored dataset the fast_helical files are handed
+        ready-made. That one belongs before everything here.
+
+          (a) at least one inject_anchor runs after mask_splat — the
+              stage-3 re-injection that feeds denoise_pass2;
+          (b) none sits in the render_splat -> mask_splat gap, where
+              dataset.masks is the splat's per-pixel alpha that mask_splat
+              exists to threshold.
         """
         for path in _workflows():
             spec = WorkflowSpec.from_yaml(str(path))
-            ids = [s.id for s in spec.steps]
-            if "mask_splat" not in [s.step for s in spec.steps]:
+            steps = spec.steps
+            ids = [s.id for s in steps]
+            if "mask_splat" not in [s.step for s in steps]:
                 continue
-            mask_at = min(i for i, s in enumerate(spec.steps) if s.step == "mask_splat")
-            for i, step in enumerate(spec.steps):
-                if step.step != "inject_anchor":
-                    continue
-                with self.subTest(workflow=path.name, step=step.id):
-                    self.assertGreater(
-                        i, mask_at,
-                        f"'{step.id}' runs before mask_splat ('{ids[mask_at]}'); the "
-                        f"injected anchor photo would be composited over black and "
-                        f"bilateral-filtered, and the splat alpha would be gone",
-                    )
+            mask_at = min(i for i, s in enumerate(steps) if s.step == "mask_splat")
+            inject_at = [i for i, s in enumerate(steps) if s.step == "inject_anchor"]
+            resplat_at = [i for i, s in enumerate(steps) if s.step == "render_splat"]
+
+            with self.subTest(workflow=path.name, check="reinjected after mask_splat"):
+                self.assertTrue(
+                    any(i > mask_at for i in inject_at),
+                    f"{path.name}: nothing re-injects the anchor after mask_splat "
+                    f"('{ids[mask_at]}'); denoise_pass2 would see a re-rendered "
+                    f"anchor frame instead of the warped photo",
+                )
+
+            if resplat_at:
+                lo = min(resplat_at)
+                for i in inject_at:
+                    if lo < i < mask_at:
+                        with self.subTest(workflow=path.name, step=ids[i]):
+                            self.fail(
+                                f"'{ids[i]}' injects the anchor between render_splat "
+                                f"('{ids[lo]}') and mask_splat ('{ids[mask_at]}'), "
+                                f"where it manufactures an all-1.0 batch over the "
+                                f"splat alpha mask_splat needs",
+                            )
 
 
     def test_a_warped_anchor_is_bordered_in_grey_not_white(self):

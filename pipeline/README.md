@@ -150,12 +150,14 @@ pipeline/
 │   │                            what the upscale invalidates), for
 │   │                            isolating the upscaler when output looks
 │   │                            wrong
-│   └── fast_helical_native.yaml single forward pass from a front/back sheet;
+│   └── fast_helical_native.yaml a bootstrap prologue from a front/back
+│                                sheet (split → sam3d_body → render →
+│                                generate_firstlast → inject_anchor) then
+│                                fast_helical_full.yaml's steps verbatim.
 │                                rmbg/wan22_vace_denoise/sapiens2/
 │                                sam3d_body verified on real hardware,
-│                                render's own rasterisation not. Predates
-│                                the export conventions the two above
-│                                use — see its STATUS note
+│                                render's own rasterisation and the warp
+│                                not — see its STATUS note
 └── tests/                 stdlib unittest, no pytest dependency. Run with
                            `python -m unittest discover -s tests -t .`.
                            Most tests are golden-output tests against

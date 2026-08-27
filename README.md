@@ -11,16 +11,18 @@ workflows ship:
 |---|---|---|
 | `fast_helical_full` | an existing dataset | six — the full port of the ComfyUI `fast helical` pipeline, upscale included |
 | `fast_helical` | an existing dataset | five — the same run with the SeedVR2 upscale taken out, to isolate it when output looks wrong |
-| `fast_helical_native` | a front/back reference sheet | one forward pass — split the sheet, reconstruct a body, render its own views, denoise, train a splat |
+| `fast_helical_native` | a front/back reference sheet | a bootstrap prologue (split the sheet, reconstruct a body, render its own anchored views) then `fast_helical_full`'s six stages verbatim |
 
 **None has been run end-to-end on a pod**, and `fast_helical_native` is the
-least proven of the three: it is the next piece of work, and predates the
-export conventions the other two use. The
+least proven of the three: its bootstrap prologue (`split_reference_sheet` →
+`render` → `generate_firstlast` → `inject_anchor`) has never executed. Past
+that it is a copy of `fast_helical_full` — kept in sync by
+`tests/test_workflows.py`. The
 [coverage section](pipeline/README.md#coverage-vs-the-comfyui-node-pack)
 tracks what is verified against what.
 
-The two `fast_helical` workflows end by producing whichever deliverables
-you ask for, under the run's output directory:
+All three workflows end by producing whichever deliverables you ask for,
+under the run's output directory:
 
 ```
 <run>/colmap/   cameras.txt, images.txt, points3D.txt, images/, normals/

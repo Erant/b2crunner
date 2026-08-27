@@ -101,14 +101,14 @@ Open `https://<pod-id>-7860.proxy.runpod.net`. Three input modes:
   right, as a diffusion model generates it. Runs
   `fast_helical_native.yaml`, which splits it (front half to the
   SAM-3D-Body reconstruction and the anchor warp, back half to the denoise
-  pass as its reference view) and renders its own views. **Least proven of
-  the three**: its front half
+  pass as its reference view), renders its own anchored views, and then
+  runs `fast_helical_full`'s six-stage pipeline over that dataset — so it
+  produces the same `colmap/` and `ply/` deliverables, driven by the same
+  Outputs checkboxes. **Least proven of the three**: its bootstrap prologue
   (`split_reference_sheet` → `render` → `generate_firstlast` →
-  `inject_anchor`) has never executed
-  end to end, and it predates the export conventions the two `fast_helical`
-  files use — so it produces a splat and a checkpoint, not a `colmap/` and
-  `ply/`. Picking this input against either `fast_helical` file is refused
-  at submit time: those read frames and cameras they do not render.
+  `inject_anchor`) has never executed end to end. Picking this input
+  against either `fast_helical` file is refused at submit time: those read
+  frames and cameras they do not render.
 
 The **Params** panel is generated from the workflow and the steps in it,
 not typed as YAML. **Globals** at the top holds what the whole flow shares
@@ -133,10 +133,10 @@ the command line.
 **Outputs** picks what the run produces: the COLMAP dataset, the trained
 `.ply`, or both. This is a real switch, not a filter on the result — the
 .ply is a second full 30,000-iteration brush training, and unchecking it
-skips that step outright. At least one has to be checked. The control only
-appears for a workflow that declares those switches, which today means the
-two `fast_helical` files; `fast_helical_native` produces a splat and a
-dataset checkpoint instead, and hides it.
+skips that step outright. At least one has to be checked. The control
+appears for any workflow that declares those switches, which today is all
+three — `fast_helical_native` mirrors `fast_helical_full` past its
+bootstrap.
 
 The **Results** tab has three things: the one `.zip` of the run's
 deliverables (`colmap/` and/or `ply/`, and nothing else — the run
@@ -210,7 +210,7 @@ properties, in order of how much they matter:
   |---|---|---|
   | `fast_helical` | rmbg, sapiens2, wan22, wan22_fp8, wan22_lora | ~52.7 GB |
   | `fast_helical_full` | rmbg, sapiens2, wan22, wan22_fp8, wan22_lora, seedvr2 | ~58.7 GB |
-  | `fast_helical_native` | rmbg, sapiens2, sam3dbody, wan22, wan22_fp8, wan22_lora | ~55.5 GB |
+  | `fast_helical_native` | rmbg, sapiens2, sam3dbody, wan22, wan22_fp8, wan22_lora, seedvr2 | ~61.5 GB |
 
   `wan22` is now only 11.9 GB — the base repo's text_encoder, VAE,
   tokenizer and scheduler. The transformers come from `wan22_fp8` (35.2 GB

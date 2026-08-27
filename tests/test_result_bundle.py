@@ -118,8 +118,10 @@ class TestResultBundle(unittest.TestCase):
 
 
 class TestOutputSelection(unittest.TestCase):
-    def test_the_fast_helical_workflows_offer_both(self):
-        for name in ("fast_helical", "fast_helical_full"):
+    def test_the_shipped_workflows_offer_both(self):
+        """All three now declare export_colmap / export_ply —
+        fast_helical_native mirrors fast_helical_full past its bootstrap."""
+        for name in ("fast_helical", "fast_helical_full", "fast_helical_native"):
             with self.subTest(workflow=name):
                 self.assertEqual(
                     sorted(webui.workflow_outputs(name)),
@@ -128,9 +130,21 @@ class TestOutputSelection(unittest.TestCase):
 
     def test_a_workflow_without_the_params_offers_nothing(self):
         """The control hides itself rather than pretending to switch
-        something the workflow has never heard of. fast_helical_native ends
-        at a checkpoint, with no COLMAP export and no ply/."""
-        self.assertEqual(webui.workflow_outputs("fast_helical_native"), [])
+        something the workflow has never heard of. No shipped workflow lacks
+        the switches any more, so this exercises one that declares no
+        globals at all."""
+        import os
+
+        with tempfile.NamedTemporaryFile(
+            "w", suffix=".yaml", delete=False
+        ) as handle:
+            handle.write(
+                "name: bare\nglobals: {}\nsteps:\n"
+                "  - id: a\n    step: rmbg\n    dispatch: in_process\n"
+            )
+            bare = handle.name
+        self.addCleanup(os.unlink, bare)
+        self.assertEqual(webui.workflow_outputs(bare), [])
 
     def test_which_workflows_can_start_from_a_photo(self):
         """The gate on the UI's photo input, pinned to the real shipped

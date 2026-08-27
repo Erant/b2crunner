@@ -1,93 +1,57 @@
-# Target shape for the native port of workflows/pipeline/fast helical.yaml.
-# rmbg, wan22_vace_denoise, sapiens2_lite, and sam3d_body (pipeline/steps/)
-# are all verified on real hardware (L40S pod) — wan22_vace_denoise against
-# cyber_6f's initial/ dataset at full 81-frame batch size (see that
-# module's docstring for why frame count matters), rmbg and sapiens2_lite
-# against its output frames (both single-image and batched paths), and
-# sam3d_body against cyber_6f's anchor.png. brush and render_splat are now
-# verified on real GPU hardware too (a local RTX 4070 Ti — see
-# docs/docker-build-notes.md); render's rasterization itself is still
-# UNTESTED (its own module docstring), separate from the EGL capability
-# check that ran fine.
+# The from-a-sheet path: build the initial multi-view dataset from one
+# front/back reference sheet, then run fast_helical_full's pipeline over it.
 #
-# render / generate_firstlast / inject_anchor are wired in below (2026-08-
-# 23) — previously this workflow computed sam3d_body's mesh reconstruction
-# into scene.* and then discarded it, jumping straight to `denoise` reading
-# dataset.images/cameras that nothing had ever populated. That's also what
-# every prior verification run sidestepped: everything tested so far used
-# cyber_6f/initial, a pre-existing recorded multi-view dataset, not a
-# dataset this workflow built itself from one photo.
+# BOOTSTRAP (this file only) — split_sheet -> reconstruct_body ->
+# render_initial_views -> warp_reference_to_anchor -> reinject_anchor_initial.
+# This is the part fast_helical_full is handed ready-made: a dataset rendered
+# with override_cam_from_mesh whose extras carry orbit_target /
+# anchor_position / focal_length_mm / original_focal_length, with a warped
+# reference photo injected at the anchor frame (VACE mask 0.0) among renders
+# (VACE mask 1.0). cyber_6f/initial IS that dataset; here the workflow builds
+# it from one image.
 #
-# What "wired in" does NOT yet mean: a way to invoke this from a bare
-# image. pipeline/dataset.py's Dataset dataclass requires images/cameras/
-# points_3d/resolution up front (no defaults), and pipeline/cli.py only
-# loads a complete on-disk dataset via --dataset — there's no bootstrap
-# path that constructs a Dataset from just a reference photo yet. Until
-# that exists, running this workflow from scratch means seeding a Context
-# by hand (or extending cli.py) with a Dataset stub carrying only
-# reference_image, empty images/cameras/points_3d, before calling
-# WorkflowRunner.run directly — this file's step graph is now correct and
-# complete, but the CLI entrypoint for "just one photo" is a separate,
-# still-open piece of work.
+# FROM denoise_pass1 ON — identical to fast_helical_full.yaml, step for step,
+# id for id. The three fast_helical files are maintained as copies (there is
+# no include mechanism); keep this tail in sync with fast_helical_full.yaml.
+# tests/test_workflows.py checks it has not drifted.
 #
-# pattern/n_frames for render_initial_views below are inferred, not
-# recovered from any source graph: even upstream ComfyUI-Body2COLMAP never
-# scripted this stage as an API JSON (checked workflows/api/ and
-# workflows/pipeline/fast helical.yaml directly — the pipeline runner
-# there also starts from a pre-existing "initial" directory; producing it
-# was apparently always a manual/interactive ComfyUI step). circular/81
-# frames matches cyber_6f/initial/metadata.json's own recorded shape
-# (81 cameras, anchor_frame_index=0, which is what render.py's circular
-# path always produces in override_cam_from_mesh mode) closely enough to
-# use as the default, but treat it as a best-effort match, not a verified
-# recipe — there is no ground truth to diff against here the way brush's
-# branch pin had `--help` to check against.
-# STATUS (2026-08-25): this is the next piece of work, not a working
-# recipe. It is the only workflow that starts from an image rather than a
-# dataset — the web UI's front/back sheet input is refused against any
-# other — and `Dataset.from_reference_image` (added since the header above
-# was written) now closes the bootstrap gap that paragraph describes, so
-# `pipeline.cli run fast_helical_native --reference-image sheet.png` at
-# least has an entry point.
+# STATUS: never executed end-to-end, and the least proven of the three.
+# render's rasterization and generate_firstlast's warp have never run on real
+# hardware (their module docstrings); everything from denoise_pass1 on
+# carries fast_helical_full's own status. Treat this as the thing to debug on
+# a GPU pod, not a working recipe.
 #
-# What that image is was settled on 2026-08-25: the two-panel front/back
-# sheet a diffusion model generates, split down the middle by the first
-# step below. The front half feeds the mesh and the anchor warp; the back
-# half becomes dataset.reference_image and is all VACE conditions on. See
-# steps/reference_sheet.py — and note that cyber_6f's recorded
-# reference.png (the whole sheet) is the older convention, not the target
-# for this path.
+# Stage 6 produces the run's deliverables under output_root, exactly as
+# fast_helical_full does:
 #
-# It PREDATES the deliverable conventions the two fast_helical files use
-# and does not follow them yet:
+#   colmap/   cameras.txt + images.txt + points3D.txt, images/, normals/
+#   ply/      scene.ply — a second brush training, normal-supervised
 #
-#   * it ends at `train_splat` + a `save_dataset` checkpoint, with no
-#     COLMAP export and no `ply/` — so it declares neither `export_colmap`
-#     nor `export_ply`, and the UI's Outputs checkboxes hide for it;
-#   * it is a single forward pass — it stops where fast_helical's second
-#     half (re-render, mask, denoise again) begins.
+# Either can be switched off with the export_colmap / export_ply globals; the
+# web UI's Outputs checkboxes are exactly those two.
 #
-# The plan is to get the helical flow right first and then bring this one
-# up to it. Until then, treat the numbers in here as inherited rather than
-# chosen wherever a comment does not say otherwise.
-name: fast_helical_native
-description: >-
-  From-a-sheet single forward pass: split the front/back reference sheet,
-  reconstruct a body, render its own views, denoise, train a splat.
-  Predates the export conventions the fast_helical files use — see the
-  STATUS note in the file.
+# The input is not a photo of the subject: it is the two-panel sheet a
+# diffusion model generates, subject facing front on the left and seen from
+# behind on the right. split_sheet cuts it down the middle — the front half
+# feeds the mesh and the anchor warp, the back half becomes
+# dataset.reference_image, the one view wan22_vace_denoise conditions on.
+# cyber_6f's recorded reference.png is the whole sheet — the older
+# convention, from before anchor injection; not the target here.
 #
 # **Reading this file.** `globals:` holds only what more than one step has to
 # agree on; everything else lives under the step that consumes it, as an
 # override on the default that step's own class declares (pipeline/step.py's
-# `Step.PARAMS`). The brush settings that used to sit up here as
-# `brush_sh_degree` and friends are gone rather than moved: steps/brush.py's
-# declared defaults ARE those values (they came from nodes/brush_node.py the
-# same way), so the one training below only has to say what is specific to
-# it. `python -m pipeline.cli params fast_helical_native` prints the
-# effective value of every param, defaults included.
+# `Step.PARAMS`). `python -m pipeline.cli params fast_helical_native --all`
+# prints the effective value of every param, defaults included.
+name: fast_helical_native
+description: >-
+  From a front/back reference sheet: split it, reconstruct a body, render its
+  own anchored views, then run fast_helical_full's six-stage pipeline over
+  that dataset — denoise, train+re-render a splat, mask, denoise again,
+  upscale, export a COLMAP dataset and/or a normal-supervised .ply.
+
 globals:
-  # [720, 1280], the same portrait frame the helical files render and
+  # [720, 1280], the same portrait frame the fast_helical files render and
   # denoise at (2026-08-25; this file inherited [512, 512] from an earlier
   # draft). It sets both the render size and wan22_vace_denoise's
   # width/height, so the two cannot drift apart here.
@@ -95,9 +59,25 @@ globals:
   diffusion_steps: 6
   cfg: 1.0
   seed: 0
-  # The one brush setting kept flow-wide, matching the fast_helical files:
-  # it is the expensive one, at roughly an hour of GPU.
+
+  # The one brush setting kept flow-wide rather than left to the step
+  # defaults, because it is the expensive one: it is paid twice (stage 2's
+  # re-render splat and stage 6's deliverable) and it is roughly an hour of
+  # GPU each time. Everything else brush takes — sh_degree, max_splats,
+  # refine_every, the normal-loss group — sits at steps/brush.py's own
+  # defaults, which are these workflows' values; override one under a single
+  # `train_*` step below to tune that training alone.
   brush_total_steps: 30000
+
+  # Which deliverables stage 6 produces. Both default on; the web UI drives
+  # them from its Outputs checkboxes, and `--param export_ply=false` does
+  # the same from the CLI. Turning one off skips its steps entirely (see
+  # `when:` in pipeline/workflow.py) — which for export_ply means not
+  # starting a second 30,000-iteration brush training you were going to
+  # throw away.
+  export_colmap: true
+  export_ply: true
+
   # Every path this workflow writes to disk hangs off this one global, and
   # `pipeline.cli run` repoints it at the run's own directory under
   # B2C_OUTPUT_DIR (i.e. the mounted volume) unless you pass
@@ -106,6 +86,7 @@ globals:
   # which on a pod is the container's writable layer — small, and gone when
   # the pod is recycled.
   output_root: output/fast_helical_native
+
   # Exact strings from the live ComfyUI graph (workflows/api/denoise.json,
   # nodes 6/7/188) — $SUBJECT_DESC$ gets filled in from dataset.prompt.
   #
@@ -134,19 +115,21 @@ globals:
     动, 小头, 小脸"
 
 steps:
-  # The input is not a photo of the subject: it is the two-panel sheet a
-  # diffusion model generates, the subject facing front on the left and
-  # seen from behind on the right. Nothing downstream wants both panels,
-  # and the two halves go to opposite places (steps/reference_sheet.py):
+  # ================================================================ bootstrap
+  # Build the dataset fast_helical_full expects as its input. Everything from
+  # `denoise_pass1` on is a verbatim copy of fast_helical_full.yaml.
+
+  # The input is the two-panel front/back sheet, not a photo of the subject.
+  # Nothing downstream wants both panels, and the two halves go to opposite
+  # places (steps/reference_sheet.py):
   #
-  #   front -> scene.front_image        rmbg / sam3d_body / generate_firstlast
+  #   front -> scene.front_image        sam3d_body / generate_firstlast
   #   back  -> dataset.reference_image  wan22_vace_denoise's reference_image
   #
-  # Writing the back half over dataset.reference_image is deliberate, and
-  # it is what makes `save_dataset`'s reference.png the back view: with the
+  # Writing the back half over dataset.reference_image is deliberate: with the
   # anchor injected, the front already reaches the diffusion pass as a real
-  # photograph at the anchor frame, so the reference slot is spent on the
-  # one view nothing else in the batch can supply. (cyber_6f's recorded
+  # photograph at the anchor frame, so the reference slot is spent on the one
+  # view nothing else in the batch can supply. (cyber_6f's recorded
   # reference.png is the whole sheet — the older convention, from before
   # anchor injection. Don't take it as the target.)
   - id: split_sheet
@@ -159,22 +142,6 @@ steps:
     outputs:
       front: scene.front_image
       back: dataset.reference_image
-
-  # rmbg's foreground/background mask is for the Gaussian-splat stage
-  # (brush's --alpha-mode, not yet a step in this workflow) — NOT for
-  # wan22_vace_denoise's control_masks below, which needs a different thing
-  # entirely: a per-frame reference-vs-needs-denoising flag (see that
-  # module's docstring, verified against cyber_6f's initial/ alpha
-  # channel). That flag already comes baked into dataset.masks from
-  # Dataset.from_disk() (the alpha channel of the loaded frames) — so rmbg
-  # writes to its own scene.* path here rather than overwriting it.
-  - id: remove_background
-    step: rmbg
-    dispatch: in_process
-    inputs:
-      image: scene.front_image
-    outputs:
-      mask: scene.foreground_mask
 
   - id: reconstruct_body
     step: sam3d_body
@@ -202,10 +169,10 @@ steps:
   # override_cam_from_mesh: true is what makes this the *initial* render —
   # it anchors one frame exactly at the original SAM-3D-Body camera and
   # publishes the orbit_target/anchor_position/original_focal_length/
-  # image_warp extras that reinject_anchor_initial and the eventual
-  # render_splat re-render both key off (see splat.py's
-  # override_cam_from_mesh path). Without it this would be a normal
-  # auto-oriented render with no anchor to warp the reference photo onto.
+  # image_warp extras that reinject_anchor_initial and rerender_splat
+  # both key off (see splat.py's override_cam_from_mesh path). Without it
+  # this would be a normal auto-oriented render with no anchor to warp the
+  # reference photo onto.
   - id: render_initial_views
     step: render
     dispatch: in_process
@@ -281,6 +248,12 @@ steps:
     outputs:
       warped_image: dataset.anchor_image
 
+  # The initial anchor injection — the pre-denoise one. This is what
+  # cyber_6f/initial already has baked in when fast_helical_full is handed
+  # it: the warped photo overwrites every frame sitting at the anchor
+  # camera, and the VACE mask there becomes 0.0 ("a real photograph, keep
+  # it") against 1.0 for every synthetic render. `reinject_anchor` in
+  # stage 3 does it again after the helical re-render + mask_splat.
   - id: reinject_anchor_initial
     step: inject_anchor
     dispatch: in_process
@@ -297,12 +270,33 @@ steps:
       images: dataset.images
       masks: dataset.masks
 
-  # Weights: the step's fp8 defaults (see steps/wan22_vace_denoise.py) —
-  # nothing to configure here, and no bf16 path to fall back to.
-  - id: denoise
+  # ================================================================
+  # From here down: a verbatim copy of fast_helical_full.yaml's steps. Keep
+  # the two in sync — tests/test_workflows.py checks they have not drifted.
+  # ================================================================
+
+  # ---------------------------------------------------------------- stage 1
+  # denoise.json: initial -> circular, strength 1.0.
+  # dataset.masks here is the per-frame reference/denoise flag baked into
+  # the loaded frames' alpha — NOT a foreground mask. See
+  # steps/wan22_vace_denoise.py's docstring.
+  #
+  # No checkpoint params here on purpose: the step defaults to the
+  # pre-quantized fp8 experts (silveroxides/Wan_2.2-fp8_scaled_hybrid) and
+  # has no bf16 path left to fall back to. Override fp8_checkpoint_high /
+  # fp8_checkpoint_low (both `advanced`) only to point at local files.
+  - id: denoise_pass1
     step: wan22_vace_denoise
     dispatch: subprocess
     env: wan22
+    # Hold the pipeline resident between the two passes: one worker process
+    # serves both, so the ~47 GB of weights come off the network volume
+    # once per run instead of twice. The worker calls the step's
+    # release_vram() after every job, so brush (which trains on the GPU
+    # between these two steps) still finds an empty card — the weights wait
+    # in host RAM, not VRAM. Both passes must declare this; it is what
+    # makes them share one worker.
+    keep_loaded: true
     inputs:
       control_video: dataset.images
       control_masks: dataset.masks
@@ -314,18 +308,24 @@ steps:
       steps: ${globals.diffusion_steps}
       cfg: ${globals.cfg}
       seed: ${globals.seed}
+      # The one thing the two passes disagree on. Before this file had
+      # per-step namespaces that meant a literal here and a literal there;
+      # it still does, but now it is the ONLY brush/denoise value either
+      # pass has to spell out.
       strength: 1.0
       prompt: ${globals.denoise_prompt}
       negative_prompt: ${globals.denoise_negative_prompt}
     outputs:
       images: dataset.images
 
-  # Per-frame masks for the *denoised* batch — distinct from
-  # remove_background above (which masks the raw reference photo for a
-  # generate_firstlast pass that isn't wired in yet). Overwrites
-  # dataset.masks; the per-frame reference/denoise flag that field held for
-  # the denoise step above is no longer needed past this point.
-  - id: mask_denoised_frames
+  # ---------------------------------------------------------------- stage 2
+  # resplat_helical.json: train a splat on the denoised views, then
+  # re-render it along a new, longer helical orbit.
+
+  # Foreground alpha for brush's --alpha-mode transparent. Distinct from
+  # the denoise control mask above, which this overwrites: past this point
+  # the reference/denoise flag is no longer needed.
+  - id: foreground_masks
     step: rmbg
     dispatch: in_process
     inputs:
@@ -341,17 +341,6 @@ steps:
     outputs:
       normal_maps: scene.normal_maps
 
-  # in_process, not docker: targeting RunPod, where a pod IS a single
-  # container with no nested Docker daemon to run a separate brush image
-  # in (confirmed on a real pod: no /var/run/docker.sock, no `docker`
-  # binary) — so brush has to live in the same image as everything else,
-  # per docker/Dockerfile. Its OS-level Vulkan/graphics requirement is
-  # unresolved as of this writing: confirmed a default RunPod pod's
-  # NVIDIA_DRIVER_CAPABILITIES only exposes compute,utility (vulkaninfo
-  # fails with ERROR_INCOMPATIBLE_DRIVER even though the driver's .so files
-  # are present), and setting the capability in docker/Dockerfile's own
-  # image is necessary but not yet confirmed sufficient for a RunPod pod
-  # specifically — see that file's comment and docs/docker.md.
   - id: train_splat
     step: brush
     dispatch: in_process
@@ -366,15 +355,244 @@ steps:
       total_steps: ${globals.brush_total_steps}
       # Without this brush exports into tempfile.gettempdir() (see
       # steps/brush.py) — the trained .ply then only survives because
-      # Dataset.to_disk copies it at the very end.
+      # Dataset.to_disk copies it at the very end. `output_dir` rather than
+      # `export_dir` because this is an intermediate: it lands under
+      # <output_root>/brush/training_<ms>/, which cannot collide with the
+      # second training below.
       output_dir: ${globals.output_root}
     outputs:
       splat_path: dataset.splat_path
 
-  - id: checkpoint
-    step: save_dataset
+  - id: load_trained_splat
+    step: load_splat
+    dispatch: in_process
+    inputs:
+      splat_path: dataset.splat_path
+    outputs:
+      splat_scene: scene.splat
+
+  # The ComfyUI node leaves override_cam_from_mesh off here: this is a
+  # fresh, longer orbit framed from the splat's own bounds (fill_ratio 0.8,
+  # focal length inherited from the dataset), not an anchored one. The
+  # anchor is re-applied by inject_anchor below, matching on position. Both
+  # of those are steps/splat.py's declared defaults, so this block only has
+  # to say what the helical path itself is.
+  - id: rerender_splat
+    step: render_splat
+    dispatch: in_process
+    inputs:
+      splat_scene: scene.splat
+      dataset: dataset
+    params:
+      width: ${globals.resolution.0}
+      height: ${globals.resolution.1}
+      pattern: helical
+      n_frames: 81
+      n_loops: 2
+      amplitude_deg: 30.0
+      # 30/90, not the 45/45 the solver defaults to — the values
+      # resplat_helical.json's Body2COLMAP_HelicalPath node carries.
+      lead_in_deg: 30.0
+      lead_out_deg: 90.0
+    outputs:
+      images: dataset.images
+      masks: dataset.masks
+      cameras: dataset.cameras
+      image_names: dataset.image_names
+      points_3d: dataset.points_3d
+
+  # ---------------------------------------------------------------- stage 3
+  # mask_splat.json: drop the splat's low-confidence fringes. 6/2 is from
+  # `fast helical.yaml`'s own step config, and is also steps/mask_splat.py's
+  # default — spelled out here because it is the number that distinguishes
+  # this pipeline from the `helical` (12/4) and `tiered` (4/0) ones.
+  - id: mask_splat_fringes
+    step: mask_splat
     dispatch: in_process
     inputs:
       dataset: dataset
     params:
-      directory: ${globals.output_root}/checkpoint
+      filter_size: 6
+      dilation: 2
+    outputs:
+      dataset: dataset
+
+  # Put the warped reference photo back onto whichever new frames landed on
+  # the original camera. Matches by position, so it survives the reorbit.
+  #
+  # AFTER mask_splat, not before it — the ordering is load-bearing and was
+  # wrong. Before mask_splat this step sits where dataset.masks is carrying
+  # rerender_splat's per-pixel splat alpha, and it would overwrite exactly
+  # the input mask_splat exists to threshold. Here it only ever sees VACE
+  # masks: mask_splat has already consumed the alpha and emitted all-1.0.
+  #
+  # This reproduces cyber2_6f/masked_splatted frame for frame: 80 frames
+  # masked and filtered at alpha 255, and frame_00038_ the anchor.png
+  # verbatim — not composited over black, not bilateral-filtered — at
+  # alpha 0.
+  - id: reinject_anchor
+    step: inject_anchor
+    dispatch: in_process
+    inputs:
+      images: dataset.images
+      cameras: dataset.cameras
+      anchor_position: dataset.extras.anchor_position
+      anchor_image: dataset.anchor_image
+      # mask_splat's all-1.0 batch, passed through with 0.0 written at the
+      # anchor frame. Manufacturing it here instead would give the same
+      # values today; wiring it keeps the step from silently destroying a
+      # mask that matters if anything is ever inserted above it.
+      masks: dataset.masks
+    outputs:
+      images: dataset.images
+      masks: dataset.masks
+
+  # ---------------------------------------------------------------- stage 4
+  # denoise.json again, strength 0.8 — clean up the re-render.
+  - id: denoise_pass2
+    step: wan22_vace_denoise
+    dispatch: subprocess
+    env: wan22
+    # See denoise_pass1: both passes must declare keep_loaded for the two of
+    # them to share one resident worker.
+    keep_loaded: true
+    inputs:
+      control_video: dataset.images
+      control_masks: dataset.masks
+      reference_image: dataset.reference_image
+      subject_desc: dataset.prompt
+    params:
+      width: ${globals.resolution.0}
+      height: ${globals.resolution.1}
+      steps: ${globals.diffusion_steps}
+      cfg: ${globals.cfg}
+      seed: ${globals.seed}
+      strength: 0.8
+      prompt: ${globals.denoise_prompt}
+      negative_prompt: ${globals.denoise_negative_prompt}
+    outputs:
+      images: dataset.images
+
+  # ---------------------------------------------------------------- stage 5
+  # upscale.json
+  - id: upscale
+    step: seedvr2
+    dispatch: subprocess
+    env: seedvr2
+    inputs:
+      images: dataset.images
+    params:
+      # SeedVR2's `resolution` is the target output *shortest edge*, not a
+      # multiplier — asking for less than the input's shortest edge
+      # downscales. See steps/seedvr2.py.
+      #
+      # 1080, not the 1440 this was: the frames feed a Gaussian splat, and a
+      # splat does not resolve detail the way a video does — past roughly
+      # the native render size the extra pixels mostly buy training time and
+      # VRAM. 720x1280 in, 1080x1920 out, which is also what the recorded
+      # ComfyUI-era upscale produced (cyber_6f/upscaled).
+      resolution: 1080
+      # steps/seedvr2.py defaults this to 5; 1 is this workflow's own
+      # choice — raise it once a real VRAM budget for the upscale is known.
+      batch_size: 1
+      vae_encode_tiled: true
+      vae_decode_tiled: true
+    outputs:
+      images: dataset.images
+
+  # seedvr2 resamples the frames and cannot return cameras — it runs in its
+  # own venv, and that IPC boundary carries plain arrays, not Camera
+  # objects. So without this step the dataset now holds 1080x1920 images
+  # described by 720x1280 intrinsics, and both stage-6 consumers believe
+  # the wrong focal length: cameras.txt would claim a 720x1280 PINHOLE
+  # camera, and brush would fit a splat at half the focal length the images
+  # were rendered with. The recorded ComfyUI-era export has exactly this
+  # mismatch (cyber_6f/colmap: 720x1280 intrinsics, 1080x1920 frames), so
+  # this is an inherited bug, not a new one — and a prime suspect for
+  # output that looks *almost* right.
+  #
+  # Delete this step (or run fast_helical.yaml, which has no upscale at
+  # all) to reproduce the old behaviour for comparison. It is a no-op on
+  # a dataset whose frames already match its cameras.
+  - id: rescale_cameras
+    step: fit_cameras_to_images
+    dispatch: in_process
+    inputs:
+      dataset: dataset
+    outputs:
+      dataset: dataset
+
+  # ---------------------------------------------------------------- stage 6
+  # colmap.json: background-remove, re-estimate normals against the frames
+  # as they finally are, then emit whichever deliverables were selected.
+  - id: export_masks
+    step: rmbg
+    dispatch: in_process
+    inputs:
+      images: dataset.images
+    outputs:
+      masks: dataset.masks
+
+  # NOT the stage-2 normal maps (scene.normal_maps): those describe the
+  # pre-re-render frames, which rerender_splat replaced wholesale with a
+  # different, longer orbit — a different count, different poses, and after
+  # the upscale a different resolution. Both deliverables below want
+  # normals for *these* frames, so they are estimated again here.
+  - id: export_normals
+    step: sapiens2_lite
+    dispatch: in_process
+    inputs:
+      images: dataset.images
+    params:
+      # Smaller than the step's default of 8: at the upscaled resolution
+      # these are 1080x1920 float32 maps, and the returned list alone is
+      # ~2 GB of host RAM.
+      batch_size: 4
+    outputs:
+      normal_maps: scene.export_normal_maps
+
+  # Deliverable 1: a COLMAP dataset. `layout: brush` puts the frames in
+  # images/ and the normals in normals/ beside the three .txt files —
+  # what brush itself reads, and what somebody handed this directory
+  # expects, rather than the flat frames-beside-the-txt layout the ComfyUI
+  # colmap.json stage wrote.
+  - id: export_colmap
+    step: colmap_export
+    dispatch: in_process
+    when: ${globals.export_colmap}
+    inputs:
+      cameras: dataset.cameras
+      image_names: dataset.image_names
+      points_3d: dataset.points_3d
+      images: dataset.images
+      masks: dataset.masks
+      normal_maps: scene.export_normal_maps
+    params:
+      output_dir: ${globals.output_root}/colmap
+      layout: brush
+
+  # Deliverable 2: a trained splat, normal-supervised. This is a second
+  # full brush training — the stage-2 one exists to drive the helical
+  # re-render and predates the second denoise pass and the upscale, so it
+  # is not the splat anyone wants to keep. `export_dir` puts this one at a
+  # predictable path instead of brush/training_<ms>/, which is the whole
+  # reason the final splat can be `ply/scene.ply`.
+  - id: train_final_splat
+    step: brush
+    dispatch: in_process
+    when: ${globals.export_ply}
+    inputs:
+      cameras: dataset.cameras
+      image_names: dataset.image_names
+      points_3d: dataset.points_3d
+      images: dataset.images
+      masks: dataset.masks
+      normal_maps: scene.export_normal_maps
+    params:
+      total_steps: ${globals.brush_total_steps}
+      export_dir: ${globals.output_root}/ply
+      export_name: scene.ply
+    outputs:
+      # Overwrites the stage-2 intermediate, so Dataset.to_disk's splat.ply
+      # and the CLI's closing "splat:" line both name the final one.
+      splat_path: dataset.splat_path
