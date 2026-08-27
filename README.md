@@ -52,6 +52,9 @@ python -m pipeline.cli run fast_helical --dataset path/to/b2c_dataset
 python -m pipeline.cli run fast_helical --dataset path/to/b2c_dataset \
     --param export_ply=false
 
+# every param a workflow resolves: its globals, then each step's own
+python -m pipeline.cli params fast_helical
+
 # or from a front/back reference sheet (subject facing front on the left,
 # seen from behind on the right) — the workflow splits it and renders its own views
 python -m pipeline.cli run fast_helical_native --reference-image sheet.png \

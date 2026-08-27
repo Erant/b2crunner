@@ -17,67 +17,57 @@
 #
 # Two differences from fast_helical_full.yaml, and only two:
 #
-#   * no `upscale` step (seedvr2), and no `upscale_resolution` param;
+#   * no `upscale` step (seedvr2);
 #   * no `rescale_cameras` step (fit_cameras_to_images) — it exists solely
 #     to repair the intrinsics the upscale invalidates, and with no upscale
 #     the cameras already match the frames.
 #
-# Keep the two files in step when editing either.
+# The `globals:` blocks are now identical: everything the upscale needed to
+# be told lives under the `upscale` step in the other file, so removing the
+# step removed its settings with it. Keep the two files in step when
+# editing either; tests/test_workflows.py checks that.
 #
 # Stage 5 produces the run's deliverables, under output_root:
 #
 #   colmap/   cameras.txt + images.txt + points3D.txt, images/, normals/
 #   ply/      scene.ply — a second brush training, normal-supervised
 #
-# Either can be switched off with the export_colmap / export_ply params;
+# Either can be switched off with the export_colmap / export_ply globals;
 # the web UI's Outputs checkboxes are exactly those two.
 #
 # STATUS: shares every step with fast_helical_full.yaml. The file is checked
-# by tests/test_workflows.py (it loads, resolves against the registry, and
+# by tests/test_workflows.py (it loads, validates against the registry, and
 # its templates expand), which is not the same as having run.
 #
 # Expects a dataset rendered with override_cam_from_mesh (its extras carry
 # orbit_target / anchor_position / focal_length_mm / original_focal_length),
 # i.e. what `render` produces and what cyber_6f/initial is.
+#
+# **Reading this file.** `globals:` holds only what more than one step has to
+# agree on; everything else lives under the step that consumes it, as an
+# override on the default that step's own class declares (pipeline/step.py's
+# `Step.PARAMS`). `python -m pipeline.cli params fast_helical` prints the
+# effective value of every param, defaults included.
 name: fast_helical
 description: >-
   fast_helical_full without the SeedVR2 upscale: denoise, train+re-render a
   splat, mask, denoise again, then export a COLMAP dataset and/or a
   normal-supervised trained .ply.
 
-params:
+globals:
   resolution: [720, 1280]
   diffusion_steps: 6
   cfg: 1.0
   seed: 0
 
-  # Stage 2 helical re-render. Values from resplat_helical.json's
-  # Body2COLMAP_HelicalPath node — note lead_in/lead_out are 30/90, not the
-  # 45/45 the solver defaults to.
-  resplat_frames: 81
-  resplat_loops: 2
-  resplat_amplitude_deg: 30.0
-  resplat_lead_in_deg: 30.0
-  resplat_lead_out_deg: 90.0
-
-  # Stage 3, from `fast helical.yaml`'s own step config.
-  mask_filter_size: 6
-  mask_dilation: 2
-
-  # Brush defaults, matching nodes/brush_node.py and resplat_helical.json.
-  brush_path: brush
+  # The one brush setting kept flow-wide rather than left to the step
+  # defaults, because it is the expensive one: it is paid twice (stage 2's
+  # re-render splat and stage 6's deliverable) and it is roughly an hour of
+  # GPU each time. Everything else brush takes — sh_degree, max_splats,
+  # refine_every, the normal-loss group — sits at steps/brush.py's own
+  # defaults, which are these workflows' values; override one under a single
+  # `train_*` step below to tune that training alone.
   brush_total_steps: 30000
-  brush_sh_degree: 3
-  brush_max_resolution: 1920
-  brush_max_splats: 10000000
-  brush_refine_every: 200
-  brush_normal_loss_strength: 0.05
-  brush_normal_loss_step_start: 5000
-  # How often the normal loss is actually evaluated, in training steps.
-  # 1 is brush's own default (every step); raising it skips the extra
-  # normal render on the steps in between, and brush scales the sampled
-  # loss by the same factor so the expected gradient does not change.
-  brush_normal_loss_every: 1
 
   # Which deliverables stage 6 produces. Both default on; the web UI drives
   # them from its Outputs checkboxes, and `--param export_ply=false` does
@@ -88,7 +78,7 @@ params:
   export_colmap: true
   export_ply: true
 
-  # Every path this workflow writes to disk hangs off this one param, and
+  # Every path this workflow writes to disk hangs off this one global, and
   # `pipeline.cli run` repoints it at the run's own directory under
   # B2C_OUTPUT_DIR (i.e. the mounted volume) unless you pass
   # `--param output_root=...`. The literal below is only what you get from
@@ -134,7 +124,7 @@ steps:
   # No checkpoint params here on purpose: the step defaults to the
   # pre-quantized fp8 experts (silveroxides/Wan_2.2-fp8_scaled_hybrid) and
   # has no bf16 path left to fall back to. Override fp8_checkpoint_high /
-  # fp8_checkpoint_low only to point at local files.
+  # fp8_checkpoint_low (both `advanced`) only to point at local files.
   - id: denoise_pass1
     step: wan22_vace_denoise
     dispatch: subprocess
@@ -153,14 +143,18 @@ steps:
       reference_image: dataset.reference_image
       subject_desc: dataset.prompt
     params:
-      width: ${params.resolution.0}
-      height: ${params.resolution.1}
-      steps: ${params.diffusion_steps}
-      cfg: ${params.cfg}
-      seed: ${params.seed}
+      width: ${globals.resolution.0}
+      height: ${globals.resolution.1}
+      steps: ${globals.diffusion_steps}
+      cfg: ${globals.cfg}
+      seed: ${globals.seed}
+      # The one thing the two passes disagree on. Before this file had
+      # per-step namespaces that meant a literal here and a literal there;
+      # it still does, but now it is the ONLY brush/denoise value either
+      # pass has to spell out.
       strength: 1.0
-      prompt: ${params.denoise_prompt}
-      negative_prompt: ${params.denoise_negative_prompt}
+      prompt: ${globals.denoise_prompt}
+      negative_prompt: ${globals.denoise_negative_prompt}
     outputs:
       images: dataset.images
 
@@ -198,20 +192,14 @@ steps:
       masks: dataset.masks
       normal_maps: scene.normal_maps
     params:
-      brush_path: ${params.brush_path}
-      total_steps: ${params.brush_total_steps}
-      sh_degree: ${params.brush_sh_degree}
-      max_resolution: ${params.brush_max_resolution}
-      max_splats: ${params.brush_max_splats}
-      refine_every: ${params.brush_refine_every}
+      total_steps: ${globals.brush_total_steps}
       # Without this brush exports into tempfile.gettempdir() (see
       # steps/brush.py) — the trained .ply then only survives because
-      # Dataset.to_disk copies it at the very end.
-      output_dir: ${params.output_root}
-      alpha_mode: transparent
-      normal_loss_strength: ${params.brush_normal_loss_strength}
-      normal_loss_step_start: ${params.brush_normal_loss_step_start}
-      normal_loss_every: ${params.brush_normal_loss_every}
+      # Dataset.to_disk copies it at the very end. `output_dir` rather than
+      # `export_dir` because this is an intermediate: it lands under
+      # <output_root>/brush/training_<ms>/, which cannot collide with the
+      # second training below.
+      output_dir: ${globals.output_root}
     outputs:
       splat_path: dataset.splat_path
 
@@ -226,7 +214,9 @@ steps:
   # The ComfyUI node leaves override_cam_from_mesh off here: this is a
   # fresh, longer orbit framed from the splat's own bounds (fill_ratio 0.8,
   # focal length inherited from the dataset), not an anchored one. The
-  # anchor is re-applied by inject_anchor below, matching on position.
+  # anchor is re-applied by inject_anchor below, matching on position. Both
+  # of those are steps/splat.py's declared defaults, so this block only has
+  # to say what the helical path itself is.
   - id: rerender_splat
     step: render_splat
     dispatch: in_process
@@ -234,19 +224,16 @@ steps:
       splat_scene: scene.splat
       dataset: dataset
     params:
-      width: ${params.resolution.0}
-      height: ${params.resolution.1}
+      width: ${globals.resolution.0}
+      height: ${globals.resolution.1}
       pattern: helical
-      n_frames: ${params.resplat_frames}
-      n_loops: ${params.resplat_loops}
-      amplitude_deg: ${params.resplat_amplitude_deg}
-      lead_in_deg: ${params.resplat_lead_in_deg}
-      lead_out_deg: ${params.resplat_lead_out_deg}
-      framing: full
-      fill_ratio: 0.8
-      focal_length_mm: 0
-      override_pointcloud: false
-      device: cuda
+      n_frames: 81
+      n_loops: 2
+      amplitude_deg: 30.0
+      # 30/90, not the 45/45 the solver defaults to — the values
+      # resplat_helical.json's Body2COLMAP_HelicalPath node carries.
+      lead_in_deg: 30.0
+      lead_out_deg: 90.0
     outputs:
       images: dataset.images
       masks: dataset.masks
@@ -255,15 +242,18 @@ steps:
       points_3d: dataset.points_3d
 
   # ---------------------------------------------------------------- stage 3
-  # mask_splat.json: drop the splat's low-confidence fringes.
+  # mask_splat.json: drop the splat's low-confidence fringes. 6/2 is from
+  # `fast helical.yaml`'s own step config, and is also steps/mask_splat.py's
+  # default — spelled out here because it is the number that distinguishes
+  # this pipeline from the `helical` (12/4) and `tiered` (4/0) ones.
   - id: mask_splat_fringes
     step: mask_splat
     dispatch: in_process
     inputs:
       dataset: dataset
     params:
-      filter_size: ${params.mask_filter_size}
-      dilation: ${params.mask_dilation}
+      filter_size: 6
+      dilation: 2
     outputs:
       dataset: dataset
 
@@ -293,8 +283,6 @@ steps:
       # values today; wiring it keeps the step from silently destroying a
       # mask that matters if anything is ever inserted above it.
       masks: dataset.masks
-    params:
-      tolerance_pct: 0.1
     outputs:
       images: dataset.images
       masks: dataset.masks
@@ -305,13 +293,8 @@ steps:
     step: wan22_vace_denoise
     dispatch: subprocess
     env: wan22
-    # Hold the pipeline resident between the two passes: one worker process
-    # serves both, so the ~47 GB of weights come off the network volume
-    # once per run instead of twice. The worker calls the step's
-    # release_vram() after every job, so brush (which trains on the GPU
-    # between these two steps) still finds an empty card — the weights wait
-    # in host RAM, not VRAM. Both passes must declare this; it is what
-    # makes them share one worker.
+    # See denoise_pass1: both passes must declare keep_loaded for the two of
+    # them to share one resident worker.
     keep_loaded: true
     inputs:
       control_video: dataset.images
@@ -319,14 +302,14 @@ steps:
       reference_image: dataset.reference_image
       subject_desc: dataset.prompt
     params:
-      width: ${params.resolution.0}
-      height: ${params.resolution.1}
-      steps: ${params.diffusion_steps}
-      cfg: ${params.cfg}
-      seed: ${params.seed}
+      width: ${globals.resolution.0}
+      height: ${globals.resolution.1}
+      steps: ${globals.diffusion_steps}
+      cfg: ${globals.cfg}
+      seed: ${globals.seed}
       strength: 0.8
-      prompt: ${params.denoise_prompt}
-      negative_prompt: ${params.denoise_negative_prompt}
+      prompt: ${globals.denoise_prompt}
+      negative_prompt: ${globals.denoise_negative_prompt}
     outputs:
       images: dataset.images
 
@@ -344,13 +327,19 @@ steps:
   # NOT the stage-2 normal maps (scene.normal_maps): those describe the
   # pre-re-render frames, which rerender_splat replaced wholesale with a
   # different, longer orbit — a different count and different poses. Both
-  # deliverables below want normals for *these* frames, so they are
-  # estimated again here.
+  # deliverables below want
+  # normals for *these* frames, so they are estimated again here.
   - id: export_normals
     step: sapiens2_lite
     dispatch: in_process
     inputs:
       images: dataset.images
+    params:
+      # Smaller than the step's default of 8: these are full-resolution
+      # float32 maps and the returned list alone is most of a gigabyte of
+      # host RAM. Kept at 4 to match fast_helical_full.yaml, where the
+      # upscale makes it matter more.
+      batch_size: 4
     outputs:
       normal_maps: scene.export_normal_maps
 
@@ -362,7 +351,7 @@ steps:
   - id: export_colmap
     step: colmap_export
     dispatch: in_process
-    when: ${params.export_colmap}
+    when: ${globals.export_colmap}
     inputs:
       cameras: dataset.cameras
       image_names: dataset.image_names
@@ -371,18 +360,19 @@ steps:
       masks: dataset.masks
       normal_maps: scene.export_normal_maps
     params:
-      output_dir: ${params.output_root}/colmap
+      output_dir: ${globals.output_root}/colmap
       layout: brush
 
   # Deliverable 2: a trained splat, normal-supervised. This is a second
   # full brush training — the stage-2 one exists to drive the helical
-  # re-render and predates the second denoise pass, so it
+  # re-render and predates the second denoise pass and the upscale, so it
   # is not the splat anyone wants to keep. `export_dir` puts this one at a
-  # predictable path instead of brush/training_<ms>/.
+  # predictable path instead of brush/training_<ms>/, which is the whole
+  # reason the final splat can be `ply/scene.ply`.
   - id: train_final_splat
     step: brush
     dispatch: in_process
-    when: ${params.export_ply}
+    when: ${globals.export_ply}
     inputs:
       cameras: dataset.cameras
       image_names: dataset.image_names
@@ -391,18 +381,9 @@ steps:
       masks: dataset.masks
       normal_maps: scene.export_normal_maps
     params:
-      brush_path: ${params.brush_path}
-      total_steps: ${params.brush_total_steps}
-      sh_degree: ${params.brush_sh_degree}
-      max_resolution: ${params.brush_max_resolution}
-      max_splats: ${params.brush_max_splats}
-      refine_every: ${params.brush_refine_every}
-      export_dir: ${params.output_root}/ply
+      total_steps: ${globals.brush_total_steps}
+      export_dir: ${globals.output_root}/ply
       export_name: scene.ply
-      alpha_mode: transparent
-      normal_loss_strength: ${params.brush_normal_loss_strength}
-      normal_loss_step_start: ${params.brush_normal_loss_step_start}
-      normal_loss_every: ${params.brush_normal_loss_every}
     outputs:
       # Overwrites the stage-2 intermediate, so Dataset.to_disk's splat.ply
       # and the CLI's closing "splat:" line both name the final one.

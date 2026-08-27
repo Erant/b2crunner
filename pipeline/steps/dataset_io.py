@@ -12,11 +12,16 @@ from typing import Any, Dict
 
 from ..dataset import Dataset
 from ..registry import register_step
-from ..step import Step
+from ..step import REQUIRED, Param, Step
 
 
 @register_step("save_dataset")
 class SaveDatasetStep(Step):
+    PARAMS = (
+        Param("directory", str, REQUIRED,
+              "Where to write the checkpoint. Usually ${globals.output_root}/something."),
+    )
+
     def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
         dataset: Dataset = inputs["dataset"]
         directory = params["directory"]
@@ -26,6 +31,10 @@ class SaveDatasetStep(Step):
 
 @register_step("load_dataset")
 class LoadDatasetStep(Step):
+    PARAMS = (
+        Param("directory", str, REQUIRED, "The on-disk dataset directory to read."),
+    )
+
     def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
         directory = params["directory"]
         return {"dataset": Dataset.from_disk(directory)}

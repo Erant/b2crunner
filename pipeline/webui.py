@@ -72,6 +72,7 @@ from .logging_setup import DATE_FORMAT, FORMAT, QueueLogHandler, timestamped_run
 from .models import is_ready, registry, required_for_steps, wait_until_ready
 from .paths import data_dir, log_dir, output_dir, upload_dir
 from .runner import RunCancelled, RunEvent, WorkflowRunner
+from .step import Param
 from .workflow import WorkflowSpec, load_envs
 
 logger = logging.getLogger(__name__)
@@ -247,7 +248,8 @@ class RunManager:
     def start(
         self,
         workflow_path: Path,
-        params: Dict[str, Any],
+        global_overrides: Dict[str, Any],
+        step_overrides: Dict[str, Dict[str, Any]],
         dataset_dir: Optional[Path],
         reference_image: Optional[Path],
         prompt: str,
@@ -256,11 +258,23 @@ class RunManager:
             raise gr.Error("A run is already in progress. Cancel it first, or wait for it.")
 
         spec = WorkflowSpec.from_yaml(workflow_path)
-        spec.params.update(params)
+        # Both namespaces are filtered to what this workflow actually has.
+        # A key that is not here means the panel state is stale — the user
+        # switched workflows and submitted before the redraw landed — and
+        # dropping it beats failing the run over a control that is no
+        # longer on screen, or worse, inventing a global nothing reads.
+        spec.globals.update(
+            {k: v for k, v in global_overrides.items() if k in spec.globals}
+        )
+        by_id = {step.id: step for step in spec.steps}
+        for step_id, values in step_overrides.items():
+            if step_id in by_id:
+                by_id[step_id].params.update(values)
+        spec.validate()
         run_name = timestamped_run_name(spec.name)
         out = output_dir() / run_name
-        if "output_root" in spec.params and "output_root" not in params:
-            spec.params["output_root"] = str(out)
+        if "output_root" in spec.globals and "output_root" not in global_overrides:
+            spec.globals["output_root"] = str(out)
 
         with self._lock:
             self._log.clear()
@@ -493,7 +507,7 @@ def workflow_outputs(name: str) -> List[str]:
     from .cli import resolve_workflow
 
     spec = WorkflowSpec.from_yaml(resolve_workflow(name))
-    return [label for label, param in OUTPUT_PARAMS.items() if param in spec.params]
+    return [label for label, param in OUTPUT_PARAMS.items() if param in spec.globals]
 
 
 # Exactly the fields `Dataset.from_reference_image` cannot fill in: a
@@ -530,30 +544,122 @@ def workflow_needs_a_dataset(name: str) -> bool:
     return False
 
 
-def workflow_params_yaml(name: str) -> str:
+# Globals the generated panel deliberately does not draw a control for.
+#
+# The output switches have a dedicated control (the Outputs checkboxes), and
+# showing them here too would give the same setting two editable homes that
+# disagree the moment someone touches one.
+#
+# output_root is excluded for a sharper reason: `start()` only repoints it at
+# the run's own timestamped directory when the submitted overrides do NOT
+# contain the key (mirroring `pipeline.cli run`'s `--param output_root=...`).
+# When the panel was a YAML box showing the workflow's literal default
+# (`output/fast_helical`, relative to the process's cwd), every run
+# round-tripped it back whether the box was touched or not, permanently
+# defeating that repoint — colmap_export and the final brush training wrote
+# under the cwd instead of the run directory, and the Results tab reported
+# "the run produced neither" even though the run had completed and written
+# real output, just not where anything was looking for it. Submitting only
+# what the user actually changed means the same thing cannot happen again,
+# but leaving it off the panel keeps it impossible rather than merely
+# unlikely.
+HIDDEN_GLOBALS = set(OUTPUT_PARAMS.values()) | {"output_root"}
+
+
+def workflow_param_panel(name: str) -> tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    """Everything the Run tab needs to draw a control per param.
+
+    Returns (globals, steps), where each step entry is
+    {"id", "step", "params": [Param], "overrides": {name: value}} — the
+    Param objects carry type/default/help/advanced (pipeline/step.py), and
+    `overrides` is what this workflow set on top, already template-expanded
+    so a field shows the value the run would really use.
+
+    A step's overrides are keyed by its `id:`, which is the whole point: the
+    two `brush` trainings in fast_helical_full get their own section and
+    their own controls.
+    """
     from .cli import resolve_workflow
+    from .registry import get_step_class
+    from .templating import resolve
 
     spec = WorkflowSpec.from_yaml(resolve_workflow(name))
-    # The output switches are deliberately left out: they have a dedicated
-    # control, and showing them here too would give the same setting two
-    # editable homes that disagree the moment someone touches one.
-    #
-    # output_root is left out too, but for a sharper reason: `start()` only
-    # repoints it at the run's own timestamped directory when the submitted
-    # params do NOT already contain the key (mirroring `pipeline.cli run`'s
-    # `--param output_root=...` override). Showing the workflow's literal
-    # default here (`output/fast_helical`, relative to the process's cwd)
-    # meant every run round-tripped it back through `on_start`'s params dict
-    # whether the box was touched or not, permanently defeating that
-    # repoint — colmap_export and the final brush training wrote under the
-    # cwd instead of the run directory, and the Results tab reported "the
-    # run produced neither" even though the run had completed and written
-    # real output, just not where anything was looking for it.
-    excluded = set(OUTPUT_PARAMS.values()) | {"output_root"}
-    params = {k: v for k, v in spec.params.items() if k not in excluded}
-    if not params:
-        return "# this workflow declares no params\n"
-    return yaml.safe_dump(params, sort_keys=False, allow_unicode=True, width=100)
+    globals_shown = {k: v for k, v in spec.globals.items() if k not in HIDDEN_GLOBALS}
+
+    scope = {"globals": spec.globals}
+    steps: List[Dict[str, Any]] = []
+    for step in spec.steps:
+        declared = get_step_class(step.step).declared_params()
+        if not declared:
+            continue
+        steps.append({
+            "id": step.id,
+            "step": step.step,
+            "params": list(declared.values()),
+            "overrides": resolve(step.params, scope),
+        })
+    return globals_shown, steps
+
+
+# A string default long enough (or with a line break in it) that a one-line
+# box is unusable — the denoise prompts are the case this exists for.
+_MULTILINE_AT = 80
+
+
+def _widget_for(param: Param, value: Any, label: str):
+    """One Gradio control for one declared param, prefilled with `value`.
+
+    Everything the widget needs — type, bounds, choices, help — comes off
+    the Param, which is why declaring params was worth doing: the UI has no
+    per-step knowledge in it at all.
+    """
+    info = param.help or None
+    if param.type is bool:
+        return gr.Checkbox(value=bool(value), label=label, info=info)
+    if param.type in (int, float):
+        if param.minimum is not None and param.maximum is not None:
+            return gr.Slider(
+                minimum=param.minimum, maximum=param.maximum,
+                step=1 if param.type is int else None,
+                value=value, label=label, info=info,
+            )
+        return gr.Number(
+            value=value, label=label, info=info,
+            precision=0 if param.type is int else None,
+        )
+    if param.type is list:
+        return gr.Textbox(
+            value=yaml.safe_dump(value, default_flow_style=True).strip(),
+            label=label, info=(info + " (YAML list)") if info else "YAML list",
+        )
+    if param.choices:
+        return gr.Dropdown(
+            choices=list(param.choices), value=value, label=label, info=info,
+            allow_custom_value=True,
+        )
+    text = value if isinstance(value, str) else ""
+    multiline = "\n" in text or len(text) > _MULTILINE_AT
+    return gr.Textbox(
+        value=text, label=label, info=info, lines=6 if multiline else 1,
+    )
+
+
+def _widget_value(param: Param, raw: Any) -> Any:
+    """Bring a widget's value back to the param's declared type.
+
+    Only the list case needs real work — a list arrives as YAML text. The
+    rest is left to `Step.resolve_params`, which coerces at run time
+    anyway; doing it twice would just mean two places to disagree.
+    """
+    if param.type is list:
+        try:
+            parsed = yaml.safe_load(raw) if isinstance(raw, str) else raw
+        except yaml.YAMLError as exc:
+            raise gr.Error(f"{param.name}: not valid YAML ({exc})")
+        if not isinstance(parsed, (list, tuple)):
+            raise gr.Error(f"{param.name}: expected a YAML list, got {raw!r}")
+        return list(parsed)
+    return raw
 
 
 def workflow_summary(name: str) -> str:
@@ -761,12 +867,88 @@ def build_app(envs_path: str) -> gr.Blocks:
                         cancel_btn = gr.Button("Cancel", variant="stop")
                 with gr.Column(scale=1):
                     summary_out = gr.Markdown(workflow_summary(default_workflow))
-                    params_in = gr.Code(
-                        value=workflow_params_yaml(default_workflow),
-                        language="yaml",
-                        label="Params (edited copy of the workflow's own params block)",
-                        lines=20,
-                    )
+
+                    # Only what the user actually changed, in the two
+                    # namespaces a run resolves: {"globals": {...},
+                    # "steps": {step_id: {...}}}. Everything untouched stays
+                    # owned by the workflow file and the step defaults,
+                    # which is what keeps output_root's repoint working (see
+                    # HIDDEN_GLOBALS) and what makes "reset" mean something.
+                    param_state = gr.State({"globals": {}, "steps": {}})
+
+                    def _record(scope: str, key: str, param, baseline, step_id=""):
+                        """A .change() handler that files one widget's value.
+
+                        A value equal to what the panel was drawn with is
+                        *removed* rather than stored, so nudging a control
+                        and putting it back leaves nothing pinned.
+                        """
+                        def handler(raw, state):
+                            value = _widget_value(param, raw)
+                            state = {
+                                "globals": dict(state.get("globals", {})),
+                                "steps": {k: dict(v) for k, v in state.get("steps", {}).items()},
+                            }
+                            bucket = (
+                                state["globals"] if scope == "globals"
+                                else state["steps"].setdefault(step_id, {})
+                            )
+                            if value == baseline:
+                                bucket.pop(key, None)
+                            else:
+                                bucket[key] = value
+                            return state
+                        return handler
+
+                    @gr.render(inputs=[workflow_in])
+                    def render_params(name):
+                        globals_shown, step_entries = workflow_param_panel(name)
+
+                        with gr.Accordion("Globals", open=True):
+                            if not globals_shown:
+                                gr.Markdown("_This workflow declares no globals._")
+                            for key, value in globals_shown.items():
+                                # A workflow's globals are free-form values,
+                                # not declared Params, so the widget is
+                                # picked from the value's own Python type.
+                                pseudo = Param(name=key, type=type(value), default=value)
+                                widget = _widget_for(pseudo, value, key)
+                                widget.change(
+                                    _record("globals", key, pseudo, value),
+                                    inputs=[widget, param_state], outputs=[param_state],
+                                )
+
+                        for entry in step_entries:
+                            label = f"{entry['id']}  ({entry['step']})"
+                            with gr.Accordion(label, open=False):
+                                plain = [p for p in entry["params"] if not p.advanced]
+                                advanced = [p for p in entry["params"] if p.advanced]
+
+                                def draw(param):
+                                    overridden = param.name in entry["overrides"]
+                                    value = (
+                                        entry["overrides"][param.name] if overridden
+                                        else param.default
+                                    )
+                                    mark = " •" if overridden else ""
+                                    widget = _widget_for(param, value, param.name + mark)
+                                    widget.change(
+                                        _record("steps", param.name, param, value, entry["id"]),
+                                        inputs=[widget, param_state], outputs=[param_state],
+                                    )
+
+                                for param in plain:
+                                    draw(param)
+                                if advanced:
+                                    with gr.Accordion("Advanced", open=False):
+                                        for param in advanced:
+                                            draw(param)
+
+                        gr.Markdown(
+                            "_A dot marks a param the workflow sets; the rest show the "
+                            "step's own default. Advanced holds the knobs that exist "
+                            "because the underlying library has them._"
+                        )
 
         with gr.Tab("Progress"):
             status_out = gr.Markdown(_format_status(RunState()))
@@ -839,16 +1021,19 @@ def build_app(envs_path: str) -> gr.Blocks:
 
         # -- wiring --------------------------------------------------------
         def on_workflow_change(name: str):
+            # The param panel redraws itself off `workflow_in` (see
+            # gr.render above); this clears the state that went with the
+            # old workflow so a stale override cannot survive the switch.
             choices = workflow_outputs(name)
             return (
                 workflow_summary(name),
-                workflow_params_yaml(name),
+                {"globals": {}, "steps": {}},
                 gr.update(choices=choices, value=choices, visible=bool(choices)),
             )
 
         workflow_in.change(
             on_workflow_change, inputs=workflow_in,
-            outputs=[summary_out, params_in, outputs_in],
+            outputs=[summary_out, param_state, outputs_in],
         )
 
         def on_source_change(source: str):
@@ -866,13 +1051,10 @@ def build_app(envs_path: str) -> gr.Blocks:
         rescan_btn.click(lambda: gr.update(choices=discover_datasets()), outputs=dataset_in)
 
         def on_start(workflow, source, dataset_path, zip_file, photo, prompt,
-                     params_text, selected_outputs):
-            try:
-                params = yaml.safe_load(params_text) or {}
-            except yaml.YAMLError as exc:
-                raise gr.Error(f"Params are not valid YAML: {exc}")
-            if not isinstance(params, dict):
-                raise gr.Error("Params must be a YAML mapping.")
+                     params, selected_outputs):
+            params = params or {}
+            global_overrides = dict(params.get("globals", {}))
+            step_overrides = {k: dict(v) for k, v in params.get("steps", {}).items()}
 
             supported = workflow_outputs(workflow)
             if supported:
@@ -885,7 +1067,7 @@ def build_app(envs_path: str) -> gr.Blocks:
                 # Set both, not just the checked ones: a workflow defaults
                 # them to true, so an unchecked box has to actively say false.
                 for label in supported:
-                    params[OUTPUT_PARAMS[label]] = label in chosen
+                    global_overrides[OUTPUT_PARAMS[label]] = label in chosen
 
             dataset_dir = reference_image = None
             if source == SOURCE_DIRECTORY:
@@ -916,7 +1098,8 @@ def build_app(envs_path: str) -> gr.Blocks:
 
             manager.start(
                 workflow_path=resolve_workflow(workflow),
-                params=params,
+                global_overrides=global_overrides,
+                step_overrides=step_overrides,
                 dataset_dir=dataset_dir,
                 reference_image=reference_image,
                 prompt=prompt or "",
@@ -956,7 +1139,7 @@ def build_app(envs_path: str) -> gr.Blocks:
         start_btn.click(
             on_start,
             inputs=[workflow_in, source_in, dataset_in, zip_in, photo_in, prompt_in,
-                    params_in, outputs_in],
+                    param_state, outputs_in],
             outputs=[],
         ).success(stream, outputs=progress_outputs)
 

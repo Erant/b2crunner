@@ -22,6 +22,8 @@ from body2colmap.camera import Camera
 from pipeline.dataset import Dataset
 from pipeline.registry import get_step_class
 
+from tests.helpers import run_step
+
 import pipeline.steps  # noqa: F401
 
 
@@ -51,7 +53,7 @@ def _dataset(camera_size, image_size, count=3):
 
 
 def _run(dataset):
-    return get_step_class("fit_cameras_to_images")().run({"dataset": dataset}, {})["dataset"]
+    return run_step("fit_cameras_to_images", {"dataset": dataset}, {})["dataset"]
 
 
 class TestFitCamerasToImages(unittest.TestCase):

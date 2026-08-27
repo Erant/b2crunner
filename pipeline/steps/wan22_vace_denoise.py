@@ -139,7 +139,7 @@ import numpy as np
 
 from ..masks import normalize_mask
 from ..registry import register_step
-from ..step import Step
+from ..step import REQUIRED, Param, Step
 
 logger = logging.getLogger(__name__)
 
@@ -187,6 +187,59 @@ def resolve_fp8_checkpoint(
 
 @register_step("wan22_vace_denoise")
 class Wan22VaceDenoiseStep(Step):
+    # The per-call knobs come first; everything from `checkpoint` down is
+    # which weights to build the pipeline out of and how to place it, which
+    # is set once for the machine rather than tuned per run — hence
+    # `advanced`. Those are also exactly the LOAD_PARAMS list below, and the
+    # two are meant to stay in step.
+    PARAMS = (
+        Param("width", int, REQUIRED, "Frame width the pipeline generates at", minimum=1),
+        Param("height", int, REQUIRED, "Frame height the pipeline generates at", minimum=1),
+        Param("steps", int, 6, "Diffusion steps", minimum=1),
+        Param("cfg", float, 1.0, "Classifier-free guidance scale"),
+        Param("seed", int, 0, "Diffusion seed"),
+        Param("strength", float, 1.0,
+              "VACE conditioning scale: 1.0 generates from the control video, lower "
+              "values keep more of it", minimum=0.0, maximum=1.0),
+        Param("prompt", str, "",
+              "Positive prompt. $SUBJECT_DESC$ in it is filled in from the "
+              "`subject_desc` input (dataset.prompt)"),
+        Param("negative_prompt", str, "", "Negative prompt"),
+        Param("length", int, None,
+              "Frames to generate; empty means as many as the control video has"),
+
+        Param("checkpoint", str, DEFAULT_CHECKPOINT,
+              "The diffusers repo the pipeline's non-transformer components come from",
+              advanced=True),
+        Param("fp8_repo", str, DEFAULT_FP8_REPO,
+              "Repo holding the pre-quantized fp8 experts", advanced=True),
+        Param("fp8_checkpoint_high", str, DEFAULT_FP8_HIGH,
+              "High-noise expert: a filename in fp8_repo, or a local path",
+              advanced=True),
+        Param("fp8_checkpoint_low", str, DEFAULT_FP8_LOW,
+              "Low-noise expert: a filename in fp8_repo, or a local path",
+              advanced=True),
+        Param("fp8_config", str, None,
+              "Where the transformer config is read from; empty means `checkpoint`",
+              advanced=True),
+        Param("use_lora", bool, True, "Fuse the Lightning 4-step LoRAs", advanced=True),
+        Param("lora_repo", str, DEFAULT_LORA_REPO, "LoRA repo", advanced=True),
+        Param("lora_subfolder", str, DEFAULT_LORA_SUBFOLDER, "LoRA subfolder",
+              advanced=True),
+        Param("lora_high", str, DEFAULT_LORA_HIGH, "High-noise LoRA weights",
+              advanced=True),
+        Param("lora_low", str, DEFAULT_LORA_LOW, "Low-noise LoRA weights", advanced=True),
+        Param("lora_strength_high", float, 1.0, "High-noise LoRA scale", advanced=True),
+        Param("lora_strength_low", float, 1.0, "Low-noise LoRA scale", advanced=True),
+        Param("attention_backend", str, "auto",
+              "Attention implementation; auto picks per GPU architecture",
+              advanced=True),
+        Param("cpu_offload", bool, True,
+              "Stream the two 17.58 GB transformers on and off the card per forward "
+              "instead of resident-loading them", advanced=True),
+        Param("device", str, "cuda", "Torch device", advanced=True),
+    )
+
     # Which params load() actually reads. pipeline/worker.py's resident
     # worker reuses the loaded pipeline while these are unchanged and
     # rebuilds it when they are not — see load_signature() there.
@@ -228,20 +281,20 @@ class Wan22VaceDenoiseStep(Step):
 
         from ..wan_fp8 import load_config, load_fp8_transformer
 
-        checkpoint = params.get("checkpoint", DEFAULT_CHECKPOINT)
-        fp8_repo = params.get("fp8_repo", DEFAULT_FP8_REPO)
+        checkpoint = params["checkpoint"]
+        fp8_repo = params["fp8_repo"]
         fp8_high = resolve_fp8_checkpoint(
-            params.get("fp8_checkpoint_high", DEFAULT_FP8_HIGH), fp8_repo
+            params["fp8_checkpoint_high"], fp8_repo
         )
         fp8_low = resolve_fp8_checkpoint(
-            params.get("fp8_checkpoint_low", DEFAULT_FP8_LOW), fp8_repo
+            params["fp8_checkpoint_low"], fp8_repo
         )
 
         # Only the geometry, from the base repo's transformer/config.json —
         # kilobytes, and the reason `transformer/config.json` survives in
         # pipeline/models.py's allow_patterns while `transformer/*` does not.
-        config = load_config(params.get("fp8_config", checkpoint))
-        device = params.get("device", "cuda")
+        config = load_config(params["fp8_config"] or checkpoint)
+        device = params["device"]
         transformer = load_fp8_transformer(fp8_high, config, device="cpu")
         transformer_2 = load_fp8_transformer(fp8_low, config, device="cpu")
 
@@ -257,7 +310,7 @@ class Wan22VaceDenoiseStep(Step):
             torch_dtype=torch.bfloat16,
         )
 
-        if params.get("use_lora", True):
+        if params["use_lora"]:
             self._load_lora_unfused(pipe, params)
 
         self._finish_load(pipe, params, device)
@@ -287,18 +340,18 @@ class Wan22VaceDenoiseStep(Step):
         The cost of not fusing is a small per-step overhead (an extra
         low-rank matmul per adapted Linear), not a correctness difference.
         """
-        lora_repo = params.get("lora_repo", DEFAULT_LORA_REPO)
-        lora_subfolder = params.get("lora_subfolder", DEFAULT_LORA_SUBFOLDER)
+        lora_repo = params["lora_repo"]
+        lora_subfolder = params["lora_subfolder"]
         pipe.load_lora_weights(
             lora_repo,
             subfolder=lora_subfolder,
-            weight_name=params.get("lora_high", DEFAULT_LORA_HIGH),
+            weight_name=params["lora_high"],
             adapter_name="lightning_high",
         )
         pipe.load_lora_weights(
             lora_repo,
             subfolder=lora_subfolder,
-            weight_name=params.get("lora_low", DEFAULT_LORA_LOW),
+            weight_name=params["lora_low"],
             adapter_name="lightning_low",
             load_into_transformer_2=True,
         )
@@ -307,15 +360,15 @@ class Wan22VaceDenoiseStep(Step):
         # `transformer`, low-noise in `transformer_2`), and a pipeline-level
         # call has to guess which component each name belongs to.
         pipe.transformer.set_adapters(
-            ["lightning_high"], [params.get("lora_strength_high", 1.0)]
+            ["lightning_high"], [params["lora_strength_high"]]
         )
         pipe.transformer_2.set_adapters(
-            ["lightning_low"], [params.get("lora_strength_low", 1.0)]
+            ["lightning_low"], [params["lora_strength_low"]]
         )
 
     def _finish_load(self, pipe, params: Dict[str, Any], device: str) -> None:
         """Attention backend + offload, split out of load() for readability."""
-        attention_backend = params.get("attention_backend", "auto")
+        attention_backend = params["attention_backend"]
         if attention_backend and attention_backend != "none":
             backend_name = (
                 _select_sage_backend() if attention_backend == "auto" else attention_backend
@@ -331,7 +384,7 @@ class Wan22VaceDenoiseStep(Step):
                     )
 
         self._device = device
-        self._cpu_offload = bool(params.get("cpu_offload", True))
+        self._cpu_offload = params["cpu_offload"]
         if self._cpu_offload:
             pipe.enable_model_cpu_offload()
         else:
@@ -416,10 +469,10 @@ class Wan22VaceDenoiseStep(Step):
         reference_images = [Image.fromarray(_bgr_to_rgb(ref_img))] if ref_img is not None else None
         logger.info("  frame conversion: %.1fs", time.time() - converting)
 
-        generator = torch.Generator(device=params.get("device", "cuda"))
-        generator.manual_seed(int(params.get("seed", 0)))
+        generator = torch.Generator(device=params["device"])
+        generator.manual_seed(params["seed"])
 
-        prompt = params.get("prompt", "")
+        prompt = params["prompt"]
         subject_desc = inputs.get("subject_desc")
         if subject_desc and "$SUBJECT_DESC$" in prompt:
             prompt = prompt.replace("$SUBJECT_DESC$", subject_desc)
@@ -431,16 +484,16 @@ class Wan22VaceDenoiseStep(Step):
         with _timed_phases(pipe):
             result = pipe(
                 prompt=prompt,
-                negative_prompt=params.get("negative_prompt", ""),
+                negative_prompt=params["negative_prompt"],
                 video=video,
                 mask=masks,
                 reference_images=reference_images,
-                conditioning_scale=params.get("strength", 1.0),
+                conditioning_scale=params["strength"],
                 height=params["height"],
                 width=params["width"],
-                num_frames=params.get("length", len(video)),
-                num_inference_steps=params.get("steps", 6),
-                guidance_scale=params.get("cfg", 1.0),
+                num_frames=params["length"] or len(video),
+                num_inference_steps=params["steps"],
+                guidance_scale=params["cfg"],
                 generator=generator,
                 output_type="np",
             )

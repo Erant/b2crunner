@@ -30,7 +30,7 @@ import numpy as np
 
 from pipeline.dataset import Dataset
 from pipeline.registry import get_step_class
-from tests.helpers import require_stage, require_stage2
+from tests.helpers import require_stage, require_stage2, run_step
 
 import pipeline.steps  # noqa: F401
 
@@ -49,7 +49,7 @@ class TestInjectAnchorAgainstRecordedData(unittest.TestCase):
             "anchor_image": self.ds.anchor_image,
         }
         inputs.update(overrides)
-        return get_step_class("inject_anchor")().run(inputs, {})
+        return run_step("inject_anchor", inputs, {})
 
     def test_recorded_dataset_really_has_a_duplicated_anchor_frame(self):
         """The premise of the test below: two cameras at the anchor, and both
@@ -84,11 +84,11 @@ class TestInjectAnchorAgainstRecordedData(unittest.TestCase):
         whole reason anchor_frame_index is called informational. After a
         rotate_views the index is meaningless but injection must still land
         on the same two cameras."""
-        rotated = get_step_class("rotate_views")().run(
+        rotated = run_step("rotate_views", 
             {"dataset": self.ds}, {"start_azimuth_deg": 137.0}
         )["dataset"]
 
-        out = get_step_class("inject_anchor")().run(
+        out = run_step("inject_anchor", 
             {
                 "images": rotated.images,
                 "cameras": rotated.cameras,
@@ -216,10 +216,10 @@ class TestMaskThenInjectAgainstCyber2(unittest.TestCase):
 
     def _run_chain(self):
         ds = self._dataset()
-        ds = get_step_class("mask_splat")().run(
+        ds = run_step("mask_splat", 
             {"dataset": ds}, {"filter_size": 6, "dilation": 2}
         )["dataset"]
-        out = get_step_class("inject_anchor")().run(
+        out = run_step("inject_anchor", 
             {
                 "images": ds.images,
                 "cameras": ds.cameras,
@@ -265,7 +265,7 @@ class TestMaskThenInjectAgainstCyber2(unittest.TestCase):
         import cv2
 
         ds = self._dataset()
-        out = get_step_class("inject_anchor")().run(
+        out = run_step("inject_anchor", 
             {
                 "images": ds.images,
                 "cameras": ds.cameras,
@@ -275,7 +275,7 @@ class TestMaskThenInjectAgainstCyber2(unittest.TestCase):
             {"tolerance_pct": 0.1},
         )
         ds.images, ds.masks = out["images"], out["masks"]
-        ds = get_step_class("mask_splat")().run(
+        ds = run_step("mask_splat", 
             {"dataset": ds}, {"filter_size": 6, "dilation": 2}
         )["dataset"]
 
@@ -342,7 +342,7 @@ class TestAnchorBorderColour(unittest.TestCase):
             position=np.zeros(3, dtype=np.float32),
             rotation=np.eye(3, dtype=np.float32),
         )
-        out = get_step_class("generate_firstlast")().run(
+        out = run_step("generate_firstlast", 
             {
                 "image": np.full((200, 200, 3), 200, np.uint8),
                 "camera": camera,

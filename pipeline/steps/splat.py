@@ -68,7 +68,7 @@ import numpy as np
 
 from ..proc import stream_command
 from ..registry import register_step
-from ..step import Step
+from ..step import REQUIRED, Param, Step
 
 logger = logging.getLogger(__name__)
 
@@ -94,14 +94,18 @@ class LoadSplatStep(Step):
     """Load a trained Gaussian splat from a PLY file.
 
     inputs:  {} (or {"splat_path": str} to override the param)
-    params:  filepath (str)
     outputs: {"splat_scene": SplatScene, "splat_path": str}
     """
+
+    PARAMS = (
+        Param("filepath", str, None,
+              "The .ply to load. A `splat_path` input wins over it"),
+    )
 
     def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
         from body2colmap.splat_scene import SplatScene
 
-        filepath = inputs.get("splat_path") or params.get("filepath")
+        filepath = inputs.get("splat_path") or params["filepath"]
         if not filepath:
             raise ValueError("load_splat needs a 'filepath' param or 'splat_path' input")
 
@@ -122,15 +126,16 @@ class SaveSplatStep(Step):
     """Write a Gaussian splat scene to a PLY file.
 
     inputs:  {"splat_scene": SplatScene}
-    params:  filepath (str)
     outputs: {"splat_path": str}
     """
 
+    PARAMS = (
+        Param("filepath", str, REQUIRED, "The .ply to write"),
+    )
+
     def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
         scene = inputs["splat_scene"]
-        filepath = params.get("filepath")
-        if not filepath:
-            raise ValueError("save_splat needs a 'filepath' param")
+        filepath = params["filepath"]
 
         path = Path(filepath)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -147,12 +152,6 @@ class RenderSplatStep(Step):
              plus optionally {"dataset": Dataset} — the source dataset,
              used for framing bounds, focal-length inheritance, camera
              reuse, point-cloud preservation and extras pass-through
-    params:  pattern ("circular" | "sinusoidal" | "helical", omit to reuse
-             the dataset's cameras verbatim), n_frames and the
-             pattern-specific params (as steps/render.py), width, height,
-             framing, focal_length_mm, fill_ratio, bg_color,
-             override_cam_from_mesh, override_pointcloud,
-             pointcloud_samples, render_path
     outputs: same shape as steps/render.py — {"images", "masks",
              "cameras", "image_names", "points_3d", "resolution",
              "focal_length_mm"} plus "anchor_position" /
@@ -169,11 +168,72 @@ class RenderSplatStep(Step):
     `steps/brush.py`'s `brush_path`.
     """
 
+    # Same shape as steps/render.py's declaration, with two differences:
+    # `pattern` is empty by default (reuse the dataset's cameras verbatim),
+    # and `n_frames` therefore cannot be REQUIRED — it is read only when a
+    # pattern is set, and _generate_path says so if it is missing then.
+    PARAMS = (
+        Param("pattern", str, "",
+              "Shape of the new camera path. Empty reuses the source dataset's "
+              "cameras verbatim, which is how outline.json re-renders the exact "
+              "same views for replace_views to swap back in",
+              choices=("", "circular", "sinusoidal", "helical")),
+        Param("n_frames", int, None, "Views to render; required when a pattern is set",
+              minimum=1),
+        Param("width", int, 720, "Render width", minimum=1),
+        Param("height", int, 1280, "Render height", minimum=1),
+        Param("framing", str, "full",
+              "Which of the source render's framing presets to reuse for the bounds",
+              choices=("full", "torso", "bust", "head")),
+        Param("fill_ratio", float, 0.8, "How much of the frame the subject fills",
+              minimum=0.0, maximum=1.0),
+        Param("focal_length_mm", float, 0.0,
+              "0 inherits the dataset's, then falls back to one derived from width"),
+        Param("override_cam_from_mesh", bool, False,
+              "Anchor the new path on the dataset's original camera, as steps/render.py "
+              "does. Off here in the helical re-render: that is a fresh, longer orbit "
+              "framed from the splat's own bounds, and inject_anchor re-applies the "
+              "anchor afterwards by matching on position"),
+        Param("bg_color", list, [0.0, 0.0, 0.0],
+              "RGB in [0,1]. Black, not the recorded run's 127 grey: black is where "
+              "that pipeline ends up after mask_splat, and matching its intermediate "
+              "grey would reintroduce the same halo, just dimmer"),
+        Param("override_pointcloud", bool, False,
+              "Sample a fresh point cloud off the splat instead of keeping the "
+              "dataset's. The mesh render's cloud describes the actual subject "
+              "geometry; one sampled from a trained splat inherits its noise"),
+
+        Param("elevation_deg", float, 0.0, "Circular: camera elevation"),
+        Param("start_azimuth_deg", float, 0.0, "Where the orbit starts"),
+        Param("overlap", int, 1,
+              "Circular: 1 makes the first and last frame share a position"),
+        Param("amplitude_deg", float, 30.0,
+              "Sinusoidal/helical: elevation swing either side of the equator"),
+        Param("n_cycles", int, 1, "Sinusoidal: elevation cycles over the orbit"),
+        Param("n_loops", int, 2, "Helical: turns around the subject"),
+        Param("lead_in_deg", float, 45.0, "Helical: azimuth spent easing in"),
+        Param("lead_out_deg", float, 45.0, "Helical: azimuth spent easing out"),
+
+        Param("radius", float, None,
+              "Orbit radius; empty derives one from the framing", advanced=True),
+        Param("pointcloud_samples", int, 10000,
+              "Points to sample when override_pointcloud is on", minimum=1,
+              advanced=True),
+        Param("splat_path", str, None,
+              "A .ply to load when no splat_scene input is wired", advanced=True),
+        Param("render_path", str, "brush-splat-render",
+              "The rasteriser binary, on PATH or as an absolute path", advanced=True),
+        # No `device`: rasterisation shells out to brush-splat-render, which
+        # picks its own. The workflows used to pass one and it was read by
+        # nothing; declaring it would put a control in the UI that does
+        # nothing at all.
+    )
+
     def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
         from body2colmap.splat_scene import SplatScene
 
         scene = inputs.get("splat_scene")
-        splat_path = inputs.get("splat_path") or params.get("splat_path")
+        splat_path = inputs.get("splat_path") or params["splat_path"]
         if scene is None:
             if not splat_path:
                 raise ValueError(
@@ -183,8 +243,8 @@ class RenderSplatStep(Step):
             scene = SplatScene.from_ply(str(splat_path))
 
         dataset = inputs.get("dataset")
-        width = int(params.get("width", 720))
-        height = int(params.get("height", 1280))
+        width = params["width"]
+        height = params["height"]
 
         cameras, focal_length, effective_mm, anchor_frame_index = _resolve_cameras(
             scene=scene, dataset=dataset, params=params, width=width, height=height
@@ -211,8 +271,8 @@ class RenderSplatStep(Step):
         # Black matches where that pipeline ENDS up, which is what matters
         # here — matching its intermediate grey would reintroduce the same
         # halo, just dimmer.
-        bg_color = tuple(params.get("bg_color", (0.0, 0.0, 0.0)))
-        render_path = params.get("render_path", "brush-splat-render")
+        bg_color = tuple(params["bg_color"])
+        render_path = params["render_path"]
         image_names = [f"frame_{i + 1:05d}_.png" for i in range(len(cameras))]
 
         logger.info(
@@ -247,7 +307,7 @@ class RenderSplatStep(Step):
         # does not rebuild, so downstream steps keep working without an
         # allowlist for every key.
         if dataset is not None:
-            skip = _REBUILT_KEYS | _ANCHOR_KEYS if params.get("pattern") else _REBUILT_KEYS
+            skip = _REBUILT_KEYS | _ANCHOR_KEYS if params["pattern"] else _REBUILT_KEYS
             for key, value in dataset.extras.items():
                 if key not in skip:
                     result[key] = value
@@ -364,12 +424,12 @@ def _resolve_cameras(
     )
     from body2colmap.utils import compute_auto_orbit_radius, compute_default_focal_length
 
-    pattern = params.get("pattern")
-    override_cam_from_mesh = bool(params.get("override_cam_from_mesh", False))
+    pattern = params["pattern"]
+    override_cam_from_mesh = params["override_cam_from_mesh"]
     extras = dataset.extras if dataset is not None else {}
 
     # Focal length: explicit param > inherited from the dataset > auto.
-    focal_length_mm = float(params.get("focal_length_mm", 0.0) or 0.0)
+    focal_length_mm = float(params["focal_length_mm"] or 0.0)
     effective_mm = focal_length_mm
     if effective_mm <= 0:
         effective_mm = float(extras.get("focal_length_mm", 0.0) or 0.0)
@@ -394,9 +454,10 @@ def _resolve_cameras(
         else compute_default_focal_length(width)
     )
 
-    # No pattern: reuse the dataset's cameras verbatim. Its anchor keys then
+    # No pattern — the declared default, an empty string. Reuse the
+    # dataset's cameras verbatim. Its anchor keys then
     # still describe this render, so they pass through untouched.
-    if pattern is None:
+    if not pattern:
         if dataset is None or not dataset.cameras:
             raise ValueError(
                 "render_splat needs either a 'pattern' param to build a new "
@@ -432,7 +493,7 @@ def _resolve_cameras(
     # Framing bounds from the source render, falling back to the splat's own
     # bounds. Using the mesh render's bounds is what keeps a re-render framed
     # identically to the render it is replacing.
-    framing = params.get("framing", "full")
+    framing = params["framing"]
     bounds = None
     framing_bounds = extras.get("framing_bounds")
     if framing_bounds and framing in framing_bounds:
@@ -447,13 +508,13 @@ def _resolve_cameras(
         bounds = scene.get_bounds()
 
     orbit_center = (bounds[0] + bounds[1]) / 2.0
-    radius = params.get("radius")
+    radius = params["radius"]
     if radius is None:
         radius = compute_auto_orbit_radius(
             bounds=bounds,
             render_size=(width, height),
             focal_length=focal_length,
-            fill_ratio=float(params.get("fill_ratio", 0.8)),
+            fill_ratio=params["fill_ratio"],
         )
 
     path_gen = OrbitPath(target=orbit_center, radius=radius)
@@ -465,12 +526,18 @@ def _resolve_cameras(
 
 
 def _generate_path(path_gen, pattern: str, params: Dict[str, Any], camera_template):
+    if params["n_frames"] is None:
+        raise ValueError(
+            f"render_splat: pattern '{pattern}' builds a new camera path, so it needs "
+            "an n_frames param. Leave `pattern` empty to reuse the source dataset's "
+            "cameras instead."
+        )
     if pattern == "circular":
         return path_gen.circular(
             n_frames=params["n_frames"],
-            elevation_deg=params.get("elevation_deg", 0.0),
-            start_azimuth_deg=params.get("start_azimuth_deg", 0.0),
-            overlap=params.get("overlap", 1),
+            elevation_deg=params["elevation_deg"],
+            start_azimuth_deg=params["start_azimuth_deg"],
+            overlap=params["overlap"],
             camera_template=camera_template,
         )
     if pattern == "sinusoidal":
@@ -478,7 +545,7 @@ def _generate_path(path_gen, pattern: str, params: Dict[str, Any], camera_templa
             n_frames=params["n_frames"],
             amplitude_deg=params["amplitude_deg"],
             n_cycles=params["n_cycles"],
-            start_azimuth_deg=params.get("start_azimuth_deg", 0.0),
+            start_azimuth_deg=params["start_azimuth_deg"],
             camera_template=camera_template,
         )
     if pattern == "helical":
@@ -486,9 +553,9 @@ def _generate_path(path_gen, pattern: str, params: Dict[str, Any], camera_templa
             n_frames=params["n_frames"],
             n_loops=params["n_loops"],
             amplitude_deg=params["amplitude_deg"],
-            lead_in_deg=params.get("lead_in_deg", 45.0),
-            lead_out_deg=params.get("lead_out_deg", 45.0),
-            start_azimuth_deg=params.get("start_azimuth_deg", 0.0),
+            lead_in_deg=params["lead_in_deg"],
+            lead_out_deg=params["lead_out_deg"],
+            start_azimuth_deg=params["start_azimuth_deg"],
             camera_template=camera_template,
         )
     raise ValueError(f"Unknown path pattern: {pattern!r}")
@@ -548,7 +615,7 @@ def _anchored_path(
             n_frames=params["n_frames"],
             elevation_deg=orbit_params["elevation_deg"],
             start_azimuth_deg=orbit_params["start_azimuth_deg"],
-            overlap=params.get("overlap", 1),
+            overlap=params["overlap"],
             camera_template=camera_template,
         )
         return cameras, 0
@@ -557,8 +624,8 @@ def _anchored_path(
         n_frames=params["n_frames"],
         n_loops=params["n_loops"],
         amplitude_deg=params["amplitude_deg"],
-        lead_in_deg=params.get("lead_in_deg", 45.0),
-        lead_out_deg=params.get("lead_out_deg", 45.0),
+        lead_in_deg=params["lead_in_deg"],
+        lead_out_deg=params["lead_out_deg"],
     )
     anchor_info = helical_solver(target=orbit_center, **helix_params)
     path_gen = orbit_path_cls(target=orbit_center, radius=float(anchor_info["radius"]))
@@ -578,11 +645,11 @@ def _resolve_pointcloud(scene, dataset, params: Dict[str, Any]):
     the actual subject geometry, while one sampled from a trained splat
     inherits whatever noise that training left behind.
     """
-    override = bool(params.get("override_pointcloud", False))
+    override = params["override_pointcloud"]
     if not override and dataset is not None and dataset.points_3d is not None:
         logger.info("render_splat: preserving the dataset's point cloud")
         return dataset.points_3d
 
-    n_samples = int(params.get("pointcloud_samples", 10000))
+    n_samples = params["pointcloud_samples"]
     logger.info("render_splat: sampling %d points from the splat scene", n_samples)
     return scene.get_point_cloud(n_samples=n_samples)

@@ -54,7 +54,7 @@ import numpy as np
 
 from ..dataset import Dataset
 from ..registry import register_step
-from ..step import Step
+from ..step import Param, Step
 
 logger = logging.getLogger(__name__)
 
@@ -174,13 +174,18 @@ class DropViewsStep(Step):
     """Remove views by 1-based index.
 
     inputs:  {"dataset": Dataset}
-    params:  views_to_drop (str, e.g. "1,2,3,9-40")
     outputs: {"dataset": Dataset}
     """
 
+    PARAMS = (
+        Param("views_to_drop", str, "",
+              "1-based indices to remove, as a comma-separated list of numbers "
+              "and ranges, e.g. \"1,2,3,9-40\""),
+    )
+
     def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
         dataset: Dataset = inputs["dataset"]
-        spec = str(params.get("views_to_drop", "") or "")
+        spec = params["views_to_drop"] or ""
 
         drop_indices = parse_view_indices(spec)
         if not drop_indices:
@@ -213,18 +218,23 @@ class FilterFoVStep(Step):
     """Keep only views whose azimuth falls inside a field-of-view cone.
 
     inputs:  {"dataset": Dataset}
-    params:  azimuth_deg (center, default 0 = front),
-             fov_deg (total width, default 180 — views within ±fov/2 are kept)
     outputs: {"dataset": Dataset}
 
     Requires extras["orbit_target"]; see the module docstring on the
     azimuth convention and on why merged datasets are rejected.
     """
 
+    PARAMS = (
+        Param("azimuth_deg", float, 0.0, "Centre of the cone; 0 is the skeleton's front"),
+        Param("fov_deg", float, 180.0,
+              "Total width of the cone — a view is kept when it falls within "
+              "half of this either side of azimuth_deg", minimum=0.0, maximum=360.0),
+    )
+
     def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
         dataset: Dataset = inputs["dataset"]
-        azimuth_deg = float(params.get("azimuth_deg", 0.0))
-        fov_deg = float(params.get("fov_deg", 180.0))
+        azimuth_deg = params["azimuth_deg"]
+        fov_deg = params["fov_deg"]
 
         orbit_target, forward_azimuth_deg = _require_orbit_metadata(dataset, "filter_fov")
         rel_azimuths = _relative_azimuths(dataset.cameras, orbit_target, forward_azimuth_deg)
@@ -255,7 +265,6 @@ class RotateViewsStep(Step):
     """Cyclically reorder views so frame_00001 sits at a given azimuth.
 
     inputs:  {"dataset": Dataset}
-    params:  start_azimuth_deg (absolute, relative to skeleton front)
     outputs: {"dataset": Dataset}
 
     The parameter is an *absolute* azimuth, not an offset, so applying this
@@ -269,9 +278,15 @@ class RotateViewsStep(Step):
     sequence — which is what a FirstLast diffusion pass wants.
     """
 
+    PARAMS = (
+        Param("start_azimuth_deg", float, 0.0,
+              "Which azimuth frame_00001 should sit at, relative to the skeleton's "
+              "front. Absolute, not an offset, so applying it twice is idempotent"),
+    )
+
     def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
         dataset: Dataset = inputs["dataset"]
-        start_azimuth_deg = float(params.get("start_azimuth_deg", 0.0))
+        start_azimuth_deg = params["start_azimuth_deg"]
 
         n_views = len(dataset.cameras)
         if n_views == 0:
@@ -320,7 +335,6 @@ class ReplaceViewsStep(Step):
     """Swap in views from a second dataset wherever the cameras coincide.
 
     inputs:  {"dataset": Dataset (base), "replacement": Dataset}
-    params:  tolerance_pct (default 0.1 — percent of scene scale)
     outputs: {"dataset": Dataset}
 
     For every base camera the nearest replacement camera is found; if the
@@ -335,10 +349,16 @@ class ReplaceViewsStep(Step):
     from a trained splat, then merge them back into the original orbit.
     """
 
+    PARAMS = (
+        Param("tolerance_pct", float, 0.1,
+              "How close two cameras must be to count as the same view, as a "
+              "percentage of the base set's camera bounding-box diagonal"),
+    )
+
     def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
         base: Dataset = inputs["dataset"]
         repl: Dataset = inputs["replacement"]
-        tolerance_pct = float(params.get("tolerance_pct", 0.1))
+        tolerance_pct = params["tolerance_pct"]
 
         base_pos = np.stack([np.asarray(c.position, dtype=np.float64) for c in base.cameras])
         repl_pos = np.stack([np.asarray(c.position, dtype=np.float64) for c in repl.cameras])
@@ -398,8 +418,6 @@ class MergeDatasetsStep(Step):
     """Concatenate two or more datasets into one.
 
     inputs:  {"datasets": List[Dataset]} or {"dataset_1": ..., "dataset_2": ...}
-    params:  pointcloud_mode ("first" | "merge" | "resample"),
-             pointcloud_samples (int, resample only)
     outputs: {"dataset": Dataset}
 
     Frames are renumbered sequentially across the whole merged set. All
@@ -413,6 +431,15 @@ class MergeDatasetsStep(Step):
     error messages mention merged datasets).
     """
 
+    PARAMS = (
+        Param("pointcloud_mode", str, "first",
+              "Which point cloud the merged dataset carries: the first input's, "
+              "all of them concatenated, or a resample of the concatenation",
+              choices=("first", "merge", "resample")),
+        Param("pointcloud_samples", int, 10000,
+              "How many points to keep; resample mode only", minimum=1),
+    )
+
     def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
         datasets = _collect_datasets(inputs)
         if len(datasets) < 2:
@@ -420,8 +447,8 @@ class MergeDatasetsStep(Step):
                 f"merge_datasets needs at least 2 datasets, got {len(datasets)}"
             )
 
-        pointcloud_mode = str(params.get("pointcloud_mode", "first"))
-        pointcloud_samples = int(params.get("pointcloud_samples", 10000))
+        pointcloud_mode = params["pointcloud_mode"]
+        pointcloud_samples = params["pointcloud_samples"]
 
         first_resolution = tuple(datasets[0].resolution)
         for idx, ds in enumerate(datasets):
@@ -499,8 +526,10 @@ class FitCamerasToImagesStep(Step):
     workflow whose upscale step is switched off.
 
     inputs: {"dataset": Dataset}
-    params: {}
     outputs: {"dataset": Dataset}
+
+    Takes no params — the scale factor comes from comparing the frames to
+    the cameras that describe them.
     """
 
     def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:

@@ -76,7 +76,17 @@ description: >-
   reconstruct a body, render its own views, denoise, train a splat.
   Predates the export conventions the fast_helical files use — see the
   STATUS note in the file.
-params:
+#
+# **Reading this file.** `globals:` holds only what more than one step has to
+# agree on; everything else lives under the step that consumes it, as an
+# override on the default that step's own class declares (pipeline/step.py's
+# `Step.PARAMS`). The brush settings that used to sit up here as
+# `brush_sh_degree` and friends are gone rather than moved: steps/brush.py's
+# declared defaults ARE those values (they came from nodes/brush_node.py the
+# same way), so the one training below only has to say what is specific to
+# it. `python -m pipeline.cli params fast_helical_native` prints the
+# effective value of every param, defaults included.
+globals:
   # [720, 1280], the same portrait frame the helical files render and
   # denoise at (2026-08-25; this file inherited [512, 512] from an earlier
   # draft). It sets both the render size and wan22_vace_denoise's
@@ -85,20 +95,10 @@ params:
   diffusion_steps: 6
   cfg: 1.0
   seed: 0
-  # Defaults match nodes/brush_node.py's ComfyUI node defaults.
+  # The one brush setting kept flow-wide, matching the fast_helical files:
+  # it is the expensive one, at roughly an hour of GPU.
   brush_total_steps: 30000
-  brush_sh_degree: 3
-  brush_max_resolution: 1920
-  brush_max_splats: 10000000
-  brush_refine_every: 200
-  brush_normal_loss_strength: 0.05
-  brush_normal_loss_step_start: 5000
-  # How often the normal loss is actually evaluated, in training steps.
-  # 1 is brush's own default (every step); raising it skips the extra
-  # normal render on the steps in between, and brush scales the sampled
-  # loss by the same factor so the expected gradient does not change.
-  brush_normal_loss_every: 1
-  # Every path this workflow writes to disk hangs off this one param, and
+  # Every path this workflow writes to disk hangs off this one global, and
   # `pipeline.cli run` repoints it at the run's own directory under
   # B2C_OUTPUT_DIR (i.e. the mounted volume) unless you pass
   # `--param output_root=...`. The literal below is only what you get from
@@ -214,12 +214,9 @@ steps:
     params:
       pattern: circular
       n_frames: 81
-      width: ${params.resolution.0}
-      height: ${params.resolution.1}
-      render_mode: depth+skeleton
-      framing: full
+      width: ${globals.resolution.0}
+      height: ${globals.resolution.1}
       override_cam_from_mesh: true
-      fill_ratio: 0.8
       # Mid grey, not the step's default white. This does NOT change the
       # rendered background — `depth+skeleton`'s base layer is render_depth,
       # which takes no bg_color — it changes the ONE other thing render.py
@@ -284,12 +281,10 @@ steps:
       cameras: dataset.cameras
       anchor_position: dataset.extras.anchor_position
       anchor_image: dataset.anchor_image
-    params:
-      tolerance_pct: 0.1
-      # No `masks` input: the batch this writes is manufactured here, and
-      # it is wan22_vace_denoise's per-frame VACE mask — 1.0 "synthetic,
-      # denoise it" for the renders, 0.0 "a real photo, keep it" at the
-      # injected anchor. See steps/anchor_stub.py.
+    # No `masks` input: the batch this writes is manufactured by the step,
+    # and it is wan22_vace_denoise's per-frame VACE mask — 1.0 "synthetic,
+    # denoise it" for the renders, 0.0 "a real photo, keep it" at the
+    # injected anchor. See steps/anchor_stub.py.
     outputs:
       images: dataset.images
       masks: dataset.masks
@@ -306,14 +301,14 @@ steps:
       reference_image: dataset.reference_image
       subject_desc: dataset.prompt
     params:
-      width: ${params.resolution.0}
-      height: ${params.resolution.1}
-      steps: ${params.diffusion_steps}
-      cfg: ${params.cfg}
-      seed: ${params.seed}
+      width: ${globals.resolution.0}
+      height: ${globals.resolution.1}
+      steps: ${globals.diffusion_steps}
+      cfg: ${globals.cfg}
+      seed: ${globals.seed}
       strength: 1.0
-      prompt: ${params.denoise_prompt}
-      negative_prompt: ${params.denoise_negative_prompt}
+      prompt: ${globals.denoise_prompt}
+      negative_prompt: ${globals.denoise_negative_prompt}
     outputs:
       images: dataset.images
 
@@ -360,20 +355,11 @@ steps:
       masks: dataset.masks
       normal_maps: scene.normal_maps
     params:
-      brush_path: brush
-      total_steps: ${params.brush_total_steps}
-      sh_degree: ${params.brush_sh_degree}
-      max_resolution: ${params.brush_max_resolution}
-      max_splats: ${params.brush_max_splats}
-      refine_every: ${params.brush_refine_every}
+      total_steps: ${globals.brush_total_steps}
       # Without this brush exports into tempfile.gettempdir() (see
       # steps/brush.py) — the trained .ply then only survives because
       # Dataset.to_disk copies it at the very end.
-      output_dir: ${params.output_root}
-      alpha_mode: transparent
-      normal_loss_strength: ${params.brush_normal_loss_strength}
-      normal_loss_step_start: ${params.brush_normal_loss_step_start}
-      normal_loss_every: ${params.brush_normal_loss_every}
+      output_dir: ${globals.output_root}
     outputs:
       splat_path: dataset.splat_path
 
@@ -383,4 +369,4 @@ steps:
     inputs:
       dataset: dataset
     params:
-      directory: ${params.output_root}/checkpoint
+      directory: ${globals.output_root}/checkpoint

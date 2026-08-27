@@ -14,7 +14,7 @@ import cv2
 import numpy as np
 
 from pipeline.registry import get_step_class
-from tests.helpers import require_stage
+from tests.helpers import require_stage, run_step
 
 import pipeline.steps  # noqa: F401
 
@@ -32,8 +32,7 @@ def _panel(value: int, height: int = 64, width: int = 32) -> np.ndarray:
 
 
 def _run(sheet, **params):
-    step = get_step_class("split_reference_sheet")()
-    return step.run({"sheet": sheet}, params)
+    return run_step("split_reference_sheet", {"sheet": sheet}, params)
 
 
 class TestSplitReferenceSheet(unittest.TestCase):

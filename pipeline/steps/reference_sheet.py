@@ -41,7 +41,7 @@ from typing import Any, Dict
 import numpy as np
 
 from ..registry import register_step
-from ..step import Step
+from ..step import Param, Step
 
 logger = logging.getLogger(__name__)
 
@@ -51,14 +51,17 @@ class SplitReferenceSheetStep(Step):
     """Halve a front/back sheet down the middle.
 
     inputs: {"sheet": np.ndarray HxWx3 BGR uint8 — the generated sheet}
-    params: {"front_side": "left" (default) or "right" — which half holds
-             the front view}
     outputs: {"front": np.ndarray, "back": np.ndarray}
 
     A sheet is always at least as wide as it is tall (two portrait panels
     side by side), so a portrait input is a single photo handed in by
     mistake — that raises rather than quietly cutting a person in half.
     """
+
+    PARAMS = (
+        Param("front_side", str, "left", "Which half of the sheet holds the front view",
+              choices=("left", "right")),
+    )
 
     def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
         sheet = np.asarray(inputs["sheet"])
@@ -73,7 +76,7 @@ class SplitReferenceSheetStep(Step):
                 f"this one would cut a single subject down the middle."
             )
 
-        front_side = params.get("front_side", "left")
+        front_side = params["front_side"]
         if front_side not in ("left", "right"):
             raise ValueError(
                 f"split_reference_sheet: front_side must be 'left' or 'right', "

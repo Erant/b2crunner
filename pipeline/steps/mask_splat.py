@@ -61,7 +61,7 @@ import numpy as np
 from ..dataset import Dataset
 from ..masks import normalize_mask
 from ..registry import register_step
-from ..step import Step
+from ..step import Param, Step
 
 logger = logging.getLogger(__name__)
 
@@ -72,13 +72,6 @@ class MaskSplatStep(Step):
 
     inputs:  {"dataset": Dataset} — images plus the splat render's alpha
              as dataset.masks (foreground = 1)
-    params:  filter_size (int, default 6) — bilateral filter diameter,
-             `filter_size` in the pipeline YAMLs;
-             dilation (int, default 2) — `dilation` in the pipeline YAMLs;
-             threshold (int 1-255, default 16) — opacity cutoff, in the
-             inverted ComfyUI sense (see module docstring);
-             sigma_color (float, default 0.5, in [0,1] image units),
-             sigma_space (float, default 100.0)
     outputs: {"dataset": Dataset} — masked/filtered images, and masks set
              uniformly to 1.0, i.e. VACE "denoise every one of these
              frames" (the next pass must not treat the blacked-out region
@@ -100,14 +93,30 @@ class MaskSplatStep(Step):
     dilation=0 is a valid no-dilate case and is handled.
     """
 
+    # threshold/sigma_* are advanced because they are not free choices: they
+    # were fitted against the recorded ComfyUI run this step reproduces (see
+    # the module docstring), and moving them breaks that agreement.
+    PARAMS = (
+        Param("filter_size", int, 6, "Bilateral filter diameter", minimum=0),
+        Param("dilation", int, 2, "Grow the kept region back out by this many pixels; "
+              "0 is a valid no-dilate case", minimum=0),
+        Param("threshold", int, 16,
+              "Opacity cutoff in the inverted ComfyUI sense: a pixel survives at "
+              "alpha >= 1 - threshold/255, so 16 means essentially opaque",
+              minimum=1, maximum=255, advanced=True),
+        Param("sigma_color", float, 0.5, "Bilateral filter colour sigma, in [0,1] image units",
+              advanced=True),
+        Param("sigma_space", float, 100.0, "Bilateral filter spatial sigma", advanced=True),
+    )
+
     def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
         dataset: Dataset = inputs["dataset"]
 
-        filter_size = int(params.get("filter_size", 6))
-        dilation = int(params.get("dilation", 2))
-        threshold = int(params.get("threshold", 16))
-        sigma_color = float(params.get("sigma_color", 0.5))
-        sigma_space = float(params.get("sigma_space", 100.0))
+        filter_size = params["filter_size"]
+        dilation = params["dilation"]
+        threshold = params["threshold"]
+        sigma_color = params["sigma_color"]
+        sigma_space = params["sigma_space"]
 
         if dataset.masks is None:
             raise ValueError(

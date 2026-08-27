@@ -25,7 +25,7 @@ from pathlib import Path
 
 from pipeline.dataset import Dataset
 from pipeline.registry import get_step_class
-from tests.helpers import require_stage
+from tests.helpers import require_stage, run_step
 
 import pipeline.steps  # noqa: F401
 
@@ -48,7 +48,7 @@ class TestColmapExportGolden(unittest.TestCase):
         cls.soft_ds = Dataset.from_disk(require_stage("splatted"))
         cls.tmp = tempfile.TemporaryDirectory()
         cls.out = Path(cls.tmp.name)
-        get_step_class("colmap_export")().run(
+        run_step("colmap_export", 
             {
                 "cameras": cls.ds.cameras,
                 "image_names": cls.ds.image_names,
@@ -97,7 +97,7 @@ class TestColmapExportGolden(unittest.TestCase):
 
     def test_writes_frames_when_images_supplied(self):
         with tempfile.TemporaryDirectory() as tmp:
-            get_step_class("colmap_export")().run(
+            run_step("colmap_export", 
                 {
                     "cameras": self.masked_ds.cameras[:3],
                     "image_names": self.masked_ds.image_names[:3],
@@ -118,7 +118,7 @@ class TestColmapExportGolden(unittest.TestCase):
 
         frames = 2
         with tempfile.TemporaryDirectory() as tmp:
-            get_step_class("colmap_export")().run(
+            run_step("colmap_export", 
                 {
                     "cameras": self.masked_ds.cameras[:frames],
                     "image_names": self.masked_ds.image_names[:frames],
@@ -150,7 +150,7 @@ class TestColmapExportGolden(unittest.TestCase):
     def test_an_unknown_layout_is_refused(self):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaises(ValueError):
-                get_step_class("colmap_export")().run(
+                run_step("colmap_export", 
                     {
                         "cameras": self.ds.cameras[:1],
                         "image_names": self.ds.image_names[:1],
@@ -167,7 +167,7 @@ class TestColmapExportGolden(unittest.TestCase):
         import numpy as np
 
         with tempfile.TemporaryDirectory() as tmp:
-            get_step_class("colmap_export")().run(
+            run_step("colmap_export", 
                 {
                     "cameras": self.soft_ds.cameras[:1],
                     "image_names": self.soft_ds.image_names[:1],

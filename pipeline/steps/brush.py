@@ -62,7 +62,7 @@ import numpy as np
 from ..masks import mask_to_alpha_u8
 from ..proc import ProcessFailed, stream_command
 from ..registry import register_step
-from ..step import Step
+from ..step import Param, Step
 
 logger = logging.getLogger(__name__)
 
@@ -76,12 +76,6 @@ class BrushStep(Step):
              "images": List[np.ndarray] BGR(A),
              "masks": Optional[List[np.ndarray]] float32 [0,1], foreground=1,
              "normal_maps": Optional[List[np.ndarray]] HxWx3 float32 [-1,1]}
-    params: {"brush_path": str, "total_steps": int, "sh_degree": int,
-             "max_resolution": int, "max_splats": int, "refine_every": int,
-             "alpha_mode": str, "normal_loss_strength": float,
-             "normal_loss_step_start": int, "normal_loss_every": int,
-             "with_viewer": bool, "output_dir": str, "export_dir": str,
-             "export_name": str}
     outputs: {"splat_path": str}
 
     `output_dir` puts the run under `<output_dir>/brush/training_<ms>/`,
@@ -93,6 +87,39 @@ class BrushStep(Step):
     be `ply/scene.ply` and not `brush/training_1756042129481/export.ply`.
     Set one or the other; `export_dir` wins if both are given.
     """
+
+    PARAMS = (
+        Param("total_steps", int, 30000, "Training iterations", minimum=1),
+        Param("sh_degree", int, 3, "Spherical-harmonic degree", minimum=0, maximum=4),
+        Param("max_resolution", int, 1920, "Longest edge brush trains at", minimum=1),
+        Param("max_splats", int, 10_000_000, "Cap on the number of Gaussians", minimum=1),
+        Param("refine_every", int, 200, "Densify/prune interval, in steps", minimum=1),
+        Param("alpha_mode", str, "transparent",
+              "How brush reads the frames' alpha channel", choices=("transparent", "ignore")),
+        Param("normal_loss_strength", float, 0.05,
+              "Weight on the normal-map supervision loss; 0 disables it", minimum=0.0),
+        Param("normal_loss_step_start", int, 5000,
+              "Step at which normal supervision switches on", minimum=0),
+        Param("normal_loss_every", int, 1,
+              "Evaluate the normal loss every Nth step instead of every step. brush "
+              "scales the sampled loss by N, so the expected gradient is unchanged "
+              "and only the extra normal render in between is skipped; 1 is brush's "
+              "own default", minimum=1),
+        Param("output_dir", str, None,
+              "Puts this training under <output_dir>/brush/training_<ms>/ — what an "
+              "intermediate training wants. Empty falls back to the system temp dir, "
+              "where the .ply only survives because Dataset.to_disk copies it at the "
+              "end of the run"),
+        Param("export_dir", str, None,
+              "Export straight into this directory instead, for a training whose .ply "
+              "is a deliverable and needs a predictable path. Wins over output_dir"),
+        Param("export_name", str, "export.ply", "Filename of the exported .ply"),
+        Param("brush_path", str, "brush",
+              "The brush binary, on PATH or as an absolute path", advanced=True),
+        Param("with_viewer", bool, False,
+              "Let brush open its interactive viewer window; needs a display",
+              advanced=True),
+    )
 
     def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
         from body2colmap.exporter import ColmapExporter
@@ -112,30 +139,25 @@ class BrushStep(Step):
                 f"({len(images)}). Every training view needs a matching normal map."
             )
 
-        brush_path = params.get("brush_path", "brush")
-        total_steps = int(params.get("total_steps", 30000))
-        sh_degree = int(params.get("sh_degree", 3))
-        max_resolution = int(params.get("max_resolution", 1920))
-        max_splats = int(params.get("max_splats", 10_000_000))
-        refine_every = int(params.get("refine_every", 200))
-        alpha_mode = params.get("alpha_mode", "transparent")
-        normal_loss_strength = float(params.get("normal_loss_strength", 0.05))
-        normal_loss_step_start = int(params.get("normal_loss_step_start", 5000))
-        # Evaluate the normal loss every Nth step instead of every step; brush
-        # multiplies the sampled loss by N, so the expected gradient is
-        # unchanged and only the extra normal render and its autodiff graph are
-        # skipped in between. 1 is brush's own default and means every step,
-        # i.e. the behaviour this step had before the flag existed.
-        normal_loss_every = int(params.get("normal_loss_every", 1))
-        with_viewer = bool(params.get("with_viewer", False))
+        brush_path = params["brush_path"]
+        total_steps = params["total_steps"]
+        sh_degree = params["sh_degree"]
+        max_resolution = params["max_resolution"]
+        max_splats = params["max_splats"]
+        refine_every = params["refine_every"]
+        alpha_mode = params["alpha_mode"]
+        normal_loss_strength = params["normal_loss_strength"]
+        normal_loss_step_start = params["normal_loss_step_start"]
+        normal_loss_every = params["normal_loss_every"]
+        with_viewer = params["with_viewer"]
 
-        export_dir = params.get("export_dir")
+        export_dir = params["export_dir"]
         if export_dir:
             out_root = Path(export_dir)
         else:
             timestamp = int(time.time() * 1000)
             out_root = (
-                Path(params.get("output_dir", tempfile.gettempdir()))
+                Path(params["output_dir"] or tempfile.gettempdir())
                 / "brush" / f"training_{timestamp}"
             )
         out_root.mkdir(parents=True, exist_ok=True)
@@ -189,7 +211,7 @@ class BrushStep(Step):
                     normal_path = normals_dir / Path(filename).with_suffix(".png").name
                     cv2.imwrite(str(normal_path), out)
 
-            ply_output_name = params.get("export_name", "export.ply")
+            ply_output_name = params["export_name"]
             ply_path = out_root / ply_output_name
             cmd = [
                 brush_path,

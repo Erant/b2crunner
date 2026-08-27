@@ -32,6 +32,7 @@ from __future__ import annotations
 import os
 import unittest
 from pathlib import Path
+from typing import Any, Dict, Optional
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CYBER_6F = REPO_ROOT / "cyber_6f"
@@ -66,3 +67,18 @@ def require_stage2(*names: str) -> Path | tuple[Path, ...]:
             raise unittest.SkipTest(f"reference data missing: {p}")
         paths.append(p)
     return paths[0] if len(paths) == 1 else tuple(paths)
+
+
+def run_step(name: str, inputs: Dict[str, Any], params: Optional[Dict[str, Any]] = None):
+    """Build a registered step and run it the way the runner would.
+
+    The `resolve_params` call is the part that matters: a Step's `run()`
+    reads `params["x"]` and relies on the caller having merged in the
+    defaults its class declares (pipeline/step.py). WorkflowRunner does
+    that before dispatch; a test calling a step directly has to do the
+    same, or it is exercising a code path the pipeline never takes.
+    """
+    from pipeline.registry import get_step_class
+
+    step_class = get_step_class(name)
+    return step_class().run(inputs, step_class.resolve_params(params or {}))

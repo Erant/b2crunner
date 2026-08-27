@@ -169,8 +169,8 @@ class TestRequiredForSteps(unittest.TestCase):
         """The prefetch reads enabled_steps(), so switching an output off
         also drops whatever only that output needed."""
         spec = WorkflowSpec.from_yaml(resolve_workflow("fast_helical_full"))
-        spec.params["export_colmap"] = False
-        spec.params["export_ply"] = False
+        spec.globals["export_colmap"] = False
+        spec.globals["export_ply"] = False
         # export_normals is the last sapiens2 use outside stage 2, so this
         # only proves the plumbing; the assertion that matters is that the
         # skipped steps are gone from what gets scanned at all.

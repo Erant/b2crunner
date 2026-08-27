@@ -58,23 +58,89 @@ def available_workflows() -> List[Path]:
     return sorted(WORKFLOW_DIR.glob("*.yaml"))
 
 
-def parse_param_overrides(pairs: Optional[List[str]]) -> Dict[str, Any]:
-    """`--param seed=7 --param resolution=[720,1280]` -> a dict.
+def parse_param_overrides(
+    pairs: Optional[List[str]],
+) -> tuple[Dict[str, Any], Dict[str, Dict[str, Any]]]:
+    """Split `--param` values into the two namespaces they can target.
+
+        --param seed=7                        -> a workflow global
+        --param train_final_splat.total_steps=100  -> one step's override
+
+    Returns (globals, {step_id: {param: value}}). A bare name is a global
+    because that is what a caller normally reaches for; the dotted form is
+    how the same param on two calls of one step (fast_helical_full's two
+    brush trainings) is told apart.
 
     Values go through yaml.safe_load so numbers, lists and booleans arrive
     as themselves rather than as strings — a workflow that does
-    `width: ${params.resolution.0}` needs a real list, not "[720,1280]".
+    `width: ${globals.resolution.0}` needs a real list, not "[720,1280]".
     """
-    overrides: Dict[str, Any] = {}
+    global_overrides: Dict[str, Any] = {}
+    step_overrides: Dict[str, Dict[str, Any]] = {}
     for pair in pairs or []:
         if "=" not in pair:
             raise SystemExit(f"--param expects key=value, got {pair!r}")
         key, _, raw = pair.partition("=")
+        key = key.strip()
         try:
-            overrides[key.strip()] = yaml.safe_load(raw)
+            value = yaml.safe_load(raw)
         except yaml.YAMLError as exc:
             raise SystemExit(f"--param {key}: could not parse value {raw!r}: {exc}") from None
-    return overrides
+        if "." in key:
+            step_id, _, name = key.partition(".")
+            step_overrides.setdefault(step_id, {})[name] = value
+        else:
+            global_overrides[key] = value
+    return global_overrides, step_overrides
+
+
+def apply_param_overrides(
+    spec: WorkflowSpec,
+    global_overrides: Dict[str, Any],
+    step_overrides: Dict[str, Dict[str, Any]],
+) -> None:
+    """Apply parsed `--param` values to `spec`, refusing anything unknown.
+
+    A typo'd override that silently does nothing is worse than a refusal:
+    the run completes, at the wrong settings, and looks like it honoured
+    you. So an unknown global, an unknown step id, and a param a step does
+    not declare are all fatal, each naming what would have been valid.
+    """
+    from .registry import get_step_class
+
+    unknown = sorted(set(global_overrides) - set(spec.globals))
+    if unknown:
+        raise SystemExit(
+            f"--param names not declared by workflow '{spec.name}': {', '.join(unknown)}. "
+            f"Its globals are: {', '.join(sorted(spec.globals))}. "
+            f"For a step's own param, write it as <step_id>.<param>."
+        )
+    for key, value in global_overrides.items():
+        logger.info("param override: %s = %r (was %r)", key, value, spec.globals[key])
+    spec.globals.update(global_overrides)
+
+    by_id = {step.id: step for step in spec.steps}
+    for step_id, values in step_overrides.items():
+        step = by_id.get(step_id)
+        if step is None:
+            raise SystemExit(
+                f"--param {step_id}.*: workflow '{spec.name}' has no step '{step_id}'. "
+                f"Its steps are: {', '.join(by_id)}"
+            )
+        declared = get_step_class(step.step).declared_params()
+        bad = sorted(set(values) - set(declared))
+        if bad:
+            raise SystemExit(
+                f"--param {step_id}.*: step '{step.step}' does not declare "
+                f"{', '.join(bad)}. It accepts: {', '.join(declared)}"
+            )
+        for name, value in values.items():
+            logger.info(
+                "param override: %s.%s = %r (was %r)",
+                step_id, name, value,
+                step.params.get(name, declared[name].default),
+            )
+        step.params.update(values)
 
 
 def run_workflow(args: argparse.Namespace) -> int:
@@ -94,20 +160,8 @@ def run_workflow(args: argparse.Namespace) -> int:
     logger.info("temp dir: %s", tmp)
     log_machine_banner()
 
-    overrides = parse_param_overrides(args.param)
-    if overrides:
-        unknown = sorted(set(overrides) - set(spec.params))
-        if unknown:
-            # A typo'd override that silently does nothing is worse than a
-            # refusal: the run completes, at the wrong settings, and looks
-            # like it honoured you.
-            raise SystemExit(
-                f"--param names not declared by workflow '{spec.name}': {', '.join(unknown)}. "
-                f"It declares: {', '.join(sorted(spec.params))}"
-            )
-        for key, value in overrides.items():
-            logger.info("param override: %s = %r (was %r)", key, value, spec.params[key])
-        spec.params.update(overrides)
+    global_overrides, step_overrides = parse_param_overrides(args.param)
+    apply_param_overrides(spec, global_overrides, step_overrides)
 
     envs = load_envs(args.envs)
     logger.info("envs registry: %s (%s)", args.envs, ", ".join(sorted(envs)) or "empty")
@@ -153,8 +207,8 @@ def run_workflow(args: argparse.Namespace) -> int:
     # The literal in the YAML is a relative path, which on a pod resolves
     # into the container's writable layer rather than the mounted volume —
     # a few GB of splat written somewhere small and impermanent.
-    if "output_root" in spec.params and "output_root" not in overrides:
-        spec.params["output_root"] = str(out)
+    if "output_root" in spec.globals and "output_root" not in global_overrides:
+        spec.globals["output_root"] = str(out)
         logger.info("output_root: %s", out)
 
     runner = WorkflowRunner(spec, envs=envs)
@@ -222,6 +276,54 @@ def list_workflows(args: argparse.Namespace) -> int:
     return 0
 
 
+def show_params(args: argparse.Namespace) -> int:
+    """Print the two namespaces a run actually resolves.
+
+    The whole point of the split is that a step's params are no longer all
+    visible in the workflow file — most of them come from the step class.
+    This is where you see what a run will really use, and it is the fastest
+    check that a `--param` name exists before spending an hour on a pod.
+    """
+    from . import steps  # noqa: F401  registers every Step
+    from .registry import get_step_class
+    from .templating import resolve
+
+    spec = WorkflowSpec.from_yaml(resolve_workflow(args.workflow))
+    spec.validate()
+
+    print(f"{spec.name}\n")
+    print("globals:")
+    for key, value in spec.globals.items():
+        print(f"  {key:<28} {_short(value)}")
+
+    scope = {"globals": spec.globals}
+    for step in spec.steps:
+        declared = get_step_class(step.step).declared_params()
+        overrides = resolve(step.params, scope)
+        rows = []
+        for name, param in declared.items():
+            overridden = name in overrides
+            if not overridden and not args.all:
+                continue
+            value = overrides[name] if overridden else param.default
+            mark = "*" if overridden else " "
+            flag = " (advanced)" if param.advanced else ""
+            rows.append(f"  {mark} {name:<26} {_short(value)}{flag}")
+        print(f"\n{step.id}  ({step.step})")
+        if rows:
+            print("\n".join(rows))
+        else:
+            print("    everything at the step's defaults")
+    if not args.all:
+        print("\n* = set by the workflow. Pass --all to see the step defaults too.")
+    return 0
+
+
+def _short(value: Any, limit: int = 60) -> str:
+    text = repr(value)
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
 def launch_ui(args: argparse.Namespace) -> int:
     from .webui import launch
 
@@ -260,7 +362,9 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--run-name", default=None, help="Names the log file and default --out")
     run_p.add_argument(
         "--param", action="append", metavar="KEY=VALUE",
-        help="Override one of the workflow's params; repeatable",
+        help="Override a workflow global (seed=7) or one step's own param "
+             "(train_final_splat.total_steps=100); repeatable. "
+             "`pipeline.cli params <workflow>` lists both",
     )
     run_p.add_argument(
         "--no-wait-for-models", action="store_true",
@@ -303,6 +407,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     workflows_p = sub.add_parser("workflows", help="List available workflows")
     workflows_p.set_defaults(func=list_workflows)
+
+    params_p = sub.add_parser(
+        "params", help="Show a workflow's globals and every step's effective params"
+    )
+    params_p.add_argument("workflow", help="Workflow YAML path, or a name from pipeline/workflows/")
+    params_p.add_argument(
+        "--all", action="store_true",
+        help="Include params sitting at their step's default, not just the overridden ones",
+    )
+    params_p.set_defaults(func=show_params)
 
     ui_p = sub.add_parser("ui", help="Launch the web UI")
     ui_p.add_argument("--host", default="0.0.0.0")

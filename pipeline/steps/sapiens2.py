@@ -49,7 +49,7 @@ import cv2
 import numpy as np
 
 from ..registry import register_step
-from ..step import Step
+from ..step import Param, Step
 
 DEFAULT_CHECKPOINT = "facebook/sapiens2-normal-0.8b"
 
@@ -59,10 +59,21 @@ class Sapiens2LiteStep(Step):
     """Sapiens2 normal-map estimation.
 
     inputs: {"image": np.ndarray BGR} or {"images": List[np.ndarray] BGR}
-    params: {"checkpoint": str, "device": str, "batch_size": int}
     outputs: {"normal_map": np.ndarray HxWx3 float32 in [-1,1]}
              or {"normal_maps": List[np.ndarray]} for the batched path
     """
+
+    PARAMS = (
+        Param("batch_size", int, 8,
+              "Images per forward pass. Worth lowering at upscaled resolution: "
+              "1080x1920 float32 normal maps are ~2 GB of host RAM for 81 frames",
+              minimum=1),
+        Param("checkpoint", str, DEFAULT_CHECKPOINT,
+              "HF repo for the normal-estimation model; the family is 0.3b/0.6b/1b/2b",
+              advanced=True),
+        Param("device", str, None, "Torch device; empty means cuda if available",
+              advanced=True),
+    )
 
     def __init__(self) -> None:
         self._model = None
@@ -73,8 +84,8 @@ class Sapiens2LiteStep(Step):
         import torch
         from transformers import AutoImageProcessor, AutoModelForNormalEstimation
 
-        checkpoint = params.get("checkpoint", DEFAULT_CHECKPOINT)
-        self._device = params.get("device") or ("cuda" if torch.cuda.is_available() else "cpu")
+        checkpoint = params["checkpoint"]
+        self._device = params["device"] or ("cuda" if torch.cuda.is_available() else "cpu")
         self._processor = AutoImageProcessor.from_pretrained(checkpoint)
         self._model = AutoModelForNormalEstimation.from_pretrained(checkpoint).to(self._device)
         self._model.eval()
@@ -92,7 +103,7 @@ class Sapiens2LiteStep(Step):
             self.load(params)
 
         if "images" in inputs:
-            batch_size = int(params.get("batch_size", 8))
+            batch_size = params["batch_size"]
             images = inputs["images"]
             normals = []
             for i in range(0, len(images), batch_size):

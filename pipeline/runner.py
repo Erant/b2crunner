@@ -21,6 +21,7 @@ from typing import Any, Callable, Dict, Optional
 
 from .context import Context
 from .dispatch import Dispatcher, build_dispatcher
+from .registry import get_step_class
 from .templating import resolve
 from .workflow import StepSpec, WorkflowSpec, step_enabled
 
@@ -115,14 +116,16 @@ class WorkflowRunner:
 
     def run(self, initial_context: Dict[str, Any]) -> Context:
         ctx = Context(initial_context)
-        template_scope = {"params": self.spec.params}
+        template_scope = {"globals": self.spec.globals}
         total = len(self.spec.steps)
         started = time.time()
 
-        # Resolved once, up front: a `when:` naming a param that doesn't
-        # exist should stop the run here, not forty minutes in when the
-        # step it guards is finally reached.
-        enabled = [step_enabled(step_spec, self.spec.params) for step_spec in self.spec.steps]
+        # Both checked once, up front, for the same reason: a `when:` naming
+        # a global that doesn't exist, or a step override naming a param the
+        # step doesn't declare, should stop the run here — not forty minutes
+        # in when the step it belongs to is finally reached.
+        self.spec.validate()
+        enabled = [step_enabled(step_spec, self.spec.globals) for step_spec in self.spec.steps]
 
         logger.info("=" * 72)
         logger.info(
@@ -235,7 +238,14 @@ class WorkflowRunner:
                     f"Context currently holds: {sorted(ctx.as_dict())}"
                 ) from exc
 
-        params = resolve(step_spec.params, template_scope)
+        # Two stages, in this order: expand `${globals.x}` in whatever the
+        # workflow overrode, then merge that onto the step's own declared
+        # defaults. The merged dict is what crosses the dispatcher boundary,
+        # so every dispatch mode and both worker modes see a complete param
+        # set — including `worker.load_signature`, which now compares real
+        # defaults instead of None for anything the workflow left out.
+        overrides = resolve(step_spec.params, template_scope)
+        params = get_step_class(step_spec.step).resolve_params(overrides)
         outputs = dispatcher.run(step_spec.step, inputs, params)
 
         for name, path in step_spec.outputs.items():

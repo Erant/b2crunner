@@ -158,15 +158,22 @@ class TestOutputSelection(unittest.TestCase):
                 empty = len(value) == 0 if field != "points_3d" else len(value[0]) == 0
                 self.assertTrue(empty, f"{field} is no longer empty on a photo-seeded Dataset")
 
-    def test_the_switches_are_not_also_editable_in_the_params_box(self):
+    def test_the_switches_are_not_also_editable_in_the_params_panel(self):
         """Two editable homes for one setting disagree the moment someone
         touches either."""
-        import yaml
+        globals_shown, _steps = webui.workflow_param_panel("fast_helical_full")
+        self.assertNotIn("export_colmap", globals_shown)
+        self.assertNotIn("export_ply", globals_shown)
+        self.assertIn("seed", globals_shown)
 
-        params = yaml.safe_load(webui.workflow_params_yaml("fast_helical_full"))
-        self.assertNotIn("export_colmap", params)
-        self.assertNotIn("export_ply", params)
-        self.assertIn("seed", params)
+    def test_output_root_is_not_drawn_either(self):
+        """Sharper than the switches: `RunManager.start` only repoints
+        output_root at the run directory when the submitted overrides do not
+        already carry it. A control for it would let a run write under the
+        process's cwd instead, which is how the Results tab once reported
+        "the run produced neither" for a run that had completed fine."""
+        globals_shown, _steps = webui.workflow_param_panel("fast_helical_full")
+        self.assertNotIn("output_root", globals_shown)
 
 
 if __name__ == "__main__":

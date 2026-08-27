@@ -241,18 +241,17 @@ class TestTheBf16PathIsGone(unittest.TestCase):
         return names
 
     def _params_read(self):
-        """Every `params.get("x")` the step consults — its param surface."""
-        found = set()
-        for node in ast.walk(self.tree):
-            if (isinstance(node, ast.Call)
-                    and isinstance(node.func, ast.Attribute)
-                    and node.func.attr == "get"
-                    and isinstance(node.func.value, ast.Name)
-                    and node.func.value.id == "params"
-                    and node.args
-                    and isinstance(node.args[0], ast.Constant)):
-                found.add(node.args[0].value)
-        return found
+        """The step's param surface, off its own declaration.
+
+        This used to walk the AST for `params.get("x")` calls, which was the
+        only record of what the step accepted. It declares them now
+        (pipeline/step.py's Param), so the surface can be asked for
+        directly — and unlike the AST walk, this cannot miss one that is
+        read through a variable.
+        """
+        from pipeline.steps.wan22_vace_denoise import Wan22VaceDenoiseStep
+
+        return set(Wan22VaceDenoiseStep.declared_params())
 
     def test_nothing_fuses_or_quantizes_at_load_time(self):
         called = self._called_names()

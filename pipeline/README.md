@@ -37,10 +37,13 @@ project owner:
    service, or inside a Docker container. Swapping a step's execution
    mechanism is a one-line YAML edit, not a code change.
 2. **Research-project flexibility** — workflows are human-edited YAML, not
-   code. Parameters (resolution, diffusion steps, cfg, seed, ...) are
-   declared at the workflow level and templated (`${params.x}`) into
-   individual step configs, so trying a new resolution or step count doesn't
-   require touching Python.
+   code. Parameters live in two namespaces: a `globals:` block for what the
+   whole flow has to agree on (resolution, seed, prompts, output root),
+   templated into steps as `${globals.x}`, and a per-step block that
+   overrides the defaults the Step class itself declares. Trying a new
+   resolution or step count doesn't require touching Python, and two calls
+   of the same step can be configured apart because a step's params are
+   namespaced under its `id:`.
 3. **In-memory by default** — datasets pass between steps as plain Python
    objects in a shared `Context`. Nothing touches disk unless a workflow
    explicitly includes a `save_dataset` step. This is a deliberate reversal
@@ -60,11 +63,12 @@ pipeline/
 │                      match the on-disk layout ComfyUI's Save/Load Dataset
 │                      nodes already use (metadata.json, pointcloud.npz,
 │                      frame_NNNNN_.png, reference.png, anchor.png, prompt.txt)
-├── step.py            Step ABC: run(inputs, params) -> outputs, plus
+├── step.py            Step ABC: run(inputs, params) -> outputs, the Param
+│                       declaration and the defaults merge, plus
 │                      optional load()/unload() lifecycle hooks
 ├── registry.py         @register_step("name") / get_step_class("name")
 ├── context.py          Context: dotted-path get/set over a dict of objects
-├── templating.py       "${a.b.c}" resolution against a workflow's params
+├── templating.py       "${a.b.c}" resolution against a workflow's globals
 ├── workflow.py         StepSpec / WorkflowSpec — the YAML schema; load_envs()
 ├── runner.py           WorkflowRunner — walks a WorkflowSpec, resolves &
 │                      caches dispatchers, moves outputs back into Context
@@ -186,6 +190,37 @@ One unit of work. Subclass `Step`, implement `run(inputs, params)`, decorate
 with `@register_step("name")`, reference `"name"` from a workflow's `step:`
 field. A `Step` must not know or care which `Dispatcher` will call it.
 
+**A step declares the params it accepts**, as a `PARAMS` tuple of `Param`
+(`pipeline/step.py`):
+
+```python
+@register_step("mask_splat")
+class MaskSplatStep(Step):
+    PARAMS = (
+        Param("filter_size", int, 6, "Bilateral filter diameter", minimum=0),
+        Param("dilation", int, 2, "Grow the kept region back out", minimum=0),
+        Param("threshold", int, 16, "Opacity cutoff", minimum=1, maximum=255,
+              advanced=True),
+    )
+
+    def run(self, inputs, params):
+        filter_size = params["filter_size"]   # always present, already typed
+```
+
+That declaration is the single source of truth for the defaults.
+`WorkflowRunner` merges a workflow's overrides onto them and coerces the
+result (`Step.resolve_params`) before dispatch, so `run()` reads
+`params["x"]` with no fallback and every dispatcher sees a complete dict.
+`REQUIRED` as a default means the workflow must supply one; `None` means the
+step computes it at runtime (`device`, resolved to cuda-if-available inside
+`run()`). `advanced=True` folds a param away in the web UI — the rule is
+that a knob which exists because the underlying library has one, rather than
+because this pipeline tunes it, is advanced.
+
+`python -m pipeline.cli params <workflow>` prints the effective value of
+every param in a workflow, defaults included, which is the fastest way to
+see what a run will actually use.
+
 `load(params)` / `unload()` are optional hooks for steps that hold expensive
 state (GPU weights). They're only exercised by dispatchers that keep an
 instance alive across calls (`InProcessDispatcher(keep_loaded=True)`,
@@ -243,14 +278,14 @@ in-memory between steps; disk only enters the picture via a `save_dataset`/
 
 ```yaml
 name: fast_helical_full
-params:                      # workflow-level knobs, referenced via ${params.x}
-  resolution: [512, 512]
+globals:                     # flow-wide knobs, referenced via ${globals.x}
+  resolution: [720, 1280]
   diffusion_steps: 6
   cfg: 1.0
   seed: 0
 
 steps:
-  - id: denoise               # unique within the workflow, used in error messages
+  - id: denoise               # unique within the workflow; also the params namespace
     step: wan22_vace_denoise  # registered Step name (pipeline/registry.py)
     dispatch: subprocess       # in_process | subprocess | service | docker
     env: wan22                 # key into envs.yaml; ignored for in_process
@@ -259,14 +294,29 @@ steps:
       control_video: dataset.images
       control_masks: dataset.masks
       reference_image: dataset.reference_image
-    params:                      # step call params; may reference ${params.*}
-      width: ${params.resolution.0}
-      height: ${params.resolution.1}
-      steps: ${params.diffusion_steps}
+    params:                      # OVERRIDES on this step's declared defaults
+      width: ${globals.resolution.0}
+      height: ${globals.resolution.1}
+      steps: ${globals.diffusion_steps}
     outputs:                     # step's returned name -> dotted Context path (written after the call)
       images: dataset.images
-    when: ${params.export_ply}   # optional; skip this step when falsy
+    when: ${globals.export_ply}  # optional; skip this step when falsy
 ```
+
+**The two namespaces.** `globals:` is for what two or more steps must agree
+on, and it is the only scope `${...}` resolves against. Everything else
+belongs under the step that consumes it, where it overrides the default that
+step's class declares — so a param absent from the file is not unset, it is
+at its declared default. That split is what lets one workflow call the same
+step twice and configure the two calls apart: `fast_helical_full.yaml` trains
+`brush` twice (`train_splat`, `train_final_splat`) and denoises twice
+(`denoise_pass1`, `denoise_pass2`), which under the old single flat `params:`
+block meant hand-prefixed names like `brush_total_steps` and no way to tune
+the two trainings independently at all.
+
+A step override naming a param the step does not declare is refused when the
+workflow is validated (`WorkflowSpec.validate`, called by the runner before
+step one), not silently ignored.
 
 `when:` is what makes a workflow's tail optional. It resolves like any
 param value, and a falsy result skips the step entirely — its inputs are
@@ -276,7 +326,7 @@ that step needs. The runner still reports it, as `step_skipped` at its own
 index, so a step list built from the YAML lines up with the run.
 
 The case it exists for is the two deliverables both `fast_helical`
-workflows end with (`export_colmap` / `export_ply`): the .ply is a full
+workflows end with (the `export_colmap` / `export_ply` globals): the .ply is a full
 30,000-iteration brush training, and starting one you are going to discard
 is an hour of GPU. `false`, `no`, `off`, `0` and the empty string are all
 falsy as *strings* too — a `when:` usually resolves through a param
@@ -334,8 +384,9 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
 - `Dataset.to_disk()`/`from_disk()` — round-trips correctly, verified against
   a synthetic dataset in a throwaway venv.
 - Full `WorkflowRunner` execution path — dispatcher resolution/caching,
-  `${params.x}` templating (including list indices like
-  `${params.resolution.0}`), `Context` get/set, `save_dataset` writing a
+  `${globals.x}` templating (including list indices like
+  `${globals.resolution.0}`), the merge of a step's declared defaults with
+  the workflow's overrides, `Context` get/set, `save_dataset` writing a
   real checkpoint to disk.
 - `rmbg` — RMBG-2.0 background removal (`transformers`, in-process). Ran
   against `cyber_6f`'s reference image on an L40S pod, both single-image and
@@ -680,12 +731,18 @@ sequencing itself.
 1. Add a class to `pipeline/steps/` (new file or alongside related steps),
    subclass `Step`, implement `run()`. Defer heavy imports into
    `load()`/`run()`.
-2. `@register_step("your_name")` on the class.
-3. Import the new module from `pipeline/steps/__init__.py`.
-4. Reference `"your_name"` from a workflow YAML's `step:` field, pick
+2. Declare a `PARAMS` tuple of `Param` for everything `run()`/`load()` reads
+   out of `params`, with a default, a one-line `help=`, and `advanced=True`
+   for the knobs nobody tunes. Read them as `params["x"]` — the runner has
+   already merged the defaults in. `tests/test_step_params.py` checks that
+   every registered step declares its params.
+3. `@register_step("your_name")` on the class.
+4. Import the new module from `pipeline/steps/__init__.py`.
+5. Reference `"your_name"` from a workflow YAML's `step:` field, pick
    `dispatch:`, and if not `in_process`, add an `env:` entry to
-   `envs/envs.yaml` and build that venv/image out-of-band.
-5. If the step needs its own isolated venv, `uv pip install -e .` this
+   `envs/envs.yaml` and build that venv/image out-of-band. Only the params
+   that differ from your defaults need to appear there.
+6. If the step needs its own isolated venv, `uv pip install -e .` this
    `pipeline` package into it so `python -m pipeline.worker` is importable
    there.
 

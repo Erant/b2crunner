@@ -67,7 +67,7 @@ from typing import Any, Dict, Tuple
 import numpy as np
 
 from ..registry import register_step
-from ..step import Step
+from ..step import REQUIRED, Param, Step
 
 # Must run before pyrender is ever imported anywhere in this process —
 # pyrender/OpenGL check PYOPENGL_PLATFORM at import time, not render time.
@@ -100,24 +100,8 @@ class RenderStep(Step):
              "face_landmarks": Optional[dict] — steps/face_landmarks.py's
              output, drawn on the skeleton render modes}
 
-    params: pattern ("circular" | "sinusoidal" | "helical"), n_frames,
-        width, height, render_mode ("mesh" | "depth" | "skeleton" |
-        "mesh+skeleton" | "depth+skeleton"), framing ("full" | "torso" |
-        "bust" | "head"), override_cam_from_mesh (bool — anchors one frame
-        exactly at the original SAM-3D-Body camera; circular or helical
-        pattern only), plus pattern-specific params (elevation_deg /
-        overlap for circular; amplitude_deg/n_cycles for sinusoidal;
-        n_loops/amplitude_deg/lead_in_deg/lead_out_deg for helical) and
-        rendering params (mesh_color, bg_color, skeleton_format,
-        joint_radius, bone_radius, depth_colormap, focal_length_mm,
-        fill_ratio, radius, pointcloud_samples, initial_rotation,
-        face_mode ("full" = points + connectivity lines | "points" |
-        "none"; only meaningful with a face_landmarks input) and
-        face_max_angle (degrees between the face normal and the camera
-        beyond which the overlay is skipped — 90 = full hemisphere,
-        45 = near-frontal only)). See
-        body2colmap.path.OrbitPath / body2colmap.renderer.Renderer for the
-        exact semantics of each — this step is a thin pass-through.
+    See body2colmap.path.OrbitPath / body2colmap.renderer.Renderer for the
+    exact semantics of each param below — this step is a thin pass-through.
 
     outputs: {"images": List[np.ndarray] (BGR uint8), "masks":
              List[np.ndarray] (float32 [0,1], foreground=1 — see module
@@ -131,6 +115,71 @@ class RenderStep(Step):
              "image_warp" (dict for generate_firstlast — see
              anchor_stub.py).
     """
+
+    # Pattern-specific params all carry defaults rather than being REQUIRED:
+    # only one pattern's set is read per call, so requiring n_loops would
+    # make every circular render declare a helical param. The defaults are
+    # the values the shipped workflows use.
+    PARAMS = (
+        Param("pattern", str, "circular", "Shape of the camera path",
+              choices=("circular", "sinusoidal", "helical")),
+        Param("n_frames", int, REQUIRED, "How many views to render", minimum=1),
+        Param("width", int, 720, "Render width", minimum=1),
+        Param("height", int, 1280, "Render height", minimum=1),
+        Param("render_mode", str, "depth+skeleton", "What each frame draws",
+              choices=("mesh", "depth", "skeleton", "mesh+skeleton", "depth+skeleton")),
+        Param("framing", str, "full", "How much of the body fills the frame",
+              choices=("full", "torso", "bust", "head")),
+        Param("override_cam_from_mesh", bool, False,
+              "Anchor one frame exactly at the original SAM-3D-Body camera, so a "
+              "reference photo can be warped onto it. Circular or helical only, and "
+              "it bypasses focal_length_mm/radius/start_azimuth_deg in favour of the "
+              "orbit derived from that camera"),
+        Param("fill_ratio", float, 0.8, "How much of the frame the subject fills",
+              minimum=0.0, maximum=1.0),
+        Param("focal_length_mm", float, 0.0,
+              "0 means derive one from the render width. Ignored under "
+              "override_cam_from_mesh"),
+        Param("initial_rotation", float, 0.0,
+              "Extra rotation applied after auto-orienting the body toward the "
+              "camera. Ignored under override_cam_from_mesh, which must keep the "
+              "mesh where the original camera saw it"),
+        Param("bg_color", list, [1.0, 1.0, 1.0],
+              "RGB in [0,1]. Note this does NOT paint the depth render's background: "
+              "its only other use is being published as image_warp[\"bg_color\"], the "
+              "border colour generate_firstlast fills around the warped reference"),
+
+        Param("elevation_deg", float, 0.0, "Circular: camera elevation"),
+        Param("start_azimuth_deg", float, 0.0, "Where the orbit starts"),
+        Param("overlap", int, 1,
+              "Circular: 1 makes the first and last frame share a position"),
+        Param("amplitude_deg", float, 30.0,
+              "Sinusoidal/helical: elevation swing either side of the equator"),
+        Param("n_cycles", int, 1, "Sinusoidal: elevation cycles over the orbit"),
+        Param("n_loops", int, 2, "Helical: turns around the subject"),
+        Param("lead_in_deg", float, 45.0, "Helical: azimuth spent easing in"),
+        Param("lead_out_deg", float, 45.0, "Helical: azimuth spent easing out"),
+
+        Param("radius", float, None,
+              "Orbit radius; empty derives one from the framing", advanced=True),
+        Param("mesh_color", list, [0.65, 0.74, 0.86], "RGB in [0,1]", advanced=True),
+        Param("depth_colormap", str, "grayscale", "Depth render colour map",
+              advanced=True),
+        Param("skeleton_format", str, "openpose_body25_hands", "Skeleton topology",
+              advanced=True),
+        Param("joint_radius", float, 0.006, "Skeleton joint size", advanced=True),
+        Param("bone_radius", float, 0.003, "Skeleton bone thickness", advanced=True),
+        Param("face_mode", str, "full",
+              "Face overlay: points plus connectivity lines, points alone, or none. "
+              "Only meaningful with a face_landmarks input",
+              choices=("full", "points", "none"), advanced=True),
+        Param("face_max_angle", float, 90.0,
+              "Skip the face overlay past this angle between the face normal and the "
+              "camera: 90 is the full hemisphere, 45 near-frontal only",
+              minimum=0.0, maximum=180.0, advanced=True),
+        Param("pointcloud_samples", int, 10000,
+              "Points sampled off the mesh for points3D.txt", minimum=1, advanced=True),
+    )
 
     def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
         from body2colmap.camera import Camera
@@ -159,13 +208,13 @@ class RenderStep(Step):
         }
         scene = Scene.from_sam3d_output(sam3d_dict, include_skeleton=True)
 
-        pattern = params.get("pattern", "circular")
-        framing = params.get("framing", "full")
-        override_cam_from_mesh = params.get("override_cam_from_mesh", False)
-        width = params.get("width", 720)
-        height = params.get("height", 1280)
-        render_mode = params.get("render_mode", "depth+skeleton")
-        fill_ratio = params.get("fill_ratio", 0.8)
+        pattern = params["pattern"]
+        framing = params["framing"]
+        override_cam_from_mesh = params["override_cam_from_mesh"]
+        width = params["width"]
+        height = params["height"]
+        render_mode = params["render_mode"]
+        fill_ratio = params["fill_ratio"]
 
         if override_cam_from_mesh and pattern not in ("circular", "helical"):
             raise ValueError(
@@ -178,7 +227,7 @@ class RenderStep(Step):
             # then apply any user offset. Skipped in override mode, which
             # needs the mesh's real position relative to the original
             # (origin) camera preserved.
-            initial_rotation = params.get("initial_rotation", 0.0)
+            initial_rotation = params["initial_rotation"]
             facing = scene.compute_torso_facing_direction()
             if facing is not None:
                 current_angle = float(np.arctan2(facing[0], facing[2]))
@@ -224,7 +273,7 @@ class RenderStep(Step):
                     n_frames=params["n_frames"],
                     elevation_deg=derived_elevation,
                     start_azimuth_deg=anchor_azimuth,
-                    overlap=params.get("overlap", 1),
+                    overlap=params["overlap"],
                     camera_template=camera_template,
                 )
             else:  # helical
@@ -232,8 +281,8 @@ class RenderStep(Step):
                     n_frames=params["n_frames"],
                     n_loops=params["n_loops"],
                     amplitude_deg=params["amplitude_deg"],
-                    lead_in_deg=params.get("lead_in_deg", 45.0),
-                    lead_out_deg=params.get("lead_out_deg", 45.0),
+                    lead_in_deg=params["lead_in_deg"],
+                    lead_out_deg=params["lead_out_deg"],
                 )
                 anchor_info = compute_helical_anchor_params(target=orbit_center, **helix_params)
                 derived_radius = float(anchor_info["radius"])
@@ -255,13 +304,13 @@ class RenderStep(Step):
             }
             focal_length = framed_fl
         else:
-            focal_length_mm = params.get("focal_length_mm", 0.0)
+            focal_length_mm = params["focal_length_mm"]
             if focal_length_mm <= 0:
                 focal_length = compute_default_focal_length(width)
             else:
                 focal_length = _focal_length_mm_to_pixels(focal_length_mm, width)
 
-            radius = params.get("radius")
+            radius = params["radius"]
             if radius is None:
                 radius = compute_auto_orbit_radius(
                     bounds=current_bounds,
@@ -277,8 +326,8 @@ class RenderStep(Step):
                 cameras = path_gen.circular(
                     n_frames=params["n_frames"],
                     elevation_deg=params["elevation_deg"],
-                    start_azimuth_deg=params.get("start_azimuth_deg", 0.0),
-                    overlap=params.get("overlap", 1),
+                    start_azimuth_deg=params["start_azimuth_deg"],
+                    overlap=params["overlap"],
                     camera_template=camera_template,
                 )
             elif pattern == "sinusoidal":
@@ -286,7 +335,7 @@ class RenderStep(Step):
                     n_frames=params["n_frames"],
                     amplitude_deg=params["amplitude_deg"],
                     n_cycles=params["n_cycles"],
-                    start_azimuth_deg=params.get("start_azimuth_deg", 0.0),
+                    start_azimuth_deg=params["start_azimuth_deg"],
                     camera_template=camera_template,
                 )
             elif pattern == "helical":
@@ -294,25 +343,25 @@ class RenderStep(Step):
                     n_frames=params["n_frames"],
                     n_loops=params["n_loops"],
                     amplitude_deg=params["amplitude_deg"],
-                    lead_in_deg=params.get("lead_in_deg", 45.0),
-                    lead_out_deg=params.get("lead_out_deg", 45.0),
-                    start_azimuth_deg=params.get("start_azimuth_deg", 0.0),
+                    lead_in_deg=params["lead_in_deg"],
+                    lead_out_deg=params["lead_out_deg"],
+                    start_azimuth_deg=params["start_azimuth_deg"],
                     camera_template=camera_template,
                 )
             else:
                 raise ValueError(f"Unknown path pattern: {pattern}")
 
-        mesh_color = tuple(params.get("mesh_color", (0.65, 0.74, 0.86)))
-        bg_color = tuple(params.get("bg_color", (1.0, 1.0, 1.0)))
+        mesh_color = tuple(params["mesh_color"])
+        bg_color = tuple(params["bg_color"])
         if image_warp is not None:
             image_warp["bg_color"] = bg_color
 
-        depth_colormap = params.get("depth_colormap", "grayscale")
+        depth_colormap = params["depth_colormap"]
         depth_cmap = None if depth_colormap == "grayscale" else depth_colormap
 
-        skeleton_format = params.get("skeleton_format", "openpose_body25_hands")
-        joint_radius = params.get("joint_radius", 0.006)
-        bone_radius = params.get("bone_radius", 0.003)
+        skeleton_format = params["skeleton_format"]
+        joint_radius = params["joint_radius"]
+        bone_radius = params["bone_radius"]
 
         # Optional face-landmark overlay, from steps/face_landmarks.py.
         # MediaPipe's raw points are converted to OpenPose Face 70 here
@@ -320,7 +369,7 @@ class RenderStep(Step):
         # size the landmarks were normalized against — which travels with
         # them in the dict.
         openpose_face_70 = None
-        face_mode = params.get("face_mode", "full")
+        face_mode = params["face_mode"]
         face_landmarks = inputs.get("face_landmarks")
         if face_landmarks is not None and face_mode != "none":
             from body2colmap.face import FaceLandmarkIngest
@@ -337,7 +386,7 @@ class RenderStep(Step):
             )
         else:
             face_mode = None
-        face_max_angle = float(params.get("face_max_angle", 90.0))
+        face_max_angle = params["face_max_angle"]
 
         renderer = Renderer(scene=scene, render_size=(width, height))
 
@@ -381,7 +430,7 @@ class RenderStep(Step):
                 raise ValueError(f"Unknown render_mode: {render_mode}")
             rendered_images.append(img)
 
-        points, colors = scene.get_point_cloud(n_samples=params.get("pointcloud_samples", 10000))
+        points, colors = scene.get_point_cloud(n_samples=params["pointcloud_samples"])
 
         n = len(cameras)
         image_names = [f"frame_{i + 1:05d}_.png" for i in range(n)]
@@ -401,7 +450,7 @@ class RenderStep(Step):
         effective_focal_length_mm = (
             _focal_length_pixels_to_mm(focal_length, width)
             if override_cam_from_mesh
-            else params.get("focal_length_mm", 0.0)
+            else params["focal_length_mm"]
         )
 
         result: Dict[str, Any] = {
@@ -422,7 +471,7 @@ class RenderStep(Step):
             "forward_azimuth_deg": forward_azimuth_deg,
             "focal_length_mm": effective_focal_length_mm,
             "framing_bounds": all_framing_bounds,
-            "initial_rotation": float(params.get("initial_rotation", 0.0)),
+            "initial_rotation": params["initial_rotation"],
         }
 
         if override_cam_from_mesh:

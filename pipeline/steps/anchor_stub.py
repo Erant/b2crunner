@@ -100,7 +100,7 @@ import cv2
 import numpy as np
 
 from ..registry import register_step
-from ..step import Step
+from ..step import Param, Step
 
 
 @register_step("generate_firstlast")
@@ -114,6 +114,9 @@ class GenerateFirstLastStep(Step):
              "bg_color": Optional[Tuple[float, float, float]] RGB [0,1],
              defaults to white}
     outputs: {"warped_image": np.ndarray BGR uint8}
+
+    Takes no params: everything it needs (including the border colour) comes
+    from the render step upstream, via `image_warp`.
     """
 
     def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
@@ -178,8 +181,6 @@ class InjectAnchorStep(Step):
              frames. Omit it and an all-1.0 batch is manufactured instead
              ("everything is synthetic, denoise it"), which is what the
              pre-denoise callers want.}
-    params: {"tolerance_pct": float, default 0.1 — match tolerance as a
-             percentage of the camera bounding-box diagonal}
     outputs: {"images": List[np.ndarray], "masks": List[np.ndarray]}
              (masks: float32 [0,1] VACE masks — the supplied batch where
              there was one, all-1.0 otherwise, and 0.0 at the injected
@@ -189,6 +190,12 @@ class InjectAnchorStep(Step):
     or generate_firstlast simply not wired in), the inputs pass through
     rather than failing the workflow — masks included, untouched.
     """
+
+    PARAMS = (
+        Param("tolerance_pct", float, 0.1,
+              "How close a camera has to be to the anchor position to count as "
+              "sitting on it, as a percentage of the camera bounding-box diagonal"),
+    )
 
     def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
         images: List[np.ndarray] = inputs["images"]
@@ -211,7 +218,7 @@ class InjectAnchorStep(Step):
         anchor_position = np.asarray(anchor_position, dtype=np.float32)
         positions = np.stack([cam.position for cam in cameras], axis=0)
         scale = _scene_scale(positions)
-        tolerance_pct = params.get("tolerance_pct", 0.1)
+        tolerance_pct = params["tolerance_pct"]
         threshold = (tolerance_pct / 100.0) * scale
 
         distances = np.linalg.norm(positions - anchor_position, axis=1)

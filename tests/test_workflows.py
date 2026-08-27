@@ -2,7 +2,7 @@
 
 None of these can be executed without a GPU, but most of the ways a
 workflow file goes wrong are visible without running it: a step name that
-isn't registered, a `${params.x}` that doesn't resolve, an `env:` with no
+isn't registered, a `${globals.x}` that doesn't resolve, an `env:` with no
 entry in envs.yaml, a dispatch mode that doesn't exist. This catches those
 so a pod run fails on the model, not on a typo.
 """
@@ -156,25 +156,54 @@ class TestWorkflowFiles(unittest.TestCase):
                 )
 
     def test_all_param_templates_resolve(self):
-        """A ${params.x} naming a param that doesn't exist is the single
+        """A ${globals.x} naming a global that doesn't exist is the single
         easiest mistake to make in these files, and it would otherwise only
         surface once that step is reached on a GPU."""
         for path in _workflows():
-            raw = yaml.safe_load(path.read_text())
-            params = raw.get("params", {})
             spec = WorkflowSpec.from_yaml(str(path))
             for step in spec.steps:
                 with self.subTest(workflow=path.name, step=step.id):
                     try:
-                        resolve(step.params, {"params": params})
+                        resolve(step.params, {"globals": spec.globals})
                     except Exception as exc:  # noqa: BLE001
                         self.fail(
                             f"{path.name}: step '{step.id}' has an unresolvable "
                             f"template: {exc}"
                         )
 
+    def test_every_step_override_is_a_param_that_step_declares(self):
+        """The other half of the templating check, and the one the split
+        into namespaces made possible at all.
+
+        A step's `params:` block is overrides on what its class declares
+        (pipeline/step.py's `Step.PARAMS`), so a name that isn't declared is
+        a value nothing will ever read — the pre-namespacing shape had no
+        way to notice that, because a workflow-level param not consumed by
+        anything is perfectly legal.
+        """
+        for path in _workflows():
+            spec = WorkflowSpec.from_yaml(str(path))
+            with self.subTest(workflow=path.name):
+                spec.validate()
+
+    def test_a_top_level_params_block_is_refused_by_name(self):
+        """The pre-namespacing shape must not load as an empty workflow.
+
+        Silently ignoring `params:` would run the whole pipeline at the step
+        defaults and look like it had worked, which is the worst available
+        outcome for a file somebody hasn't migrated yet.
+        """
+        import tempfile
+
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as handle:
+            handle.write("name: old\nparams:\n  seed: 0\nsteps: []\n")
+            stale = handle.name
+        with self.assertRaises(ValueError) as ctx:
+            WorkflowSpec.from_yaml(stale)
+        self.assertIn("globals:", str(ctx.exception))
+
     def test_when_conditions_resolve(self):
-        """Same reasoning as the params check above, and more load-bearing:
+        """Same reasoning as the template check above, and more load-bearing:
         an unresolvable `when:` guards a step, and the whole point of
         resolving them up front in the runner is that this fails at the
         start of a run rather than an hour into one."""
@@ -185,7 +214,7 @@ class TestWorkflowFiles(unittest.TestCase):
             for step in spec.steps:
                 with self.subTest(workflow=path.name, step=step.id):
                     try:
-                        step_enabled(step, spec.params)
+                        step_enabled(step, spec.globals)
                     except Exception as exc:  # noqa: BLE001
                         self.fail(f"{path.name}: step '{step.id}': {exc}")
 
@@ -201,10 +230,15 @@ class TestWorkflowFiles(unittest.TestCase):
             [s.id for s in full.steps if s.id not in upscale_only],
             [s.id for s in short.steps],
         )
+        # Identical now, not merely close: everything the upscale had to be
+        # told lives under the `upscale` step in the full file, so removing
+        # that step removed its settings with it. Before the params were
+        # namespaced this was `{"upscale_resolution", "upscale_batch_size"}`
+        # — two workflow-level names that existed only because there was
+        # nowhere else to put them.
         self.assertEqual(
-            set(full.params) - set(short.params),
-            {"upscale_resolution", "upscale_batch_size"},
-            "the only params either file should have to itself are the upscale's",
+            full.globals, short.globals,
+            "the two files' globals have drifted apart",
         )
         for step in short.steps:
             twin = next(s for s in full.steps if s.id == step.id)
@@ -218,14 +252,14 @@ class TestWorkflowFiles(unittest.TestCase):
                 self.assertEqual(step.keep_loaded, twin.keep_loaded)
 
     def test_output_switches_and_the_steps_they_guard_agree(self):
-        """A workflow declares `export_colmap`/`export_ply` exactly when it
-        has steps guarded by them.
+        """A workflow's globals carry `export_colmap`/`export_ply` exactly
+        when it has steps guarded by them.
 
-        Both directions are a real failure. A param with no step behind it
+        Both directions are a real failure. A global with no step behind it
         puts a checkbox in the UI that silently does nothing. A guarded step
-        whose param is undeclared is caught by `test_when_conditions_resolve`
+        whose global is undeclared is caught by `test_when_conditions_resolve`
         above, but the pairing is what keeps the UI honest: the checkboxes
-        are derived from the params, so params that do not match the steps
+        are derived from the globals, so globals that do not match the steps
         mean the UI is offering the wrong choices.
 
         Not every workflow has to produce deliverables — fast_helical_native
@@ -236,11 +270,11 @@ class TestWorkflowFiles(unittest.TestCase):
         for path in _workflows():
             spec = WorkflowSpec.from_yaml(str(path))
             for switch in switches:
-                guarded = [s.id for s in spec.steps if f"params.{switch}" in str(s.when)]
+                guarded = [s.id for s in spec.steps if f"globals.{switch}" in str(s.when)]
                 with self.subTest(workflow=path.name, param=switch):
                     self.assertEqual(
-                        switch in spec.params, bool(guarded),
-                        f"{path.name}: declares {switch}={switch in spec.params} "
+                        switch in spec.globals, bool(guarded),
+                        f"{path.name}: declares {switch}={switch in spec.globals} "
                         f"but the steps it guards are {guarded or 'none'}",
                     )
 
@@ -374,12 +408,12 @@ class TestWorkflowFiles(unittest.TestCase):
         so compare the whole string rather than eyeballing the YAML."""
         for path in _workflows():
             spec = WorkflowSpec.from_yaml(str(path))
-            if "denoise_prompt" not in spec.params:
+            if "denoise_prompt" not in spec.globals:
                 continue
             with self.subTest(workflow=path.name):
-                self.assertEqual(spec.params["denoise_prompt"], DENOISE_PROMPT)
+                self.assertEqual(spec.globals["denoise_prompt"], DENOISE_PROMPT)
                 self.assertEqual(
-                    spec.params["denoise_negative_prompt"], DENOISE_NEGATIVE_PROMPT
+                    spec.globals["denoise_negative_prompt"], DENOISE_NEGATIVE_PROMPT
                 )
 
     def test_a_mesh_is_reconstructed_from_the_sheet_s_front_half(self):

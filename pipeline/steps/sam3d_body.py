@@ -50,13 +50,28 @@ import cv2
 import numpy as np
 
 from ..registry import register_step
-from ..step import Step
+from ..step import Param, Step
 
 DEFAULT_CHECKPOINT_REPO = "facebook/sam-3d-body-dinov3"
 
 
 @register_step("sam3d_body")
 class SAM3DBodyStep(Step):
+    PARAMS = (
+        Param("bbox_thr", float, 0.8,
+              "Person-detection confidence floor", minimum=0.0, maximum=1.0),
+        Param("use_mask", bool, False, "Let the estimator segment the subject first"),
+        Param("checkpoint_repo", str, DEFAULT_CHECKPOINT_REPO,
+              "HF repo the checkpoint is pulled from", advanced=True),
+        Param("checkpoint_dir", str, None,
+              "A local snapshot directory to use instead of downloading", advanced=True),
+        Param("mhr_path", str, None,
+              "The mhr_model.pt to load; empty means assets/mhr_model.pt inside the "
+              "checkpoint directory. Not genuinely optional — an empty string reaches "
+              "torch.jit.load and crashes", advanced=True),
+        Param("device", str, "cuda", "Torch device", advanced=True),
+    )
+
     def __init__(self) -> None:
         self._estimator = None
 
@@ -64,8 +79,8 @@ class SAM3DBodyStep(Step):
         from huggingface_hub import snapshot_download
         from sam_3d_body import SAM3DBodyEstimator, load_sam_3d_body
 
-        checkpoint_dir = params.get("checkpoint_dir") or snapshot_download(
-            params.get("checkpoint_repo", DEFAULT_CHECKPOINT_REPO)
+        checkpoint_dir = params["checkpoint_dir"] or snapshot_download(
+            params["checkpoint_repo"]
         )
         # load_sam_3d_body's checkpoint_path arg must be the .ckpt FILE
         # itself, not its containing directory — confirmed by reading its
@@ -81,8 +96,8 @@ class SAM3DBodyStep(Step):
         # filename  does not exist". The checkpoint repo ships the file at
         # assets/mhr_model.pt (confirmed present after snapshot_download on
         # a real pod); default to that unless overridden.
-        mhr_path = params.get("mhr_path") or str(Path(checkpoint_dir) / "assets" / "mhr_model.pt")
-        device = params.get("device", "cuda")
+        mhr_path = params["mhr_path"] or str(Path(checkpoint_dir) / "assets" / "mhr_model.pt")
+        device = params["device"]
         model, model_cfg = load_sam_3d_body(
             str(checkpoint_path), device=device, mhr_path=mhr_path
         )
@@ -107,8 +122,8 @@ class SAM3DBodyStep(Step):
             cv2.imwrite(str(image_path), inputs["image"])
             outputs = self._estimator.process_one_image(
                 str(image_path),
-                bbox_thr=params.get("bbox_thr", 0.8),
-                use_mask=params.get("use_mask", False),
+                bbox_thr=params["bbox_thr"],
+                use_mask=params["use_mask"],
             )
 
         if not outputs:

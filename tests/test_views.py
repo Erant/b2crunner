@@ -18,13 +18,13 @@ import numpy as np
 from pipeline.dataset import Dataset
 from pipeline.registry import get_step_class
 from pipeline.steps.views import _relative_azimuths, parse_view_indices
-from tests.helpers import require_stage
+from tests.helpers import require_stage, run_step
 
 import pipeline.steps  # noqa: F401  (populates the registry)
 
 
 def _run(step_name: str, inputs, params=None):
-    return get_step_class(step_name)().run(inputs, params or {})
+    return run_step(step_name, inputs, params)
 
 
 class ViewsTestBase(unittest.TestCase):

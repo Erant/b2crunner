@@ -9,19 +9,191 @@ of a code change.
 
 Subclass this, decorate with @register_step("name"), and reference "name"
 from a workflow YAML's `step:` field.
+
+**A step declares the params it accepts**, as a `PARAMS` tuple of `Param`
+(below). That declaration is the single source of truth for the defaults:
+`WorkflowRunner` merges a workflow's overrides onto them before dispatch, so
+a `run()` body reads `params["filter_size"]` and never
+`params.get("filter_size", 6)`. Keeping the defaults in one declarative place
+is what lets the web UI enumerate a step's knobs and render a control per
+param — with the source of a value, and its help text, still visible.
+
+Stdlib only in this module, deliberately: `pipeline.worker` imports it inside
+every isolated venv (see that module's docstring), most of which have no
+numpy, no torch, and nothing else from this repo's dependency set.
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict
+from dataclasses import dataclass, field
+from typing import Any, Dict, Optional, Tuple
+
+
+class _Required:
+    """Sentinel for a param the workflow must supply; there is no default."""
+
+    _instance: Optional["_Required"] = None
+
+    def __new__(cls) -> "_Required":
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __repr__(self) -> str:
+        return "REQUIRED"
+
+    def __bool__(self) -> bool:
+        return False
+
+
+REQUIRED = _Required()
+
+
+# A param value that arrives as a string and is declared `bool` almost always
+# came from a text box or a `--param` on the command line, so "false" has to
+# mean false — `bool("false")` is True. Shared with `when:` handling in
+# pipeline/workflow.py, which needs the identical rule for the identical
+# reason.
+FALSE_STRINGS = frozenset({"", "0", "false", "no", "off", "none", "null"})
+
+
+@dataclass(frozen=True)
+class Param:
+    """One knob a Step accepts, with everything a UI needs to draw it.
+
+    `type` is a plain Python type — `int`, `float`, `bool`, `str` or `list` —
+    used both to coerce whatever a workflow or a text box supplied and to
+    pick a widget. `default` is what the step uses when nothing overrides it;
+    `REQUIRED` means there is no sensible default and a workflow that omits
+    it is an error (an output directory, say). `None` is a legitimate default
+    and means something different: "the step computes this at runtime" —
+    `device`, which resolves to cuda-if-available inside `run()`, is the
+    shape that has.
+
+    `advanced` keeps a param out of the UI's main list and behind a fold. The
+    rule for setting it: a knob that exists because the underlying library
+    has one, rather than because this pipeline tunes it, is advanced.
+    """
+
+    name: str
+    type: type = str
+    default: Any = REQUIRED
+    help: str = ""
+    choices: Tuple[Any, ...] = ()
+    minimum: Optional[float] = None
+    maximum: Optional[float] = None
+    advanced: bool = False
+
+
+class ParamError(ValueError):
+    """A param that is missing, unknown, or the wrong type for its step."""
+
+
+def coerce_param(value: Any, param: "Param", where: str) -> Any:
+    """Bring `value` to `param.type`, or explain why it can't be.
+
+    Lenient by design: YAML types most values correctly, but a `--param` or a
+    UI text box hands over strings, and refusing `"6"` for an int would make
+    both unusable. `None` passes through untouched — see `Param.default`.
+    """
+    if value is None:
+        return None
+    target = param.type
+    try:
+        if target is bool:
+            if isinstance(value, str):
+                return value.strip().lower() not in FALSE_STRINGS
+            return bool(value)
+        if target is int:
+            # Via float first so "1e4" and 1.0 both work; a fractional value
+            # is a mistake worth reporting rather than silently truncating.
+            number = float(value)
+            if number != int(number):
+                raise ValueError(f"{value!r} is not a whole number")
+            return int(number)
+        if target is float:
+            return float(value)
+        if target is str:
+            return value if isinstance(value, str) else str(value)
+        if target is list:
+            if isinstance(value, (list, tuple)):
+                return list(value)
+            raise ValueError(f"expected a list, got {type(value).__name__}")
+    except (TypeError, ValueError) as exc:
+        raise ParamError(
+            f"{where}: param '{param.name}' expects {target.__name__}, "
+            f"got {value!r} ({exc})"
+        ) from None
+    return value
 
 
 class Step(ABC):
+    # The params this step accepts. Empty means "undeclared": the runner
+    # passes a workflow's overrides through untouched and the UI has nothing
+    # to draw. That is the escape hatch for a step still being written, not
+    # the norm — everything in pipeline/steps/ declares its own.
+    PARAMS: Tuple[Param, ...] = ()
+
+    # Set by @register_step, so an error message can name the step the way a
+    # workflow YAML does rather than by its class name.
+    STEP_NAME: str = ""
+
+    @classmethod
+    def declared_params(cls) -> Dict[str, Param]:
+        """This step's params, keyed by name, in declaration order."""
+        return {param.name: param for param in cls.PARAMS}
+
+    @classmethod
+    def resolve_params(cls, overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Merge `overrides` onto the declared defaults and coerce the result.
+
+        The one place a step's effective params are decided. Called by
+        `WorkflowRunner` before dispatch — so every dispatcher and both
+        worker modes see a complete dict — and again by `pipeline.worker`,
+        which is safe because this is idempotent: re-merging an
+        already-complete dict changes nothing.
+
+        Raises `ParamError` for an override naming a param the step doesn't
+        declare (a typo that silently does nothing is worse than a refusal:
+        the run completes, at the wrong settings, looking like it honoured
+        you) and for a REQUIRED param nothing supplied.
+        """
+        overrides = dict(overrides or {})
+        declared = cls.declared_params()
+        if not declared:
+            return overrides
+
+        label = cls.STEP_NAME or cls.__name__
+        unknown = sorted(set(overrides) - set(declared))
+        if unknown:
+            raise ParamError(
+                f"Step '{label}' was given params it does not declare: "
+                f"{', '.join(unknown)}. It accepts: {', '.join(declared)}"
+            )
+
+        resolved: Dict[str, Any] = {}
+        for name, param in declared.items():
+            if name in overrides:
+                resolved[name] = coerce_param(overrides[name], param, f"step '{label}'")
+                continue
+            if param.default is REQUIRED:
+                raise ParamError(
+                    f"Step '{label}' needs param '{name}'"
+                    + (f" ({param.help})" if param.help else "")
+                    + ", and neither the step nor the workflow supplies a value."
+                )
+            resolved[name] = param.default
+        return resolved
+
     @abstractmethod
     def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
         """Execute the step. Must be side-effect-free w.r.t. disk unless the
-        step's whole purpose is I/O (e.g. SaveDatasetStep)."""
+        step's whole purpose is I/O (e.g. SaveDatasetStep).
+
+        `params` arrives complete — every name in `PARAMS`, already coerced
+        to its declared type. Read it with `params["name"]`.
+        """
         raise NotImplementedError
 
     def load(self, params: Dict[str, Any]) -> None:

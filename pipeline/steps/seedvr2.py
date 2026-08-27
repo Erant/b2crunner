@@ -53,11 +53,93 @@ import numpy as np
 
 from ..paths import models_dir
 from ..registry import register_step
-from ..step import Step
+from ..step import Param, Step
 
 
 @register_step("seedvr2")
 class SeedVR2Step(Step):
+    # Almost all of these are inference_cli.py's own argparse knobs, mirrored
+    # so this Step can reach the same code path main() does. That is exactly
+    # what `advanced` is for: what this pipeline actually tunes is the top
+    # group, and the rest exists because the upstream CLI has it.
+    #
+    # The two model names default to None rather than to
+    # src.utils.model_registry's DEFAULT_DIT/DEFAULT_VAE because that module
+    # only exists inside the seedvr2 venv — it is imported in load(), and
+    # load() applies it as the fallback.
+    PARAMS = (
+        Param("resolution", int, 1080,
+              "Target output SHORTEST edge, not a multiplier — asking for less "
+              "than the input's shortest edge downscales", minimum=1),
+        Param("batch_size", int, 5,
+              "Frames per pass. The pipeline's own workflows set 1; raise it once "
+              "a real VRAM budget for this step is known", minimum=1),
+        Param("seed", int, 42, "Diffusion seed"),
+        Param("vae_encode_tiled", bool, False, "Tile the VAE encode to save VRAM"),
+        Param("vae_decode_tiled", bool, False, "Tile the VAE decode to save VRAM"),
+        Param("color_correction", str, "lab",
+              "How the output is matched back to the input's colour",
+              choices=("lab", "none")),
+
+        Param("max_resolution", int, 0, "Cap on the output's longest edge; 0 is no cap",
+              minimum=0, advanced=True),
+        Param("uniform_batch_size", bool, False, "Force every batch to the same size",
+              advanced=True),
+        Param("prepend_frames", int, 0, "Frames of lead-in context per batch",
+              minimum=0, advanced=True),
+        Param("temporal_overlap", int, 0, "Frames shared between consecutive batches",
+              minimum=0, advanced=True),
+        Param("input_noise_scale", float, 0.0, "Noise added to the input frames",
+              advanced=True),
+        Param("latent_noise_scale", float, 0.0, "Noise added in latent space",
+              advanced=True),
+        Param("dit_offload_device", str, "none", "Where the DiT parks between passes",
+              advanced=True),
+        Param("vae_offload_device", str, "none", "Where the VAE parks between passes",
+              advanced=True),
+        Param("tensor_offload_device", str, "cpu", "Where intermediate tensors park",
+              advanced=True),
+        Param("blocks_to_swap", int, 0, "DiT blocks swapped to host RAM per forward",
+              minimum=0, advanced=True),
+        Param("swap_io_components", bool, False, "Swap the DiT's IO layers too",
+              advanced=True),
+        Param("vae_encode_tile_size", int, 1024, "Encode tile size", advanced=True),
+        Param("vae_encode_tile_overlap", int, 128, "Encode tile overlap", advanced=True),
+        Param("vae_decode_tile_size", int, 1024, "Decode tile size", advanced=True),
+        Param("vae_decode_tile_overlap", int, 128, "Decode tile overlap", advanced=True),
+        Param("tile_debug", str, "false", "Upstream's tile debug switch", advanced=True),
+        Param("attention_mode", str, "sdpa", "Attention implementation", advanced=True),
+        Param("compile_dit", bool, False, "torch.compile the DiT", advanced=True),
+        Param("compile_vae", bool, False, "torch.compile the VAE", advanced=True),
+        Param("compile_backend", str, "inductor", "torch.compile backend", advanced=True),
+        Param("compile_mode", str, "default", "torch.compile mode", advanced=True),
+        Param("compile_fullgraph", bool, False, "torch.compile fullgraph", advanced=True),
+        Param("compile_dynamic", bool, False, "torch.compile dynamic shapes", advanced=True),
+        Param("compile_dynamo_cache_size_limit", int, 64, "Dynamo cache size limit",
+              advanced=True),
+        Param("compile_dynamo_recompile_limit", int, 128, "Dynamo recompile limit",
+              advanced=True),
+        # Caching on by default: this Step's load()/run() split is meant to
+        # keep the runner alive across run() calls, mirroring main()'s
+        # --cache_dit/--cache_vae batch-processing flags.
+        Param("cache_dit", bool, True, "Keep the DiT runner alive between run() calls",
+              advanced=True),
+        Param("cache_vae", bool, True, "Keep the VAE alive between run() calls",
+              advanced=True),
+        Param("device_id", str, "0", "CUDA device index", advanced=True),
+        Param("debug", bool, False, "Upstream's verbose debug output", advanced=True),
+        Param("dit_model", str, None, "DiT checkpoint name; empty means upstream's default",
+              advanced=True),
+        Param("vae_model", str, None, "VAE checkpoint name; empty means upstream's default",
+              advanced=True),
+        Param("model_dir", str, None,
+              "Weight cache root. Empty means B2C's models dir — do NOT make this a "
+              "relative path: the vendored download_weight() treats it as its whole "
+              "cache root and never consults HF_HOME, so a relative path resolves "
+              "against the worker's cwd and puts several GB inside the container",
+              advanced=True),
+    )
+
     def __init__(self) -> None:
         self._debug = None
         self._dit_model = None
@@ -69,9 +151,9 @@ class SeedVR2Step(Step):
         from src.utils.downloads import download_weight
         from src.utils.model_registry import DEFAULT_DIT, DEFAULT_VAE
 
-        self._debug = Debug(enabled=params.get("debug", False))
-        self._dit_model = params.get("dit_model", DEFAULT_DIT)
-        self._vae_model = params.get("vae_model", DEFAULT_VAE)
+        self._debug = Debug(enabled=params["debug"])
+        self._dit_model = params["dit_model"] or DEFAULT_DIT
+        self._vae_model = params["vae_model"] or DEFAULT_VAE
         # NOT the relative "models/SEEDVR2" this used to default to: the
         # vendored download_weight() treats model_dir as its whole cache
         # root and never consults HF_HOME, so a relative path resolved
@@ -79,7 +161,7 @@ class SeedVR2Step(Step):
         # VAE weights inside the container rather than on the volume — lost
         # on every pod restart, and enough to exhaust a default container
         # disk on its own.
-        self._model_dir = params.get("model_dir") or str(models_dir() / "SEEDVR2")
+        self._model_dir = params["model_dir"] or str(models_dir() / "SEEDVR2")
 
         # main() calls this before ever touching _process_frames_core;
         # _process_frames_core itself assumes the weights are already on
@@ -126,48 +208,48 @@ class SeedVR2Step(Step):
         args = argparse.Namespace(
             dit_model=self._dit_model,
             model_dir=self._model_dir,
-            resolution=params.get("resolution", 1080),
-            max_resolution=params.get("max_resolution", 0),
-            batch_size=params.get("batch_size", 5),
-            uniform_batch_size=params.get("uniform_batch_size", False),
-            seed=params.get("seed", 42),
-            prepend_frames=params.get("prepend_frames", 0),
-            temporal_overlap=params.get("temporal_overlap", 0),
-            color_correction=params.get("color_correction", "lab"),
-            input_noise_scale=params.get("input_noise_scale", 0.0),
-            latent_noise_scale=params.get("latent_noise_scale", 0.0),
-            dit_offload_device=params.get("dit_offload_device", "none"),
-            vae_offload_device=params.get("vae_offload_device", "none"),
-            tensor_offload_device=params.get("tensor_offload_device", "cpu"),
-            blocks_to_swap=params.get("blocks_to_swap", 0),
-            swap_io_components=params.get("swap_io_components", False),
-            vae_encode_tiled=params.get("vae_encode_tiled", False),
-            vae_encode_tile_size=params.get("vae_encode_tile_size", 1024),
-            vae_encode_tile_overlap=params.get("vae_encode_tile_overlap", 128),
-            vae_decode_tiled=params.get("vae_decode_tiled", False),
-            vae_decode_tile_size=params.get("vae_decode_tile_size", 1024),
-            vae_decode_tile_overlap=params.get("vae_decode_tile_overlap", 128),
-            tile_debug=params.get("tile_debug", "false"),
-            attention_mode=params.get("attention_mode", "sdpa"),
-            compile_dit=params.get("compile_dit", False),
-            compile_vae=params.get("compile_vae", False),
-            compile_backend=params.get("compile_backend", "inductor"),
-            compile_mode=params.get("compile_mode", "default"),
-            compile_fullgraph=params.get("compile_fullgraph", False),
-            compile_dynamic=params.get("compile_dynamic", False),
-            compile_dynamo_cache_size_limit=params.get("compile_dynamo_cache_size_limit", 64),
-            compile_dynamo_recompile_limit=params.get("compile_dynamo_recompile_limit", 128),
+            resolution=params["resolution"],
+            max_resolution=params["max_resolution"],
+            batch_size=params["batch_size"],
+            uniform_batch_size=params["uniform_batch_size"],
+            seed=params["seed"],
+            prepend_frames=params["prepend_frames"],
+            temporal_overlap=params["temporal_overlap"],
+            color_correction=params["color_correction"],
+            input_noise_scale=params["input_noise_scale"],
+            latent_noise_scale=params["latent_noise_scale"],
+            dit_offload_device=params["dit_offload_device"],
+            vae_offload_device=params["vae_offload_device"],
+            tensor_offload_device=params["tensor_offload_device"],
+            blocks_to_swap=params["blocks_to_swap"],
+            swap_io_components=params["swap_io_components"],
+            vae_encode_tiled=params["vae_encode_tiled"],
+            vae_encode_tile_size=params["vae_encode_tile_size"],
+            vae_encode_tile_overlap=params["vae_encode_tile_overlap"],
+            vae_decode_tiled=params["vae_decode_tiled"],
+            vae_decode_tile_size=params["vae_decode_tile_size"],
+            vae_decode_tile_overlap=params["vae_decode_tile_overlap"],
+            tile_debug=params["tile_debug"],
+            attention_mode=params["attention_mode"],
+            compile_dit=params["compile_dit"],
+            compile_vae=params["compile_vae"],
+            compile_backend=params["compile_backend"],
+            compile_mode=params["compile_mode"],
+            compile_fullgraph=params["compile_fullgraph"],
+            compile_dynamic=params["compile_dynamic"],
+            compile_dynamo_cache_size_limit=params["compile_dynamo_cache_size_limit"],
+            compile_dynamo_recompile_limit=params["compile_dynamo_recompile_limit"],
             # Caching on by default: this Step's load()/run() split is meant
             # to keep the runner alive across run() calls, mirroring
             # main()'s --cache_dit/--cache_vae batch-processing flags.
-            cache_dit=params.get("cache_dit", True),
-            cache_vae=params.get("cache_vae", True),
+            cache_dit=params["cache_dit"],
+            cache_vae=params["cache_vae"],
         )
 
         result = inference_cli._process_frames_core(
             frames_tensor=frames_tensor,
             args=args,
-            device_id=params.get("device_id", "0"),
+            device_id=params["device_id"],
             debug=self._debug,
             runner_cache=self._cache,
         )

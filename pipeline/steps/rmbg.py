@@ -21,7 +21,7 @@ import cv2
 import numpy as np
 
 from ..registry import register_step
-from ..step import Step
+from ..step import Param, Step
 
 DEFAULT_CHECKPOINT = "briaai/RMBG-2.0"
 _IMAGE_SIZE = (1024, 1024)
@@ -31,6 +31,14 @@ _STD = (0.229, 0.224, 0.225)
 
 @register_step("rmbg")
 class RMBGStep(Step):
+    PARAMS = (
+        Param("batch_size", int, 8, "Images per forward pass", minimum=1, advanced=True),
+        Param("checkpoint", str, DEFAULT_CHECKPOINT, "HF repo for the segmentation model",
+              advanced=True),
+        Param("device", str, None, "Torch device; empty means cuda if available",
+              advanced=True),
+    )
+
     def __init__(self) -> None:
         self._model = None
         self._device = None
@@ -39,8 +47,8 @@ class RMBGStep(Step):
         import torch
         from transformers import AutoModelForImageSegmentation
 
-        checkpoint = params.get("checkpoint", DEFAULT_CHECKPOINT)
-        self._device = params.get("device") or ("cuda" if torch.cuda.is_available() else "cpu")
+        checkpoint = params["checkpoint"]
+        self._device = params["device"] or ("cuda" if torch.cuda.is_available() else "cpu")
         model = AutoModelForImageSegmentation.from_pretrained(checkpoint, trust_remote_code=True)
         model.eval().to(self._device)
         if self._device == "cuda":
@@ -59,7 +67,7 @@ class RMBGStep(Step):
             self.load(params)
 
         if "images" in inputs:
-            batch_size = int(params.get("batch_size", 8))
+            batch_size = params["batch_size"]
             images = inputs["images"]
             masks = []
             for i in range(0, len(images), batch_size):

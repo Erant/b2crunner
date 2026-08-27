@@ -110,9 +110,25 @@ Open `https://<pod-id>-7860.proxy.runpod.net`. Three input modes:
   `ply/`. Picking this input against either `fast_helical` file is refused
   at submit time: those read frames and cameras they do not render.
 
-The **Params** box is a copy of the workflow's own `params:` block. Edit it
-freely — it is parsed as YAML and layered over the defaults. `output_root`
-is repointed automatically at this run's directory under `/data/output`.
+The **Params** panel is generated from the workflow and the steps in it,
+not typed as YAML. **Globals** at the top holds what the whole flow shares
+(resolution, seed, the denoise prompts); below it is one collapsible section
+per step, titled `<step id> (<step name>)`, holding that step's own params
+with its declared defaults filled in — a dot marks the ones the workflow
+sets. Knobs that exist because the underlying library has them, rather than
+because this pipeline tunes them, sit behind each section's **Advanced**
+fold.
+
+The per-step sections are why `fast_helical_full`'s two brush trainings and
+two denoise passes can be configured apart: `train_splat` and
+`train_final_splat` get a section each. Only what you actually change is
+submitted, so everything you leave alone stays owned by the workflow file
+and the step defaults. `output_root` is deliberately not on the panel — it
+is repointed automatically at this run's directory under `/data/output`,
+and a control for it would let a run write somewhere else instead.
+
+`python -m pipeline.cli params <workflow> --all` prints the same tree on
+the command line.
 
 **Outputs** picks what the run produces: the COLMAP dataset, the trained
 `.ply`, or both. This is a real switch, not a filter on the result — the
@@ -141,8 +157,15 @@ anything long enough that you would rather have it survive in `tmux`:
 
 ```bash
 python -m pipeline.cli run fast_helical_full --dataset /data/my_dataset
+
+# a bare name is a workflow global; a dotted one is that step's own param,
+# which is how the two brush trainings are told apart
 python -m pipeline.cli run fast_helical_full --dataset /data/my_dataset \
-    --param diffusion_steps=8 --param 'resolution=[720, 1280]'
+    --param diffusion_steps=8 --param 'resolution=[720, 1280]' \
+    --param train_final_splat.total_steps=15000
+
+# what a run would actually use, defaults included
+python -m pipeline.cli params fast_helical_full --all
 
 # without the upscaler, to see whether that is what is degrading the output
 python -m pipeline.cli run fast_helical --dataset /data/my_dataset

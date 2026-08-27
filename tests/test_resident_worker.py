@@ -474,6 +474,41 @@ class TestWiring(unittest.TestCase):
         self.assertEqual(load_signature(Declared, {}), {"checkpoint": None, "use_lora": None})
         self.assertIsNone(load_signature(Undeclared, {"anything": 1}))
 
+    def test_the_signature_sees_real_defaults_not_none(self):
+        """`params` reaching the worker is already merged with the step's
+        declared defaults (WorkflowRunner does it before dispatch, and
+        `_read_job` does it again), so a LOAD_PARAMS name the workflow never
+        mentions compares as its actual value rather than as None.
+
+        Both sides being None also compares equal, so this is not a
+        correctness fix — it is what makes the logged 'load params changed'
+        line name the value that changed instead of a null.
+        """
+        from pipeline.steps.wan22_vace_denoise import Wan22VaceDenoiseStep
+
+        merged = Wan22VaceDenoiseStep.resolve_params({"width": 720, "height": 1280})
+        signature = load_signature(Wan22VaceDenoiseStep, merged)
+        self.assertIsNotNone(signature)
+        self.assertEqual(set(signature), set(Wan22VaceDenoiseStep.LOAD_PARAMS))
+        self.assertTrue(
+            signature["checkpoint"],
+            "the checkpoint default did not survive the merge into the signature",
+        )
+        self.assertIs(signature["use_lora"], True)
+
+    def test_a_per_call_param_does_not_move_the_signature(self):
+        """fast_helical_full's two passes differ only by `strength`, and a
+        signature that moved with it would reload ~47 GB between them."""
+        from pipeline.steps.wan22_vace_denoise import Wan22VaceDenoiseStep
+
+        base = {"width": 720, "height": 1280}
+        first = Wan22VaceDenoiseStep.resolve_params({**base, "strength": 1.0})
+        second = Wan22VaceDenoiseStep.resolve_params({**base, "strength": 0.8})
+        self.assertEqual(
+            load_signature(Wan22VaceDenoiseStep, first),
+            load_signature(Wan22VaceDenoiseStep, second),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

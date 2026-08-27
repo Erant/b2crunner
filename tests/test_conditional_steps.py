@@ -9,7 +9,7 @@ that an unresolvable `when:` stops the run at the start rather than at the
 step.
 
 That last one is the reason `enabled` is computed up front in
-WorkflowRunner.run: a typo in `when: ${params.export_ply}` guarding the
+WorkflowRunner.run: a typo in `when: ${globals.export_ply}` guarding the
 final brush training would otherwise surface an hour into a run, having
 already spent two denoise passes and a splat training.
 """
@@ -24,9 +24,9 @@ from pipeline.workflow import StepSpec, WorkflowSpec, step_enabled
 import tests.test_runner_events  # noqa: F401  registers _test_echo
 
 
-def _make_spec(step_dicts, params=None):
+def _make_spec(step_dicts, globals_=None):
     return WorkflowSpec(
-        name="t", params=params or {},
+        name="t", globals=globals_ or {},
         steps=[StepSpec.from_dict(d) for d in step_dicts],
     )
 
@@ -42,7 +42,7 @@ class TestStepEnabled(unittest.TestCase):
 
     def test_param_reference_follows_the_param(self):
         step = StepSpec.from_dict(
-            {"id": "a", "step": "_test_echo", "when": "${params.export_ply}"}
+            {"id": "a", "step": "_test_echo", "when": "${globals.export_ply}"}
         )
         self.assertTrue(step_enabled(step, {"export_ply": True}))
         self.assertFalse(step_enabled(step, {"export_ply": False}))
@@ -52,7 +52,7 @@ class TestStepEnabled(unittest.TestCase):
         and bool("false") is True — which would run exactly the step they
         switched off."""
         step = StepSpec.from_dict(
-            {"id": "a", "step": "_test_echo", "when": "${params.x}"}
+            {"id": "a", "step": "_test_echo", "when": "${globals.x}"}
         )
         for value in ("false", "False", "no", "off", "0", "", "  false  "):
             with self.subTest(value=value):
@@ -63,7 +63,7 @@ class TestStepEnabled(unittest.TestCase):
 
     def test_an_unresolvable_when_names_the_step(self):
         step = StepSpec.from_dict(
-            {"id": "final_splat", "step": "_test_echo", "when": "${params.typo}"}
+            {"id": "final_splat", "step": "_test_echo", "when": "${globals.typo}"}
         )
         with self.assertRaises(KeyError) as caught:
             step_enabled(step, {"export_ply": True})
@@ -76,12 +76,12 @@ class TestRunnerSkips(unittest.TestCase):
             [
                 {"id": "one", "step": "_test_echo",
                  "params": {"value": 1}, "outputs": {"value": "out.one"}},
-                {"id": "two", "step": "_test_echo", "when": "${params.want_two}",
+                {"id": "two", "step": "_test_echo", "when": "${globals.want_two}",
                  "params": {"value": 2}, "outputs": {"value": "out.two"}},
                 {"id": "three", "step": "_test_echo",
                  "params": {"value": 3}, "outputs": {"value": "out.three"}},
             ],
-            params={"want_two": second_on},
+            globals_={"want_two": second_on},
         )
 
     def test_a_skipped_step_writes_nothing(self):
@@ -117,9 +117,9 @@ class TestRunnerSkips(unittest.TestCase):
             [
                 {"id": "expensive", "step": "_test_echo",
                  "params": {"value": 1}, "outputs": {"value": "out.one"}},
-                {"id": "guarded", "step": "_test_echo", "when": "${params.nope}"},
+                {"id": "guarded", "step": "_test_echo", "when": "${globals.nope}"},
             ],
-            params={},
+            globals_={},
         )
         seen = []
         with self.assertRaises(KeyError):
@@ -129,7 +129,7 @@ class TestRunnerSkips(unittest.TestCase):
     def test_enabled_steps_reports_what_will_run(self):
         spec = self._spec(False)
         self.assertEqual([s.id for s in spec.enabled_steps()], ["one", "three"])
-        spec.params["want_two"] = True
+        spec.globals["want_two"] = True
         self.assertEqual([s.id for s in spec.enabled_steps()], ["one", "two", "three"])
 
 

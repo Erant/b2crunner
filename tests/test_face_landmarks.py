@@ -34,7 +34,7 @@ from pipeline.steps.face_landmarks import (
     _frontality_score,
     _pick_best_face,
 )
-from tests.helpers import require_stage
+from tests.helpers import require_stage, run_step
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -172,10 +172,11 @@ DETECTION_SCRIPT = textwrap.dedent(
     import pipeline.steps
 
     ds = Dataset.from_disk({stage!r})
-    step = get_step_class("detect_face_landmarks")()
+    step_class = get_step_class("detect_face_landmarks")
+    step, params = step_class(), step_class.resolve_params()
     out = {{}}
     for key, image in (("anchor", ds.anchor_image), ("reference", ds.reference_image)):
-        res = step.run({{"image": image}}, {{}})["face_landmarks"]
+        res = step.run({{"image": image}}, params)["face_landmarks"]
         lm = res["landmarks"]
         out[key] = {{
             "n_points": int(lm.shape[0]),

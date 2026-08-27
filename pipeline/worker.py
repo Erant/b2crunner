@@ -111,12 +111,21 @@ def _import_steps() -> None:
             importlib.import_module(name)
 
 
-def _read_job(input_path: str, params_path: str):
+def _read_job(step_name: str, input_path: str, params_path: str):
+    from .registry import get_step_class
+
     with open(input_path, "rb") as f:
         inputs = pickle.load(f)
     with open(params_path, "r") as f:
         params = json.load(f)
-    return inputs, params
+    # Idempotent: WorkflowRunner already merged the step's declared defaults
+    # in before writing this file, and re-merging a complete dict changes
+    # nothing. It is applied again here so a worker invoked directly —
+    # `python -m pipeline.worker <step> in.pkl params.json out.pkl`, which is
+    # how a single step gets reproduced by hand — gets the same defaults as
+    # one the runner drove, instead of a KeyError on the first param the
+    # hand-written JSON didn't mention.
+    return inputs, get_step_class(step_name).resolve_params(params)
 
 
 def _describe_job(logger, step_name: str, inputs, params) -> None:
@@ -151,7 +160,7 @@ def run_once(argv) -> None:
     logger = logging.getLogger("pipeline.worker")
     from .registry import get_step_class
 
-    inputs, params = _read_job(input_path, params_path)
+    inputs, params = _read_job(step_name, input_path, params_path)
     _describe_job(logger, step_name, inputs, params)
 
     started = time.time()
@@ -346,7 +355,7 @@ def serve() -> int:
             step_name = job["step"]
             started = time.time()
             try:
-                inputs, params = _read_job(job["inputs"], job["params"])
+                inputs, params = _read_job(step_name, job["inputs"], job["params"])
                 _describe_job(logger, step_name, inputs, params)
 
                 step_class = get_step_class(step_name)

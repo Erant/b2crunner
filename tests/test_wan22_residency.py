@@ -103,30 +103,21 @@ class TestLoadParams(unittest.TestCase):
             self.assertNotIn(per_call, load_params, f"{per_call} is a per-call param")
 
     def test_every_declared_param_is_one_load_actually_reads(self):
-        """Guards the other direction: a stale name silently over-reloads."""
-        import ast
-        from pathlib import Path
+        """Guards the other direction: a stale name silently over-reloads.
+
+        Checked against the step's `PARAMS` declaration rather than against
+        an AST walk for `params.get("x")` — a name in LOAD_PARAMS that the
+        step does not declare is now a genuine bug in its own right, since
+        `load_signature` would compare `None` against `None` on every job
+        and never notice the param it was asked to watch.
+        """
         from pipeline.steps import wan22_vace_denoise as mod
 
-        # The module, not the class: getsource() on a class yields an
-        # indented block that ast.parse rejects.
-        tree = ast.parse(Path(mod.__file__).read_text())
-
-        read: set[str] = set()
-        for node in ast.walk(tree):
-            if (isinstance(node, ast.Call)
-                    and isinstance(node.func, ast.Attribute)
-                    and node.func.attr == "get"
-                    and isinstance(node.func.value, ast.Name)
-                    and node.func.value.id == "params"
-                    and node.args
-                    and isinstance(node.args[0], ast.Constant)):
-                read.add(node.args[0].value)
-
-        missing = set(mod.Wan22VaceDenoiseStep.LOAD_PARAMS) - read
+        declared = set(mod.Wan22VaceDenoiseStep.declared_params())
+        missing = set(mod.Wan22VaceDenoiseStep.LOAD_PARAMS) - declared
         self.assertEqual(
             missing, set(),
-            f"LOAD_PARAMS names params the step never reads: {sorted(missing)}",
+            f"LOAD_PARAMS names params the step does not declare: {sorted(missing)}",
         )
 
 

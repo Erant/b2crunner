@@ -59,7 +59,7 @@ import cv2
 import numpy as np
 
 from ..registry import register_step
-from ..step import Step
+from ..step import Param, Step
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +115,15 @@ class DetectFaceLandmarksStep(Step):
     no indication why.
     """
 
+    PARAMS = (
+        Param("min_detection_confidence", float, 0.3,
+              "MediaPipe face-detector confidence floor", minimum=0.0, maximum=1.0,
+              advanced=True),
+        Param("crop_padding", float, 0.5,
+              "How far to pad the detected face box before the second-stage crop, "
+              "as a fraction of the box", minimum=0.0, advanced=True),
+    )
+
     def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
         try:
             import mediapipe as mp
@@ -127,8 +136,8 @@ class DetectFaceLandmarksStep(Step):
             ) from exc
 
         image = inputs["image"]
-        min_confidence = float(params.get("min_detection_confidence", 0.3))
-        crop_padding = float(params.get("crop_padding", 0.5))
+        min_confidence = params["min_detection_confidence"]
+        crop_padding = params["crop_padding"]
 
         # This pipeline speaks cv2 BGR; MediaPipe wants SRGB.
         bgr = image[:, :, :3] if image.ndim == 3 and image.shape[2] == 4 else image

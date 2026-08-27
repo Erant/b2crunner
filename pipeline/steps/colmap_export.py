@@ -45,7 +45,7 @@ import numpy as np
 
 from ..masks import mask_to_alpha_u8
 from ..registry import register_step
-from ..step import Step
+from ..step import REQUIRED, Param, Step
 
 
 LAYOUTS = ("flat", "brush")
@@ -60,9 +60,17 @@ class ColmapExportStep(Step):
              "images": Optional[List[np.ndarray]] BGR(A),
              "masks": Optional[List[np.ndarray]] float32 [0,1], foreground=1,
              "normal_maps": Optional[List[np.ndarray]] HxWx3 float32 [-1,1]}
-    params: {"output_dir": str, "layout": "flat" | "brush"}
     outputs: {"output_path": str}
     """
+
+    PARAMS = (
+        Param("output_dir", str, REQUIRED, "Directory to write the COLMAP dataset into"),
+        Param("layout", str, "flat",
+              "flat: frames beside the .txt files (the ComfyUI stage's shape, and what "
+              "the golden test compares against). brush: images/ and normals/ "
+              "subdirectories, which is what a dataset handed to somebody wants",
+              choices=("flat", "brush")),
+    )
 
     def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
         from body2colmap.exporter import ColmapExporter
@@ -82,7 +90,7 @@ class ColmapExportStep(Step):
                 f"({len(images)}). Every training view needs a matching normal map."
             )
 
-        layout = params.get("layout", "flat")
+        layout = params["layout"]
         if layout not in LAYOUTS:
             raise ValueError(f"Unknown layout {layout!r}; expected one of {LAYOUTS}.")
 

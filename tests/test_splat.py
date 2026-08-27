@@ -26,10 +26,34 @@ from unittest import mock
 
 from pipeline.dataset import Dataset
 from pipeline.registry import get_step_class
-from pipeline.steps.splat import _resolve_cameras, _resolve_pointcloud
-from tests.helpers import require_stage
+from pipeline.steps.splat import (
+    _resolve_cameras as _resolve_cameras_raw,
+    _resolve_pointcloud as _resolve_pointcloud_raw,
+)
+from tests.helpers import require_stage, run_step
 
 import pipeline.steps  # noqa: F401
+
+
+def _rs_params(params):
+    """render_splat's declared defaults with `params` on top.
+
+    Both helpers below read `params["x"]` and expect the merge the runner
+    does before dispatch (see pipeline/runner.py). Doing it here keeps every
+    call site in this file passing only the values it is actually testing.
+    """
+    return get_step_class("render_splat").resolve_params(params)
+
+
+def _resolve_cameras(*, scene, dataset, params, width, height):
+    return _resolve_cameras_raw(
+        scene=scene, dataset=dataset, params=_rs_params(params),
+        width=width, height=height,
+    )
+
+
+def _resolve_pointcloud(scene, dataset, params):
+    return _resolve_pointcloud_raw(scene, dataset, _rs_params(params))
 
 
 def _synthetic_scene(n=64, sh_degree=0):
@@ -60,10 +84,10 @@ class TestSplatIO(unittest.TestCase):
         scene = _synthetic_scene()
         with tempfile.TemporaryDirectory() as tmp:
             path = str(Path(tmp) / "nested" / "splat.ply")
-            out = get_step_class("save_splat")().run({"splat_scene": scene}, {"filepath": path})
+            out = run_step("save_splat", {"splat_scene": scene}, {"filepath": path})
             self.assertTrue(Path(out["splat_path"]).exists())
 
-            back = get_step_class("load_splat")().run({}, {"filepath": path})["splat_scene"]
+            back = run_step("load_splat", {}, {"filepath": path})["splat_scene"]
 
         self.assertEqual(len(back), len(scene))
         self.assertEqual(back.sh_degree, scene.sh_degree)
@@ -73,15 +97,15 @@ class TestSplatIO(unittest.TestCase):
 
     def test_load_missing_file_raises(self):
         with self.assertRaises(FileNotFoundError):
-            get_step_class("load_splat")().run({}, {"filepath": "/nonexistent/x.ply"})
+            run_step("load_splat", {}, {"filepath": "/nonexistent/x.ply"})
 
     def test_load_requires_a_path(self):
         with self.assertRaises(ValueError):
-            get_step_class("load_splat")().run({}, {})
+            run_step("load_splat", {}, {})
 
     def test_save_requires_a_path(self):
         with self.assertRaises(ValueError):
-            get_step_class("save_splat")().run({"splat_scene": _synthetic_scene()}, {})
+            run_step("save_splat", {"splat_scene": _synthetic_scene()}, {})
 
 
 class TestRenderSplatCameras(unittest.TestCase):
@@ -353,7 +377,7 @@ class TestRenderSplatBackground(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             ply = Path(tmp) / "s.ply"
-            get_step_class("save_splat")().run({"splat_scene": scene}, {"filepath": str(ply)})
+            run_step("save_splat", {"splat_scene": scene}, {"filepath": str(ply)})
             with mock.patch.object(splat_module, "_run_render", fake_render):
                 splat_module._rasterize(
                     scene=scene,
@@ -385,20 +409,14 @@ class TestRenderSplatBackground(unittest.TestCase):
 
 
 def _render_splat_default_bg():
-    """The bg_color render_splat falls back to, extracted from its source.
+    """The bg_color render_splat falls back to, read off its declaration.
 
-    The default lives in a params.get() call inside run(), which needs a
-    scene, a splat file and cameras to reach. Reading it out of the source
-    keeps this test pinned to the shipped value without standing up all of
-    that.
+    This used to dig the literal out of a `params.get("bg_color", ...)` call
+    inside run() with a regex, because that was the only place the default
+    existed. It is now declared (pipeline/step.py's Param), so the test can
+    simply ask — and still gets the shipped value rather than one restated
+    here, which is the property that matters.
     """
-    import inspect
-    import re
+    from pipeline.registry import get_step_class
 
-    from pipeline.steps.splat import RenderSplatStep
-
-    source = inspect.getsource(RenderSplatStep.run)
-    match = re.search(r'params\.get\("bg_color",\s*\(([^)]*)\)\)', source)
-    if match is None:
-        raise AssertionError("render_splat no longer defaults bg_color via params.get")
-    return tuple(float(x) for x in match.group(1).split(","))
+    return tuple(get_step_class("render_splat").declared_params()["bg_color"].default)

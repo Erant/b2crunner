@@ -29,11 +29,11 @@ class BoomStep(Step):
         raise ValueError("this step always fails")
 
 
-def _make_spec(step_dicts, params=None):
+def _make_spec(step_dicts, globals_=None):
     from pipeline.workflow import StepSpec
 
     return WorkflowSpec(
-        name="t", params=params or {},
+        name="t", globals=globals_ or {},
         steps=[StepSpec.from_dict(d) for d in step_dicts],
     )
 

@@ -23,7 +23,7 @@ import numpy as np
 
 from pipeline.dataset import Dataset
 from pipeline.registry import get_step_class
-from tests.helpers import require_stage
+from tests.helpers import require_stage, run_step
 
 import pipeline.steps  # noqa: F401
 
@@ -35,7 +35,7 @@ class TestMaskSplatGolden(unittest.TestCase):
     def setUpClass(cls):
         cls.src, cls.gold_dir = require_stage("splatted", "masked_splatted")
         cls.ds = Dataset.from_disk(cls.src)
-        cls.out = get_step_class("mask_splat")().run(
+        cls.out = run_step("mask_splat", 
             {"dataset": cls.ds}, {"filter_size": 6, "dilation": 2}
         )["dataset"]
 
@@ -98,7 +98,7 @@ class TestMaskSplatGolden(unittest.TestCase):
 
     def test_dilation_zero_is_allowed(self):
         """`tiered`'s second mask_splat pass uses dilation=0."""
-        out = get_step_class("mask_splat")().run(
+        out = run_step("mask_splat", 
             {"dataset": self.ds}, {"filter_size": 4, "dilation": 0}
         )["dataset"]
         self.assertEqual(len(out.images), len(self.ds.images))
@@ -110,7 +110,7 @@ class TestMaskSplatGolden(unittest.TestCase):
             resolution=self.ds.resolution, masks=None,
         )
         with self.assertRaises(ValueError):
-            get_step_class("mask_splat")().run({"dataset": no_masks}, {})
+            run_step("mask_splat", {"dataset": no_masks}, {})
 
 
 if __name__ == "__main__":
