@@ -217,20 +217,28 @@ steps:
       width: ${globals.resolution.0}
       height: ${globals.resolution.1}
       override_cam_from_mesh: true
+      # Flat silhouette base + the usual skeleton overlay. The base layer's
+      # background is always #7F7F7F (render.py forces it, `bg_color` below
+      # does not reach it), and `outline_strength` sets how dark the fill
+      # is — left at its default, which lands the fill on #6F6F6F, just
+      # off the ground.
+      render_mode: outline+skeleton
       # Mid grey, not the step's default white. This does NOT change the
-      # rendered background — `depth+skeleton`'s base layer is render_depth,
-      # which takes no bg_color — it changes the ONE other thing render.py
-      # spends this param on: it publishes it as `image_warp["bg_color"]`
-      # (render.py's `if image_warp is not None` block), which is where
-      # warp_reference_to_anchor below gets the border colour it fills
-      # around the warped reference photo.
+      # rendered background — neither `outline+skeleton`'s flat #7F7F7F base
+      # nor `render_depth` takes bg_color — it changes the ONE other thing
+      # render.py spends this param on: it publishes it as
+      # `image_warp["bg_color"]` (render.py's `if image_warp is not None`
+      # block), which is where warp_reference_to_anchor below gets the
+      # border colour it fills around the warped reference photo.
       #
       # 0.5 rather than a literal 127/255, because the recorded run shows
       # both roundings and 0.5 is what produces them: the renderer does
       # `int(bg*255)` = 127 and generate_firstlast does `round(bg*255)` =
       # 128. cyber2_6f/initial has mesh frames at 127 and an anchor.png at
       # 128 — the same 0.5 down two code paths, which is the evidence that
-      # 0.5 is the value the reference pipeline used.
+      # 0.5 is the value the reference pipeline used. It also matches the
+      # #7F7F7F the outline base grounds on, so the anchor border and the
+      # render backgrounds agree.
       #
       # White is the value that cannot be right: the anchor frame reaches
       # denoise_pass2 sitting among grey renders, and a white border is the

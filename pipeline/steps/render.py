@@ -91,6 +91,38 @@ def _focal_length_pixels_to_mm(focal_length_px: float, image_width: int) -> floa
     return (focal_length_px / image_width) * _FULL_FRAME_SENSOR_WIDTH_MM
 
 
+# "outline+skeleton" render mode: a flat two-tone silhouette base layer on a
+# fixed mid-grey ground, with the skeleton drawn over it exactly as in the
+# other "*+skeleton" modes. The silhouette fill is a single grey the
+# `outline_strength` percentage picks on a linear ramp from the background
+# (0% -> #7F7F7F, silhouette invisible) to black (100% -> #000000).
+_OUTLINE_BG_VALUE = 0x7F  # #7F7F7F — always the background, never configurable
+_OUTLINE_FULL_STRENGTH_VALUE = 0x00  # #000000 — outline_strength 100%
+# body2colmap render_outline's own `blur` default, tracked here so an
+# un-set workflow renders exactly as the library would.
+_OUTLINE_DEFAULT_BLUR = 4
+# The default strength lands the outline exactly on #6F6F6F.
+_DEFAULT_OUTLINE_STRENGTH = (
+    100.0
+    * (_OUTLINE_BG_VALUE - 0x6F)
+    / (_OUTLINE_BG_VALUE - _OUTLINE_FULL_STRENGTH_VALUE)
+)
+
+
+def _outline_grey(strength: float) -> float:
+    """The [0,1] grey an `outline_strength` percentage maps to.
+
+    Quantised to 8 bits, then nudged by half a level so body2colmap's
+    `render_outline` — which does a plain ``int(c * 255)`` — recovers the
+    intended byte exactly rather than losing one to float truncation.
+    """
+    frac = min(max(strength, 0.0), 100.0) / 100.0
+    value = round(
+        _OUTLINE_BG_VALUE * (1.0 - frac) + _OUTLINE_FULL_STRENGTH_VALUE * frac
+    )
+    return (value + 0.5) / 255.0
+
+
 @register_step("render")
 class RenderStep(Step):
     """Render a camera-path orbit of a SAM-3D-Body mesh/skeleton.
@@ -127,7 +159,21 @@ class RenderStep(Step):
         Param("width", int, 720, "Render width", minimum=1),
         Param("height", int, 1280, "Render height", minimum=1),
         Param("render_mode", str, "depth+skeleton", "What each frame draws",
-              choices=("mesh", "depth", "skeleton", "mesh+skeleton", "depth+skeleton")),
+              choices=("mesh", "depth", "skeleton", "mesh+skeleton", "depth+skeleton",
+                       "outline+skeleton")),
+        Param("outline_strength", float, _DEFAULT_OUTLINE_STRENGTH,
+              "outline+skeleton mode only: how dark the flat silhouette fill "
+              "is, as a percentage. 0 matches the fixed #7F7F7F background "
+              "(the silhouette disappears), 100 is solid black. The default "
+              "lands the fill on #6F6F6F. Ignored by every other render_mode",
+              minimum=0.0, maximum=100.0),
+        Param("outline_blur", int, _OUTLINE_DEFAULT_BLUR,
+              "outline+skeleton mode only: Gaussian softening of the "
+              "silhouette edge, in pixels (0 leaves a hard two-tone edge). "
+              "This is body2colmap's own render_outline `blur`; the skeleton "
+              "overlay is composited on top afterwards and stays sharp. "
+              "Ignored by every other render_mode",
+              minimum=0, advanced=True),
         Param("framing", str, "full", "How much of the body fills the frame",
               choices=("full", "torso", "bust", "head")),
         Param("eye_style", str, "shape",
@@ -161,9 +207,11 @@ class RenderStep(Step):
               "camera. Ignored under override_cam_from_mesh, which must keep the "
               "mesh where the original camera saw it"),
         Param("bg_color", list, [1.0, 1.0, 1.0],
-              "RGB in [0,1]. Note this does NOT paint the depth render's background: "
-              "its only other use is being published as image_warp[\"bg_color\"], the "
-              "border colour generate_firstlast fills around the warped reference"),
+              "RGB in [0,1]. Note this does NOT paint the depth render's background, "
+              "nor the outline+skeleton one (that is always the fixed #7F7F7F "
+              "ground): its only other use is being published as "
+              "image_warp[\"bg_color\"], the border colour generate_firstlast fills "
+              "around the warped reference"),
 
         Param("elevation_deg", float, 0.0, "Circular: camera elevation"),
         Param("start_azimuth_deg", float, 0.0, "Where the orbit starts"),
@@ -379,6 +427,13 @@ class RenderStep(Step):
         joint_radius = params["joint_radius"]
         bone_radius = params["bone_radius"]
 
+        # outline+skeleton: the flat fill grey the strength percentage picks,
+        # and the fixed #7F7F7F ground it always sits on (which is exactly the
+        # 0%-strength grey — so the two agree by construction).
+        outline_fg_color = (_outline_grey(params["outline_strength"]),) * 3
+        outline_bg_color = (_outline_grey(0.0),) * 3
+        outline_blur = params["outline_blur"]
+
         # Eye appearance for the face overlay. body2colmap ignores these
         # unless a face_landmarks input makes the face visible, so they are
         # always passed rather than gated here. eye_style "shape" fills each
@@ -436,7 +491,7 @@ class RenderStep(Step):
                     face_max_angle=face_max_angle,
                     **eye_opts,
                 )
-            elif render_mode in ("mesh+skeleton", "depth+skeleton"):
+            elif render_mode in ("mesh+skeleton", "depth+skeleton", "outline+skeleton"):
                 composite_modes: Dict[str, Any] = {
                     "skeleton": {
                         "target_format": skeleton_format,
@@ -446,8 +501,14 @@ class RenderStep(Step):
                 }
                 if render_mode == "mesh+skeleton":
                     composite_modes["mesh"] = {"color": mesh_color, "bg_color": bg_color}
-                else:
+                elif render_mode == "depth+skeleton":
                     composite_modes["depth"] = {"colormap": depth_cmap}
+                else:  # outline+skeleton — skeleton overlay unchanged, flat grey base
+                    composite_modes["outline"] = {
+                        "fg_color": outline_fg_color,
+                        "bg_color": outline_bg_color,
+                        "blur": outline_blur,
+                    }
                 if face_mode is not None:
                     composite_modes["face"] = {
                         "face_mode": face_mode,
