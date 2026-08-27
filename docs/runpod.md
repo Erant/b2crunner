@@ -211,7 +211,7 @@ properties, in order of how much they matter:
   |---|---|---|
   | `fast_helical` | rmbg, sapiens2, wan22, wan22_fp8, wan22_lora | ~52.7 GB |
   | `fast_helical_full` | rmbg, sapiens2, wan22, wan22_fp8, wan22_lora, seedvr2 | ~58.7 GB |
-  | `fast_helical_native` | rmbg, sapiens2, sam3dbody, wan22, wan22_fp8, wan22_lora, seedvr2 | ~61.5 GB |
+  | `fast_helical_native` | rmbg, sapiens2, sam3dbody, wan22, wan22_fp8, wan22_lora, seedvr2, mediapipe | ~61.5 GB |
 
   `wan22` is now only 11.9 GB — the base repo's text_encoder, VAE,
   tokenizer and scheduler. The transformers come from `wan22_fp8` (35.2 GB

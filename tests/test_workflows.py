@@ -266,8 +266,9 @@ class TestWorkflowFiles(unittest.TestCase):
         native = WorkflowSpec.from_yaml(str(WORKFLOW_DIR / "fast_helical_native.yaml"))
 
         bootstrap = [
-            "split_sheet", "reconstruct_body", "render_initial_views",
-            "warp_reference_to_anchor", "reinject_anchor_initial",
+            "split_sheet", "reconstruct_body", "detect_face",
+            "render_initial_views", "warp_reference_to_anchor",
+            "reinject_anchor_initial",
         ]
         native_ids = [s.id for s in native.steps]
         self.assertEqual(

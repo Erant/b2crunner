@@ -5,16 +5,22 @@ optional `face_landmarks` param, which draws face keypoints on the
 skeleton render modes so a diffusion pass gets facial structure to
 condition on, not just a body skeleton.
 
-The detection pipeline (itself lifted from body2colmap's
-`tools/extract_face_landmarks.py`) is two-stage, and the second stage is
-the reason this is more than a single library call:
+The detection pipeline is **crop-first**, which is the reason this is more
+than a single library call. The ComfyUI-Body2COLMAP reference node
+(nodes/face_landmarks_node.py, itself lifted from body2colmap's
+`tools/extract_face_landmarks.py`) runs FaceLandmarker on the full image
+first and only crops when that finds nothing — but for this project's
+inputs, which are full-body shots where the face is a small fraction of
+the frame, a whole-image FaceLandmarker pass either finds nothing or
+returns badly-placed landmarks. MediaPipe's FaceLandmarker is trained on
+face-filling images. So:
 
-1. Run FaceLandmarker on the full image. Fine for a headshot or selfie.
-2. If that finds nothing — the normal outcome for this project's inputs,
-   which are full-body shots where the face is a small fraction of the
-   frame — run FaceDetector to locate face bounding boxes, crop each with
-   padding, and re-run FaceLandmarker on the crop. Crop-space landmarks
-   are then mapped back to full-image normalized coordinates.
+1. Run FaceDetector (blaze_face_short_range) to locate face bounding
+   boxes, crop each with padding, and run FaceLandmarker on the crop.
+   Crop-space landmarks are mapped back to full-image normalized coords.
+2. Only if the detector finds nothing — or no crop yields landmarks — fall
+   back to FaceLandmarker on the whole frame (a head-and-shoulders input,
+   or an aspect ratio the short-range detector was not trained for).
 
 With several faces found (a front/back reference sheet gives two), the
 most frontal wins, scored by the z-component of the cross product of the
@@ -35,8 +41,9 @@ VERIFIED locally against cyber_6f's real reference photos (CPU, no pod):
 478 landmarks from the single-subject anchor photo, and — on the
 two-panel front/back reference sheet — the frontality scoring correctly
 selects the front-facing subject in the left panel over the back-of-head
-in the right one. Both go through the crop-and-retry fallback, since the
-face is a small part of a full-body frame. See tests/test_face_landmarks.py.
+in the right one. Both resolve through the detector-and-crop path, since
+the face is a small part of a full-body frame. See
+tests/test_face_landmarks.py.
 
 One operational note: mediapipe 1.0.1 on macOS arm64 aborted the process
 once (SIGABRT inside `TensorsToDetectionsCalculator::Open()` via
@@ -105,14 +112,14 @@ class DetectFaceLandmarksStep(Step):
              dataset.reference_image or dataset.anchor_image
     params:  min_detection_confidence (float, default 0.3),
              crop_padding (float, default 0.5 — padding around a detected
-             face box, as a fraction of face size, for the fallback crop)
+             face box, as a fraction of face size, before landmarking it)
     outputs: {"face_landmarks": {"source": "mediapipe",
               "landmarks": np.ndarray (N, 3) normalized,
               "image_size": (width, height)}}
 
-    Raises RuntimeError when no face can be found by either stage — a
-    silent empty result would produce a skeleton render with no face and
-    no indication why.
+    Raises RuntimeError when neither the short-range detector nor the
+    whole-image landmarker finds a face — a silent empty result would
+    produce a skeleton render with no face and no indication why.
     """
 
     PARAMS = (
@@ -267,21 +274,14 @@ def _detect(
     *, rgb, width, height, landmarker, detector_path, min_confidence,
     crop_padding, mp, vision, python,
 ) -> np.ndarray:
-    """Two-stage detection. Returns (N, 3) full-image normalized landmarks."""
-    # Stage 1: the whole image.
-    result = landmarker.detect(mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb))
-    if result.face_landmarks:
-        face, idx = _pick_best_face(result.face_landmarks)
-        if len(result.face_landmarks) > 1:
-            logger.info(
-                "detect_face_landmarks: %d faces on the full image, chose #%d "
-                "(frontality %.2f)",
-                len(result.face_landmarks), idx + 1, _frontality_score(face),
-            )
-        return _face_to_array(face)
+    """Crop-first detection. Returns (N, 3) full-image normalized landmarks.
 
-    # Stage 2: detect, crop, retry. Expected for full-body shots.
-    logger.info("detect_face_landmarks: nothing on the full image, cropping")
+    Stage 1 is the short-range detector plus a padded crop per face box,
+    landmarked individually — MediaPipe's FaceLandmarker needs a
+    face-filling image and this project's inputs never are. Stage 2, only
+    when stage 1 comes up empty, is FaceLandmarker on the whole frame.
+    """
+    # Stage 1: detect -> pad -> crop -> landmark each crop.
     det_options = vision.FaceDetectorOptions(
         base_options=python.BaseOptions(model_asset_path=detector_path),
         min_detection_confidence=min_confidence,
@@ -299,43 +299,61 @@ def _detect(
     finally:
         detector.close()
 
-    if not bboxes:
-        raise RuntimeError(
-            f"No face detected in image ({width}x{height}). Ensure the image "
-            "contains a visible face."
-        )
-
-    logger.info(
-        "detect_face_landmarks: %d face box(es), cropping with padding=%.2f",
-        len(bboxes), crop_padding,
-    )
-
-    candidates: List[Tuple[Any, np.ndarray, int, int]] = []
-    for bbox in bboxes:
-        crop, x1, y1 = _crop_to_face(rgb, bbox, padding=crop_padding)
-        crop_result = landmarker.detect(
-            mp.Image(image_format=mp.ImageFormat.SRGB, data=crop)
-        )
-        if crop_result.face_landmarks:
-            candidates.append((crop_result.face_landmarks[0], crop, x1, y1))
-
-    if not candidates:
-        raise RuntimeError(
-            f"FaceDetector located {len(bboxes)} face(s) but FaceLandmarker "
-            "could not extract landmarks from any crop."
-        )
-
-    _, best_idx = _pick_best_face([c[0] for c in candidates])
-    face, crop, x1, y1 = candidates[best_idx]
-    crop_h, crop_w = crop.shape[:2]
-
-    if len(candidates) > 1:
+    if bboxes:
         logger.info(
-            "detect_face_landmarks: chose face #%d of %d (frontality %.2f)",
-            best_idx + 1, len(candidates), _frontality_score(face),
+            "detect_face_landmarks: %d face box(es), cropping with padding=%.2f",
+            len(bboxes), crop_padding,
         )
-    logger.info(
-        "detect_face_landmarks: from crop %dx%d at offset %d,%d",
-        crop_w, crop_h, x1, y1,
+        candidates: List[Tuple[Any, np.ndarray, int, int]] = []
+        for bbox in bboxes:
+            crop, x1, y1 = _crop_to_face(rgb, bbox, padding=crop_padding)
+            crop_result = landmarker.detect(
+                mp.Image(image_format=mp.ImageFormat.SRGB, data=crop)
+            )
+            if crop_result.face_landmarks:
+                candidates.append((crop_result.face_landmarks[0], crop, x1, y1))
+
+        if candidates:
+            _, best_idx = _pick_best_face([c[0] for c in candidates])
+            face, crop, x1, y1 = candidates[best_idx]
+            crop_h, crop_w = crop.shape[:2]
+            if len(candidates) > 1:
+                logger.info(
+                    "detect_face_landmarks: chose face #%d of %d (frontality %.2f)",
+                    best_idx + 1, len(candidates), _frontality_score(face),
+                )
+            logger.info(
+                "detect_face_landmarks: from crop %dx%d at offset %d,%d",
+                crop_w, crop_h, x1, y1,
+            )
+            return _face_to_array_from_crop(
+                face, crop_w, crop_h, x1, y1, width, height
+            )
+
+        logger.info(
+            "detect_face_landmarks: detector found %d box(es) but no crop "
+            "yielded landmarks; trying the whole frame", len(bboxes),
+        )
+    else:
+        logger.info(
+            "detect_face_landmarks: detector found no face; trying the whole frame"
+        )
+
+    # Stage 2 (fallback): the whole frame. A head-and-shoulders crop, or an
+    # aspect ratio the short-range detector was not trained for.
+    result = landmarker.detect(mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb))
+    if result.face_landmarks:
+        face, idx = _pick_best_face(result.face_landmarks)
+        if len(result.face_landmarks) > 1:
+            logger.info(
+                "detect_face_landmarks: %d faces on the full frame, chose #%d "
+                "(frontality %.2f)",
+                len(result.face_landmarks), idx + 1, _frontality_score(face),
+            )
+        return _face_to_array(face)
+
+    raise RuntimeError(
+        f"No face detected in image ({width}x{height}) by the short-range "
+        "detector or the whole-frame landmarker. Ensure the image contains a "
+        "visible face."
     )
-    return _face_to_array_from_crop(face, crop_w, crop_h, x1, y1, width, height)

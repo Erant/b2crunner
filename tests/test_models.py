@@ -147,7 +147,8 @@ class TestRequiredForSteps(unittest.TestCase):
     def test_blocking_is_scoped_to_the_workflow(self):
         cases = {
             "fast_helical_native": {"rmbg", "sapiens2", "sam3dbody", "wan22",
-                                    "wan22_fp8", "wan22_lora", "seedvr2"},
+                                    "wan22_fp8", "wan22_lora", "seedvr2",
+                                    "mediapipe"},
             "fast_helical": {"rmbg", "sapiens2", "wan22", "wan22_fp8", "wan22_lora"},
             "fast_helical_full": {"rmbg", "sapiens2", "wan22", "wan22_fp8",
                                   "wan22_lora", "seedvr2"},

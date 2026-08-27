@@ -2,7 +2,8 @@
 # front/back reference sheet, then run fast_helical_full's pipeline over it.
 #
 # BOOTSTRAP (this file only) — split_sheet -> reconstruct_body ->
-# render_initial_views -> warp_reference_to_anchor -> reinject_anchor_initial.
+# detect_face -> render_initial_views -> warp_reference_to_anchor ->
+# reinject_anchor_initial.
 # This is the part fast_helical_full is handed ready-made: a dataset rendered
 # with override_cam_from_mesh whose extras carry orbit_target /
 # anchor_position / focal_length_mm / original_focal_length, with a warped
@@ -124,6 +125,23 @@ steps:
       focal_length: scene.focal_length
       bbox: scene.bbox
 
+  # MediaPipe face landmarks off the front half of the sheet, for the face
+  # overlay render.py draws on the skeleton (steps/face_landmarks.py). The
+  # SAM-3D-Body rig render.py consumes has no facial detail past a few head
+  # joints, so without this the initial render — and the diffusion pass it
+  # conditions — gets a bare body skeleton with no eyes/nose/mouth. CPU,
+  # ~10 MB of model files fetched to the volume on first use. Raises if it
+  # finds no face, which for a front/back sheet should not happen; the
+  # two-stage detect-crop-retry in that step is there because the face is a
+  # small part of a full-body frame.
+  - id: detect_face
+    step: detect_face_landmarks
+    dispatch: in_process
+    inputs:
+      image: scene.front_image
+    outputs:
+      face_landmarks: scene.face_landmarks
+
   # render's mesh_output wants a dict with vertices/cam_t/faces/
   # keypoints_3d/focal_length (see render.py's module docstring on why
   # keypoints_3d specifically, not joints) — reconstruct_body's outputs
@@ -143,6 +161,11 @@ steps:
     dispatch: in_process
     inputs:
       mesh_output: scene
+      # detect_face's output, drawn on the skeleton overlay (face_mode
+      # defaults to "full"). Without this input render.py sets face_mode to
+      # None and the overlay is skipped entirely — a body skeleton with no
+      # face, which is what "just the skeleton and outline" looks like.
+      face_landmarks: scene.face_landmarks
     params:
       pattern: circular
       n_frames: 81

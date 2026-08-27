@@ -151,7 +151,8 @@ pipeline/
 │   │                            isolating the upscaler when output looks
 │   │                            wrong
 │   └── fast_helical_native.yaml a bootstrap prologue from a front/back
-│                                sheet (split → sam3d_body → render →
+│                                sheet (split → sam3d_body →
+│                                detect_face_landmarks → render →
 │                                generate_firstlast → inject_anchor) then
 │                                fast_helical_full.yaml's steps verbatim.
 │                                rmbg/wan22_vace_denoise/sapiens2/
