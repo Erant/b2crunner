@@ -146,16 +146,23 @@ def check_torch() -> Check:
             f"{props.total_memory / 1e9:.1f} GB"
         )
 
-    # An actual kernel launch, not just is_available(): the arch-list vs.
-    # real-hardware mismatch noted in docs/docker-build-notes.md means the
-    # list alone is not a reliable yes/no for "will this run".
-    try:
-        a = torch.randn(64, 64, device="cuda")
-        result = float((a @ a).sum())
-        lines.append(f"real matmul on cuda:0 OK (sum={result:.1f})")
-    except Exception as exc:
-        return Check("torch", FAIL, f"matmul on cuda:0 failed: {exc}", lines)
+    # An actual kernel launch per visible device, not just is_available():
+    # the arch-list vs. real-hardware mismatch noted in
+    # docs/docker-build-notes.md means the list alone is not a reliable
+    # yes/no for "will this run", and on a multi-GPU pod one bad card must
+    # not hide behind a matmul that only ever tried device 0.
+    status = OK
+    for index in range(torch.cuda.device_count()):
+        try:
+            a = torch.randn(64, 64, device=f"cuda:{index}")
+            result = float((a @ a).sum())
+            lines.append(f"real matmul on cuda:{index} OK (sum={result:.1f})")
+        except Exception as exc:
+            lines.append(f"real matmul on cuda:{index} FAILED: {exc}")
+            status = FAIL
 
+    if status == FAIL:
+        return Check("torch", FAIL, "matmul failed on at least one device", lines)
     return Check("torch", OK, f"{torch.__version__} / cu{torch.version.cuda}", lines)
 
 

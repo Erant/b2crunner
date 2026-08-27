@@ -183,7 +183,7 @@ class TestOutputSelection(unittest.TestCase):
         self.assertIn("resolution", globals_shown)
 
     def test_output_root_is_not_drawn_either(self):
-        """Sharper than the switches: `RunManager.start` only repoints
+        """Sharper than the switches: `pipeline.run_worker` only repoints
         output_root at the run directory when the submitted overrides do not
         already carry it. A control for it would let a run write under the
         process's cwd instead, which is how the Results tab once reported

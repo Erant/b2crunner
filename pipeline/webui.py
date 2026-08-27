@@ -31,15 +31,20 @@ render / generate_firstlast / inject_anchor) has never executed end to end
 of the pipeline is still exercisable from a zip without touching the
 image.
 
-**The run is a background thread, the UI only ever polls it.** A Gradio
+**Each run is its own OS process, the UI only ever polls it.** A Gradio
 generator holds an SSE connection for as long as it yields, and a browser
 tab surviving a three-hour run over a pod proxy is not something to design
-around. So the thread owns the run, the UI reads a snapshot of shared
-state, and closing the tab does nothing to the work. Reopening it and
-hitting Attach picks the view back up.
+around. So a `pipeline.run_worker` child owns the run, the UI reads a
+snapshot published as JSON, and closing the tab does nothing to the work.
+Reopening it and picking the run back up from the dropdown picks the view
+back up.
 
-One run at a time, deliberately: there is one GPU, and two concurrent
-workflows just means both OOM.
+One run per idle GPU, automatically: `GpuScheduler` (pipeline/gpu_scheduler.py)
+spawns one `pipeline.run_worker` process per submitted run, `CUDA_VISIBLE_DEVICES`
+-pinned to whichever physical GPU is free, and queues the rest. Two runs on
+two different cards do not contend for either's VRAM — CUDA context
+isolation is a property of the OS process boundary, not something this
+process negotiates.
 
 **What a run hands back** is a choice made before it starts, not after: the
 Outputs checkboxes set the workflow's `export_colmap` / `export_ply` params,
@@ -54,12 +59,9 @@ from __future__ import annotations
 
 import logging
 import shutil
-import threading
+import signal
 import time
-import traceback
 import zipfile
-from collections import deque
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -67,43 +69,21 @@ import gradio as gr
 import yaml
 
 from . import steps  # noqa: F401  registers every Step; the UI is an entrypoint
-from .dataset import Dataset, find_dataset_root
-from .logging_setup import DATE_FORMAT, FORMAT, QueueLogHandler, timestamped_run_name
-from .models import is_ready, registry, required_for_steps, wait_until_ready
-from .paths import data_dir, log_dir, output_dir, upload_dir
-from .runner import RunCancelled, RunEvent, WorkflowRunner
+from .dataset import find_dataset_root
+from .gpu_scheduler import GpuScheduler, detect_gpu_count
+from .logging_setup import timestamped_run_name
+from .models import registry
+from .paths import data_dir, output_dir, run_jobs_dir, upload_dir
+from .run_state import PREVIEW_FRAMES, RunJob, RunState
 from .step import Param
-from .workflow import WorkflowSpec, load_envs
+from .workflow import WorkflowSpec, apply_ui_overrides, load_envs
 
 logger = logging.getLogger(__name__)
-
-# Enough scrollback to cover a whole step's chatter without letting a
-# runaway progress bar grow the process's memory without bound.
-_LOG_BUFFER_LINES = 4000
 
 # The gallery is a sanity check ("did it render a person or grey mush"),
 # not a contact sheet — 81 full-resolution PNGs into a browser over a pod
 # proxy is slow enough to look broken.
 _GALLERY_MAX = 24
-
-# The per-step contact sheet: eight frames evenly spaced through the batch,
-# written after every step. Eight because an 81-frame orbit strides by ten —
-# frames 1, 11, 21, ... — which is a quarter turn between neighbours, enough
-# to see a step break one side of the subject and not the other.
-#
-# Downscaled JPEGs, not the frames themselves: a run has around fifteen
-# steps, so this is ~120 images, and at full resolution that is a gigabyte
-# of PNG nobody can load over a pod's HTTP proxy.
-_PREVIEW_FRAMES = 8
-_PREVIEW_WIDTH = 480
-_PREVIEW_QUALITY = 82
-_PREVIEW_DIRNAME = "_previews"
-
-# What a masked-out pixel is drawn over. Mid-grey rather than black or
-# white so it reads as "nothing here" against both a dark jacket and a
-# blown-out background — the two cases where a mask step going wrong is
-# otherwise invisible.
-_PREVIEW_BACKDROP = 128
 
 SOURCE_DIRECTORY = "Dataset directory on this machine"
 SOURCE_ZIP = "Upload a dataset .zip"
@@ -120,357 +100,6 @@ OUTPUT_COLMAP = "COLMAP dataset"
 OUTPUT_PLY = "Trained .ply (normal-supervised)"
 OUTPUT_PARAMS = {OUTPUT_COLMAP: "export_colmap", OUTPUT_PLY: "export_ply"}
 OUTPUT_SUBDIRS = {OUTPUT_COLMAP: "colmap", OUTPUT_PLY: "ply"}
-
-
-@dataclass
-class StepRecord:
-    index: int
-    step_id: str
-    step_name: str
-    status: str = "running"
-    elapsed: float = 0.0
-    # Paths to this step's preview frames, filled in as it finishes.
-    previews: List[str] = field(default_factory=list)
-
-
-@dataclass
-class RunState:
-    name: str = ""
-    workflow: str = ""
-    status: str = "idle"  # idle | running | done | failed | cancelled
-    message: str = ""
-    started: float = 0.0
-    finished: float = 0.0
-    current: int = 0
-    total: int = 0
-    steps: List[StepRecord] = field(default_factory=list)
-    output_dir: Optional[Path] = None
-    log_path: Optional[Path] = None
-    error: str = ""
-
-
-def preview_indices(count: int, wanted: int = _PREVIEW_FRAMES) -> List[int]:
-    """Evenly spaced frame indices: 0, 10, 20, ... for an 81-frame batch.
-
-    Strides rather than slicing the front, because the interesting failures
-    are positional — a denoise pass that holds up at the front of the orbit
-    and falls apart at the back looks perfect in the first eight frames.
-    """
-    if count <= 0:
-        return []
-    if count <= wanted:
-        return list(range(count))
-    stride = count // wanted
-    return [i * stride for i in range(wanted)]
-
-
-def write_previews(images, masks, names, destination: Path) -> List[str]:
-    """Write this step's sampled frames as small JPEGs; return their paths.
-
-    Masks are composited in rather than dropped: `rmbg` and `mask_splat`
-    change nothing else about a frame, so without this their previews are
-    indistinguishable from the step before them — which is exactly when you
-    are looking at this gallery.
-    """
-    import cv2
-    import numpy as np
-
-    from .masks import normalize_mask
-
-    destination.mkdir(parents=True, exist_ok=True)
-    written = []
-    for i in preview_indices(len(images)):
-        frame = np.asarray(images[i])
-        if frame.ndim == 2:
-            frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
-
-        alpha = None
-        if frame.shape[-1] == 4:
-            alpha = normalize_mask(frame[:, :, 3])
-            frame = frame[:, :, :3]
-        if masks is not None and i < len(masks):
-            alpha = normalize_mask(masks[i])
-
-        frame = frame.astype(np.float32)
-        if alpha is not None:
-            if alpha.shape != frame.shape[:2]:
-                alpha = cv2.resize(alpha, (frame.shape[1], frame.shape[0]),
-                                   interpolation=cv2.INTER_NEAREST)
-            frame = frame * alpha[..., None] + _PREVIEW_BACKDROP * (1.0 - alpha[..., None])
-
-        height, width = frame.shape[:2]
-        if width > _PREVIEW_WIDTH:
-            scale = _PREVIEW_WIDTH / width
-            frame = cv2.resize(
-                frame, (_PREVIEW_WIDTH, max(1, int(round(height * scale)))),
-                interpolation=cv2.INTER_AREA,
-            )
-
-        name = names[i] if i < len(names) else f"frame_{i + 1:05d}_"
-        path = destination / f"{i:05d}_{Path(name).stem}.jpg"
-        cv2.imwrite(
-            str(path), np.clip(frame, 0, 255).astype(np.uint8),
-            [int(cv2.IMWRITE_JPEG_QUALITY), _PREVIEW_QUALITY],
-        )
-        written.append(str(path))
-    return written
-
-
-class RunManager:
-    """Owns the one background run and the state the UI reads off it."""
-
-    def __init__(self, envs_path: str) -> None:
-        self.envs_path = envs_path
-        self._lock = threading.Lock()
-        self._log: deque = deque(maxlen=_LOG_BUFFER_LINES)
-        self._thread: Optional[threading.Thread] = None
-        self._cancel = threading.Event()
-        self.state = RunState()
-
-    # -- state ------------------------------------------------------------
-    @property
-    def is_running(self) -> bool:
-        return self._thread is not None and self._thread.is_alive()
-
-    def snapshot(self) -> tuple[RunState, str]:
-        with self._lock:
-            return self.state, "\n".join(self._log)
-
-    def _put_log(self, line: str) -> None:
-        with self._lock:
-            self._log.append(line)
-
-    def cancel(self) -> None:
-        self._cancel.set()
-        self._put_log(">>> cancellation requested; the run stops after the current step")
-
-    # -- running ----------------------------------------------------------
-    def start(
-        self,
-        workflow_path: Path,
-        global_overrides: Dict[str, Any],
-        step_overrides: Dict[str, Dict[str, Any]],
-        dataset_dir: Optional[Path],
-        reference_image: Optional[Path],
-        prompt: str,
-    ) -> str:
-        if self.is_running:
-            raise gr.Error("A run is already in progress. Cancel it first, or wait for it.")
-
-        spec = WorkflowSpec.from_yaml(workflow_path)
-        # Both namespaces are filtered to what this workflow actually has.
-        # A key that is not here means the panel state is stale — the user
-        # switched workflows and submitted before the redraw landed — and
-        # dropping it beats failing the run over a control that is no
-        # longer on screen, or worse, inventing a global nothing reads.
-        spec.globals.update(
-            {k: v for k, v in global_overrides.items() if k in spec.globals}
-        )
-        by_id = {step.id: step for step in spec.steps}
-        for step_id, values in step_overrides.items():
-            if step_id in by_id:
-                by_id[step_id].params.update(values)
-        spec.validate()
-        run_name = timestamped_run_name(spec.name)
-        out = output_dir() / run_name
-        if "output_root" in spec.globals and "output_root" not in global_overrides:
-            spec.globals["output_root"] = str(out)
-
-        with self._lock:
-            self._log.clear()
-            self.state = RunState(
-                name=run_name,
-                workflow=spec.name,
-                status="running",
-                started=time.time(),
-                total=len(spec.steps),
-                steps=[
-                    StepRecord(i, s.id, s.step, status="pending")
-                    for i, s in enumerate(spec.steps, start=1)
-                ],
-                output_dir=out,
-            )
-        self._cancel.clear()
-
-        self._thread = threading.Thread(
-            target=self._run,
-            args=(spec, run_name, out, dataset_dir, reference_image, prompt),
-            name=f"b2c-run-{run_name}",
-            daemon=True,
-        )
-        self._thread.start()
-        return run_name
-
-    def _capture_previews(self, event: RunEvent) -> List[str]:
-        """Snapshot a few of this step's output frames, off the Context.
-
-        Runs on the run thread, between steps — a handful of downscaled
-        JPEG writes, next to steps measured in minutes. Every failure here
-        is swallowed: a debugging aid must never be the thing that kills a
-        two-hour run.
-        """
-        if event.context is None or not self.state.output_dir:
-            return []
-        try:
-            images = event.context.get("dataset.images")
-        except (KeyError, AttributeError, TypeError):
-            return []
-        if not images:
-            return []
-        try:
-            masks = event.context.get("dataset.masks")
-        except (KeyError, AttributeError, TypeError):
-            masks = None
-        try:
-            names = event.context.get("dataset.image_names") or []
-        except (KeyError, AttributeError, TypeError):
-            names = []
-
-        destination = (
-            Path(self.state.output_dir) / _PREVIEW_DIRNAME
-            / f"{event.index:02d}_{event.step_id}"
-        )
-        try:
-            return write_previews(images, masks, names, destination)
-        except Exception:  # noqa: BLE001 - see the docstring
-            logger.warning("could not write previews for step %s", event.step_id, exc_info=True)
-            return []
-
-    def _on_event(self, event: RunEvent) -> None:
-        # Outside the lock: this writes eight JPEGs, and the UI polls the
-        # same lock once a second.
-        previews = self._capture_previews(event) if event.kind == "step_end" else []
-
-        with self._lock:
-            state = self.state
-            if event.kind == "step_start":
-                state.current = event.index
-                state.message = f"[{event.index}/{event.total}] {event.step_id}"
-                state.steps[event.index - 1].status = "running"
-            elif event.kind == "step_end":
-                record = state.steps[event.index - 1]
-                record.status = "done"
-                record.elapsed = event.elapsed
-                record.previews = previews
-            elif event.kind == "step_error":
-                record = state.steps[event.index - 1]
-                record.status = "failed"
-                record.elapsed = event.elapsed
-            elif event.kind == "step_skipped":
-                # Advance the progress bar past it, but leave it visible in
-                # the step table: "why is there no ply/" is answered by
-                # seeing the step sitting there marked skipped.
-                state.current = event.index
-                state.steps[event.index - 1].status = "skipped"
-        # Checked on entry to each step rather than inside one: a step is a
-        # single opaque call (often a subprocess holding the GPU), and
-        # tearing one down mid-flight risks leaving the card in a state the
-        # next run inherits.
-        if event.kind == "step_start" and self._cancel.is_set():
-            raise RunCancelled(f"cancelled before step {event.index} ({event.step_id})")
-
-    def _run(
-        self,
-        spec: WorkflowSpec,
-        run_name: str,
-        out: Path,
-        dataset_dir: Optional[Path],
-        reference_image: Optional[Path],
-        prompt: str,
-    ) -> None:
-        # Mirror this run's log into the UI buffer. Attached to the root
-        # logger so it also picks up the relayed output of subprocess steps
-        # (which arrive as `step.<name>` records), not just this module's.
-        root = logging.getLogger()
-        # A handler below the logger's own level receives nothing, and the
-        # root default is WARNING. `setup_logging` normally lowers it, but
-        # the UI can also be driven from an embedding process that never
-        # called it — in which case the log pane stays silently empty,
-        # which reads as "the run is stuck".
-        if root.level > logging.INFO:
-            root.setLevel(logging.INFO)
-
-        handler = QueueLogHandler(self._put_log)
-        handler.setLevel(logging.INFO)
-        root.addHandler(handler)
-
-        log_path = log_dir() / f"{run_name}.log"
-        file_handler = logging.FileHandler(log_path, encoding="utf-8")
-        file_handler.setFormatter(logging.Formatter(FORMAT, datefmt=DATE_FORMAT))
-        root.addHandler(file_handler)
-        with self._lock:
-            self.state.log_path = log_path
-
-        try:
-            from .doctor import log_machine_banner
-
-            logger.info("run '%s' (%s)", run_name, spec.name)
-            logger.info("output: %s", out)
-            log_machine_banner()
-
-            # Block here, not at submit time: the wait belongs on the
-            # Progress tab where it is visible and cancellable, not in a
-            # button handler that would just appear to hang. Scoped to the
-            # steps this run will actually execute — fast_helical must not
-            # wait on SeedVR2's 6 GB for an upscale it does not do.
-            needed = required_for_steps(step.step for step in spec.enabled_steps())
-            if needed and not all(is_ready(key) for key in needed):
-                def report(missing):
-                    with self._lock:
-                        self.state.message = (
-                            f"waiting for model download: {', '.join(missing)} "
-                            f"(~{sum(registry()[k].approx_gb for k in missing):.0f} GB)"
-                        )
-
-                logger.info("models this workflow needs: %s", ", ".join(needed))
-                report(needed)
-                wait_until_ready(needed, on_wait=report)
-                with self._lock:
-                    self.state.message = ""
-                logger.info("all required models present")
-
-            if reference_image is not None:
-                dataset = Dataset.from_reference_image(reference_image, prompt=prompt or None)
-                logger.info("starting from reference sheet %s (%dx%d)",
-                            reference_image, *dataset.resolution)
-            else:
-                dataset = Dataset.from_disk(dataset_dir)
-                logger.info("loaded %s: %d frames, %d cameras, %d points",
-                            dataset_dir, len(dataset.images), len(dataset.cameras),
-                            len(dataset.points_3d[0]))
-                if prompt:
-                    dataset.prompt = prompt
-
-            envs = load_envs(self.envs_path)
-            runner = WorkflowRunner(spec, envs=envs, on_event=self._on_event)
-            ctx = runner.run({"dataset": dataset})
-
-            final: Dataset = ctx.get("dataset")
-            saved = final.to_disk(out)
-            logger.info("saved final dataset to %s (%d frames)", saved, len(final.images))
-
-            with self._lock:
-                self.state.status = "done"
-                self.state.message = f"complete — {len(final.images)} frames in {saved}"
-        except RunCancelled as exc:
-            logger.warning("run cancelled: %s", exc)
-            with self._lock:
-                self.state.status = "cancelled"
-                self.state.message = str(exc)
-        except Exception as exc:
-            logger.error("run failed: %s", exc)
-            logger.debug("%s", traceback.format_exc())
-            self._put_log(traceback.format_exc())
-            with self._lock:
-                self.state.status = "failed"
-                self.state.message = f"{type(exc).__name__}: {exc}"
-                self.state.error = traceback.format_exc()
-        finally:
-            with self._lock:
-                self.state.finished = time.time()
-            root.removeHandler(handler)
-            root.removeHandler(file_handler)
-            file_handler.close()
 
 
 # --------------------------------------------------------------------------
@@ -780,12 +409,15 @@ def preview_step_choices(state: RunState) -> List[str]:
 
 def _format_status(state: RunState) -> str:
     if state.status == "idle":
-        return "### idle\nNothing running. Configure a run on the **Run** tab."
+        return "### idle\nPick a run above, or start one on the **Run** tab."
+    if state.status == "queued":
+        return f"### 🕓 queued — `{state.name}`\nWaiting for a free GPU."
 
-    elapsed = (state.finished or time.time()) - state.started
+    elapsed = (state.finished or time.time()) - state.started if state.started else 0.0
     icon = {"running": "⏳", "done": "✅", "failed": "❌", "cancelled": "⛔"}.get(state.status, "")
     lines = [
-        f"### {icon} {state.status} — `{state.name}`",
+        f"### {icon} {state.status} — `{state.name}`"
+        + (f" · **GPU** {state.gpu_index}" if state.gpu_index is not None else ""),
         f"**workflow** `{state.workflow}` · **elapsed** {elapsed:.0f}s "
         f"· **step** {state.current}/{state.total}",
     ]
@@ -796,6 +428,31 @@ def _format_status(state: RunState) -> str:
     if state.log_path:
         lines.append(f"**log** `{state.log_path}`")
     return "\n\n".join(lines)
+
+
+def _fleet_status(scheduler: GpuScheduler) -> str:
+    slots = scheduler.gpu_status()
+    busy = sum(1 for slot in slots if slot["busy"])
+    queued = scheduler.queued_count()
+    parts = [f"**{busy} of {len(slots)}** GPU{'s' if len(slots) != 1 else ''} busy"]
+    if queued:
+        parts.append(f"**{queued}** queued")
+    detail = ", ".join(
+        f"gpu{slot['gpu']}: {slot['run'] if slot['busy'] else 'idle'}" for slot in slots
+    )
+    return " · ".join(parts) + (f"  \n_{detail}_" if detail else "")
+
+
+def _run_choices(scheduler: GpuScheduler) -> List[tuple[str, str]]:
+    icons = {"queued": "🕓", "running": "⏳", "done": "✅", "failed": "❌", "cancelled": "⛔"}
+    return [
+        (
+            f"{icons.get(s.status, '?')} {s.name}"
+            + (f" (gpu {s.gpu_index})" if s.gpu_index is not None else ""),
+            s.name,
+        )
+        for s in reversed(scheduler.list_runs())
+    ]
 
 
 def _step_rows(state: RunState) -> List[List[Any]]:
@@ -811,13 +468,33 @@ def _step_rows(state: RunState) -> List[List[Any]]:
 # the app
 # --------------------------------------------------------------------------
 
-def build_app(envs_path: str) -> gr.Blocks:
-    manager = RunManager(envs_path)
+def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
+    scheduler = GpuScheduler(
+        gpu_count=gpu_count if gpu_count is not None else detect_gpu_count(),
+        work_dir=run_jobs_dir(),
+    )
     workflows = workflow_choices()
     default_workflow = "fast_helical_full" if "fast_helical_full" in workflows else workflows[0]
 
     with gr.Blocks(title="b2c_runner", analytics_enabled=False) as app:
         gr.Markdown("# b2c_runner\nBody2COLMAP pipeline — submit a run, watch it, collect the output.")
+
+        # Shared across every tab: which run the Progress/Results controls
+        # below are currently looking at. A run submitted on the Run tab
+        # selects itself here automatically; picking a different one from
+        # the dropdown re-points every other tab at it.
+        with gr.Row():
+            run_picker = gr.Dropdown(
+                choices=[], value=None, label="Active run", scale=3,
+                info="Every run this session has seen, most recent first.",
+            )
+            refresh_runs_btn = gr.Button("Refresh run list", size="sm", scale=1)
+        fleet_out = gr.Markdown(_fleet_status(scheduler))
+
+        # Keeps the app object usable as a handle onto its own scheduler —
+        # `launch()` needs it to forward a shutdown signal to every worker
+        # this process spawned.
+        app._gpu_scheduler = scheduler  # noqa: SLF001
 
         with gr.Tab("Run"):
             with gr.Row():
@@ -969,8 +646,10 @@ def build_app(envs_path: str) -> gr.Blocks:
                 variant="secondary",
             )
             gr.Markdown(
-                "_The run happens in a background thread. Closing this tab does not stop it —"
-                " reopen the page and press **Attach / refresh** to pick the view back up._"
+                "_Each run is its own process, pinned to whichever GPU picked it up. "
+                "Closing this tab does not stop it — reopen the page, pick it from "
+                "**Active run** above, and press **Attach / refresh** to pick the view "
+                "back up._"
             )
 
         with gr.Tab("Results"):
@@ -980,7 +659,7 @@ def build_app(envs_path: str) -> gr.Blocks:
             results_gallery = gr.Gallery(label="Final frames", columns=6, height=400)
 
             gr.Markdown(
-                f"### Per-step frames\n_{_PREVIEW_FRAMES} frames spaced evenly "
+                f"### Per-step frames\n_{PREVIEW_FRAMES} frames spaced evenly "
                 "through the batch, captured after every step, so a step that "
                 "breaks the output can be identified by looking rather than by "
                 "reading the log. One row per step, in run order. These appear "
@@ -992,7 +671,7 @@ def build_app(envs_path: str) -> gr.Blocks:
                 info="Narrow the sheet to one step to see its frames larger.",
             )
             preview_gallery_out = gr.Gallery(
-                label="Per-step frames", columns=_PREVIEW_FRAMES, height=600,
+                label="Per-step frames", columns=PREVIEW_FRAMES, height=600,
                 object_fit="contain",
             )
 
@@ -1096,61 +775,83 @@ def build_app(envs_path: str) -> gr.Blocks:
 
             from .cli import resolve_workflow
 
-            manager.start(
-                workflow_path=resolve_workflow(workflow),
+            workflow_path = resolve_workflow(workflow)
+            spec = WorkflowSpec.from_yaml(workflow_path)
+            # Validated here, before the job is ever queued, so a bad
+            # override fails at submit time — in a button handler the user
+            # is looking at — instead of forty minutes into a queued run
+            # a `pipeline.run_worker` process reports as merely "failed".
+            apply_ui_overrides(spec, global_overrides, step_overrides)
+            spec.validate()
+
+            run_name = timestamped_run_name(spec.name)
+            out = output_dir() / run_name
+            job = RunJob(
+                run_name=run_name,
+                workflow_name=spec.name,
+                workflow_path=str(workflow_path),
+                output_dir=str(out),
+                envs_path=envs_path,
                 global_overrides=global_overrides,
                 step_overrides=step_overrides,
-                dataset_dir=dataset_dir,
-                reference_image=reference_image,
+                dataset_dir=str(dataset_dir) if dataset_dir else None,
+                reference_image=str(reference_image) if reference_image else None,
                 prompt=prompt or "",
             )
+            scheduler.submit(job)
+            return gr.update(choices=_run_choices(scheduler), value=run_name)
 
-        def stream():
-            """Poll the manager until the run ends, then one final update.
+        def stream(run_name: Optional[str]):
+            """Poll the selected run until it ends, then one final update.
 
             A generator rather than a Timer so it works the same on every
-            Gradio 4.x/5.x, and it deliberately reads shared state instead
-            of driving the run: if this connection dies, the thread it is
-            watching does not.
+            Gradio 4.x/5.x, and it deliberately reads shared state (a
+            `RunState` the scheduler last read off that run's `status.json`)
+            instead of driving the run: if this connection dies, the
+            `pipeline.run_worker` process it is watching does not.
             """
+            if not run_name:
+                state = RunState()
+                yield (_format_status(state), gr.update(value=0), _step_rows(state),
+                       "", _fleet_status(scheduler))
+                return
             while True:
-                state, log_text = manager.snapshot()
+                state = scheduler.snapshot(run_name)
                 fraction = (state.current / state.total) if state.total else 0
                 yield (
                     _format_status(state),
                     gr.update(value=fraction),
                     _step_rows(state),
-                    log_text,
+                    scheduler.log_text(run_name),
+                    _fleet_status(scheduler),
                 )
-                if not manager.is_running:
+                if state.status not in ("queued", "running"):
                     break
                 time.sleep(1.0)
-            state, log_text = manager.snapshot()
-            fraction = (state.current / state.total) if state.total else 0
-            yield (
-                _format_status(state),
-                gr.update(value=fraction),
-                _step_rows(state),
-                log_text,
-            )
 
-        progress_outputs = [status_out, progress_out, steps_out, log_out]
+        progress_outputs = [status_out, progress_out, steps_out, log_out, fleet_out]
 
         start_btn.click(
             on_start,
             inputs=[workflow_in, source_in, dataset_in, zip_in, photo_in, prompt_in,
                     param_state, outputs_in],
-            outputs=[],
-        ).success(stream, outputs=progress_outputs)
+            outputs=[run_picker],
+        ).then(stream, inputs=[run_picker], outputs=progress_outputs)
 
-        attach_btn.click(stream, outputs=progress_outputs)
-        cancel_btn.click(lambda: manager.cancel(), outputs=[])
+        attach_btn.click(stream, inputs=[run_picker], outputs=progress_outputs)
+        refresh_runs_btn.click(
+            lambda: gr.update(choices=_run_choices(scheduler)), outputs=[run_picker]
+        )
+        cancel_btn.click(
+            lambda run_name: scheduler.cancel(run_name) if run_name else None,
+            inputs=[run_picker], outputs=[],
+        )
 
-        def on_results():
-            state, _ = manager.snapshot()
+        def on_results(run_name: Optional[str]):
+            state = scheduler.snapshot(run_name) if run_name else RunState()
             directory = state.output_dir
             if not directory or not Path(directory).exists():
-                return "No output directory yet — start a run first.", [], None
+                return "No output directory yet — pick or start a run first.", [], None
 
             directories = result_dirs(Path(directory))
             if not directories:
@@ -1159,7 +860,7 @@ def build_app(envs_path: str) -> gr.Blocks:
                 # failed, and looking in the run directory is the next move.
                 note = (
                     "still running — the exports are the last steps"
-                    if state.status == "running"
+                    if state.status in ("queued", "running")
                     else "the run produced neither; check the Progress tab's step list"
                 )
                 return (
@@ -1184,8 +885,8 @@ def build_app(envs_path: str) -> gr.Blocks:
             )
             return info, gallery_images(directory), archive
 
-        def stream_results(step_filter: str):
-            """Poll the Results tab for as long as the run is going.
+        def stream_results(run_name: Optional[str], step_filter: str):
+            """Poll the Results tab for as long as the selected run is going.
 
             Same shape as `stream()` on the Progress tab and for the same
             reason: the per-step frames are worth watching *during* a
@@ -1196,19 +897,23 @@ def build_app(envs_path: str) -> gr.Blocks:
             is not built until there is something to put in it — so the
             expensive half is skipped until the end.
             """
+            if not run_name:
+                yield ("Pick a run above.", [], None,
+                       gr.update(choices=[PREVIEW_ALL]), [])
+                return
             while True:
-                state, _ = manager.snapshot()
-                running = manager.is_running
-                if running:
+                state = scheduler.snapshot(run_name)
+                active = state.status in ("queued", "running")
+                if active:
                     finished = (gr.update(), gr.update(), gr.update())
                 else:
-                    finished = on_results()
+                    finished = on_results(run_name)
                 yield (
                     *finished,
                     gr.update(choices=preview_step_choices(state)),
                     preview_gallery(state, step_filter),
                 )
-                if not running:
+                if not active:
                     break
                 time.sleep(3.0)
 
@@ -1216,15 +921,16 @@ def build_app(envs_path: str) -> gr.Blocks:
                            preview_step_in, preview_gallery_out]
 
         results_refresh.click(
-            stream_results, inputs=preview_step_in, outputs=results_outputs
+            stream_results, inputs=[run_picker, preview_step_in], outputs=results_outputs
         )
 
-        def on_preview_filter(step_filter: str):
-            state, _ = manager.snapshot()
+        def on_preview_filter(run_name: Optional[str], step_filter: str):
+            state = scheduler.snapshot(run_name) if run_name else RunState()
             return preview_gallery(state, step_filter)
 
         preview_step_in.change(
-            on_preview_filter, inputs=preview_step_in, outputs=preview_gallery_out
+            on_preview_filter, inputs=[run_picker, preview_step_in],
+            outputs=preview_gallery_out,
         )
 
         def on_models():
@@ -1252,13 +958,33 @@ def build_app(envs_path: str) -> gr.Blocks:
     return app
 
 
-def launch(host: str = "0.0.0.0", port: int = 7860, envs_path: str = "", share: bool = False) -> None:
+def launch(
+    host: str = "0.0.0.0", port: int = 7860, envs_path: str = "", share: bool = False,
+    gpu_count: Optional[int] = None,
+) -> None:
     from .cli import DEFAULT_ENVS
 
-    app = build_app(envs_path or DEFAULT_ENVS)
-    logger.info("web UI on http://%s:%d", host, port)
-    # queue() is what makes the streaming generator above work at all, and
-    # the concurrency limit matches the one-run-at-a-time rule.
+    app = build_app(envs_path or DEFAULT_ENVS, gpu_count=gpu_count)
+    scheduler: GpuScheduler = app._gpu_scheduler  # noqa: SLF001
+    logger.info("web UI on http://%s:%d (%d GPU worker slot(s))", host, port, scheduler.gpu_count)
+
+    # Nothing forwards SIGTERM/SIGINT to a child this process spawned with
+    # `subprocess.Popen` on its own — Python does not do that for you. On a
+    # pod stop, without this, every in-flight `pipeline.run_worker` would be
+    # orphaned holding a CUDA context until the container's whole cgroup is
+    # torn down.
+    def _shutdown(signum, frame) -> None:
+        logger.info("received signal %s; stopping %d GPU worker(s)", signum, scheduler.gpu_count)
+        scheduler.shutdown()
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGTERM, _shutdown)
+    signal.signal(signal.SIGINT, _shutdown)
+
+    # queue() is what makes the streaming generator above work at all. The
+    # concurrency limit is UI-event concurrency (how many browser
+    # connections Gradio itself services at once), unrelated to how many
+    # GPU workers the scheduler runs — that is bounded by `gpu_count`.
     app.queue(default_concurrency_limit=4).launch(
         server_name=host,
         server_port=port,

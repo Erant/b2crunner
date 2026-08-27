@@ -329,7 +329,10 @@ def launch_ui(args: argparse.Namespace) -> int:
 
     setup_logging(verbose=True, log_file=args.log_file, run_name="webui")
     configure_tmpdir()
-    launch(host=args.host, port=args.port, envs_path=args.envs, share=args.share)
+    launch(
+        host=args.host, port=args.port, envs_path=args.envs, share=args.share,
+        gpu_count=args.gpus,
+    )
     return 0
 
 
@@ -422,6 +425,11 @@ def build_parser() -> argparse.ArgumentParser:
     ui_p.add_argument("--host", default="0.0.0.0")
     ui_p.add_argument("--port", type=int, default=7860)
     ui_p.add_argument("--share", action="store_true", help="Request a public gradio.live tunnel")
+    ui_p.add_argument(
+        "--gpus", type=int, default=None,
+        help="Number of parallel GPU worker slots (default: torch.cuda.device_count(), "
+             "or 1 with no GPU visible). Lower this to reserve a card for something else.",
+    )
     add_common(ui_p)
     ui_p.set_defaults(func=launch_ui)
 

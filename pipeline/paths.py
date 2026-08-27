@@ -94,6 +94,19 @@ def models_dir() -> Path:
     return _sub("B2C_MODELS_DIR", "models")
 
 
+def run_jobs_dir() -> Path:
+    """Scratch for the `RunJob`/`RunState` JSON the web UI's GPU scheduler
+    and `pipeline.run_worker` exchange across the process boundary.
+
+    Not TMPDIR: a status file needs to survive exactly as long as the
+    worker process reading and writing it — the same lifetime as everything
+    else under the volume — and keeping it out of the dispatchers' own
+    per-step IPC scratch means `ls`ing one directory is not noisy with the
+    other's churn.
+    """
+    return _sub("B2C_RUN_JOBS_DIR", "run_jobs")
+
+
 def configure_tmpdir() -> Path:
     """Point the stdlib's temp machinery at the volume.
 

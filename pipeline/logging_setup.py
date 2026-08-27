@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import logging
 import os
+import secrets
 import sys
 import time
 from pathlib import Path
@@ -105,7 +106,11 @@ def setup_logging(
 
 
 def timestamped_run_name(prefix: str = "run") -> str:
-    return f"{prefix}-{time.strftime('%Y%m%d-%H%M%S')}"
+    # The timestamp alone is only second-resolution: two runs started within
+    # the same second (routine once several GPUs can start runs at once)
+    # would otherwise share an output dir and a log file. The suffix isn't
+    # for humans, just for uniqueness.
+    return f"{prefix}-{time.strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(3)}"
 
 
 class QueueLogHandler(logging.Handler):

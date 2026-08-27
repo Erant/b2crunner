@@ -175,6 +175,32 @@ class WorkflowSpec:
                 )
 
 
+def apply_ui_overrides(
+    spec: WorkflowSpec,
+    global_overrides: Dict[str, Any],
+    step_overrides: Dict[str, Dict[str, Any]],
+) -> None:
+    """Apply a UI submission's overrides to `spec`, dropping anything stale.
+
+    Deliberately not `pipeline.cli.apply_param_overrides`'s strict version,
+    which raises on an unknown key: a `--param` typo should fail loudly, but
+    a UI submission's param panel is drawn from a specific workflow and can
+    go stale the moment the user switches the workflow dropdown and submits
+    before the redraw lands. Dropping a key that is no longer part of this
+    workflow beats failing the run over a control that is no longer on
+    screen, or worse, inventing a global nothing reads.
+
+    Used both by the web UI (to validate before a run is even queued) and by
+    `pipeline.run_worker` (to apply the same overrides again when it loads
+    its own copy of the spec) — the two must agree on what an override means.
+    """
+    spec.globals.update({k: v for k, v in global_overrides.items() if k in spec.globals})
+    by_id = {step.id: step for step in spec.steps}
+    for step_id, values in step_overrides.items():
+        if step_id in by_id:
+            by_id[step_id].params.update(values)
+
+
 # A `when:` that resolves to a string is almost always a `${globals.x}`
 # pointing at a value someone typed into a text box, so "false" has to mean
 # false — bool("false") is True, and silently running a step the caller
