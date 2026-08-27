@@ -2,18 +2,18 @@
 
 Not a general templating language on purpose — this is a research pipeline's
 config file, not user-facing software. Just enough to let a step's params
-reference the workflow's `globals:` block (resolution, step counts, etc.)
+reference the workflow's `globals:` block (the frame size, the output root)
 without repeating literal values at every step. `globals` is the only scope
 a workflow resolves against: a step's own params are namespaced under its
 `id:` and are not addressable from elsewhere in the file.
 
 Two forms, and the difference matters:
 
-    steps: ${globals.diffusion_steps}          -> the value itself, typed
+    width: ${globals.resolution.0}             -> the value itself, typed
     output_dir: ${globals.output_root}/colmap  -> string interpolation
 
 A whole-string reference keeps the value's type, so `${globals.resolution}`
-stays a list and `${globals.seed}` stays an int. Anything with text around
+stays a list and `${globals.resolution.0}` stays an int. Anything with text around
 it can only be a string, so the referenced value is stringified and spliced
 in. The second form exists so a workflow can derive its output paths from
 one `output_root` global that the CLI repoints at the run's own directory —

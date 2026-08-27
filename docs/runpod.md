@@ -158,10 +158,11 @@ anything long enough that you would rather have it survive in `tmux`:
 ```bash
 python -m pipeline.cli run fast_helical_full --dataset /data/my_dataset
 
-# a bare name is a workflow global; a dotted one is that step's own param,
-# which is how the two brush trainings are told apart
+# a bare name is a workflow global (resolution is the only tunable one); a
+# dotted one is that step's own param, which is how the two brush trainings
+# and the two denoise passes are told apart
 python -m pipeline.cli run fast_helical_full --dataset /data/my_dataset \
-    --param diffusion_steps=8 --param 'resolution=[720, 1280]' \
+    --param 'resolution=[720, 1280]' --param denoise_pass1.steps=8 \
     --param train_final_splat.total_steps=15000
 
 # what a run would actually use, defaults included

@@ -479,16 +479,25 @@ class TestWorkflowFiles(unittest.TestCase):
 
     def test_denoise_prompts_match_the_graph_character_for_character(self):
         """See DENOISE_PROMPT's comment: the way this breaks is whitespace,
-        so compare the whole string rather than eyeballing the YAML."""
+        so compare the whole string rather than eyeballing the YAML.
+
+        The prompts are now a param of each wan22_vace_denoise step, not a
+        workflow global — and each workflow has two denoise passes carrying
+        their own copy, so this checks every one.
+        """
+        seen = 0
         for path in _workflows():
             spec = WorkflowSpec.from_yaml(str(path))
-            if "denoise_prompt" not in spec.globals:
-                continue
-            with self.subTest(workflow=path.name):
-                self.assertEqual(spec.globals["denoise_prompt"], DENOISE_PROMPT)
-                self.assertEqual(
-                    spec.globals["denoise_negative_prompt"], DENOISE_NEGATIVE_PROMPT
-                )
+            for step in spec.steps:
+                if step.step != "wan22_vace_denoise":
+                    continue
+                seen += 1
+                with self.subTest(workflow=path.name, step=step.id):
+                    self.assertEqual(step.params.get("prompt"), DENOISE_PROMPT)
+                    self.assertEqual(
+                        step.params.get("negative_prompt"), DENOISE_NEGATIVE_PROMPT
+                    )
+        self.assertGreaterEqual(seen, 6, "expected two denoise passes in each workflow")
 
     def test_a_mesh_is_reconstructed_from_the_sheet_s_front_half(self):
         """The from-an-image path is handed the two-panel front/back sheet,

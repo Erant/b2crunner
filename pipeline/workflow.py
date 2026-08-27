@@ -5,7 +5,7 @@ Two parameter namespaces, and the split is the point:
     name: fast_helical
     globals:                          # affects the whole flow
       resolution: [720, 1280]
-      diffusion_steps: 6
+      output_root: output/fast_helical
     steps:
       - id: denoise
         step: wan22_vace_denoise      # registered Step name
@@ -15,15 +15,15 @@ Two parameter namespaces, and the split is the point:
           control_video: dataset.images
           reference_image: dataset.reference_image
         params:                       # overrides on THIS step's own defaults
-          steps: ${globals.diffusion_steps}
+          steps: 6                    # this step's own knob, a literal
           width: ${globals.resolution.0}
         outputs:
           denoised: dataset.images    # written back into the shared Context
         when: ${globals.run_denoise}  # optional; skip the step when falsy
 
-`globals:` is for what two or more steps must agree on — the frame size, the
-seed, the prompts, the output root — and is the only thing `${...}` resolves
-against. Everything else belongs in the step that consumes it, under that
+`globals:` is for what two or more steps must agree on — in the shipped
+files just the frame size, the output root, and the two Outputs switches —
+and is the only thing `${...}` resolves against. Everything else belongs in the step that consumes it, under that
 step's own `params:`, where it overrides the default the Step class declares
 (see `Step.PARAMS` in pipeline/step.py). A step's params are therefore
 namespaced by its `id:`, which is what lets one workflow call the same step

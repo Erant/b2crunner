@@ -41,11 +41,12 @@
 # i.e. what `render` produces and what cyber_6f/initial is.
 #
 # **Reading this file.** `globals:` holds only what more than one step has to
-# agree on; everything else lives under the step that consumes it, as an
-# override on the default that step's own class declares (pipeline/step.py's
-# `Step.PARAMS`). So a param that is absent below is not unset — it is at its
-# declared default, and `python -m pipeline.cli params fast_helical_full`
-# prints the effective value of every one of them.
+# agree on — which here is just `resolution`, plus the two Outputs switches
+# and `output_root` (see below). Everything else lives under the step that
+# consumes it, as an override on the default that step's own class declares
+# (pipeline/step.py's `Step.PARAMS`). So a param that is absent below is not
+# unset — it is at its declared default, and `python -m pipeline.cli params
+# fast_helical_full --all` prints the effective value of every one of them.
 name: fast_helical_full
 description: >-
   Full six-stage fast-helical pipeline: denoise, train+re-render a splat,
@@ -53,26 +54,20 @@ description: >-
   normal-supervised trained .ply.
 
 globals:
+  # The only value more than one step must agree on: the render size is also
+  # wan22_vace_denoise's width/height, and the two must not drift apart.
+  # diffusion_steps / cfg / seed / the brush iteration count / the denoise
+  # prompts all used to sit here too; they are parameters of the one or two
+  # steps that read them, and now live under those steps.
   resolution: [720, 1280]
-  diffusion_steps: 6
-  cfg: 1.0
-  seed: 0
-
-  # The one brush setting kept flow-wide rather than left to the step
-  # defaults, because it is the expensive one: it is paid twice (stage 2's
-  # re-render splat and stage 6's deliverable) and it is roughly an hour of
-  # GPU each time. Everything else brush takes — sh_degree, max_splats,
-  # refine_every, the normal-loss group — sits at steps/brush.py's own
-  # defaults, which are these workflows' values; override one under a single
-  # `train_*` step below to tune that training alone.
-  brush_total_steps: 30000
 
   # Which deliverables stage 6 produces. Both default on; the web UI drives
   # them from its Outputs checkboxes, and `--param export_ply=false` does
   # the same from the CLI. Turning one off skips its steps entirely (see
   # `when:` in pipeline/workflow.py) — which for export_ply means not
   # starting a second 30,000-iteration brush training you were going to
-  # throw away.
+  # throw away. These are workflow-level toggles, not step params — no step
+  # declares them — so they stay here.
   export_colmap: true
   export_ply: true
 
@@ -82,35 +77,9 @@ globals:
   # `--param output_root=...`. The literal below is only what you get from
   # a bare `WorkflowRunner` with no CLI: relative to the working directory,
   # which on a pod is the container's writable layer — small, and gone when
-  # the pod is recycled.
+  # the pod is recycled. Templated into a dozen step params, so it stays a
+  # global too.
   output_root: output/fast_helical
-
-  # Exact strings from the live ComfyUI graph (workflows/api/denoise.json,
-  # nodes 6/7/188) — $SUBJECT_DESC$ gets filled in from dataset.prompt.
-  #
-  # Double-quoted with escaped line breaks rather than YAML's `>-`, and that
-  # matters: a folded scalar turns every line break into a space, which
-  # inside the Chinese runs silently inserts spaces that are not in the
-  # graph's string. `\` at end of line drops the break and the next line's
-  # indent instead, so what loads is the prompt character for character.
-  # tests/test_workflows.py pins both against the strings below.
-  denoise_prompt: "时间静止，人物完全静止。身体如雕塑般僵硬，胸口没有起伏，头部保持固定\
-    角度，面部肌肉完全不动，维持单一的中性表情。双眼一眨不眨，眼睑保持张\
-    开且稳定，目光空洞而固定，锁定远处墙面上的一个点，对镜头毫无察觉、毫\
-    无反应。镜头以匀速、固定焦距围绕主体平滑移动。 Time is frozen and only \
-    the camera moves. The gaze stays anchored to that point on the wall \
-    as the camera passes, so the eyes slide across the frame, always aimed \
-    past the lens at the wall behind it. Eyelids stay open and steady, the \
-    expression holds without a single micro-movement, and the head keeps \
-    its exact angle throughout. The frozen subject is $SUBJECT_DESC$, lit \
-    by even soft studio light against a plain seamless backdrop, photorealistic, \
-    sharp focus, identical face and clothing in every frame."
-  denoise_negative_prompt: "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静\
-    止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的\
-    手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体\
-    ，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走, \
-    chewing, tattoos, 眼球运动，眨眼，眼动追踪，微表情，面部抽动，头部移\
-    动, 小头, 小脸"
 
 steps:
   # ---------------------------------------------------------------- stage 1
@@ -143,16 +112,42 @@ steps:
     params:
       width: ${globals.resolution.0}
       height: ${globals.resolution.1}
-      steps: ${globals.diffusion_steps}
-      cfg: ${globals.cfg}
-      seed: ${globals.seed}
-      # The one thing the two passes disagree on. Before this file had
-      # per-step namespaces that meant a literal here and a literal there;
-      # it still does, but now it is the ONLY brush/denoise value either
-      # pass has to spell out.
+      # From the ComfyUI graph (workflows/api/denoise.json): 6 steps, cfg
+      # 1.0, seed 0. These happen to equal the step's own declared defaults;
+      # spelled out anyway so the two passes read identically and every knob
+      # a run tunes is visible in the step's params block.
+      steps: 6
+      cfg: 1.0
+      seed: 0
+      # The one value the two passes disagree on: pass 1 denoises the
+      # circular render from scratch, pass 2 (strength 0.8) cleans up the
+      # helical re-render.
       strength: 1.0
-      prompt: ${globals.denoise_prompt}
-      negative_prompt: ${globals.denoise_negative_prompt}
+      # Exact strings from the live ComfyUI graph (denoise.json nodes
+      # 6/7/188); $SUBJECT_DESC$ is filled in from dataset.prompt. Double-
+      # quoted with `\`-escaped line breaks, NOT YAML's folded `>-`: a
+      # folded scalar turns every line break into a space, which inside the
+      # Chinese runs silently corrupts the string. tests/test_workflows.py
+      # pins both, character for character, against every wan22_vace_denoise
+      # step in every workflow. denoise_pass2 carries the same two strings —
+      # a step param cannot reference another step's, so they are repeated.
+      prompt: "时间静止，人物完全静止。身体如雕塑般僵硬，胸口没有起伏，头部保持固定\
+        角度，面部肌肉完全不动，维持单一的中性表情。双眼一眨不眨，眼睑保持张\
+        开且稳定，目光空洞而固定，锁定远处墙面上的一个点，对镜头毫无察觉、毫\
+        无反应。镜头以匀速、固定焦距围绕主体平滑移动。 Time is frozen and only \
+        the camera moves. The gaze stays anchored to that point on the wall \
+        as the camera passes, so the eyes slide across the frame, always aimed \
+        past the lens at the wall behind it. Eyelids stay open and steady, the \
+        expression holds without a single micro-movement, and the head keeps \
+        its exact angle throughout. The frozen subject is $SUBJECT_DESC$, lit \
+        by even soft studio light against a plain seamless backdrop, photorealistic, \
+        sharp focus, identical face and clothing in every frame."
+      negative_prompt: "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静\
+        止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的\
+        手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体\
+        ，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走, \
+        chewing, tattoos, 眼球运动，眨眼，眼动追踪，微表情，面部抽动，头部移\
+        动, 小头, 小脸"
     outputs:
       images: dataset.images
 
@@ -190,7 +185,14 @@ steps:
       masks: dataset.masks
       normal_maps: scene.normal_maps
     params:
-      total_steps: ${globals.brush_total_steps}
+      # The expensive knob: brush trains twice in this pipeline (here and
+      # train_final_splat) at roughly an hour of GPU each. 30000 equals
+      # steps/brush.py's own default; spelled out because it is the one
+      # brush setting worth seeing at a glance, and the two trainings could
+      # be given different counts here. Everything else brush takes —
+      # sh_degree, max_splats, refine_every, the normal-loss group — sits at
+      # that step's declared defaults.
+      total_steps: 30000
       # Without this brush exports into tempfile.gettempdir() (see
       # steps/brush.py) — the trained .ply then only survives because
       # Dataset.to_disk copies it at the very end. `output_dir` rather than
@@ -302,12 +304,28 @@ steps:
     params:
       width: ${globals.resolution.0}
       height: ${globals.resolution.1}
-      steps: ${globals.diffusion_steps}
-      cfg: ${globals.cfg}
-      seed: ${globals.seed}
+      # Same as denoise_pass1 — see the note there. Only `strength` differs.
+      steps: 6
+      cfg: 1.0
+      seed: 0
       strength: 0.8
-      prompt: ${globals.denoise_prompt}
-      negative_prompt: ${globals.denoise_negative_prompt}
+      prompt: "时间静止，人物完全静止。身体如雕塑般僵硬，胸口没有起伏，头部保持固定\
+        角度，面部肌肉完全不动，维持单一的中性表情。双眼一眨不眨，眼睑保持张\
+        开且稳定，目光空洞而固定，锁定远处墙面上的一个点，对镜头毫无察觉、毫\
+        无反应。镜头以匀速、固定焦距围绕主体平滑移动。 Time is frozen and only \
+        the camera moves. The gaze stays anchored to that point on the wall \
+        as the camera passes, so the eyes slide across the frame, always aimed \
+        past the lens at the wall behind it. Eyelids stay open and steady, the \
+        expression holds without a single micro-movement, and the head keeps \
+        its exact angle throughout. The frozen subject is $SUBJECT_DESC$, lit \
+        by even soft studio light against a plain seamless backdrop, photorealistic, \
+        sharp focus, identical face and clothing in every frame."
+      negative_prompt: "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静\
+        止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的\
+        手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体\
+        ，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走, \
+        chewing, tattoos, 眼球运动，眨眼，眼动追踪，微表情，面部抽动，头部移\
+        动, 小头, 小脸"
     outputs:
       images: dataset.images
 
@@ -427,7 +445,9 @@ steps:
       masks: dataset.masks
       normal_maps: scene.export_normal_maps
     params:
-      total_steps: ${globals.brush_total_steps}
+      # See train_splat's note. Same count; a run tuning the deliverable
+      # splat alone changes it here.
+      total_steps: 30000
       export_dir: ${globals.output_root}/ply
       export_name: scene.ply
     outputs:

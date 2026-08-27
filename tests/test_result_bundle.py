@@ -178,7 +178,9 @@ class TestOutputSelection(unittest.TestCase):
         globals_shown, _steps = webui.workflow_param_panel("fast_helical_full")
         self.assertNotIn("export_colmap", globals_shown)
         self.assertNotIn("export_ply", globals_shown)
-        self.assertIn("seed", globals_shown)
+        # resolution is the one global the panel does draw — the switches and
+        # output_root are the exceptions, not the rule.
+        self.assertIn("resolution", globals_shown)
 
     def test_output_root_is_not_drawn_either(self):
         """Sharper than the switches: `RunManager.start` only repoints

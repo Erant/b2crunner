@@ -281,10 +281,9 @@ in-memory between steps; disk only enters the picture via a `save_dataset`/
 ```yaml
 name: fast_helical_full
 globals:                     # flow-wide knobs, referenced via ${globals.x}
-  resolution: [720, 1280]
-  diffusion_steps: 6
-  cfg: 1.0
-  seed: 0
+  resolution: [720, 1280]    # the render size, and wan22_vace_denoise's w/h
+  output_root: output/fast_helical
+  export_ply: true
 
 steps:
   - id: denoise               # unique within the workflow; also the params namespace
@@ -299,7 +298,7 @@ steps:
     params:                      # OVERRIDES on this step's declared defaults
       width: ${globals.resolution.0}
       height: ${globals.resolution.1}
-      steps: ${globals.diffusion_steps}
+      steps: 6                    # a literal: this step's own knob, not shared
     outputs:                     # step's returned name -> dotted Context path (written after the call)
       images: dataset.images
     when: ${globals.export_ply}  # optional; skip this step when falsy
