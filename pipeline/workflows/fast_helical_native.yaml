@@ -53,12 +53,15 @@ description: >-
   upscale, export a COLMAP dataset and/or a normal-supervised .ply.
 
 globals:
-  # The only value more than one step must agree on: [720, 1280] is both the
-  # render size and wan22_vace_denoise's width/height, and the two must not
-  # drift apart. (2026-08-25: this file inherited [512, 512] from an earlier
-  # draft.) diffusion_steps / cfg / seed / the brush count / the denoise
-  # prompts used to sit here too; they are parameters of the steps that read
-  # them and now live under those steps, matching fast_helical_full.yaml.
+  # The only value more than one step must agree on: [720, 1280] is the
+  # render size, wan22_vace_denoise's width/height, and render_splat's. The
+  # `render` step takes it whole as `resolution: ${globals.resolution}` and
+  # has no width/height override of its own, so that stage cannot drift;
+  # denoise and render_splat still split it via `.0`/`.1`. (2026-08-25: this
+  # file inherited [512, 512] from an earlier draft.) diffusion_steps / cfg
+  # / seed / the brush count / the denoise prompts used to sit here too;
+  # they are parameters of the steps that read them and now live under those
+  # steps, matching fast_helical_full.yaml.
   resolution: [720, 1280]
 
   # Which deliverables stage 6 produces. Both default on; the web UI drives
@@ -169,8 +172,7 @@ steps:
     params:
       pattern: circular
       n_frames: 81
-      width: ${globals.resolution.0}
-      height: ${globals.resolution.1}
+      resolution: ${globals.resolution}
       override_cam_from_mesh: true
       # Flat silhouette base + the usual skeleton overlay. The base layer's
       # background is always #7F7F7F (render.py forces it, `bg_color` below

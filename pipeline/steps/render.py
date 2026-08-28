@@ -156,8 +156,11 @@ class RenderStep(Step):
         Param("pattern", str, "circular", "Shape of the camera path",
               choices=("circular", "sinusoidal", "helical")),
         Param("n_frames", int, REQUIRED, "How many views to render", minimum=1),
-        Param("width", int, 720, "Render width", minimum=1),
-        Param("height", int, 1280, "Render height", minimum=1),
+        Param("resolution", list, [720, 1280],
+              "Render size as [width, height]. The shipped workflow passes "
+              "${globals.resolution} straight through, so one global fixes "
+              "the frame size for every stage — there is no separate "
+              "width/height knob on this step to drift from it."),
         Param("render_mode", str, "depth+skeleton", "What each frame draws",
               choices=("mesh", "depth", "skeleton", "mesh+skeleton", "depth+skeleton",
                        "outline+skeleton")),
@@ -275,8 +278,14 @@ class RenderStep(Step):
         pattern = params["pattern"]
         framing = params["framing"]
         override_cam_from_mesh = params["override_cam_from_mesh"]
-        width = params["width"]
-        height = params["height"]
+        resolution = params["resolution"]
+        if len(resolution) != 2:
+            raise ValueError(
+                f"resolution must be [width, height], got {resolution!r}"
+            )
+        width, height = (int(v) for v in resolution)
+        if min(width, height) < 1:
+            raise ValueError(f"resolution must be positive, got {width}x{height}")
         render_mode = params["render_mode"]
         fill_ratio = params["fill_ratio"]
 
