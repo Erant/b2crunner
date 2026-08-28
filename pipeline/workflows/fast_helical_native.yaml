@@ -178,6 +178,27 @@ steps:
     outputs:
       face_landmarks: scene.face_landmarks
 
+  # Stopgap for a systematic SAM-3D-Body failure: fitted from a straight-on
+  # frontal photo (which this path always feeds it), the head comes out too
+  # far forward — the neck-to-head vector tilts 30-45 deg off the torso axis,
+  # so every render shows the neck craned. This nods the head+jaw back over
+  # the shoulders as a rigid piece about the inter-shoulder axis through the
+  # neck joint, graded to zero at the shoulders so nothing below the throat
+  # moves, and bends the MHR70 skeleton by the identical transform so the
+  # overlay still tracks the silhouette. Runs before render_initial_views so
+  # the mesh render, the anchor warp and everything downstream see the
+  # corrected pose. `mode=auto` straightens to ~10 deg of residual lean;
+  # see steps/head_angle.py for the fixed-angle alternative and the knobs.
+  - id: fix_head_angle
+    step: head_angle_fix
+    dispatch: in_process
+    inputs:
+      vertices: scene.vertices
+      keypoints_3d: scene.keypoints_3d
+    outputs:
+      vertices: scene.vertices
+      keypoints_3d: scene.keypoints_3d
+
   # render's mesh_output wants a dict with vertices/cam_t/faces/
   # keypoints_3d/focal_length (see render.py's module docstring on why
   # keypoints_3d specifically, not joints) — reconstruct_body's outputs

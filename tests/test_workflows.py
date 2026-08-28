@@ -250,8 +250,9 @@ class TestWorkflowFiles(unittest.TestCase):
 
     def test_native_mirrors_full_from_denoise_pass1_on(self):
         """fast_helical_native is a bootstrap prologue (split_sheet ->
-        reconstruct_body -> render_initial_views -> warp_reference_to_anchor
-        -> reinject_anchor_initial) followed by a verbatim copy of
+        reconstruct_body -> detect_face -> fix_head_angle ->
+        render_initial_views -> warp_reference_to_anchor ->
+        reinject_anchor_initial) followed by a verbatim copy of
         fast_helical_full.yaml's steps. There is no include mechanism, so the
         thing worth checking is that the copy has not drifted.
 
@@ -263,7 +264,7 @@ class TestWorkflowFiles(unittest.TestCase):
         native = WorkflowSpec.from_yaml(str(WORKFLOW_DIR / "fast_helical_native.yaml"))
 
         bootstrap = [
-            "split_sheet", "reconstruct_body", "detect_face",
+            "split_sheet", "reconstruct_body", "detect_face", "fix_head_angle",
             "render_initial_views", "warp_reference_to_anchor",
             "reinject_anchor_initial",
         ]
