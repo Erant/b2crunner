@@ -218,38 +218,35 @@ class TestWorkflowFiles(unittest.TestCase):
                     except Exception as exc:  # noqa: BLE001
                         self.fail(f"{path.name}: step '{step.id}': {exc}")
 
-    def test_the_two_fast_helical_files_differ_only_by_the_upscale(self):
-        """They are maintained as copies — there is no include mechanism —
-        so the thing worth checking is that they have not drifted into two
-        different pipelines that happen to share a name."""
-        full = WorkflowSpec.from_yaml(str(WORKFLOW_DIR / "fast_helical_full.yaml"))
-        short = WorkflowSpec.from_yaml(str(WORKFLOW_DIR / "fast_helical.yaml"))
+    def test_run_upscale_gates_the_upscale_stage(self):
+        """fast_helical.yaml used to be fast_helical_full.yaml minus the
+        upscale; it is now the `run_upscale` global gating `upscale` and
+        `rescale_cameras` on this one file. Off -> both drop out of
+        enabled_steps(); on (the default) -> both run."""
+        for name in ("fast_helical_full", "fast_helical_native"):
+            spec = WorkflowSpec.from_yaml(str(WORKFLOW_DIR / f"{name}.yaml"))
+            gated = {"upscale", "rescale_cameras"}
+            with self.subTest(workflow=name):
+                self.assertTrue(gated <= {s.id for s in spec.enabled_steps()})
+                spec.globals["run_upscale"] = False
+                self.assertFalse(gated & {s.id for s in spec.enabled_steps()})
 
-        upscale_only = {"upscale", "rescale_cameras"}
-        self.assertEqual(
-            [s.id for s in full.steps if s.id not in upscale_only],
-            [s.id for s in short.steps],
-        )
-        # Identical now, not merely close: everything the upscale had to be
-        # told lives under the `upscale` step in the full file, so removing
-        # that step removed its settings with it. Before the params were
-        # namespaced this was `{"upscale_resolution", "upscale_batch_size"}`
-        # — two workflow-level names that existed only because there was
-        # nowhere else to put them.
-        self.assertEqual(
-            full.globals, short.globals,
-            "the two files' globals have drifted apart",
-        )
-        for step in short.steps:
-            twin = next(s for s in full.steps if s.id == step.id)
-            with self.subTest(step=step.id):
-                self.assertEqual(step.step, twin.step)
-                self.assertEqual(step.dispatch, twin.dispatch)
-                self.assertEqual(step.env, twin.env)
-                self.assertEqual(step.inputs, twin.inputs)
-                self.assertEqual(step.outputs, twin.outputs)
-                self.assertEqual(step.when, twin.when)
-                self.assertEqual(step.keep_loaded, twin.keep_loaded)
+    def test_pre_upscale_colmap_is_off_by_default_and_gated_together(self):
+        """The debug stage-4b export (masks + normals + colmap) is three
+        steps, all guarded by `export_colmap_preupscale`, all skipped
+        unless it is set."""
+        preupscale = {"export_masks_preupscale", "export_normals_preupscale",
+                      "export_colmap_preupscale"}
+        for name in ("fast_helical_full", "fast_helical_native"):
+            spec = WorkflowSpec.from_yaml(str(WORKFLOW_DIR / f"{name}.yaml"))
+            with self.subTest(workflow=name):
+                self.assertFalse(spec.globals["export_colmap_preupscale"])
+                self.assertFalse(preupscale & {s.id for s in spec.enabled_steps()})
+                for step in spec.steps:
+                    if step.id in preupscale:
+                        self.assertEqual(step.when, "${globals.export_colmap_preupscale}")
+                spec.globals["export_colmap_preupscale"] = True
+                self.assertTrue(preupscale <= {s.id for s in spec.enabled_steps()})
 
     def test_native_mirrors_full_from_denoise_pass1_on(self):
         """fast_helical_native is a bootstrap prologue (split_sheet ->
@@ -326,12 +323,15 @@ class TestWorkflowFiles(unittest.TestCase):
         are derived from the globals, so globals that do not match the steps
         mean the UI is offering the wrong choices.
 
-        All three shipped workflows now declare both: fast_helical_native
+        Both shipped workflows declare all of these: fast_helical_native
         mirrors fast_helical_full after its bootstrap prologue, exports
         included. A workflow that declared a switch with no guarded step
-        (or the reverse) is what this still guards against.
+        (or the reverse) is what this still guards against. `run_upscale`
+        is in the list for the same reason — it is a global whose only job
+        is to gate steps.
         """
-        switches = ("export_colmap", "export_ply")
+        switches = ("export_colmap", "export_ply", "export_colmap_preupscale",
+                    "run_upscale")
         for path in _workflows():
             spec = WorkflowSpec.from_yaml(str(path))
             for switch in switches:
@@ -500,19 +500,23 @@ class TestWorkflowFiles(unittest.TestCase):
         workflow global — and each workflow has two denoise passes carrying
         their own copy, so this checks every one.
         """
+        workflows = _workflows()
         seen = 0
-        for path in _workflows():
+        for path in workflows:
             spec = WorkflowSpec.from_yaml(str(path))
+            passes = 0
             for step in spec.steps:
                 if step.step != "wan22_vace_denoise":
                     continue
                 seen += 1
+                passes += 1
                 with self.subTest(workflow=path.name, step=step.id):
                     self.assertEqual(step.params.get("prompt"), DENOISE_PROMPT)
                     self.assertEqual(
                         step.params.get("negative_prompt"), DENOISE_NEGATIVE_PROMPT
                     )
-        self.assertGreaterEqual(seen, 6, "expected two denoise passes in each workflow")
+            self.assertEqual(passes, 2, f"{path.name}: expected two denoise passes")
+        self.assertEqual(seen, 2 * len(workflows))
 
     def test_a_mesh_is_reconstructed_from_the_sheet_s_front_half(self):
         """The from-an-image path is handed the two-panel front/back sheet,

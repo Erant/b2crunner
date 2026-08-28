@@ -7,29 +7,38 @@ stdout over SSH" means a dropped connection loses the view of a run that is
 still going. And the image is meant to be built once and not rebuilt, so
 anything you might want to do on the pod has to already be in it.
 
-Three shapes of input, per what the pipeline can start from:
+One upload box, and what it holds decides what runs — there is no input
+picker (`resolve_upload`). Three shapes are understood:
 
-  * **an existing dataset directory** on the mounted volume — the path every
-    verification run so far has used (cyber_6f/initial and friends);
-  * **an uploaded .zip** of such a directory — the same thing when the
-    dataset lives on your laptop rather than the pod;
-  * **a front/back reference sheet** — the from-scratch path, via
+  * **a dataset .zip** — an archive with a `metadata.json` somewhere in it,
+    rooted at the dataset or one level above. The path every verification
+    run so far has used (cyber_6f/initial and friends), just from your
+    laptop rather than the pod. One run.
+  * **a single reference-sheet image** — the from-scratch path, via
     `Dataset.from_reference_image` and `fast_helical_native.yaml`. One
     square image with the subject facing front on the left and seen from
     behind on the right, as a diffusion model generates it; the workflow's
-    first step halves it (see steps/reference_sheet.py).
+    first step halves it (see steps/reference_sheet.py). One run.
+  * **a .zip of image/prompt pairs** — `image1.jpg` + `image1.txt`,
+    `image2.png` + `image2.txt`, ... Each image is submitted as its own
+    reference-sheet run with the text file as its prompt, and `GpuScheduler`
+    fans them across every GPU on the box. The "twelve subjects, four cards"
+    path — one upload instead of twelve. A zip of images with no `.txt`
+    files works too: each is a reference sheet and the Subject box is the
+    prompt for all of them.
 
-Only that last workflow takes a sheet; both `fast_helical` files begin from
-a complete dataset. Picking the sheet input against one of those is refused
-at submit time (see `workflow_needs_a_dataset`, which reads it off the
-steps rather than off a flag) instead of failing on a bare KeyError one
-step in.
+The upload's format also picks the workflow, so there is no workflow picker
+either (`workflow_for` / `peek_upload_workflow`): a dataset .zip runs
+`fast_helical_full`, an image or a zip of images runs `fast_helical_native`,
+which renders its own frames from each. The one pipeline knob left in the
+UI is the "Upscale dataset" toggle — the SeedVR2 stage, which used to be
+the `fast_helical` / `fast_helical_full` split and is now one `run_upscale`
+global.
 
-The sheet path is the least proven of the three — its front half (split /
+The reference-sheet path is the least proven — its front half (split /
 render / generate_firstlast / inject_anchor) has never executed end to end
-— which is exactly why the other two are here: if it falls over, the rest
-of the pipeline is still exercisable from a zip without touching the
-image.
+— which is exactly why the dataset .zip is still here: if it falls over,
+the rest of the pipeline is still exercisable without touching the image.
 
 **Each run is its own OS process, the UI only ever polls it.** A Gradio
 generator holds an SSE connection for as long as it yields, and a browser
@@ -58,6 +67,7 @@ exactly those: one .zip holding `colmap/` and/or `ply/`, and nothing else.
 from __future__ import annotations
 
 import logging
+import re
 import shutil
 import signal
 import time
@@ -85,50 +95,65 @@ logger = logging.getLogger(__name__)
 # proxy is slow enough to look broken.
 _GALLERY_MAX = 24
 
-SOURCE_DIRECTORY = "Dataset directory on this machine"
-SOURCE_ZIP = "Upload a dataset .zip"
-SOURCE_PHOTO = "Front/back reference sheet"
-
 PREVIEW_ALL = "All steps"
 
-# The two things a finished run can hand back, as a checkbox label -> the
-# workflow param that switches it on, and the subdirectory of the run it
-# lands in. A workflow opts in by declaring those params (fast_helical and
-# fast_helical_full both do); one that declares neither just doesn't show
-# the control.
+# The workflow selection is not a control any more — the upload's format
+# picks it (see `workflow_for` / `peek_upload_workflow`): a dataset .zip
+# runs the full dataset pipeline, an image or a zip of image/prompt pairs
+# runs the from-a-sheet one. The only pipeline knob left in the UI is the
+# "Upscale dataset" toggle, which used to be the fast_helical /
+# fast_helical_full split and is now one `run_upscale` global.
+WORKFLOW_DATASET = "fast_helical_full"
+WORKFLOW_NATIVE = "fast_helical_native"
+
+# The two things a finished run can hand back from its Outputs checkbox
+# group, as label -> the workflow global that switches it on. Both shipped
+# workflows declare both.
 OUTPUT_COLMAP = "COLMAP dataset"
 OUTPUT_PLY = "Trained .ply (normal-supervised)"
 OUTPUT_PARAMS = {OUTPUT_COLMAP: "export_colmap", OUTPUT_PLY: "export_ply"}
-OUTPUT_SUBDIRS = {OUTPUT_COLMAP: "colmap", OUTPUT_PLY: "ply"}
+
+# Deliverable subdirectories a run can drop under its output_root, scanned
+# by `result_dirs` when packaging the download. `colmap_preupscale/` is the
+# debug export gated by `export_colmap_preupscale` (see the Outputs box).
+RESULT_SUBDIRS = ("colmap", "colmap_preupscale", "ply")
 
 
 # --------------------------------------------------------------------------
 # helpers the UI calls
 # --------------------------------------------------------------------------
 
-def discover_datasets(root: Optional[Path] = None, max_depth: int = 3) -> List[str]:
-    """Directories under the volume that look like b2c datasets.
+def workflow_for(dataset_dir: Optional[Path]) -> str:
+    """The pipeline an upload runs: dataset .zip -> the dataset workflow,
+    an image / pairs zip -> the from-a-sheet one."""
+    return WORKFLOW_DATASET if dataset_dir is not None else WORKFLOW_NATIVE
 
-    Bounded depth because the volume also holds the HF cache, which is tens
-    of thousands of files and has no metadata.json anywhere in it.
+
+def peek_upload_workflow(upload_path: Optional[str]) -> str:
+    """Which workflow an upload will run, decided without extracting it.
+
+    A bare image is the sheet path. A `.zip` is the dataset path only if it
+    carries a `metadata.json` (checked against the archive's name list, no
+    extraction) — otherwise it is a zip of images, also the sheet path.
+    Falls back to the dataset workflow when there is nothing attached yet,
+    which is what the params panel shows on a fresh page.
     """
-    base = root or data_dir()
-    found: List[str] = []
-    if not base.exists():
-        return found
-    for depth in range(max_depth + 1):
-        pattern = "/".join(["*"] * depth + ["metadata.json"]) if depth else "metadata.json"
-        for match in base.glob(pattern):
-            parent = str(match.parent)
-            if parent not in found:
-                found.append(parent)
-    return sorted(found)
-
-
-def workflow_choices() -> List[str]:
-    from .cli import available_workflows
-
-    return [p.stem for p in available_workflows()]
+    if not upload_path:
+        return WORKFLOW_DATASET
+    suffix = Path(upload_path).suffix.lower()
+    if suffix in _IMAGE_SUFFIXES:
+        return WORKFLOW_NATIVE
+    if suffix == ".zip":
+        try:
+            with zipfile.ZipFile(upload_path) as archive:
+                names = archive.namelist()
+        except (zipfile.BadZipFile, OSError):
+            return WORKFLOW_DATASET
+        if any(Path(n).name == "metadata.json" and "__MACOSX" not in Path(n).parts
+               for n in names):
+            return WORKFLOW_DATASET
+        return WORKFLOW_NATIVE
+    return WORKFLOW_DATASET
 
 
 def workflow_outputs(name: str) -> List[str]:
@@ -137,6 +162,39 @@ def workflow_outputs(name: str) -> List[str]:
 
     spec = WorkflowSpec.from_yaml(resolve_workflow(name))
     return [label for label, param in OUTPUT_PARAMS.items() if param in spec.globals]
+
+
+def resolve_output_globals(
+    selected_outputs: Optional[List[str]], run_upscale: bool, want_preupscale_colmap: bool,
+) -> Dict[str, bool]:
+    """The four workflow globals the Outputs box sets, with the pre-upscale
+    COLMAP rules folded in.
+
+    `export_colmap_preupscale` only means anything with the upscale on — the
+    pre- and post-upscale frames are otherwise the same. So with the upscale
+    off, ticking "Pre-upscale COLMAP dataset" just guarantees the ordinary
+    `colmap/` (and is a plain no-op if "COLMAP dataset" was already ticked).
+
+    Raises `gr.Error` if the result would export nothing.
+    """
+    chosen = set(selected_outputs or [])
+    want_colmap = OUTPUT_COLMAP in chosen
+    want_ply = OUTPUT_PLY in chosen
+
+    export_colmap = want_colmap or (want_preupscale_colmap and not run_upscale)
+    export_colmap_preupscale = want_preupscale_colmap and run_upscale
+
+    if not (export_colmap or export_colmap_preupscale or want_ply):
+        raise gr.Error(
+            "Pick at least one output — a run that exports neither a COLMAP "
+            "dataset nor a .ply leaves nothing to download."
+        )
+    return {
+        "run_upscale": run_upscale,
+        "export_colmap": export_colmap,
+        "export_ply": want_ply,
+        "export_colmap_preupscale": export_colmap_preupscale,
+    }
 
 
 # Exactly the fields `Dataset.from_reference_image` cannot fill in: a
@@ -175,9 +233,10 @@ def workflow_needs_a_dataset(name: str) -> bool:
 
 # Globals the generated panel deliberately does not draw a control for.
 #
-# The output switches have a dedicated control (the Outputs checkboxes), and
-# showing them here too would give the same setting two editable homes that
-# disagree the moment someone touches one.
+# The deliverable switches, `run_upscale`, and `export_colmap_preupscale`
+# all have a dedicated control in the Outputs box; showing them here too
+# would give one setting two editable homes that disagree the moment
+# someone touches one.
 #
 # output_root is excluded for a sharper reason: `start()` only repoints it at
 # the run's own timestamped directory when the submitted overrides do NOT
@@ -192,7 +251,9 @@ def workflow_needs_a_dataset(name: str) -> bool:
 # what the user actually changed means the same thing cannot happen again,
 # but leaving it off the panel keeps it impossible rather than merely
 # unlikely.
-HIDDEN_GLOBALS = set(OUTPUT_PARAMS.values()) | {"output_root"}
+HIDDEN_GLOBALS = set(OUTPUT_PARAMS.values()) | {
+    "output_root", "run_upscale", "export_colmap_preupscale",
+}
 
 
 def workflow_param_panel(name: str) -> tuple[Dict[str, Any], List[Dict[str, Any]]]:
@@ -352,19 +413,111 @@ def workflow_summary(name: str) -> str:
     )
 
 
-def extract_dataset_zip(zip_path: str) -> Path:
-    """Unpack an uploaded archive into the volume and return its dataset root."""
-    target = upload_dir() / f"dataset-{time.strftime('%Y%m%d-%H%M%S')}"
+# Image extensions the single upload box understands, bare or inside a zip.
+# Kept in step with what `cv2.imread` (via `Dataset.from_reference_image`)
+# can decode.
+_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
+
+# One (reference_image, prompt) per run a submission fans out to;
+# reference_image is None for a run that starts from `dataset_dir` instead.
+RunPlan = List["tuple[Optional[Path], str]"]
+
+
+def _guarded_extract(zip_path: str, target: Path) -> Path:
+    """Unpack `zip_path` under `target`, refusing absolute or `..` members.
+
+    This unpacks onto the mounted volume, next to real data, so it cannot
+    trust the member names the archive carries.
+    """
     target.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(zip_path) as archive:
-        # Refuse absolute paths and `..` traversal rather than trusting the
-        # archive: this unpacks onto the volume, next to real data.
         for member in archive.namelist():
             resolved = (target / member).resolve()
             if not str(resolved).startswith(str(target.resolve())):
                 raise gr.Error(f"Refusing to extract {member!r}: it escapes the target directory.")
         archive.extractall(target)
-    return find_dataset_root(target)
+    return target
+
+
+def extract_dataset_zip(zip_path: str) -> Path:
+    """Unpack an uploaded archive into the volume and return its dataset root."""
+    target = upload_dir() / f"dataset-{time.strftime('%Y%m%d-%H%M%S')}"
+    return find_dataset_root(_guarded_extract(zip_path, target))
+
+
+def _iter_files(root: Path):
+    """Every real file under `root`, skipping a macOS `__MACOSX/` sidecar."""
+    return (p for p in root.rglob("*") if p.is_file() and "__MACOSX" not in p.parts)
+
+
+def pair_images_with_prompts(root: Path, fallback_prompt: str = "") -> List["tuple[Path, str]"]:
+    """[(image_path, prompt), ...] for every image under an already-extracted zip.
+
+    Pairing is by stem within a directory — `image1.jpg` takes `image1.txt`
+    beside it — so a zip made by selecting files and one made by zipping a
+    folder both work.
+
+    Two shapes are accepted. If the archive carries any `.txt` it is treated
+    as image/prompt pairs and every image must have its match (a missing one
+    is a slip, not an intent to run promptless). If it carries none, each
+    image is a bare reference sheet and `fallback_prompt` — what the Subject
+    box holds — is the prompt for all of them.
+    """
+    images = sorted(p for p in _iter_files(root) if p.suffix.lower() in _IMAGE_SUFFIXES)
+    if not images:
+        raise gr.Error(
+            "Nothing usable in the zip: no `metadata.json` (a dataset) and no "
+            "images (reference sheets, or `image1.jpg` + `image1.txt` pairs)."
+        )
+    have_prompts = any(p.suffix.lower() == ".txt" for p in _iter_files(root))
+
+    pairs: List["tuple[Path, str]"] = []
+    missing: List[str] = []
+    for image in images:
+        prompt_file = next(
+            (image.with_suffix(s) for s in (".txt", ".TXT") if image.with_suffix(s).exists()),
+            None,
+        )
+        if prompt_file is None:
+            (missing.append(image.name) if have_prompts
+             else pairs.append((image, fallback_prompt)))
+            continue
+        pairs.append((image, prompt_file.read_text(encoding="utf-8").strip() or fallback_prompt))
+
+    if missing:
+        raise gr.Error(
+            "No matching .txt prompt file for: " + ", ".join(missing)
+            + ". Give every image a same-named .txt beside it, or remove all the "
+            ".txt files to use the Subject box for each."
+        )
+    return pairs
+
+
+def resolve_upload(upload_path: str, prompt: str) -> "tuple[Optional[Path], RunPlan]":
+    """Work out what one upload is, and the runs it fans out to.
+
+    Returns `(dataset_dir, plan)`. Content decides — there is no input
+    picker any more:
+
+      * a bare image file            -> (None, one reference-sheet run)
+      * a .zip holding metadata.json  -> (dataset_dir, one dataset run)
+      * a .zip of images (+ .txt)     -> (None, one run per image)
+    """
+    suffix = Path(upload_path).suffix.lower()
+    if suffix in _IMAGE_SUFFIXES:
+        return None, [(save_upload(upload_path, "reference"), prompt)]
+    if suffix != ".zip":
+        raise gr.Error(
+            f"Don't know what to do with a {suffix or 'no-extension'} file — upload "
+            "a .zip (a dataset, or image/prompt pairs) or a single reference image."
+        )
+
+    root = _guarded_extract(
+        upload_path, upload_dir() / f"upload-{time.strftime('%Y%m%d-%H%M%S')}"
+    )
+    if next(root.rglob("metadata.json"), None) is not None:
+        return find_dataset_root(root), [(None, prompt)]
+    return None, list(pair_images_with_prompts(root, prompt))
 
 
 def save_upload(path: str, prefix: str) -> Path:
@@ -378,14 +531,14 @@ def result_dirs(run_dir: Optional[Path]) -> Dict[str, Path]:
     """The deliverable subdirectories this run actually produced.
 
     Keyed by the name they take inside the archive, which is the same name
-    they have on disk — `colmap/` and `ply/`, written there by the
-    workflow's own export steps via `output_root`.
+    they have on disk — `colmap/`, `colmap_preupscale/`, `ply/`, written
+    there by the workflow's own export steps via `output_root`.
     """
     if not run_dir:
         return {}
     root = Path(run_dir)
     found = {}
-    for name in OUTPUT_SUBDIRS.values():
+    for name in RESULT_SUBDIRS:
         candidate = root / name
         if candidate.is_dir() and any(candidate.rglob("*")):
             found[name] = candidate
@@ -520,8 +673,7 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
         gpu_count=gpu_count if gpu_count is not None else detect_gpu_count(),
         work_dir=run_jobs_dir(),
     )
-    workflows = workflow_choices()
-    default_workflow = "fast_helical_full" if "fast_helical_full" in workflows else workflows[0]
+    default_workflow = WORKFLOW_DATASET
 
     with gr.Blocks(title="b2c_runner", analytics_enabled=False) as app:
         gr.Markdown("# b2c_runner\nBody2COLMAP pipeline — submit a run, watch it, collect the output.")
@@ -546,35 +698,33 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
         with gr.Tab("Run"):
             with gr.Row():
                 with gr.Column(scale=1):
-                    workflow_in = gr.Dropdown(
-                        workflows, value=default_workflow, label="Workflow",
-                    )
-                    source_in = gr.Radio(
-                        [SOURCE_DIRECTORY, SOURCE_ZIP, SOURCE_PHOTO],
-                        value=SOURCE_DIRECTORY,
+                    upload_in = gr.File(
                         label="Input",
+                        file_types=[".zip", *sorted(_IMAGE_SUFFIXES)],
+                        file_count="single",
                     )
-                    dataset_in = gr.Dropdown(
-                        discover_datasets(), label="Dataset directory",
-                        info=f"b2c datasets found under {data_dir()}",
-                        allow_custom_value=True,
+                    gr.Markdown(
+                        "_Upload **one** of:_\n"
+                        "- _a **dataset `.zip`** (has a `metadata.json`) — one run;_\n"
+                        "- _a **`.zip` of `image1.jpg` + `image1.txt` pairs** — one "
+                        "run per pair, fanned across every GPU;_\n"
+                        "- _a single **reference-sheet image** — one run._\n\n"
+                        "_The format picks the pipeline: a dataset `.zip` runs "
+                        "`fast_helical_full`, an image runs `fast_helical_native`._"
                     )
-                    rescan_btn = gr.Button("Rescan", size="sm")
-                    zip_in = gr.File(
-                        label="Dataset .zip", file_types=[".zip"], visible=False,
-                    )
-                    photo_in = gr.Image(
-                        # Not a photo of the subject: the two-panel image a
-                        # diffusion model generates, front view left, back
-                        # view right. fast_helical_native splits it.
-                        label="Front/back reference sheet", type="filepath",
-                        visible=False,
+                    # No longer a picker — a read-out of what the upload chose.
+                    workflow_in = gr.Dropdown(
+                        [WORKFLOW_DATASET, WORKFLOW_NATIVE], value=default_workflow,
+                        label="Pipeline", interactive=False,
+                        info="Set by the upload's format. The params panel and "
+                             "Outputs below follow it.",
                     )
                     prompt_in = gr.Textbox(
                         label="Subject description",
                         placeholder="a woman in a red jacket",
-                        info="Fills $SUBJECT_DESC$ in the denoise prompt. "
-                             "Optional for an existing dataset that already has one.",
+                        info="Fills $SUBJECT_DESC$ in the denoise prompt. Optional "
+                             "for a dataset that already carries one; for images it "
+                             "is the fallback when a pair's .txt is missing or empty.",
                     )
                     default_outputs = workflow_outputs(default_workflow)
                     outputs_in = gr.CheckboxGroup(
@@ -585,6 +735,19 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
                              ".zip contains. Unchecking the .ply skips a whole "
                              "30,000-iteration brush training.",
                         visible=bool(default_outputs),
+                    )
+                    upscale_in = gr.Checkbox(
+                        value=True, label="Upscale dataset",
+                        info="Run the SeedVR2 upscale (720x1280 -> 1080x1920) "
+                             "before the export. Off = the shorter pipeline that "
+                             "used to be a separate workflow.",
+                    )
+                    preupscale_colmap_in = gr.Checkbox(
+                        value=False, label="Pre-upscale COLMAP dataset (debug)",
+                        info="Also export colmap_preupscale/ from the frames as "
+                             "they are before the upscale, to compare splat "
+                             "quality with and without it. Ignored unless "
+                             "'Upscale dataset' is on.",
                     )
                     with gr.Row():
                         start_btn = gr.Button("Start run", variant="primary")
@@ -802,9 +965,12 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
 
         # -- wiring --------------------------------------------------------
         def on_workflow_change(name: str):
-            # The param panel redraws itself off `workflow_in` (see
-            # gr.render above); this clears the state that went with the
-            # old workflow so a stale override cannot survive the switch.
+            # `workflow_in` is a read-out, not a picker — it changes only
+            # when `on_upload_change` sets it from the upload's format. When
+            # it does, redraw the summary, reset the override state (the old
+            # workflow's step ids no longer apply), and re-point the Outputs
+            # group. The params panel redraws itself off `workflow_in` via
+            # its own `@gr.render`.
             choices = workflow_outputs(name)
             return (
                 workflow_summary(name),
@@ -817,91 +983,86 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
             outputs=[summary_out, param_state, outputs_in],
         )
 
-        def on_source_change(source: str):
-            return (
-                gr.update(visible=source == SOURCE_DIRECTORY),
-                gr.update(visible=source == SOURCE_DIRECTORY),
-                gr.update(visible=source == SOURCE_ZIP),
-                gr.update(visible=source == SOURCE_PHOTO),
+        def on_upload_change(upload_file):
+            path = (
+                upload_file if isinstance(upload_file, str)
+                else upload_file.name if upload_file else None
             )
+            return gr.update(value=peek_upload_workflow(path))
 
-        source_in.change(
-            on_source_change, inputs=source_in,
-            outputs=[dataset_in, rescan_btn, zip_in, photo_in],
-        )
-        rescan_btn.click(lambda: gr.update(choices=discover_datasets()), outputs=dataset_in)
+        upload_in.change(on_upload_change, inputs=[upload_in], outputs=[workflow_in])
 
-        def on_start(workflow, source, dataset_path, zip_file, photo, prompt,
-                     params, selected_outputs):
+        def on_start(upload_file, prompt, params, selected_outputs,
+                     upscale, preupscale_colmap):
             params = params or {}
             global_overrides = dict(params.get("globals", {}))
             step_overrides = {k: dict(v) for k, v in params.get("steps", {}).items()}
 
-            supported = workflow_outputs(workflow)
-            if supported:
-                chosen = set(selected_outputs or [])
-                if not chosen:
-                    raise gr.Error(
-                        "Pick at least one output — a run that exports neither a "
-                        "COLMAP dataset nor a .ply leaves nothing to download."
-                    )
-                # Set both, not just the checked ones: a workflow defaults
-                # them to true, so an unchecked box has to actively say false.
-                for label in supported:
-                    global_overrides[OUTPUT_PARAMS[label]] = label in chosen
+            if not upload_file:
+                raise gr.Error(
+                    "Upload something: a dataset .zip, a .zip of image/prompt "
+                    "pairs, or a single reference-sheet image."
+                )
+            path = upload_file if isinstance(upload_file, str) else upload_file.name
+            dataset_dir, plan = resolve_upload(path, prompt or "")
+            # The upload's format is the workflow choice — a dataset .zip
+            # runs the dataset pipeline, an image / pairs zip the sheet one.
+            # No mismatch to guard against: it is derived, not picked.
+            workflow = workflow_for(dataset_dir)
 
-            dataset_dir = reference_image = None
-            if source == SOURCE_DIRECTORY:
-                if not dataset_path:
-                    raise gr.Error("Pick a dataset directory (or Rescan if the list is empty).")
-                dataset_dir = find_dataset_root(dataset_path)
-            elif source == SOURCE_ZIP:
-                if not zip_file:
-                    raise gr.Error("Upload a .zip of a dataset directory.")
-                path = zip_file if isinstance(zip_file, str) else zip_file.name
-                dataset_dir = extract_dataset_zip(path)
-            else:
-                if not photo:
-                    raise gr.Error(
-                        "Upload the front/back reference sheet (front view on "
-                        "the left, back view on the right)."
-                    )
-                if workflow_needs_a_dataset(workflow):
-                    raise gr.Error(
-                        f"'{workflow}' starts from an existing dataset — it reads "
-                        "frames and cameras it does not render. Use "
-                        "fast_helical_native, which builds its own views from a "
-                        "reference sheet, or pick a dataset directory / upload a .zip."
-                    )
-                reference_image = save_upload(photo, "reference")
+            # run_upscale + the three deliverable switches, with the
+            # pre-upscale-COLMAP rules folded in. Raises if nothing exports.
+            global_overrides.update(resolve_output_globals(
+                selected_outputs, bool(upscale), bool(preupscale_colmap),
+            ))
 
             from .cli import resolve_workflow
 
             workflow_path = resolve_workflow(workflow)
             spec = WorkflowSpec.from_yaml(workflow_path)
-            # Validated here, before the job is ever queued, so a bad
-            # override fails at submit time — in a button handler the user
-            # is looking at — instead of forty minutes into a queued run
-            # a `pipeline.run_worker` process reports as merely "failed".
+            # Validated here, before any job is queued, so a bad override
+            # fails at submit time — in a button handler the user is looking
+            # at — instead of forty minutes into a queued run a
+            # `pipeline.run_worker` process reports as merely "failed". The
+            # overrides are identical across a fanned-out batch, so one
+            # check covers every job it produces.
             apply_ui_overrides(spec, global_overrides, step_overrides)
             spec.validate()
 
-            run_name = timestamped_run_name(spec.name)
-            out = output_dir() / run_name
-            job = RunJob(
-                run_name=run_name,
-                workflow_name=spec.name,
-                workflow_path=str(workflow_path),
-                output_dir=str(out),
-                envs_path=envs_path,
-                global_overrides=global_overrides,
-                step_overrides=step_overrides,
-                dataset_dir=str(dataset_dir) if dataset_dir else None,
-                reference_image=str(reference_image) if reference_image else None,
-                prompt=prompt or "",
-            )
-            scheduler.submit(job)
-            return gr.update(choices=_run_choices(scheduler), value=run_name)
+            fanned_out = len(plan) > 1
+
+            def _submit(reference_image: Optional[Path], run_prompt: str) -> str:
+                # A fanned-out batch names each run after its image so the
+                # picker reads `fast_helical_native-image1-...`; a single run
+                # keeps the bare workflow prefix it always had. The stem is
+                # squeezed to filename-safe chars — it becomes a directory
+                # and a log-file name.
+                prefix = spec.name
+                if fanned_out and reference_image is not None:
+                    stem = re.sub(r"[^A-Za-z0-9._-]+", "-", reference_image.stem).strip("-")
+                    prefix = f"{spec.name}-{stem}" if stem else spec.name
+                run_name = timestamped_run_name(prefix)
+                scheduler.submit(RunJob(
+                    run_name=run_name,
+                    workflow_name=spec.name,
+                    workflow_path=str(workflow_path),
+                    output_dir=str(output_dir() / run_name),
+                    envs_path=envs_path,
+                    global_overrides=global_overrides,
+                    step_overrides=step_overrides,
+                    dataset_dir=str(dataset_dir) if dataset_dir else None,
+                    reference_image=str(reference_image) if reference_image else None,
+                    prompt=run_prompt,
+                ))
+                return run_name
+
+            first = None
+            for reference_image, run_prompt in plan:
+                name = _submit(reference_image, run_prompt)
+                first = first or name
+            # Point the shared picker at the first run; the rest are one
+            # dropdown-hop away and already fanning out across the other GPUs.
+            return gr.update(choices=_run_choices(scheduler), value=first)
 
         def stream(run_name: Optional[str]):
             """Poll the selected run until it ends, then one final update.
@@ -935,8 +1096,8 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
 
         start_btn.click(
             on_start,
-            inputs=[workflow_in, source_in, dataset_in, zip_in, photo_in, prompt_in,
-                    param_state, outputs_in],
+            inputs=[upload_in, prompt_in, param_state, outputs_in,
+                    upscale_in, preupscale_colmap_in],
             outputs=[run_picker],
         ).then(stream, inputs=[run_picker], outputs=progress_outputs)
 
@@ -966,7 +1127,8 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
                     else "the run produced neither; check the Progress tab's step list"
                 )
                 return (
-                    f"### `{directory}`\n\nNo `colmap/` or `ply/` here yet — {note}.",
+                    f"### `{directory}`\n\nNo `colmap/`, `colmap_preupscale/` or "
+                    f"`ply/` here yet — {note}.",
                     gallery_images(directory),
                     None,
                 )

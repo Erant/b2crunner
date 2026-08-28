@@ -119,9 +119,9 @@ class TestResultBundle(unittest.TestCase):
 
 class TestOutputSelection(unittest.TestCase):
     def test_the_shipped_workflows_offer_both(self):
-        """All three now declare export_colmap / export_ply —
-        fast_helical_native mirrors fast_helical_full past its bootstrap."""
-        for name in ("fast_helical", "fast_helical_full", "fast_helical_native"):
+        """Both declare export_colmap / export_ply — fast_helical_native
+        mirrors fast_helical_full past its bootstrap."""
+        for name in ("fast_helical_full", "fast_helical_native"):
             with self.subTest(workflow=name):
                 self.assertEqual(
                     sorted(webui.workflow_outputs(name)),
@@ -153,7 +153,6 @@ class TestOutputSelection(unittest.TestCase):
         the end of a from-a-photo workflow is handed a dataset the earlier
         steps built, not one the caller had to supply."""
         self.assertFalse(webui.workflow_needs_a_dataset("fast_helical_native"))
-        self.assertTrue(webui.workflow_needs_a_dataset("fast_helical"))
         self.assertTrue(webui.workflow_needs_a_dataset("fast_helical_full"))
 
     def test_the_photo_gate_keys_off_the_fields_a_photo_cannot_fill(self):

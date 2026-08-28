@@ -141,13 +141,13 @@ pipeline/
 │   └── seedvr2/         requirements.txt + setup.sh (vendors
 │                      numz/ComfyUI-SeedVR2_VideoUpscaler)
 ├── workflows/
-│   ├── fast_helical_full.yaml   full six-stage native port of the
-│   │                            ComfyUI `fast helical` pipeline; every
-│   │                            step exists and the file validates, but
-│   │                            it has never been executed
-│   ├── fast_helical.yaml        the same file minus the SeedVR2 upscale
-│   │                            (and the camera rescale that repairs
-│   │                            what the upscale invalidates), for
+│   ├── fast_helical_full.yaml   full native port of the ComfyUI `fast
+│   │                            helical` pipeline; every step exists and
+│   │                            the file validates, but it has never been
+│   │                            executed. `run_upscale: false` gates out
+│   │                            the SeedVR2 upscale (and the camera
+│   │                            rescale that repairs what it invalidates)
+│   │                            — the old fast_helical.yaml — for
 │   │                            isolating the upscaler when output looks
 │   │                            wrong
 │   └── fast_helical_native.yaml a bootstrap prologue from a front/back

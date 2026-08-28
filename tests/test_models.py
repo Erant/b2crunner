@@ -151,7 +151,6 @@ class TestRequiredForSteps(unittest.TestCase):
             "fast_helical_native": {"rmbg", "sapiens2", "sam3dbody", "moge2",
                                     "wan22", "wan22_fp8", "wan22_lora",
                                     "seedvr2", "mediapipe"},
-            "fast_helical": {"rmbg", "sapiens2", "wan22", "wan22_fp8", "wan22_lora"},
             "fast_helical_full": {"rmbg", "sapiens2", "wan22", "wan22_fp8",
                                   "wan22_lora", "seedvr2"},
         }
@@ -162,11 +161,17 @@ class TestRequiredForSteps(unittest.TestCase):
                     set(models.required_for_steps(s.step for s in spec.steps)), expected
                 )
 
-    def test_the_non_upscaling_workflow_does_not_wait_on_seedvr2(self):
-        """fast_helical exists to run without the upscaler; blocking on the
-        upscaler's 6 GB before it starts would defeat that."""
-        spec = WorkflowSpec.from_yaml(resolve_workflow("fast_helical"))
-        self.assertNotIn("seedvr2", models.required_for_steps(s.step for s in spec.steps))
+    def test_run_upscale_false_does_not_wait_on_seedvr2(self):
+        """`run_upscale: false` is what fast_helical.yaml used to be. The
+        prefetch scans enabled_steps(), so with the upscale gated off,
+        blocking on the upscaler's 6 GB before the run starts would defeat
+        the point of turning it off."""
+        spec = WorkflowSpec.from_yaml(resolve_workflow("fast_helical_full"))
+        spec.globals["run_upscale"] = False
+        self.assertNotIn(
+            "seedvr2",
+            models.required_for_steps(s.step for s in spec.enabled_steps()),
+        )
 
     def test_a_when_skipped_step_is_not_waited_on(self):
         """The prefetch reads enabled_steps(), so switching an output off

@@ -80,9 +80,9 @@ class StepSpec:
     # Run this step only if this resolves truthy. Anything `params:` accepts
     # works — a literal `false`, or a `${globals.x}` reference, which is the
     # case it exists for: a workflow that ends in several optional exports
-    # (fast_helical.yaml's COLMAP dataset and trained .ply) needs the caller
-    # to pick which ones to pay for, and a 30,000-iteration brush run is not
-    # something to start and throw away.
+    # (fast_helical_full.yaml's COLMAP dataset and trained .ply) needs the
+    # caller to pick which ones to pay for, and a 30,000-iteration brush run
+    # is not something to start and throw away.
     #
     # A skipped step still occupies its slot in the run — the runner reports
     # it as skipped rather than renumbering around it, so a step list in the

@@ -357,8 +357,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="The front/back reference sheet to start from: one image with the "
              "subject facing front on the left and seen from behind on the right. "
              "The workflow halves it and renders its own views "
-             "(fast_helical_native.yaml). The fast_helical workflows cannot take "
-             "this — they begin from an existing dataset",
+             "(fast_helical_native.yaml). fast_helical_full cannot take this — "
+             "it begins from an existing dataset",
     )
     run_p.add_argument("--prompt", default=None, help="Subject description used by the denoise steps")
     run_p.add_argument("--out", default=None, help="Directory to save the final dataset to")

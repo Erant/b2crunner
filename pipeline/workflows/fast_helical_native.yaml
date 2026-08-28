@@ -25,11 +25,13 @@
 # Stage 6 produces the run's deliverables under output_root, exactly as
 # fast_helical_full does:
 #
-#   colmap/   cameras.txt + images.txt + points3D.txt, images/, normals/
-#   ply/      scene.ply — a second brush training, normal-supervised
+#   colmap/              cameras.txt + images.txt + points3D.txt, images/, normals/
+#   ply/                 scene.ply — a second brush training, normal-supervised
+#   colmap_preupscale/   debug: a COLMAP dataset from the pre-upscale frames
 #
-# Either can be switched off with the export_colmap / export_ply globals; the
-# web UI's Outputs checkboxes are exactly those two.
+# export_colmap / export_ply switch the first two off; export_colmap_preupscale
+# (with run_upscale on) opts into the third. The web UI's Outputs box drives
+# all of them plus the "Upscale dataset" toggle. Same as fast_helical_full.yaml.
 #
 # The input is not a photo of the subject: it is the two-panel sheet a
 # diffusion model generates, subject facing front on the left and seen from
@@ -40,8 +42,9 @@
 # convention, from before anchor injection; not the target here.
 #
 # **Reading this file.** `globals:` holds only what more than one step has to
-# agree on — `resolution` and `framing`, plus the two Outputs switches and
-# `output_root`.
+# agree on — `resolution` and `framing`, plus the deliverable switches
+# (export_colmap / export_ply / export_colmap_preupscale), the `run_upscale`
+# toggle, and `output_root`.
 # Everything else lives under the step that consumes it, as an override on
 # the default that step's own class declares (pipeline/step.py's
 # `Step.PARAMS`). `python -m pipeline.cli params fast_helical_native --all`
@@ -86,6 +89,22 @@ globals:
   # throw away. Workflow-level toggles, not step params, so they stay here.
   export_colmap: true
   export_ply: true
+
+  # Whether the SeedVR2 upscale (stage 5) runs. On by default. `run_upscale:
+  # false` skips both the `upscale` step and `rescale_cameras` (which exists
+  # only to repair the intrinsics the upscale invalidates). The web UI
+  # drives it from the "Upscale dataset" checkbox; `--param
+  # run_upscale=false` does the same from the CLI. Same toggle, same
+  # default, same guarded steps as fast_helical_full.yaml — keep them in
+  # sync.
+  run_upscale: true
+
+  # Debug: also export a COLMAP dataset built from the frames as they are
+  # BEFORE the upscale (stage 4b below), to measure what SeedVR2 does to
+  # Gaussian-splatting quality. Only meaningful with run_upscale: true. Off
+  # by default. Lands in <output_root>/colmap_preupscale/. Mirrors
+  # fast_helical_full.yaml.
+  export_colmap_preupscale: false
 
   # Every path this workflow writes to disk hangs off this one global, and
   # `pipeline.cli run` repoints it at the run's own directory under
@@ -537,12 +556,55 @@ steps:
     outputs:
       images: dataset.images
 
+  # --------------------------------------------------------------- stage 4b
+  # Debug deliverable: a COLMAP dataset from the pre-upscale frames, for
+  # comparing splat quality with and without SeedVR2. Gated by
+  # export_colmap_preupscale, which the web UI only sets when run_upscale is
+  # also on (with the upscale off, stage 6 already exports these same
+  # frames). rmbg + normals are recomputed here rather than reused from
+  # stage 6: those run after the upscale, on 1080x1920 frames.
+  - id: export_masks_preupscale
+    step: rmbg
+    dispatch: in_process
+    when: ${globals.export_colmap_preupscale}
+    inputs:
+      images: dataset.images
+    outputs:
+      masks: dataset.masks
+
+  - id: export_normals_preupscale
+    step: sapiens2_lite
+    dispatch: in_process
+    when: ${globals.export_colmap_preupscale}
+    inputs:
+      images: dataset.images
+    params:
+      batch_size: 4
+    outputs:
+      normal_maps: scene.preupscale_normal_maps
+
+  - id: export_colmap_preupscale
+    step: colmap_export
+    dispatch: in_process
+    when: ${globals.export_colmap_preupscale}
+    inputs:
+      cameras: dataset.cameras
+      image_names: dataset.image_names
+      points_3d: dataset.points_3d
+      images: dataset.images
+      masks: dataset.masks
+      normal_maps: scene.preupscale_normal_maps
+    params:
+      output_dir: ${globals.output_root}/colmap_preupscale
+      layout: brush
+
   # ---------------------------------------------------------------- stage 5
-  # upscale.json
+  # upscale.json — skipped entirely when run_upscale is false.
   - id: upscale
     step: seedvr2
     dispatch: subprocess
     env: seedvr2
+    when: ${globals.run_upscale}
     inputs:
       images: dataset.images
     params:
@@ -575,12 +637,13 @@ steps:
   # this is an inherited bug, not a new one — and a prime suspect for
   # output that looks *almost* right.
   #
-  # Delete this step (or run fast_helical.yaml, which has no upscale at
-  # all) to reproduce the old behaviour for comparison. It is a no-op on
-  # a dataset whose frames already match its cameras.
+  # Skipped with `run_upscale: false` (it is a no-op on a dataset whose
+  # frames already match its cameras) — same `when:` as `upscale`, so the
+  # two are always on or off together.
   - id: rescale_cameras
     step: fit_cameras_to_images
     dispatch: in_process
+    when: ${globals.run_upscale}
     inputs:
       dataset: dataset
     outputs:

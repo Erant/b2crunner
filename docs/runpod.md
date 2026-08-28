@@ -88,27 +88,33 @@ the version lines behind each of those.
 
 ## Submitting work
 
-Open `https://<pod-id>-7860.proxy.runpod.net`. Three input modes:
+Open `https://<pod-id>-7860.proxy.runpod.net`. There is **one upload box**,
+and what you put in it decides what runs — no input picker:
 
-- **Dataset directory on this machine** — anything under `/data` containing
-  a `metadata.json`. Upload one with `runpodctl send` / `scp` first, or use
-  a network volume that already has it.
-- **Upload a dataset .zip** — the same thing from your laptop. The archive
-  can be rooted at the dataset or one level above it; the extractor finds
-  the `metadata.json` either way.
-- **Front/back reference sheet** — the from-scratch path. One square image
-  with the subject facing front on the left and seen from behind on the
-  right, as a diffusion model generates it. Runs
+- **A dataset `.zip`** — any archive with a `metadata.json` in it, rooted at
+  the dataset or one level above; the extractor finds it either way. One
+  run. This is the path every verification run so far has used.
+- **A single reference-sheet image** — the from-scratch path. One square
+  image with the subject facing front on the left and seen from behind on
+  the right, as a diffusion model generates it. Runs
   `fast_helical_native.yaml`, which splits it (front half to the
   SAM-3D-Body reconstruction and the anchor warp, back half to the denoise
   pass as its reference view), renders its own anchored views, and then
-  runs `fast_helical_full`'s six-stage pipeline over that dataset — so it
-  produces the same `colmap/` and `ply/` deliverables, driven by the same
-  Outputs checkboxes. **Least proven of the three**: its bootstrap prologue
-  (`split_reference_sheet` → `render` → `generate_firstlast` →
-  `inject_anchor`) has never executed end to end. Picking this input
-  against either `fast_helical` file is refused at submit time: those read
-  frames and cameras they do not render.
+  runs `fast_helical_full`'s stages over that dataset — same `colmap/` and
+  `ply/` deliverables, same Outputs box. **Least proven path**: its
+  bootstrap prologue (`split_reference_sheet` → `render` →
+  `generate_firstlast` → `inject_anchor`) has never executed end to end.
+- **A `.zip` of image/prompt pairs** — `image1.jpg` + `image1.txt`,
+  `image2.png` + `image2.txt`, ... Each image becomes its own
+  reference-sheet run with its text file as the prompt, and the scheduler
+  fans them across every GPU on the box — one upload instead of one
+  submission per subject. A `.zip` of images with no `.txt` files works
+  too: each is a reference sheet and the **Subject description** box is the
+  prompt for all of them.
+
+The upload's format also picks the pipeline — there is no workflow picker.
+A dataset `.zip` runs `fast_helical_full`; an image or a zip of images runs
+`fast_helical_native`. The read-only **Pipeline** field shows which.
 
 The **Params** panel is generated from the workflow and the steps in it,
 not typed as YAML. **Globals** at the top holds what the whole flow shares
@@ -130,13 +136,22 @@ and a control for it would let a run write somewhere else instead.
 `python -m pipeline.cli params <workflow> --all` prints the same tree on
 the command line.
 
-**Outputs** picks what the run produces: the COLMAP dataset, the trained
-`.ply`, or both. This is a real switch, not a filter on the result — the
-.ply is a second full 30,000-iteration brush training, and unchecking it
-skips that step outright. At least one has to be checked. The control
-appears for any workflow that declares those switches, which today is all
-three — `fast_helical_native` mirrors `fast_helical_full` past its
-bootstrap.
+**Outputs** picks what the run produces. These are real switches, not
+filters on the result — an unchecked step does not run:
+
+- **COLMAP dataset** / **Trained `.ply`** — one, the other, or both; at
+  least one has to be selected. The `.ply` is a second full
+  30,000-iteration brush training, so unchecking it is worth an hour.
+- **Upscale dataset** (on by default) — runs the SeedVR2 upscale
+  (720×1280 → 1080×1920) before the export. Off is the shorter pipeline
+  that used to be the separate `fast_helical` workflow — the way to check
+  whether the upscale is what degrades the output. Sets the `run_upscale`
+  global.
+- **Pre-upscale COLMAP dataset (debug)** — with the upscale on, also
+  exports `colmap_preupscale/` from the frames as they are *before*
+  SeedVR2, so you can train a splat on each and compare. Ignored with the
+  upscale off (the frames are then the same, and it just guarantees the
+  ordinary `colmap/`).
 
 The **Results** tab has three things: the one `.zip` of the run's
 deliverables (`colmap/` and/or `ply/`, and nothing else — the run
@@ -169,11 +184,12 @@ python -m pipeline.cli run fast_helical_full --dataset /data/my_dataset \
 python -m pipeline.cli params fast_helical_full --all
 
 # without the upscaler, to see whether that is what is degrading the output
-python -m pipeline.cli run fast_helical --dataset /data/my_dataset
-
-# the same output switches the UI's Outputs checkboxes drive
 python -m pipeline.cli run fast_helical_full --dataset /data/my_dataset \
-    --param export_ply=false
+    --param run_upscale=false
+
+# the same output switches the UI's Outputs box drives
+python -m pipeline.cli run fast_helical_full --dataset /data/my_dataset \
+    --param export_ply=false --param export_colmap_preupscale=true
 
 # from a front/back reference sheet instead
 python -m pipeline.cli run fast_helical_native --reference-image /data/sheet.png \
@@ -204,12 +220,12 @@ properties, in order of how much they matter:
   burned GPU time on the stages before it.
 - **Waiting is scoped to the workflow** — and, past that, to the steps a
   run's params actually select, since a `when:`-skipped step's checkpoint
-  is not waited on either. `fast_helical` never touches the upscaler, so it
-  does not block on SeedVR2's 6 GB:
+  is not waited on either. `--param run_upscale=false` gates the upscale
+  out, so that run does not block on SeedVR2's 6 GB:
 
   | Workflow | Blocks on | Total |
   |---|---|---|
-  | `fast_helical` | rmbg, sapiens2, wan22, wan22_fp8, wan22_lora | ~52.7 GB |
+  | `fast_helical_full` (`run_upscale=false`) | rmbg, sapiens2, wan22, wan22_fp8, wan22_lora | ~52.7 GB |
   | `fast_helical_full` | rmbg, sapiens2, wan22, wan22_fp8, wan22_lora, seedvr2 | ~58.7 GB |
   | `fast_helical_native` | rmbg, sapiens2, sam3dbody, wan22, wan22_fp8, wan22_lora, seedvr2, mediapipe | ~61.5 GB |
 
