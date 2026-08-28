@@ -281,39 +281,44 @@ class TestRenderSplatCameras(unittest.TestCase):
             width=720, height=1280,
         )
 
-    def test_a_framing_preset_zooms_instead_of_dollying(self):
-        """The regression: a preset used to recompute the orbit radius from its
-        own (much smaller) bounds, walking the camera in towards the subject
-        while leaving the intrinsics at the source render's full-body focal
-        length. It must instead stay on the orbit the dataset was framed on and
-        lengthen the focal length, as steps/render.py's override branch does —
-        the splat is only valid from near the cameras it was trained on, and
-        `inject_anchor` matches the anchor frame by camera position."""
+    def _radius_about(self, cams, centre):
+        d = np.linalg.norm([c.position - centre for c in cams], axis=1)
+        return float(d.mean()), float(d.std())
+
+    def test_a_framing_preset_reaims_and_tightens_the_orbit(self):
+        """fast_helical_native threads one `framing` global through both the
+        mesh `render` and this step, so a non-'full' preset is rendered onto
+        cameras re-aimed at that preset and the splat is trained there. This
+        step must rebuild its orbit around the SAME box — centred on it, with
+        a radius sized from it (a tighter box -> a shorter radius at the
+        inherited focal) — not stay on the full-body orbit. The focal length
+        is inherited from that render and is not re-framed per preset."""
         full = (np.array([-0.4, -0.9, -2.4], np.float32),
                 np.array([0.4, 0.9, -1.7], np.float32))
-        head = (np.array([-0.1, 0.6, -2.15], np.float32),
-                np.array([0.1, 0.9, -1.95], np.float32))
+        head = (np.array([-0.15, 0.35, -2.2], np.float32),
+                np.array([0.15, 0.75, -1.9], np.float32))
         bounds = {"full": full, "head": head}
 
-        full_cams, full_px, _, _ = self._framed("full", bounds)
-        head_cams, head_px, _, _ = self._framed("head", bounds)
+        full_cams, full_px, full_mm, _ = self._framed("full", bounds)
+        head_cams, head_px, head_mm, _ = self._framed("head", bounds)
 
-        def radius(cams, box):
-            centre = (box[0] + box[1]) / 2.0
-            return float(np.linalg.norm(cams[0].position - centre))
+        r_full, s_full = self._radius_about(full_cams, (full[0] + full[1]) / 2.0)
+        r_head, s_head = self._radius_about(head_cams, (head[0] + head[1]) / 2.0)
 
-        self.assertAlmostEqual(radius(head_cams, head), radius(full_cams, full),
-                               places=5, msg="a preset moved the camera off the orbit")
-        self.assertGreater(head_px, full_px * 1.5,
-                           "a preset did not lengthen the focal length")
-        self.assertAlmostEqual(head_cams[0].fx, head_px, places=5)
+        self.assertLess(s_full, 1e-3, "full orbit is not centred on the full box")
+        self.assertLess(s_head, 1e-3, "head orbit is not centred on the head box")
+        self.assertLess(r_head, r_full, "a tighter preset did not tighten the radius")
 
-    def test_full_framing_is_unchanged_by_the_zoom_path(self):
-        """`full` must come out exactly as the radius-based path left it: the
-        focal length stays the one inherited from the dataset, because
-        `_focal_length_framing` inverts the `compute_auto_orbit_radius` call
-        that produced the radius. This is what keeps the shipped workflows —
-        all of which render at `full` — byte-for-byte unaffected."""
+        self.assertAlmostEqual(head_px, full_px, places=5,
+                               msg="a preset re-framed the focal length")
+        self.assertAlmostEqual(head_mm, full_mm, places=6)
+        self.assertAlmostEqual(head_mm, self.ds.extras["focal_length_mm"], places=6)
+
+    def test_full_framing_inherits_the_focal_and_uses_full_bounds(self):
+        """`full` is unchanged from before the `framing` global existed: the
+        focal length is the one inherited from the dataset, and the orbit is
+        sized from the full-body box. Every shipped fast_helical run renders
+        at `full`, so this is the path that must not move."""
         full = (np.array([-0.4, -0.9, -2.4], np.float32),
                 np.array([0.4, 0.9, -1.7], np.float32))
         _cams, focal_px, mm, _ = self._framed("full", {"full": full})
@@ -322,11 +327,11 @@ class TestRenderSplatCameras(unittest.TestCase):
         self.assertAlmostEqual(mm, inherited, places=6)
         self.assertAlmostEqual(focal_px, (inherited / 36.0) * 720, places=4)
 
-    def test_an_explicit_focal_length_is_not_overridden_by_a_preset(self):
+    def test_an_explicit_focal_length_wins_over_the_inherited_one(self):
         """focal_length_mm is documented as winning over the inherited value;
-        a preset must not silently re-frame on top of it."""
-        head = (np.array([-0.1, 0.6, -2.15], np.float32),
-                np.array([0.1, 0.9, -1.95], np.float32))
+        selecting a preset alongside it changes the orbit, not the focal."""
+        head = (np.array([-0.15, 0.35, -2.2], np.float32),
+                np.array([0.15, 0.75, -1.9], np.float32))
         import copy
 
         framed = copy.copy(self.ds)
@@ -344,9 +349,9 @@ class TestRenderSplatCameras(unittest.TestCase):
     def test_framing_bounds_survive_a_disk_round_trip(self):
         """Regression: Dataset.to_disk's JSON filter only flattened a
         top-level ndarray, so framing_bounds (nested {preset: (min, max)}
-        arrays) was dropped entirely. A fast_helical_full run loads its input
-        dataset from disk, so every non-'full' render_splat framing silently
-        fell back to the whole splat — identical to 'full'."""
+        arrays) was dropped entirely — every non-'full' render_splat framing
+        then silently fell back to the splat's own bounds. `_json_safe` now
+        recurses, so a preset still frames the orbit after a round-trip."""
         import copy
 
         framed = copy.copy(self.ds)
@@ -365,23 +370,26 @@ class TestRenderSplatCameras(unittest.TestCase):
         self.assertIn("framing_bounds", back.extras)
         self.assertIn("torso", back.extras["framing_bounds"])
 
-        _torso, torso_px, _, _ = _resolve_cameras(
+        torso_cams, torso_px, _, _ = _resolve_cameras(
             scene=self.scene, dataset=back,
             params={"pattern": "helical", "n_frames": 8, "framing": "torso"},
             width=720, height=1280,
         )
-        _full, full_px, _, _ = _resolve_cameras(
+        full_cams, full_px, _, _ = _resolve_cameras(
             scene=self.scene, dataset=back,
             params={"pattern": "helical", "n_frames": 8, "framing": "full"},
             width=720, height=1280,
         )
-        # The preset zooms, so the focal length — not the camera position — is
-        # what a working preset changes. See
-        # test_a_framing_preset_zooms_instead_of_dollying.
-        self.assertGreater(
-            torso_px, full_px * 1.5,
+        # Both boxes are centred on the origin, so the radius is the tell: the
+        # tiny torso box sizes a much shorter orbit. Without the round-trip
+        # fix both fall back to the splat's own bounds and these are equal.
+        r_torso = float(np.linalg.norm(torso_cams[0].position))
+        r_full = float(np.linalg.norm(full_cams[0].position))
+        self.assertLess(
+            r_torso, r_full * 0.5,
             "framing preset had no effect after a to_disk/from_disk round-trip",
         )
+        self.assertAlmostEqual(torso_px, full_px, places=5)
 
 
 class TestRenderSplatPointcloud(unittest.TestCase):

@@ -40,7 +40,8 @@
 # convention, from before anchor injection; not the target here.
 #
 # **Reading this file.** `globals:` holds only what more than one step has to
-# agree on — `resolution`, plus the two Outputs switches and `output_root`.
+# agree on — `resolution` and `framing`, plus the two Outputs switches and
+# `output_root`.
 # Everything else lives under the step that consumes it, as an override on
 # the default that step's own class declares (pipeline/step.py's
 # `Step.PARAMS`). `python -m pipeline.cli params fast_helical_native --all`
@@ -63,6 +64,19 @@ globals:
   # they are parameters of the steps that read them and now live under those
   # steps, matching fast_helical_full.yaml.
   resolution: [720, 1280]
+
+  # How much of the body fills the frame. Threaded through BOTH renderers
+  # that see it — the mesh `render` (render_initial_views) and the splat
+  # re-render (rerender_splat) — because they have to agree: `render` frames
+  # the mesh at this preset, so the splat is trained on cameras re-aimed and
+  # tightened for it, and rerender_splat then has to rebuild its helical
+  # orbit around that same preset. Split between two step params it would
+  # drift; as one global it cannot. `full` is the whole body (the shipped
+  # default and what every prior run used); `torso` / `bust` / `head` crop
+  # progressively tighter. Only the mesh reconstruction's skeleton makes the
+  # tighter presets available — `render` falls back to `full` for any it
+  # cannot compute, and rerender_splat follows.
+  framing: full
 
   # Which deliverables stage 6 produces. Both default on; the web UI drives
   # them from its Outputs checkboxes, and `--param export_ply=false` does
@@ -173,6 +187,9 @@ steps:
       pattern: circular
       n_frames: 81
       resolution: ${globals.resolution}
+      # See the `framing` global: rerender_splat below reads the same value,
+      # and the two renderers must frame the subject identically.
+      framing: ${globals.framing}
       override_cam_from_mesh: true
       # Flat silhouette base + the usual skeleton overlay. The base layer's
       # background is always #7F7F7F (render.py forces it, `bg_color` below
@@ -400,6 +417,13 @@ steps:
   # anchor is re-applied by inject_anchor below, matching on position. Both
   # of those are steps/splat.py's declared defaults, so this block only has
   # to say what the helical path itself is.
+  #
+  # `framing: ${globals.framing}` is the ONE param that intentionally
+  # differs from fast_helical_full.yaml's otherwise-identical rerender_splat
+  # (test_workflows.py's mirror check carves it out). The other two files
+  # have no mesh render, so nothing there to keep a `framing` global in step
+  # with — but here render_initial_views framed the mesh at that preset, and
+  # the splat re-render has to match it.
   - id: rerender_splat
     step: render_splat
     dispatch: in_process
@@ -409,6 +433,7 @@ steps:
     params:
       width: ${globals.resolution.0}
       height: ${globals.resolution.1}
+      framing: ${globals.framing}
       pattern: helical
       n_frames: 81
       n_loops: 2

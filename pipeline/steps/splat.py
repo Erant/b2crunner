@@ -89,41 +89,6 @@ def _mm_to_pixels(focal_length_mm: float, image_width: int) -> float:
     return (focal_length_mm / _FULL_FRAME_SENSOR_WIDTH_MM) * image_width
 
 
-def _pixels_to_mm(focal_length_px: float, image_width: int) -> float:
-    return (focal_length_px / image_width) * _FULL_FRAME_SENSOR_WIDTH_MM
-
-
-def _focal_length_framing(bounds, render_size, radius: float, fill_ratio: float) -> float:
-    """The longest focal length that still fits `bounds` at `radius`.
-
-    The exact algebraic inverse of body2colmap's `compute_auto_orbit_radius`,
-    which solves the same relation the other way round (radius from focal
-    length). Written out rather than solved numerically because the inverse
-    is closed-form: that function fits each extent with
-    ``R = (extent/2) / tan(fov * fill / 2)`` and ``fov = 2*atan(dim / 2f)``,
-    so ``f = dim / (2 * tan(atan(extent / 2R) / fill))``, and the binding
-    dimension is the one giving the *smaller* focal length. Round-trips to
-    machine precision, which is what keeps `"full"` framing bit-identical to
-    the radius-based path it replaces.
-    """
-    width, height = render_size
-    lo, hi = bounds
-    scene_width = max(float(hi[0] - lo[0]), float(hi[2] - lo[2]))
-    scene_height = float(hi[1] - lo[1])
-
-    candidates = [
-        dim / (2.0 * np.tan(np.arctan(extent / (2.0 * radius)) / fill_ratio))
-        for extent, dim in ((scene_width, width), (scene_height, height))
-        if extent > 0.0
-    ]
-    if not candidates:
-        raise ValueError(
-            f"render_splat: framing bounds are degenerate ({lo} .. {hi}); no "
-            "focal length frames a zero-sized box."
-        )
-    return float(min(candidates))
-
-
 @register_step("load_splat")
 class LoadSplatStep(Step):
     """Load a trained Gaussian splat from a PLY file.
@@ -219,12 +184,10 @@ class RenderSplatStep(Step):
         Param("height", int, 1280, "Render height", minimum=1),
         Param("framing", str, "full",
               "Which of the source render's framing presets to reuse for the "
-              "bounds. A preset zooms — it lengthens the focal length and keeps "
-              "the camera on the orbit the source dataset was framed on, the way "
-              "steps/render.py's override branch does — rather than walking the "
-              "camera in towards the subject, which would rasterise the splat "
-              "from outside the view cone it was trained for. Ignored when "
-              "focal_length_mm is set explicitly",
+              "bounds. fast_helical_native threads one `framing` global through "
+              "both the mesh `render` and this step, so a non-'full' preset "
+              "re-renders the splat on the same re-aimed, tighter-framed orbit "
+              "the mesh render used and the splat was trained on",
               choices=("full", "torso", "bust", "head")),
         Param("fill_ratio", float, 0.8, "How much of the frame the subject fills",
               minimum=0.0, maximum=1.0),
@@ -534,104 +497,45 @@ def _resolve_cameras(
     # Framing bounds from the source render, falling back to the splat's own
     # bounds. Using the mesh render's bounds is what keeps a re-render framed
     # identically to the render it is replacing.
+    #
+    # The mesh render applies the SAME `framing` preset (fast_helical_native
+    # threads one `framing` global through both `render` and this step), so a
+    # non-"full" preset here re-aims the orbit at that preset's centre and
+    # sizes the radius from that preset's box — the orbit the splat was
+    # actually trained on. It must not try to compensate by staying on the
+    # full-body orbit: the training cameras are not there.
     framing = params["framing"]
-    fill_ratio = params["fill_ratio"]
     framing_bounds = extras.get("framing_bounds") or {}
 
-    def _bounds_for(preset: str):
-        """The preset's AABB as a pair of float32 corners, or None.
-
-        A disk round-trip (Dataset.to_disk/from_disk) brings framing_bounds
-        back as nested plain lists rather than ndarrays, so normalise here and
-        every caller below gets real arrays either way.
-        """
-        raw = framing_bounds.get(preset)
-        if raw is None:
-            return None
-        return tuple(np.asarray(corner, dtype=np.float32) for corner in raw)
-
-    # The orbit the SOURCE dataset was framed on. A framing preset must not
-    # move the camera off it — see below — so this, not the preset's own
-    # bounds, is what sets the radius. It is also the fallback for a preset
-    # the source render could not compute, which then behaves exactly as
-    # "full" rather than as some third thing.
-    orbit_bounds = _bounds_for("full")
-    if orbit_bounds is None:
-        orbit_bounds = tuple(np.asarray(c, dtype=np.float32) for c in scene.get_bounds())
-
-    bounds = _bounds_for(framing)
-    if bounds is not None:
+    raw_bounds = framing_bounds.get(framing) if framing in framing_bounds else None
+    if raw_bounds is not None:
+        # A disk round-trip (Dataset.to_disk/from_disk) brings framing_bounds
+        # back as nested plain lists rather than ndarrays; normalise so the
+        # solvers below get real arrays either way.
+        bounds = tuple(np.asarray(corner, dtype=np.float32) for corner in raw_bounds)
         logger.info("render_splat: using '%s' framing bounds from the dataset", framing)
     else:
         if framing != "full":
             logger.warning(
                 "render_splat: framing preset '%s' not available in the dataset's "
-                "metadata; falling back to full-body framing.", framing,
+                "metadata; falling back to the splat scene's own bounds.", framing,
             )
-        bounds = orbit_bounds
+        bounds = scene.get_bounds()
 
     orbit_center = (bounds[0] + bounds[1]) / 2.0
     radius = params["radius"]
     if radius is None:
         radius = compute_auto_orbit_radius(
-            bounds=orbit_bounds,
+            bounds=bounds,
             render_size=(width, height),
             focal_length=focal_length,
-            fill_ratio=fill_ratio,
-        )
-
-    # A framing preset ZOOMS; it does not dolly. This is the same correction
-    # steps/render.py's override branch already carries: there, framing a
-    # preset re-frames the focal length and leaves the camera on the orbit the
-    # anchor pins it to. Here the radius used to be recomputed from the
-    # preset's own (much smaller) bounds instead, which walked the camera in
-    # towards the subject — 2.04 -> 0.68 world units for a `head` preset on a
-    # normally-framed dataset — and left the intrinsics at the source render's
-    # full-body focal length. Three things broke, all silently:
-    #
-    #   * The splat was only ever trained from cameras on the original orbit.
-    #     Rasterising it from a third of that distance renders Gaussians well
-    #     outside the view cone they were fitted for.
-    #   * `compute_auto_orbit_radius` fits a sphere, so it ignores the box's
-    #     depth. That is a rounding error at 2m and a real one up close: the
-    #     near face of a `bust`/`head` box lands ~25% closer than the orbit
-    #     centre, so the subject overflowed the frame (measured 105-119% of
-    #     the frame width against the 80% `fill_ratio` asks for).
-    #   * `inject_anchor` matches the anchor frame by camera POSITION. A
-    #     dollied orbit cannot contain that position at all: the original
-    #     camera sits |orbit_target| away from the orbit centre, so once the
-    #     radius shrinks below that the whole path is strictly outside match
-    #     range no matter how it is sampled (0.68-radius orbit about a centre
-    #     2.04 away never gets closer than 1.36). That step returns the batch
-    #     unchanged when it finds no match, so the warped reference photo was
-    #     dropped without a word.
-    #
-    # Keeping the radius and re-framing the focal length fixes all three. For
-    # `framing: full` the new focal length is the inherited one to machine
-    # precision (`_focal_length_framing` inverts the call just above), so the
-    # shipped default path is unchanged.
-    if focal_length_mm > 0:
-        if framing != "full":
-            logger.warning(
-                "render_splat: framing='%s' is being rendered at the explicitly "
-                "requested focal_length_mm=%.2f rather than one framed for that "
-                "preset. Set focal_length_mm to 0 to let the preset choose it.",
-                framing, focal_length_mm,
-            )
-    else:
-        focal_length = _focal_length_framing(
-            bounds, (width, height), radius, fill_ratio
-        )
-        effective_mm = _pixels_to_mm(focal_length, width)
-        camera_template = Camera(
-            focal_length=(focal_length, focal_length), image_size=(width, height)
+            fill_ratio=params["fill_ratio"],
         )
 
     path_gen = OrbitPath(target=orbit_center, radius=radius)
     cameras = _generate_path(path_gen, pattern, params, camera_template)
     logger.info(
-        "render_splat: %s path, %d cameras, radius=%.3f, focal=%.1fpx (%.2fmm)",
-        pattern, len(cameras), radius, focal_length, effective_mm,
+        "render_splat: %s path, %d cameras, radius=%.3f", pattern, len(cameras), radius
     )
     return cameras, focal_length, effective_mm, None
 

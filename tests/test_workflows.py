@@ -290,7 +290,21 @@ class TestWorkflowFiles(unittest.TestCase):
                 self.assertEqual(step.outputs, twin.outputs)
                 self.assertEqual(step.when, twin.when)
                 self.assertEqual(step.keep_loaded, twin.keep_loaded)
-                self.assertEqual(step.params, twin.params)
+                if step.id == "rerender_splat":
+                    # native threads a `framing` global through both its mesh
+                    # render and this step; the other two files have no mesh
+                    # render, so their rerender_splat frames at the default.
+                    self.assertEqual(
+                        step.params.get("framing"), "${globals.framing}",
+                        "native's rerender_splat should read the framing global",
+                    )
+                    self.assertNotIn("framing", twin.params)
+                    self.assertEqual(
+                        {k: v for k, v in step.params.items() if k != "framing"},
+                        twin.params,
+                    )
+                else:
+                    self.assertEqual(step.params, twin.params)
 
         for key, value in full.globals.items():
             if key == "output_root":

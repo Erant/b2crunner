@@ -249,6 +249,13 @@ _MULTILINE_AT = 80
 # otherwise draw, which can be typed into a shape no step supports.
 RESOLUTION_CHOICES = [[720, 1280], [600, 1040], [480, 832]]
 
+# Globals that are free-form YAML values but really have a fixed choice set —
+# the one the step param they feed declares. Without this the panel draws a
+# bare text box for them (a global is not a declared Param), which can be
+# typed into a value no step accepts. `framing` feeds render/render_splat's
+# `framing` param; keep this list in step with those `choices=`.
+GLOBAL_CHOICES = {"framing": ("full", "torso", "bust", "head")}
+
 
 def _res_label(pair: Any) -> str:
     return f"{pair[0]}x{pair[1]}"
@@ -666,8 +673,13 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
                                     continue
                                 # A workflow's globals are free-form values,
                                 # not declared Params, so the widget is
-                                # picked from the value's own Python type.
-                                pseudo = Param(name=key, type=type(value), default=value)
+                                # picked from the value's own Python type —
+                                # plus a fixed choice set for the few globals
+                                # that mirror a step param's `choices`.
+                                pseudo = Param(
+                                    name=key, type=type(value), default=value,
+                                    choices=GLOBAL_CHOICES.get(key, ()),
+                                )
                                 widget = _widget_for(
                                     pseudo, value, key,
                                     key=f"{name}:globals:{key}",
