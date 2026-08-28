@@ -234,42 +234,72 @@ def workflow_param_panel(name: str) -> tuple[Dict[str, Any], List[Dict[str, Any]
 # box is unusable — the denoise prompts are the case this exists for.
 _MULTILINE_AT = 80
 
+# The `resolution` global is a [width, height] pair, and only a handful of
+# pairs are usable — each has to match a size the denoise model was trained
+# for. A dropdown of those beats the free-form list box `_widget_for` would
+# otherwise draw, which can be typed into a shape no step supports.
+RESOLUTION_CHOICES = [[720, 1280], [600, 1040], [832, 480]]
 
-def _widget_for(param: Param, value: Any, label: str):
+
+def _res_label(pair: Any) -> str:
+    return f"{pair[0]}x{pair[1]}"
+
+
+def _res_value(label: str) -> List[int]:
+    width, height = str(label).lower().split("x")
+    return [int(width), int(height)]
+
+
+def _widget_for(param: Param, value: Any, label: str, key: str):
     """One Gradio control for one declared param, prefilled with `value`.
 
     Everything the widget needs — type, bounds, choices, help — comes off
     the Param, which is why declaring params was worth doing: the UI has no
     per-step knowledge in it at all.
+
+    `key` is a stable identity for this widget within the `@gr.render` block.
+    Gradio uses it to reuse the same DOM element across re-renders instead of
+    destroying and recreating it, which also preserves a value the user typed
+    but has not yet committed. The keys embed the workflow name, so switching
+    workflows changes every key and forces a full redraw — matching
+    `on_workflow_change`, which clears the override state at the same moment.
     """
     info = param.help or None
+    # `interactive=True` on every widget: these are created inside a
+    # `@gr.render` block, where Gradio does not reliably infer that a
+    # component wired as an event input should be editable. Constructed with
+    # a `value=`, it otherwise defaults to display-only and the whole panel
+    # renders read-only.
     if param.type is bool:
-        return gr.Checkbox(value=bool(value), label=label, info=info)
+        return gr.Checkbox(value=bool(value), label=label, info=info,
+                           interactive=True, key=key)
     if param.type in (int, float):
         if param.minimum is not None and param.maximum is not None:
             return gr.Slider(
                 minimum=param.minimum, maximum=param.maximum,
                 step=1 if param.type is int else None,
-                value=value, label=label, info=info,
+                value=value, label=label, info=info, interactive=True, key=key,
             )
         return gr.Number(
             value=value, label=label, info=info,
-            precision=0 if param.type is int else None,
+            precision=0 if param.type is int else None, interactive=True, key=key,
         )
     if param.type is list:
         return gr.Textbox(
             value=yaml.safe_dump(value, default_flow_style=True).strip(),
             label=label, info=(info + " (YAML list)") if info else "YAML list",
+            interactive=True, key=key,
         )
     if param.choices:
         return gr.Dropdown(
             choices=list(param.choices), value=value, label=label, info=info,
-            allow_custom_value=True,
+            allow_custom_value=True, interactive=True, key=key,
         )
     text = value if isinstance(value, str) else ""
     multiline = "\n" in text or len(text) > _MULTILINE_AT
     return gr.Textbox(
         value=text, label=label, info=info, lines=6 if multiline else 1,
+        interactive=True, key=key,
     )
 
 
@@ -553,15 +583,21 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
                     # HIDDEN_GLOBALS) and what makes "reset" mean something.
                     param_state = gr.State({"globals": {}, "steps": {}})
 
-                    def _record(scope: str, key: str, param, baseline, step_id=""):
+                    def _record(scope: str, key: str, param, baseline, step_id="",
+                                coerce=None):
                         """A .change() handler that files one widget's value.
 
                         A value equal to what the panel was drawn with is
                         *removed* rather than stored, so nudging a control
                         and putting it back leaves nothing pinned.
+
+                        `coerce` overrides how the raw widget value is brought
+                        back to the param's type — the resolution dropdown
+                        hands back a "720x1280" label, not the [w, h] list the
+                        workflow wants.
                         """
                         def handler(raw, state):
-                            value = _widget_value(param, raw)
+                            value = coerce(raw) if coerce is not None else _widget_value(param, raw)
                             state = {
                                 "globals": dict(state.get("globals", {})),
                                 "steps": {k: dict(v) for k, v in state.get("steps", {}).items()},
@@ -585,11 +621,44 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
                             if not globals_shown:
                                 gr.Markdown("_This workflow declares no globals._")
                             for key, value in globals_shown.items():
+                                if key == "resolution":
+                                    baseline = (
+                                        list(value)
+                                        if isinstance(value, (list, tuple)) else value
+                                    )
+                                    choices = [_res_label(p) for p in RESOLUTION_CHOICES]
+                                    current = (
+                                        _res_label(value)
+                                        if isinstance(value, (list, tuple)) and len(value) == 2
+                                        else None
+                                    )
+                                    if current and current not in choices:
+                                        choices = [current, *choices]
+                                    widget = gr.Dropdown(
+                                        choices=choices, value=current, label=key,
+                                        info="Frame size, width x height. Every step "
+                                             "that resizes reads this; only sizes the "
+                                             "denoise model supports are offered.",
+                                        interactive=True, key=f"{name}:globals:resolution",
+                                    )
+                                    widget.change(
+                                        _record(
+                                            "globals", key, None, baseline,
+                                            coerce=lambda raw: (
+                                                _res_value(raw) if raw else baseline
+                                            ),
+                                        ),
+                                        inputs=[widget, param_state], outputs=[param_state],
+                                    )
+                                    continue
                                 # A workflow's globals are free-form values,
                                 # not declared Params, so the widget is
                                 # picked from the value's own Python type.
                                 pseudo = Param(name=key, type=type(value), default=value)
-                                widget = _widget_for(pseudo, value, key)
+                                widget = _widget_for(
+                                    pseudo, value, key,
+                                    key=f"{name}:globals:{key}",
+                                )
                                 widget.change(
                                     _record("globals", key, pseudo, value),
                                     inputs=[widget, param_state], outputs=[param_state],
@@ -608,7 +677,10 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
                                         else param.default
                                     )
                                     mark = " •" if overridden else ""
-                                    widget = _widget_for(param, value, param.name + mark)
+                                    widget = _widget_for(
+                                        param, value, param.name + mark,
+                                        key=f"{name}:steps:{entry['id']}:{param.name}",
+                                    )
                                     widget.change(
                                         _record("steps", param.name, param, value, entry["id"]),
                                         inputs=[widget, param_state], outputs=[param_state],
