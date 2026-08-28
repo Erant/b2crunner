@@ -591,9 +591,13 @@ class RenderStep(Step):
             # decoration: filter_fov and rotate_views both hard-error
             # without orbit_target/forward_azimuth_deg, and the splat
             # renderer reuses framing_bounds/initial_rotation to keep a
-            # re-render framed identically. framing_bounds is in-memory
-            # only — Dataset.to_disk()'s JSON filter drops it, exactly as
-            # the ComfyUI save node does (see cyber_6f's b2c_extras).
+            # re-render framed identically. framing_bounds is a nested
+            # {preset: (min, max)} of ndarrays, which Dataset.to_disk()'s
+            # JSON filter used to drop whole — silently, so a disk-backed
+            # workflow (fast_helical_full) lost every preset and fell back
+            # to the splat's own bounds. cyber_6f's recorded b2c_extras
+            # shows the ComfyUI save node dropping it the same way. The
+            # filter now flattens nested arrays, so it survives.
             "orbit_target": np.asarray(orbit_center, dtype=np.float32),
             "forward_azimuth_deg": forward_azimuth_deg,
             "focal_length_mm": effective_focal_length_mm,

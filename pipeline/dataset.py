@@ -28,6 +28,31 @@ from .masks import mask_to_alpha_u8
 _SPECIAL_KEYS = {"cameras", "image_names", "points_3d", "resolution", "splat_path"}
 
 
+def _json_safe(value: Any) -> Any:
+    """Recursively convert an ``extras`` value into something ``json.dumps``
+    accepts, turning numpy arrays and scalars into plain lists/Python numbers
+    at *any* nesting depth.
+
+    The old filter only called ``.tolist()`` on a top-level array, so a nested
+    structure such as ``framing_bounds`` (``{preset: (min, max)}`` with ndarray
+    corners) failed ``json.dumps`` and was dropped whole — which is why a
+    ``render_splat`` re-render loaded from disk silently lost every non-"full"
+    framing preset. Raises ``TypeError`` for anything still not representable,
+    which ``to_disk`` catches to skip that key exactly as before.
+    """
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    if value is None or isinstance(value, (str, bool, int, float)):
+        return value
+    raise TypeError(f"extras value of type {type(value).__name__} is not serializable")
+
+
 @dataclass
 class Dataset:
     """A batch of rendered views plus the metadata needed to export/reload them.
@@ -97,13 +122,12 @@ class Dataset:
 
         json_safe_extras = {}
         for key, value in self.extras.items():
-            if hasattr(value, "tolist"):
-                value = value.tolist()
             try:
-                json.dumps(value)
-                json_safe_extras[key] = value
+                safe = _json_safe(value)
+                json.dumps(safe)
             except (TypeError, ValueError):
                 continue
+            json_safe_extras[key] = safe
         if json_safe_extras:
             metadata["b2c_extras"] = json_safe_extras
 
