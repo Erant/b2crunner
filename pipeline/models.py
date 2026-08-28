@@ -191,6 +191,33 @@ def _probe_mediapipe() -> bool:
     )
 
 
+def _fetch_moge() -> str:
+    """The single `model.pt` MoGe-2's `from_pretrained` pulls for sam3d_body.
+
+    `MoGeModel.from_pretrained(repo)` (moge.model.v2) does exactly one
+    `hf_hub_download(repo, "model.pt")` — not a snapshot — so the prefetch
+    does the same call against the same cache, and "ready" means
+    `FOVEstimator("moge2")` will not touch the network.
+    """
+    from huggingface_hub import hf_hub_download
+
+    from .steps.sam3d_body import DEFAULT_FOV_CHECKPOINT_REPO
+
+    return hf_hub_download(DEFAULT_FOV_CHECKPOINT_REPO, "model.pt")
+
+
+def _probe_moge() -> bool:
+    from huggingface_hub import hf_hub_download
+
+    from .steps.sam3d_body import DEFAULT_FOV_CHECKPOINT_REPO
+
+    try:
+        hf_hub_download(DEFAULT_FOV_CHECKPOINT_REPO, "model.pt", local_files_only=True)
+        return True
+    except Exception:
+        return False
+
+
 def _probe_seedvr2() -> bool:
     """Glob rather than import the vendored registry for the filenames.
 
@@ -256,6 +283,7 @@ def _registry() -> List[ModelSource]:
     """Built lazily so importing this module never imports a step module."""
     from .steps.rmbg import DEFAULT_CHECKPOINT as RMBG
     from .steps.sam3d_body import DEFAULT_CHECKPOINT_REPO as SAM3D
+    from .steps.sam3d_body import DEFAULT_FOV_CHECKPOINT_REPO as MOGE
     from .steps.sapiens2 import DEFAULT_CHECKPOINT as SAPIENS
     from .steps.wan22_vace_denoise import DEFAULT_CHECKPOINT as WAN22
 
@@ -288,6 +316,13 @@ def _registry() -> List[ModelSource]:
         ModelSource(
             "sam3dbody", f"{SAM3D} (body reconstruction)", ("sam3d_body",),
             sam3d_fetch, sam3d_probe, approx_gb=2.8, gated=True,
+        ),
+        ModelSource(
+            # sam3d_body's fov_estimator defaults to "moge2", so a run with
+            # that step now blocks on this too — a single model.pt, ~1.3 GB
+            # for the ViT-L variant (approximate; not yet measured on a pod).
+            "moge2", f"{MOGE} (sam3d_body FOV / focal-length estimation)",
+            ("sam3d_body",), _fetch_moge, _probe_moge, approx_gb=1.3,
         ),
         ModelSource(
             "wan22", f"{WAN22} (denoise: vae, text encoder, scheduler)",

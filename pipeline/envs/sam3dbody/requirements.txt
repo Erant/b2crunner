@@ -98,3 +98,14 @@ hf_transfer
 # pipeline/envs/sam3dbody/setup.sh, which clones it to
 # /workspace/venv_sam3dbody_vendor and adds a .pth file — same pattern as
 # seedvr2's vendored ComfyUI-SeedVR2_VideoUpscaler.
+#
+# MoGe (github.com/microsoft/MoGe) — sam3d_body's FOV / focal-length
+# estimator (pipeline/steps/sam3d_body.py, fov_estimator="moge2"; INSTALL.md
+# step 5). NOT listed above because it is installed separately, PINNED to
+# b942f00 (the last MoGe-2 commit) and --no-deps: `main` is now MoGe-3 whose
+# deps include a nvcc-built extension, gradio>=6, and a git package named
+# `pipeline` that would shadow this repo's own package in this venv. Only
+# moge.model.v2 is on the FOVEstimator path and it needs just utils3d (also
+# pinned, --no-deps) plus torch/scipy/numpy. Done by setup.sh and the
+# Dockerfile's venv_sam3dbody layer. Set fov_estimator="" to skip it and
+# fall back to the focal = sqrt(h**2 + w**2) guess.

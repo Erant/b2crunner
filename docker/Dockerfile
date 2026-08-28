@@ -323,6 +323,11 @@ RUN make-child-venv /opt/venv_seedvr2 \
 #     build env lacks it even when the venv has it.
 #   - detectron2 last, --no-build-isolation --no-deps, per
 #     facebookresearch/sam-3d-body's own INSTALL.md.
+#   - MoGe (sam3d_body's FOV / focal-length estimator, INSTALL.md step 5)
+#     PINNED to b942f00 + --no-deps: `main` is now MoGe-3, whose deps drag
+#     in an nvcc-built extension, gradio>=6, and a git package named
+#     `pipeline` that would shadow this repo's own. Only moge.model.v2 is
+#     on the inference path; it needs utils3d (also pinned) + torch/scipy.
 #   - sam-3d-body itself is vendored, not pip-installed: it has no
 #     setup.py/pyproject.toml at all.
 #
@@ -343,11 +348,16 @@ RUN make-child-venv /opt/venv_sam3dbody \
         -r pipeline/envs/sam3dbody/requirements.txt \
     && /opt/venv_sam3dbody/bin/pip install --no-build-isolation --no-deps \
         'git+https://github.com/facebookresearch/detectron2.git@a1ce2f9' \
+    && /opt/venv_sam3dbody/bin/pip install --no-deps \
+        'moge @ git+https://github.com/microsoft/MoGe.git@b942f00' \
+    && /opt/venv_sam3dbody/bin/pip install \
+        'utils3d @ git+https://github.com/EasternJournalist/utils3d.git@3fab839f0be9931dac7c8488eb0e1600c236e183' \
     && git clone --depth 1 https://github.com/facebookresearch/sam-3d-body.git \
         /opt/vendor/sam3dbody \
     && echo /opt/vendor/sam3dbody > \
         $(/opt/venv_sam3dbody/bin/python -c "import site; print(site.getsitepackages()[0])")/sam3dbody_vendor.pth \
     && /opt/venv_sam3dbody/bin/python -c "from sam_3d_body import SAM3DBodyEstimator, load_sam_3d_body" \
+    && /opt/venv_sam3dbody/bin/python -c "from tools.build_fov_estimator import FOVEstimator; from moge.model.v2 import MoGeModel; print('FOVEstimator + moge v2 OK')" \
     && /opt/venv_sam3dbody/bin/python -c "\
 from detectron2 import _C; print('detectron2 native extension OK')"
 

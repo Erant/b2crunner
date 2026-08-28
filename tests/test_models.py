@@ -70,6 +70,7 @@ class TestRegistry(unittest.TestCase):
     def test_sources_agree_with_the_steps_own_constants(self):
         """The registry must not carry its own copy of a checkpoint name."""
         from pipeline.steps.rmbg import DEFAULT_CHECKPOINT as RMBG
+        from pipeline.steps.sam3d_body import DEFAULT_FOV_CHECKPOINT_REPO as MOGE
         from pipeline.steps.wan22_vace_denoise import DEFAULT_CHECKPOINT as WAN22
         from pipeline.steps.wan22_vace_denoise import DEFAULT_FP8_REPO
 
@@ -77,6 +78,7 @@ class TestRegistry(unittest.TestCase):
         self.assertIn(RMBG, sources["rmbg"].description)
         self.assertIn(WAN22, sources["wan22"].description)
         self.assertIn(DEFAULT_FP8_REPO, sources["wan22_fp8"].description)
+        self.assertIn(MOGE, sources["moge2"].description)
 
 
 class TestWan22WeightSplit(unittest.TestCase):
@@ -146,9 +148,9 @@ class TestWan22WeightSplit(unittest.TestCase):
 class TestRequiredForSteps(unittest.TestCase):
     def test_blocking_is_scoped_to_the_workflow(self):
         cases = {
-            "fast_helical_native": {"rmbg", "sapiens2", "sam3dbody", "wan22",
-                                    "wan22_fp8", "wan22_lora", "seedvr2",
-                                    "mediapipe"},
+            "fast_helical_native": {"rmbg", "sapiens2", "sam3dbody", "moge2",
+                                    "wan22", "wan22_fp8", "wan22_lora",
+                                    "seedvr2", "mediapipe"},
             "fast_helical": {"rmbg", "sapiens2", "wan22", "wan22_fp8", "wan22_lora"},
             "fast_helical_full": {"rmbg", "sapiens2", "wan22", "wan22_fp8",
                                   "wan22_lora", "seedvr2"},

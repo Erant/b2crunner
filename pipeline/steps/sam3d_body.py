@@ -38,6 +38,20 @@ guessable from the public docs/notebook:
    `torch.jit.load("")` downstream and crashes. The checkpoint repo ships
    the real file at `assets/mhr_model.pt`; defaults to that path below
    unless overridden.
+
+FOV / focal length: `SAM3DBodyEstimator` takes an optional `fov_estimator`.
+Left unset — the state this module shipped in until 2026-08-28 — it prints
+"No FOV estimator... Using the default FOV!" and `process_one_image` builds
+camera intrinsics as `focal = sqrt(h**2 + w**2)`, principal point at the
+image centre (see `sam_3d_body/data/utils/prepare_batch.py`): a guess from
+the image dimensions alone, not the real lens, and the `focal_length` this
+step returns is then just that guess round-tripped through the model. This
+module now defaults to MoGe-2 (`Ruicheng/moge-2-vitl-normal`, loaded via
+the vendored `tools.build_fov_estimator.FOVEstimator`), which predicts
+intrinsics from the image the same way upstream's `demo.py` /
+`tools/export.py` do. `fov_estimator=""` restores the old
+`sqrt(h**2 + w**2)` behaviour. The `focal_length=1468.6px` figure above was
+from a default-FOV run, before this was wired.
 """
 
 from __future__ import annotations
@@ -53,6 +67,11 @@ from ..registry import register_step
 from ..step import Param, Step
 
 DEFAULT_CHECKPOINT_REPO = "facebook/sam-3d-body-dinov3"
+#: MoGe-2 checkpoint the FOV estimator pulls when `fov_checkpoint` is unset.
+#: `FOVEstimator("moge2")` -> `MoGeModel.from_pretrained(<this>)`, which
+#: `hf_hub_download`s a single `model.pt` from it (see pipeline/models.py's
+#: `_fetch_moge`). ViT-L "normal" variant, matching upstream's default.
+DEFAULT_FOV_CHECKPOINT_REPO = "Ruicheng/moge-2-vitl-normal"
 
 
 @register_step("sam3d_body")
@@ -61,6 +80,14 @@ class SAM3DBodyStep(Step):
         Param("bbox_thr", float, 0.8,
               "Person-detection confidence floor", minimum=0.0, maximum=1.0),
         Param("use_mask", bool, False, "Let the estimator segment the subject first"),
+        Param("fov_estimator", str, "moge2",
+              "Monocular estimator run before mesh fitting to recover the camera "
+              "focal length / intrinsics. Empty string falls back to the model's "
+              "default of focal = sqrt(h**2 + w**2) — a guess from the image "
+              "dimensions, not the real lens. Only 'moge2' is implemented upstream."),
+        Param("fov_checkpoint", str, None,
+              "Local dir or HF repo for the FOV estimator's weights; empty means "
+              + DEFAULT_FOV_CHECKPOINT_REPO, advanced=True),
         Param("checkpoint_repo", str, DEFAULT_CHECKPOINT_REPO,
               "HF repo the checkpoint is pulled from", advanced=True),
         Param("checkpoint_dir", str, None,
@@ -101,7 +128,40 @@ class SAM3DBodyStep(Step):
         model, model_cfg = load_sam_3d_body(
             str(checkpoint_path), device=device, mhr_path=mhr_path
         )
-        self._estimator = SAM3DBodyEstimator(model, model_cfg)
+        self._estimator = SAM3DBodyEstimator(
+            model, model_cfg, fov_estimator=self._load_fov_estimator(params, device)
+        )
+
+    def _load_fov_estimator(self, params: Dict[str, Any], device: str):
+        """MoGe-2 FOV estimator for `SAM3DBodyEstimator`, or None if disabled.
+
+        Without it the estimator prints "No FOV estimator... Using the
+        default FOV!" and process_one_image assumes focal = sqrt(h**2 + w**2)
+        with the principal point at the image centre — dimensions, not the
+        lens. With it, MoGe-2 predicts real intrinsics from the image.
+        """
+        name = (params["fov_estimator"] or "").strip()
+        if not name:
+            return None
+        # `tools` is the vendored facebookresearch/sam-3d-body checkout
+        # (pipeline/envs/sam3dbody/setup.sh + the Dockerfile's venv_sam3dbody
+        # layer add it via a .pth). FOVEstimator("moge2") imports `moge`,
+        # pinned to the last MoGe-2 commit and installed --no-deps in that
+        # same venv. A miss here means the venv is stale, not that we should
+        # silently fall back to the worse focal guess.
+        try:
+            from tools.build_fov_estimator import FOVEstimator
+        except ImportError as exc:
+            raise RuntimeError(
+                f"sam3d_body: fov_estimator={name!r} needs the vendored "
+                "sam-3d-body 'tools' package and MoGe in this venv. Re-run "
+                "pipeline/envs/sam3dbody/setup.sh, or set fov_estimator='' to "
+                "assume focal = sqrt(h**2 + w**2)."
+            ) from exc
+        return FOVEstimator(
+            name=name, device=device,
+            path=params["fov_checkpoint"] or DEFAULT_FOV_CHECKPOINT_REPO,
+        )
 
     def unload(self) -> None:
         self._estimator = None

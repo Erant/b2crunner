@@ -26,13 +26,28 @@ pip install -q 'git+https://github.com/facebookresearch/detectron2.git@a1ce2f9' 
 # confirmed on a real pod this doesn't break the actual import, but if it
 # ever does, `pip install 'iopath<0.1.10'` after this line is the fix.
 
+# MoGe — sam3d_body's FOV / focal-length estimator (see
+# pipeline/steps/sam3d_body.py, fov_estimator="moge2", and INSTALL.md
+# step 5). PINNED to b942f00, the last MoGe-2 commit: `main` is now MoGe-3
+# (v3.0.0), whose deps drag in a CUDA extension (flex-gemm), gradio>=6, and
+# a git package literally named `pipeline` that would shadow this repo's own
+# `pipeline` in this venv. --no-deps for moge itself: the only inference-path
+# deps are torch/scipy/numpy/cv2 (already present) + utils3d; the
+# `pipeline`/training deps MoGe 2.0.0 also lists are import-time only in
+# moge/{train,test}/, never in moge.model.v2, which is all FOVEstimator uses.
+# utils3d IS installed with its deps — only `moderngl` is new, it is small,
+# and its .np/.pt math submodules (the ones MoGe touches) don't need it.
+pip install -q --no-deps 'moge @ git+https://github.com/microsoft/MoGe.git@b942f00'
+pip install -q 'utils3d @ git+https://github.com/EasternJournalist/utils3d.git@3fab839f0be9931dac7c8488eb0e1600c236e183'
+python3 -c "from moge.model.v2 import MoGeModel; print('moge (v2) import OK')"
+
 VENDOR_DIR=/workspace/venv_sam3dbody_vendor
 if [ ! -d "$VENDOR_DIR" ]; then
     git clone --depth 1 https://github.com/facebookresearch/sam-3d-body.git "$VENDOR_DIR"
 fi
 SITE_PACKAGES=$(python3 -c "import site; print(site.getsitepackages()[0])")
 echo "$VENDOR_DIR" > "$SITE_PACKAGES/sam3dbody_vendor.pth"
-python3 -c "from sam_3d_body import SAM3DBodyEstimator, load_sam_3d_body; print('sam_3d_body import OK')"
+python3 -c "from sam_3d_body import SAM3DBodyEstimator, load_sam_3d_body; from tools.build_fov_estimator import FOVEstimator; print('sam_3d_body + FOVEstimator import OK')"
 
 python3 -c "
 from huggingface_hub import snapshot_download
