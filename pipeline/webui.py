@@ -210,7 +210,7 @@ def workflow_param_panel(name: str) -> tuple[Dict[str, Any], List[Dict[str, Any]
     """
     from .cli import resolve_workflow
     from .registry import get_step_class
-    from .templating import resolve
+    from .templating import global_ref, resolve
 
     spec = WorkflowSpec.from_yaml(resolve_workflow(name))
     globals_shown = {k: v for k, v in spec.globals.items() if k not in HIDDEN_GLOBALS}
@@ -226,6 +226,15 @@ def workflow_param_panel(name: str) -> tuple[Dict[str, Any], List[Dict[str, Any]
             "step": step.step,
             "params": list(declared.values()),
             "overrides": resolve(step.params, scope),
+            # Params this step reads verbatim from a workflow global
+            # ({param: "resolution"} etc.). The panel draws these read-only:
+            # a step's `resolution` wired to ${globals.resolution} must not
+            # become a second, drifting home for the frame size (f4dca77).
+            "global_refs": {
+                pname: ref
+                for pname, raw in step.params.items()
+                if pname in declared and (ref := global_ref(raw)) is not None
+            },
         })
     return globals_shown, steps
 
@@ -238,7 +247,7 @@ _MULTILINE_AT = 80
 # pairs are usable — each has to match a size the denoise model was trained
 # for. A dropdown of those beats the free-form list box `_widget_for` would
 # otherwise draw, which can be typed into a shape no step supports.
-RESOLUTION_CHOICES = [[720, 1280], [600, 1040], [832, 480]]
+RESOLUTION_CHOICES = [[720, 1280], [600, 1040], [480, 832]]
 
 
 def _res_label(pair: Any) -> str:
@@ -250,7 +259,7 @@ def _res_value(label: str) -> List[int]:
     return [int(width), int(height)]
 
 
-def _widget_for(param: Param, value: Any, label: str, key: str):
+def _widget_for(param: Param, value: Any, label: str, key: str, interactive: bool = True):
     """One Gradio control for one declared param, prefilled with `value`.
 
     Everything the widget needs — type, bounds, choices, help — comes off
@@ -263,43 +272,47 @@ def _widget_for(param: Param, value: Any, label: str, key: str):
     but has not yet committed. The keys embed the workflow name, so switching
     workflows changes every key and forces a full redraw — matching
     `on_workflow_change`, which clears the override state at the same moment.
+
+    `interactive=False` draws the same type-appropriate widget but read-only
+    — used for a step param the workflow has wired to a `${globals.x}`, which
+    must not get a second editable home (see `render_params`).
     """
     info = param.help or None
-    # `interactive=True` on every widget: these are created inside a
+    # `interactive=True` on every editable widget: these are created inside a
     # `@gr.render` block, where Gradio does not reliably infer that a
     # component wired as an event input should be editable. Constructed with
     # a `value=`, it otherwise defaults to display-only and the whole panel
     # renders read-only.
     if param.type is bool:
         return gr.Checkbox(value=bool(value), label=label, info=info,
-                           interactive=True, key=key)
+                           interactive=interactive, key=key)
     if param.type in (int, float):
         if param.minimum is not None and param.maximum is not None:
             return gr.Slider(
                 minimum=param.minimum, maximum=param.maximum,
                 step=1 if param.type is int else None,
-                value=value, label=label, info=info, interactive=True, key=key,
+                value=value, label=label, info=info, interactive=interactive, key=key,
             )
         return gr.Number(
             value=value, label=label, info=info,
-            precision=0 if param.type is int else None, interactive=True, key=key,
+            precision=0 if param.type is int else None, interactive=interactive, key=key,
         )
     if param.type is list:
         return gr.Textbox(
             value=yaml.safe_dump(value, default_flow_style=True).strip(),
             label=label, info=(info + " (YAML list)") if info else "YAML list",
-            interactive=True, key=key,
+            interactive=interactive, key=key,
         )
     if param.choices:
         return gr.Dropdown(
             choices=list(param.choices), value=value, label=label, info=info,
-            allow_custom_value=True, interactive=True, key=key,
+            allow_custom_value=True, interactive=interactive, key=key,
         )
     text = value if isinstance(value, str) else ""
     multiline = "\n" in text or len(text) > _MULTILINE_AT
     return gr.Textbox(
         value=text, label=label, info=info, lines=6 if multiline else 1,
-        interactive=True, key=key,
+        interactive=interactive, key=key,
     )
 
 
@@ -676,6 +689,19 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
                                         entry["overrides"][param.name] if overridden
                                         else param.default
                                     )
+                                    ref = entry["global_refs"].get(param.name)
+                                    if ref is not None:
+                                        # Wired to ${globals.<ref>}: show the
+                                        # resolved value read-only and don't
+                                        # record a change. The one editable
+                                        # home is the Globals control above.
+                                        _widget_for(
+                                            param, value,
+                                            f"{param.name}  ← globals.{ref}",
+                                            key=f"{name}:steps:{entry['id']}:{param.name}",
+                                            interactive=False,
+                                        )
+                                        return
                                     mark = " •" if overridden else ""
                                     widget = _widget_for(
                                         param, value, param.name + mark,
@@ -695,8 +721,10 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
 
                         gr.Markdown(
                             "_A dot marks a param the workflow sets; the rest show the "
-                            "step's own default. Advanced holds the knobs that exist "
-                            "because the underlying library has them._"
+                            "step's own default. `← globals.x` marks one wired to a "
+                            "global — change it in Globals, not here. Advanced holds "
+                            "the knobs that exist because the underlying library has "
+                            "them._"
                         )
 
         with gr.Tab("Progress"):

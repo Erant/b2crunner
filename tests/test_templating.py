@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from pipeline.templating import resolve
+from pipeline.templating import global_ref, resolve
 
 SCOPE = {
     "params": {
@@ -53,6 +53,25 @@ class TestResolve(unittest.TestCase):
             resolve("${params.nope}", SCOPE)
         with self.assertRaises(KeyError):
             resolve("prefix-${params.nope}", SCOPE)
+
+
+class TestGlobalRef(unittest.TestCase):
+    """`global_ref` is how the web UI spots a step param wired straight to a
+    workflow global, so it can draw it read-only instead of giving one
+    setting a second editable home."""
+
+    def test_whole_value_globals_reference(self):
+        self.assertEqual(global_ref("${globals.resolution}"), "resolution")
+        self.assertEqual(global_ref("  ${globals.resolution}  "), "resolution")
+        self.assertEqual(global_ref("${globals.resolution.0}"), "resolution.0")
+
+    def test_inline_and_non_globals_forms_are_not_refs(self):
+        self.assertIsNone(global_ref("${globals.output_root}/colmap"))
+        self.assertIsNone(global_ref("${params.resolution}"))
+        self.assertIsNone(global_ref("[720, 1280]"))
+        self.assertIsNone(global_ref([720, 1280]))
+        self.assertIsNone(global_ref(720))
+        self.assertIsNone(global_ref(None))
 
 
 if __name__ == "__main__":

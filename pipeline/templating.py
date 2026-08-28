@@ -31,6 +31,23 @@ _WHOLE = re.compile(r"^\$\{([^}]+)\}$")
 _INLINE = re.compile(r"\$\{([^}]+)\}")
 
 
+def global_ref(value: Any) -> "str | None":
+    """If `value` is a whole-string `${globals.X}` reference, return `X`.
+
+    Only the whole-value form (`resolution: ${globals.resolution}`), not the
+    inline path form (`${globals.output_root}/colmap`) — the caller wants
+    the params a step reads verbatim from a global, so the UI can show them
+    as linked-to-the-global rather than give one setting a second editable
+    home. Returns None for anything else.
+    """
+    if not isinstance(value, str):
+        return None
+    match = _WHOLE.match(value.strip())
+    if match and match.group(1).startswith("globals."):
+        return match.group(1)[len("globals."):]
+    return None
+
+
 def resolve(value: Any, scope: Dict[str, Any]) -> Any:
     if isinstance(value, str):
         stripped = value.strip()

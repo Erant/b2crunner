@@ -182,6 +182,21 @@ class TestOutputSelection(unittest.TestCase):
         # output_root are the exceptions, not the rule.
         self.assertIn("resolution", globals_shown)
 
+    def test_a_step_param_wired_to_a_global_is_marked_read_only(self):
+        """The render step's `resolution` is `${globals.resolution}` in
+        fast_helical_native. It has to stay a declared param (that is how the
+        value crosses the dispatcher), so the panel is what keeps it from
+        being a second editable home for the frame size."""
+        _globals, steps = webui.workflow_param_panel("fast_helical_native")
+        render = next(s for s in steps if s["step"] == "render")
+        self.assertEqual(render["global_refs"].get("resolution"), "resolution")
+
+        # Every param whose workflow value is a whole `${globals.x}` is
+        # captured, across every step — not just render's resolution.
+        for step in steps:
+            for pname, ref in step["global_refs"].items():
+                self.assertTrue(ref and not ref.startswith("$"))
+
     def test_output_root_is_not_drawn_either(self):
         """Sharper than the switches: `pipeline.run_worker` only repoints
         output_root at the run directory when the submitted overrides do not
