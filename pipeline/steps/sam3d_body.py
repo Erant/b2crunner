@@ -46,9 +46,11 @@ camera intrinsics as `focal = sqrt(h**2 + w**2)`, principal point at the
 image centre (see `sam_3d_body/data/utils/prepare_batch.py`): a guess from
 the image dimensions alone, not the real lens, and the `focal_length` this
 step returns is then just that guess round-tripped through the model. This
-module now defaults to MoGe-2 (`Ruicheng/moge-2-vitl-normal`, loaded via
-the vendored `tools.build_fov_estimator.FOVEstimator`), which predicts
-intrinsics from the image the same way upstream's `demo.py` /
+module now defaults to MoGe-2 (`Ruicheng/moge-2-vitl-normal`, via
+`_MoGeFOVEstimator` below — a re-implementation of upstream's
+`tools/build_fov_estimator.py`, inlined because detectron2 in the same
+venv ships a top-level `tools` package that shadows that repo's), which
+predicts intrinsics from the image the same way upstream's `demo.py` /
 `tools/export.py` do. `fov_estimator=""` restores the old
 `sqrt(h**2 + w**2)` behaviour. The `focal_length=1468.6px` figure above was
 from a default-FOV run, before this was wired.
@@ -67,11 +69,56 @@ from ..registry import register_step
 from ..step import Param, Step
 
 DEFAULT_CHECKPOINT_REPO = "facebook/sam-3d-body-dinov3"
-#: MoGe-2 checkpoint the FOV estimator pulls when `fov_checkpoint` is unset.
-#: `FOVEstimator("moge2")` -> `MoGeModel.from_pretrained(<this>)`, which
-#: `hf_hub_download`s a single `model.pt` from it (see pipeline/models.py's
-#: `_fetch_moge`). ViT-L "normal" variant, matching upstream's default.
+#: MoGe-2 checkpoint `_MoGeFOVEstimator` pulls when `fov_checkpoint` is
+#: unset. `MoGeModel.from_pretrained(<this>)` `hf_hub_download`s a single
+#: `model.pt` from it (see pipeline/models.py's `_fetch_moge`). ViT-L
+#: "normal" variant, matching upstream's default.
 DEFAULT_FOV_CHECKPOINT_REPO = "Ruicheng/moge-2-vitl-normal"
+
+
+class _MoGeFOVEstimator:
+    """MoGe-2 focal-length estimator, duck-typed for `SAM3DBodyEstimator`.
+
+    A re-implementation of facebookresearch/sam-3d-body's
+    `tools/build_fov_estimator.py` (FOVEstimator + load_moge + run_moge +
+    denormalize_f), inlined rather than imported: that repo ships it as a
+    top-level `tools` package, and detectron2 — in the same venv — ships
+    its OWN top-level `tools`, which wins on `sys.path` (the vendored repo
+    is only appended, via a .pth). `SAM3DBodyEstimator` calls exactly one
+    method, `get_cam_intrinsics(img)`, on whatever it gets as
+    `fov_estimator=`, so a stand-in with that method is all it needs. Pinned
+    against MoGe commit b942f00 (see pipeline/envs/sam3dbody/setup.sh).
+    """
+
+    def __init__(self, device: str, checkpoint: str) -> None:
+        try:
+            from moge.model.v2 import MoGeModel
+        except ImportError as exc:  # pragma: no cover - env-dependent
+            raise RuntimeError(
+                "sam3d_body: fov_estimator='moge2' needs the MoGe package in "
+                "this venv (pipeline/envs/sam3dbody/setup.sh installs it, "
+                "pinned to b942f00). Set fov_estimator='' to assume "
+                "focal = sqrt(h**2 + w**2)."
+            ) from exc
+        self._device = device
+        self._model = MoGeModel.from_pretrained(checkpoint).to(device).eval()
+
+    def get_cam_intrinsics(self, image: np.ndarray):
+        """RGB HxWx3 uint8 -> (1, 3, 3) intrinsics tensor, like run_moge."""
+        import torch
+
+        height, width = image.shape[:2]
+        tensor = torch.tensor(
+            image / 255, dtype=torch.float32, device=self._device
+        ).permute(2, 0, 1)
+        norm_k = self._model.infer(tensor)["intrinsics"].cpu().numpy()
+        fy = norm_k[1][1] * height
+        cx, cy = norm_k[0][2] * width, norm_k[1][2] * height
+        # upstream denormalize_f builds [[fx,0,cx],[0,fy,cy],[0,0,1]] and
+        # run_moge then overwrites fx with fy before handing it back, so
+        # both focals are the vertical one.
+        k = torch.tensor([[fy, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]])
+        return k[None]
 
 
 @register_step("sam3d_body")
@@ -143,24 +190,14 @@ class SAM3DBodyStep(Step):
         name = (params["fov_estimator"] or "").strip()
         if not name:
             return None
-        # `tools` is the vendored facebookresearch/sam-3d-body checkout
-        # (pipeline/envs/sam3dbody/setup.sh + the Dockerfile's venv_sam3dbody
-        # layer add it via a .pth). FOVEstimator("moge2") imports `moge`,
-        # pinned to the last MoGe-2 commit and installed --no-deps in that
-        # same venv. A miss here means the venv is stale, not that we should
-        # silently fall back to the worse focal guess.
-        try:
-            from tools.build_fov_estimator import FOVEstimator
-        except ImportError as exc:
-            raise RuntimeError(
-                f"sam3d_body: fov_estimator={name!r} needs the vendored "
-                "sam-3d-body 'tools' package and MoGe in this venv. Re-run "
-                "pipeline/envs/sam3dbody/setup.sh, or set fov_estimator='' to "
-                "assume focal = sqrt(h**2 + w**2)."
-            ) from exc
-        return FOVEstimator(
-            name=name, device=device,
-            path=params["fov_checkpoint"] or DEFAULT_FOV_CHECKPOINT_REPO,
+        if name != "moge2":
+            raise ValueError(
+                f"sam3d_body: unknown fov_estimator {name!r}; only 'moge2' "
+                "is implemented. Set fov_estimator='' to assume "
+                "focal = sqrt(h**2 + w**2)."
+            )
+        return _MoGeFOVEstimator(
+            device, params["fov_checkpoint"] or DEFAULT_FOV_CHECKPOINT_REPO
         )
 
     def unload(self) -> None:

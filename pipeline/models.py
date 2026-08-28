@@ -197,7 +197,7 @@ def _fetch_moge() -> str:
     `MoGeModel.from_pretrained(repo)` (moge.model.v2) does exactly one
     `hf_hub_download(repo, "model.pt")` — not a snapshot — so the prefetch
     does the same call against the same cache, and "ready" means
-    `FOVEstimator("moge2")` will not touch the network.
+    sam3d_body's `_MoGeFOVEstimator` will not touch the network.
     """
     from huggingface_hub import hf_hub_download
 

@@ -105,7 +105,9 @@ hf_transfer
 # b942f00 (the last MoGe-2 commit) and --no-deps: `main` is now MoGe-3 whose
 # deps include a nvcc-built extension, gradio>=6, and a git package named
 # `pipeline` that would shadow this repo's own package in this venv. Only
-# moge.model.v2 is on the FOVEstimator path and it needs just utils3d (also
-# pinned, --no-deps) plus torch/scipy/numpy. Done by setup.sh and the
-# Dockerfile's venv_sam3dbody layer. Set fov_estimator="" to skip it and
-# fall back to the focal = sqrt(h**2 + w**2) guess.
+# moge.model.v2 is on the path steps/sam3d_body.py uses (it re-implements
+# upstream's tools/build_fov_estimator inline — detectron2 ships its own
+# top-level `tools` here that wins on sys.path); it needs just utils3d (also
+# pinned) plus torch/scipy/numpy. Done by setup.sh and the Dockerfile's
+# venv_sam3dbody layer. Set fov_estimator="" to skip it and fall back to the
+# focal = sqrt(h**2 + w**2) guess.

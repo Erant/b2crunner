@@ -328,6 +328,9 @@ RUN make-child-venv /opt/venv_seedvr2 \
 #     in an nvcc-built extension, gradio>=6, and a git package named
 #     `pipeline` that would shadow this repo's own. Only moge.model.v2 is
 #     on the inference path; it needs utils3d (also pinned) + torch/scipy.
+#     steps/sam3d_body.py re-implements upstream's tools/build_fov_estimator
+#     rather than importing it — detectron2 ships its own top-level `tools`
+#     package here, which wins over the vendored repo's (only .pth-appended).
 #   - sam-3d-body itself is vendored, not pip-installed: it has no
 #     setup.py/pyproject.toml at all.
 #
@@ -357,7 +360,7 @@ RUN make-child-venv /opt/venv_sam3dbody \
     && echo /opt/vendor/sam3dbody > \
         $(/opt/venv_sam3dbody/bin/python -c "import site; print(site.getsitepackages()[0])")/sam3dbody_vendor.pth \
     && /opt/venv_sam3dbody/bin/python -c "from sam_3d_body import SAM3DBodyEstimator, load_sam_3d_body" \
-    && /opt/venv_sam3dbody/bin/python -c "from tools.build_fov_estimator import FOVEstimator; from moge.model.v2 import MoGeModel; print('FOVEstimator + moge v2 OK')" \
+    && /opt/venv_sam3dbody/bin/python -c "from moge.model.v2 import MoGeModel; print('moge v2 import OK')" \
     && /opt/venv_sam3dbody/bin/python -c "\
 from detectron2 import _C; print('detectron2 native extension OK')"
 

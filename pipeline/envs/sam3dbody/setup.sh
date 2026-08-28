@@ -34,9 +34,12 @@ pip install -q 'git+https://github.com/facebookresearch/detectron2.git@a1ce2f9' 
 # `pipeline` in this venv. --no-deps for moge itself: the only inference-path
 # deps are torch/scipy/numpy/cv2 (already present) + utils3d; the
 # `pipeline`/training deps MoGe 2.0.0 also lists are import-time only in
-# moge/{train,test}/, never in moge.model.v2, which is all FOVEstimator uses.
-# utils3d IS installed with its deps — only `moderngl` is new, it is small,
-# and its .np/.pt math submodules (the ones MoGe touches) don't need it.
+# moge/{train,test}/, never in moge.model.v2, which is all steps/sam3d_body.py
+# touches (it re-implements upstream's tools/build_fov_estimator rather than
+# importing it — detectron2 ships its own top-level `tools` here that wins on
+# sys.path). utils3d IS installed with its deps — only `moderngl` is new, it
+# is small, and its .np/.pt math submodules (the ones MoGe touches) don't
+# need it.
 pip install -q --no-deps 'moge @ git+https://github.com/microsoft/MoGe.git@b942f00'
 pip install -q 'utils3d @ git+https://github.com/EasternJournalist/utils3d.git@3fab839f0be9931dac7c8488eb0e1600c236e183'
 python3 -c "from moge.model.v2 import MoGeModel; print('moge (v2) import OK')"
@@ -47,7 +50,7 @@ if [ ! -d "$VENDOR_DIR" ]; then
 fi
 SITE_PACKAGES=$(python3 -c "import site; print(site.getsitepackages()[0])")
 echo "$VENDOR_DIR" > "$SITE_PACKAGES/sam3dbody_vendor.pth"
-python3 -c "from sam_3d_body import SAM3DBodyEstimator, load_sam_3d_body; from tools.build_fov_estimator import FOVEstimator; print('sam_3d_body + FOVEstimator import OK')"
+python3 -c "from sam_3d_body import SAM3DBodyEstimator, load_sam_3d_body; print('sam_3d_body import OK')"
 
 python3 -c "
 from huggingface_hub import snapshot_download
