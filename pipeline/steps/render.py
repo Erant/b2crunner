@@ -91,6 +91,25 @@ def _focal_length_pixels_to_mm(focal_length_px: float, image_width: int) -> floa
     return (focal_length_px / image_width) * _FULL_FRAME_SENSOR_WIDTH_MM
 
 
+def _framing_vertices(vertices, bounds, framing: str):
+    """Mesh vertices to auto-frame on, for `override_cam_from_mesh` mode.
+
+    `"full"` frames the whole mesh. A partial preset frames only the vertices
+    inside `bounds` (the preset's AABB, from `Scene.get_framing_bounds`), so the
+    computed focal length zooms to that region rather than to the whole body. A
+    preset whose bounds could not be computed arrives here as the full bounds
+    (the caller's `.get(framing, ...["full"])` fallback), which selects every
+    vertex — same as `"full"`. Falls back to the whole mesh if the box somehow
+    captures too few vertices to frame.
+    """
+    if framing == "full":
+        return vertices
+    lo, hi = bounds
+    within = np.all((vertices >= lo) & (vertices <= hi), axis=1)
+    selected = vertices[within]
+    return selected if selected.shape[0] >= 4 else vertices
+
+
 # "outline+skeleton" render mode: a flat two-tone silhouette base layer on a
 # fixed mid-grey ground, with the skeleton drawn over it exactly as in the
 # other "*+skeleton" modes. The silhouette fill is a single grey the
@@ -325,8 +344,16 @@ class RenderStep(Step):
         original_focal_length = float(mesh_output["focal_length"]) if override_cam_from_mesh else None
 
         if override_cam_from_mesh:
+            # The frame size comes from `compute_original_view_framing`, which fits
+            # whatever vertices it is handed. Passing the whole mesh made a non-"full"
+            # `framing` shift only `orbit_center` (where the camera aims) and never
+            # the focal length — the crop moved to the torso/head but the subject
+            # stayed body-sized. Restrict to the selected preset's box so the zoom
+            # tracks it too, the way `compute_auto_orbit_radius(bounds=...)` already
+            # does on the non-override path.
+            framing_vertices = _framing_vertices(scene.vertices, current_bounds, framing)
             framing_info = compute_original_view_framing(
-                vertices=scene.vertices,
+                vertices=framing_vertices,
                 render_size=(width, height),
                 original_focal_length=original_focal_length,
                 fill_ratio=fill_ratio,
