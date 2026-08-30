@@ -150,25 +150,42 @@ pipeline/
 │   │                            — the old fast_helical.yaml — for
 │   │                            isolating the upscaler when output looks
 │   │                            wrong
-│   └── fast_helical_native.yaml a bootstrap prologue from a front/back
+│   ├── fast_helical_native.yaml a bootstrap prologue from a front/back
 │                                sheet, then fast_helical_full.yaml's steps
 │                                verbatim: split → sam3d_body →
-│                                head_angle_fix → detect_face_landmarks →
-│                                render draws an anchored circular orbit of
-│                                outline+skeleton frames with the face
-│                                overlay on them → generate_firstlast +
+│                                head_angle_fix → a face branch
+│                                (sapiens2_seg → crop_to_box → sapiens2_seg
+│                                → sapiens2_lite → face_pointmap_splat)
+│                                builds a Gaussian head from a crop of the
+│                                sheet's front half → render draws an
+│                                anchored circular orbit of outline+skeleton
+│                                frames → render_splat + composite_splat_views
+│                                put that face on every drawing within 45° of
+│                                the source view → generate_firstlast +
 │                                inject_anchor warp the photo onto the anchor
-│                                frame. rmbg/wan22_vace_denoise/sapiens2/
-│                                sam3d_body verified on real hardware,
-│                                render's own rasterisation not — see its
-│                                STATUS note.
-│
-│                                A second bootstrap lived beside this one
-│                                between 2026-08-29 and 2026-08-30 — a
-│                                photo-to-splat shell in
-│                                fast_helical_shell.yaml, plus a face splat
-│                                in this file, both off Sapiens2's pointmap
-│                                head. Removed; see "What was removed" below
+│                                frame. Since 2026-08-29 the face splat has
+│                                replaced detect_face_landmarks; nothing else
+│                                about this bootstrap changed, deliberately —
+│                                it is the file for testing the face in
+│                                isolation. rmbg/
+│                                wan22_vace_denoise/sapiens2/sam3d_body
+│                                verified on real hardware, render's own
+│                                rasterisation not — see its STATUS note
+│   └── fast_helical_shell.yaml  PARKED, selected by nothing. The same tail,
+│                                but the whole bootstrap replaced by a
+│                                photo-to-splat shell: rmbg + sapiens2_lite +
+│                                pointmap_splat build a body-wide Gaussian
+│                                shell → refine_pose_to_splat re-poses the
+│                                fit to agree with it → a 380° helix (not a
+│                                circle, and not anchored) → render_splat
+│                                re-renders the shell along those same
+│                                cameras → inject_shell_views swaps it into
+│                                the frames within 15° of the source view and
+│                                marks them as the batch's real-photograph
+│                                frames, replacing generate_firstlast +
+│                                inject_anchor. The pose fit replaces
+│                                fix_head_angle (INCOMPATIBLE_STEPS). Carries
+│                                the same face branch as the file above
 └── tests/                 stdlib unittest, no pytest dependency. Run with
                            `python -m unittest discover -s tests -t .`.
                            Most tests are golden-output tests against
@@ -180,44 +197,6 @@ pipeline/
 Brush has no `pipeline/envs/brush/` directory — it's a Rust CLI baked
 directly into `docker/Dockerfile`, not a Python env with a
 `requirements.txt`/`setup.sh` of its own.
-
-## What was removed (2026-08-30): the photo-to-splat line
-
-For one day this pipeline turned the input photograph into Gaussians and
-fed them back into the bootstrap. All of it is gone, and this section is
-the map to what is missing so it is not half-rediscovered.
-
-Removed: `pointmap_splat` and `face_pointmap_splat` (`pointmap_splat.py`),
-`crop_to_box` (`crop.py`), `sapiens2_seg` and its Goliath part taxonomy,
-`refine_pose_to_splat` (`pose_refine.py`), `inject_shell_views`,
-`face_landmark_mask`, and `fast_helical_shell.yaml`. With them went two
-Sapiens2 checkpoints — `sapiens2-pointmap-1b` and `sapiens2-seg-1b`, ~13 GB
-of prefetch a fresh pod no longer blocks on — and the
-`INCOMPATIBLE_STEPS` entry pairing `head_angle_fix` with the pose refit.
-`fast_helical_native.yaml` draws the MediaPipe landmark overlay again.
-
-Kept, deliberately unwired: `composite_splat_views` and
-`select_support_views`, with brush's `support_*` inputs. Nothing produces
-views for them now, but the plumbing and its tests are intact.
-
-**The whole line is preserved on the `pointmap-splat-integration` branch**,
-which is this branch plus that work, tests and docs included. Read it there
-before rebuilding any of it — the failure was not a wiring bug. Three
-findings worth carrying over, all measured on a frontal subject:
-
-- A tighter face crop **flattens the face**: relief 224.5 -> 144.2 mm, the
-  nose going from 99.2 mm proud of the face's outer edge to 22.9. Sapiens2
-  upsamples to 1024x768, so a crop smaller than that adds no real pixels,
-  only interpolation, and the pointmap head answers a softer input with a
-  flatter face. "Crop tighter for resolution" is false here.
-- SAM-3D-Body's head agrees with the photograph on **position** (centroid
-  within 0.05 of an inter-eye distance) and, frontally, on **orientation**
-  (1.1 deg). It disagrees on **size** by 15-20%, and the sign flips between
-  subjects — the depth/size degeneracy a single view cannot resolve.
-- Anything applied to a photo-pinned splat beyond sliding it along its own
-  rays is **visible at the anchor frame**, and steps the face between the
-  injected reference photo and its neighbours. Corrections belong on the
-  mesh.
 
 ## Core concepts
 
@@ -375,7 +354,7 @@ exists for one shape — a `when:`-gated branch feeding a step that runs
 either way — because a gated step's outputs are simply not in the Context
 when it is off, and there is otherwise no way to say "take these if they
 were built". The shipped case is the face splat's supporting views:
-nothing writes them since the photo-to-splat removal, and both brush
+`face_support_views` writes them under `${globals.face_splat}`, both brush
 trainings read them with a `?`, and `fast_helical_full.yaml` reads the same
 paths while having no bootstrap that could ever write them. Everything else
 stays required, which is what keeps a typo'd path a failure rather than a
@@ -584,11 +563,13 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   ComfyUI flow injected into, and the port finds the same two from camera
   positions alone. Also verified to survive a `rotate_views` reordering,
   which is the whole reason position is the durable key and
-  `anchor_frame_index` is informational. It left the bootstrap for a day
-  (2026-08-29), when `inject_shell_views` did that job over a band of frames
-  instead of one; that step was removed on 2026-08-30 and both this and its
-  partner `generate_firstlast` are back where they were, warping the photo
-  onto the single anchor frame.
+  `anchor_frame_index` is informational. **No longer in the bootstrap**
+  (2026-08-29): `inject_shell_views` does that job there, for a band of
+  frames instead of one. The stage-3 call in the shared tail stays, and
+  no-ops on a from-a-sheet run for want of an anchor image. Its partner
+  `generate_firstlast` is now wired nowhere — the warp it does was only
+  ever for that injection — so its synthetic-data-only verification status
+  is frozen where it stands.
 - `detect_face_landmarks` — MediaPipe face landmarks (CPU, no pod), plus
   the matching `face_landmarks` input and `face_mode`/`face_max_angle`
   params on `render` that consume them. Verified against `cyber_6f`'s real
@@ -609,29 +590,79 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   skeleton overlay still tracks the silhouette — verified on a real fit:
   every joint stays inside its own mesh through the nod (median +24 -> +25
   mm behind the front surface, 0% outside). It does NOT update the MHR pose
-  parameters, so any future step that replays them will discard the nod;
-  `INCOMPATIBLE_STEPS` in `workflow.py` is the place to declare that, and is
-  empty since its one entry (`refine_pose_to_splat`) was removed.
+  parameters, which is why it cannot be combined with
+  `refine_pose_to_splat` — see `INCOMPATIBLE_STEPS` in `workflow.py`.
   Synthetic-skeleton tests only.
-- `composite_splat_views` (`anchor_stub.py`) — alpha-composites a splat
-  render onto the skeleton drawings on every frame within a view-angle cull
-  of the source view. b2crunner's stand-in for body2colmap's
-  `skeleton+splat` render mode, whose geometry and constants it takes: that
-  mode rasterises through gsplat, which this project dropped. **Wired by
-  nothing since the photo-to-splat removal** — the face splat was its only
-  producer — but kept, with its tests, for the next one.
-- `select_support_views` (`anchor_stub.py`) — the consumer of `brush`'s
-  `support_*` inputs. Takes the renders `composite_splat_views` just used,
-  keeps the frames that step gave the role `composited` (its cull angle,
-  measured once, not re-derived), un-premultiplies them back to straight
-  alpha, and hands them to both brush trainings as **masked** views —
-  evidence that counts where the splat's own coverage says to and is ignored
-  everywhere else. The composited copy goes through two diffusion passes and
-  comes out as the denoiser's idea of it; this copy does not. Both trainings
-  read it through an optional `?` path, so a workflow that writes nothing
-  there trains exactly as before — which, since the photo-to-splat removal,
-  is every workflow: **this step is wired by nothing**, and kept with its
-  plumbing and tests for the next producer. `tests/test_support_views.py`.
+- `pointmap_splat` (`pointmap_splat.py`) — one photo into a feed-forward
+  Gaussian shell, in SAM-3D-Body's own world: Sapiens2 pointmap, depth
+  re-solved from `sapiens2_lite`'s normals, one oriented Gaussian per
+  foreground pixel (matte from `rmbg`, not a seg head). Ported from
+  ~/Projects/masktest with the cameras replaced — the pointmap's own camera
+  is discarded and everything re-derived on the mesh's rays, so the shell
+  reprojects onto the source photo by construction. Run end to end locally:
+  480k Gaussians, and the anchor gate (best-fit shift against
+  `generate_firstlast`'s warp of the photo) lands at (1, 0) px. Wired into
+  `fast_helical_native.yaml`'s bootstrap, which is the thing it was written
+  for: photographic reference views for VACE around the source view, and a
+  non-degenerate helical first pass. Never run on a pod.
+- `face_pointmap_splat` (`pointmap_splat.py`) — the same step against a
+  head crop, and the reason `PointmapSplatStep` is now a base class with two
+  registered specializations rather than one step. It differs in exactly two
+  things: `_source_intrinsics`, which re-expresses SAM-3D-Body's camera on
+  the crop's pixel grid so a crop pixel still unprojects onto the ray through
+  the full-image pixel it was cut from, and two measured defaults
+  (`splat_scale` 0.5, `fill_max_frac` 0.05 — a segmentation mask of a head
+  fragments without hole filling where an RMBG matte of a body must never be
+  filled). Fed by `sapiens2_seg` (a Face_Neck mask, `parts` configurable) and
+  `crop_to_box`. Synthetic tests only; the gate is
+  `tests/test_face_splat.py::TestCropIsANoOpOnTheRays`.
+- `composite_splat_views` (`anchor_stub.py`) — alpha-composites that face
+  onto the skeleton drawings on every frame within 45° of the source view,
+  which is roughly half the orbit against the shell band's 15. This is
+  b2crunner's stand-in for body2colmap's `skeleton+splat` render mode, whose
+  geometry and constants it takes: that mode rasterises through gsplat, which
+  this project dropped. **See `docs/revert-when-body2colmap-drops-gsplat.md`
+  — this step comes back out when body2colmap moves to the brush renderer.**
+- `select_support_views` (`anchor_stub.py`) — the face splat's second route
+  into a training, and the consumer of `brush`'s `support_*` inputs. It
+  takes the same face renders `composite_splat_views` just used, keeps the
+  frames that step gave the role `composited` (its cull angle, measured
+  once, not re-derived), un-premultiplies them back to straight alpha, and
+  hands them to both brush trainings as **masked** views — evidence that
+  counts where the splat's own coverage says to and is ignored everywhere
+  else. The composited copy goes through two diffusion passes and comes out
+  as the denoiser's idea of the face; this copy does not. Both trainings
+  read it through an optional `?` path, so `face_splat: false` and
+  `fast_helical_full.yaml` (no bootstrap at all) train exactly as before.
+  `tests/test_support_views.py`.
+- `refine_pose_to_splat` (`pose_refine.py`) — re-poses a SAM-3D-Body fit so
+  its mesh agrees with that shell in novel views, which is what stops the
+  skeleton overlay drifting off the subject a few degrees either side of the
+  anchor. Adam over `body_pose_params`/`global_rot`/`cam_t` through the MHR
+  body model's own differentiable forward, with shape/scale frozen so bone
+  lengths are preserved by construction. Measured: skeleton pixels landing
+  off the splat 5.1% -> 2.8% over +-19 deg (11.3% -> 5.2% at 28 deg), anchor
+  drift 1.79 px median. Runs in the `sam3dbody` venv, since it needs that
+  model. Tests cover the depth buffers, target self-consistency and the PLY
+  reader; the optimisation itself needs the gated 2.8 GB checkpoint and is
+  not exercised in CI.
+- `inject_shell_views` (`anchor_stub.py`) — the step that spends the shell.
+  Takes the mesh render and a `render_splat` of the shell along the *same*
+  cameras (`pattern: ""`), and swaps the shell's frames in wherever the
+  camera is within `replace_radius_deg` of the anchor's — an angle on the
+  orbit sphere, so a helix's elevation counts like azimuth. It also writes
+  the VACE mask batch: 1.0 for everything by default, since a shell render
+  is not a photograph, with a second `reference_radius_deg` band available
+  for marking the closest frames 0.0 ("keep it") once somebody has looked
+  at them — which is what `fast_helical_native.yaml` now does, because
+  there this step **replaced `generate_firstlast` + `inject_anchor`**: it
+  puts photo-derived content on every frame near the source view rather
+  than only the one exactly on it, so the render no longer bends its path
+  (`override_cam_from_mesh: false`) and nothing warps the photo. At that
+  source view the two agree to a best-fit shift of (1, 0) px. Synthetic
+  camera paths in `tests/test_shell_views.py`, plus two golden ones against
+  the smoke run's recorded manifest; no diffusion pass has yet been
+  conditioned on a batch it produced.
 - `load_splat`/`save_splat`/`render_splat` — `render_splat`'s camera-path
   resolution (which cameras, what focal length, which bounding box frames
   the orbit, point-cloud preservation, metadata pass-through) is verified
@@ -648,12 +679,14 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   new orbit. The default, `dataset`, is the source render's `framing` box —
   what keeps a re-render lined up with the render it replaces, and what
   every shipped workflow uses. That is only right while the splat IS what
-  the dataset was framed around. A part-only splat is not — a head-only
-  shell's world centre sits well above a full-body orbit target, so orbiting
-  the body's box aims at the chest and sizes a radius for a whole person,
-  landing the head as a small smudge mid-frame. `bounds_source: splat`
-  ignores `framing_bounds` and takes `scene.get_bounds()` instead — a plain
-  min/max over the Gaussian means. **Only the radius moves.** The intrinsics are deliberately
+  the dataset was framed around, which the face splat is not: it is a
+  head-only shell whose world centre sits well above a full-body orbit
+  target, so orbiting the body's box aims at the chest and sizes a radius
+  for a whole person, landing the head as a small smudge mid-frame.
+  `bounds_source: splat` ignores `framing_bounds` and takes
+  `scene.get_bounds()` instead — a plain min/max over the Gaussian means,
+  so its centre is the same quantity `face_splat_stats.world_center`
+  publishes. **Only the radius moves.** The intrinsics are deliberately
   untouched, because `ColmapExporter` writes a single camera line for a
   whole training set (`cameras[0]`, stamped `CAMERA_ID 1` on every image),
   so a per-view focal length would be silently discarded and those views

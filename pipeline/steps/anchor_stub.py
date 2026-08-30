@@ -16,6 +16,16 @@ in the original ComfyUI-Body2COLMAP repo:
   diffusion pass gets one real conditioning frame instead of an all-render
   batch.
 
+- InjectShellViews is the same idea one step wider, and the only one of
+  the three with no ComfyUI ancestor: where inject_anchor puts a real
+  photograph on the one frame that sits exactly at the anchor camera,
+  inject_shell_views puts novel views rendered off `pointmap_splat`'s
+  photo-derived shell on every frame within a few degrees of it. That band
+  is the part of the orbit the shell actually knows about, and filling it
+  with photoreal renders instead of outline drawings is what the shell was
+  built for. See that class's docstring for the two radii and why the
+  default only substitutes, never trusts.
+
 - CompositeSplatViews is the fourth, and the only one that does not
   replace a frame: it alpha-composites a splat render ON TOP of the mesh
   drawing, keeping the drawing everywhere the splat is transparent. That is
@@ -61,13 +71,11 @@ reference.png is the whole two-panel front/back sheet, framed differently.
 reference.png; the front half lives at `scene.front_image` for this step
 and is likewise not persisted. See steps/reference_sheet.py.) It needs a
 real render.py `image_warp` output, so it waits on a pod. See
-tests/test_anchor.py.
-
-`InjectShellViews` used to sit here too — the same idea one step wider,
-substituting photoreal renders off a photo-derived body shell across the
-band of frames near the source view. It went with the rest of the
-photo-to-splat work on 2026-08-30 and lives on the
-`pointmap-splat-integration` branch.
+tests/test_anchor.py. `inject_shell_views` is the newest and the least
+proven: its geometry is covered on synthetic camera paths
+(tests/test_shell_views.py) and its inputs came out of one local end-to-end
+smoke run of the shell, but no diffusion pass has ever been conditioned on
+a batch it produced.
 
 Unlike the original ComfyUI nodes, this port works in cv2 BGR uint8
 throughout (no RGB<->BGR/float<->uint8 tensor conversion needed — that
@@ -283,6 +291,248 @@ def _scene_scale(positions: np.ndarray) -> float:
     return float(diag) if diag > 0 else 1.0
 
 
+@register_step("inject_shell_views")
+class InjectShellViewsStep(Step):
+    """Swap novel views rendered off the photo-derived shell into the frames
+    that sit near the anchor camera, and mark each frame's VACE role.
+
+    inputs: {"images": List[np.ndarray] — the mesh render, one per frame,
+             "shell_images": List[np.ndarray] — `render_splat` over the SAME
+             cameras, in the same order (that is what `pattern: ""` gives),
+             "cameras": List[Camera], "orbit_target": np.ndarray (3,),
+             "anchor_position": Optional[np.ndarray] (3,) — where the photo
+             was taken from, in world coordinates. Omit it and the world
+             origin is used, which is where it is: `sam3d_to_world` does not
+             recentre, so the SAM-3D-Body camera IS the world origin (and
+             `cyber_6f/initial` records exactly that as its anchor_position).
+             An anchored render publishes it explicitly; an unanchored one
+             does not, and does not need to,
+             "shell_cameras": Optional[List[Camera]] — wire it and the two
+             batches are checked to be the same views rather than assumed}
+    outputs: {"images": List[np.ndarray],
+              "masks": List[np.ndarray] — the VACE mask batch (see below),
+              "anchor_position": np.ndarray (3,) — the position the band was
+              measured from, echoed so a workflow with no anchored render can
+              still publish it as `dataset.extras.anchor_position`,
+              "view_roles": List[dict] — per frame: index, angle from the
+              anchor, role, source. Diagnostics; nothing downstream reads it}
+
+    `pointmap_splat` builds a 2.5-D shell of the side of the subject the
+    reference photo saw. It reprojects onto that photo exactly, so at the
+    anchor camera it *is* the photo, and it stays usable for about ±19
+    degrees around it before the missing back half and the grazing-incidence
+    fringes show. This step is what spends that band: within it the frame the
+    diffusion pass conditions on becomes a photoreal render of the subject
+    instead of a flat outline+skeleton drawing of the mesh; outside it the
+    mesh render is still the only thing that knows what is there.
+
+    **It supersedes `inject_anchor` in a workflow that has a shell.** They
+    do the same thing: put content that came from the reference photograph
+    into the batch, and mark those frames "keep it" for the diffusion pass.
+    inject_anchor does it for the one frame sitting exactly at the source
+    camera, by warping the photo onto it; this does it for every frame the
+    shell can speak for, by rendering the shell — and at the source camera
+    the two agree to a best-fit shift of (1, 0) px (the smoke run's anchor
+    gate), because the shell reprojects onto the photo it was built from.
+    A workflow that runs this one therefore does not need `render`'s
+    `override_cam_from_mesh`, `generate_firstlast` or `inject_anchor` at
+    all: the path does not have to be bent to put a camera exactly on the
+    photo's, and nothing has to warp the photo onto it.
+
+    Two radii, because "substituted" and "trusted" are different questions:
+
+      * `reference_radius_deg` — substituted AND marked VACE 0.0, "a real
+        photograph, keep it". Zero, the default, means no such band at all,
+        because a shell render is not a photograph: it has holes where the
+        photo saw nothing and soft edges where the Gaussians are uncertain,
+        and telling the diffusion pass to keep such a frame verbatim writes
+        those artefacts into the batch every later stage is built on. Raise
+        it — to the replace radius, which makes the whole band the batch's
+        reference material — in a workflow where this step *replaces* the
+        anchor injection, because then nothing else marks any frame as real
+        and the diffusion pass has no photographic content to hold on to
+        beyond the reference image. That is the trade: shell artefacts kept
+        verbatim on a handful of frames, against a first pass with no
+        anchored appearance anywhere.
+      * `replace_radius_deg` — substituted but still marked 1.0, "synthetic,
+        denoise it". This is the useful band: better conditioning content,
+        no claim that it is ground truth. 15 degrees is what the smoke run
+        measured as comfortably inside the shell's reliable range.
+
+    **This step manufactures the VACE mask batch**, exactly as the
+    pre-denoise `inject_anchor` call does and for the same reason: at this
+    point in a bootstrap `dataset.masks` still holds the mesh render's
+    per-pixel silhouettes, which nothing downstream reads, and the field's
+    next reader is `wan22_vace_denoise`'s `control_masks`. So it is written
+    here rather than passed through — 1.0 everywhere, 0.0 inside the
+    reference band. If an `inject_anchor` does still follow it, wire
+    `masks: dataset.masks` into that step, or it will manufacture an
+    all-1.0 batch over the top and the reference band will be silently
+    lost.
+
+    The band is measured as the angle between two directions from the orbit
+    target — the frame's camera and the anchor camera — not as a difference
+    of azimuths. A helical path sweeps elevation as well, and 15 degrees of
+    azimuth, 15 of elevation and 10.6 of both should all be the same
+    distance from the anchor, which is what a single radius has to mean.
+    """
+
+    PARAMS = (
+        Param("replace_radius_deg", float, 15.0,
+              "Substitute the shell's render for the mesh render on every "
+              "frame whose camera is within this angle of the anchor's. 0 "
+              "disables the substitution entirely", minimum=0.0, maximum=180.0),
+        Param("reference_radius_deg", float, 0.0,
+              "Of those, the ones this close to the anchor are additionally "
+              "marked as VACE references (mask 0.0, 'keep it'). A shell render "
+              "is not a photograph — see the class docstring before raising it",
+              minimum=0.0, maximum=180.0),
+    )
+
+    def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+        images: List[np.ndarray] = list(inputs["images"])
+        shell_images: List[np.ndarray] = list(inputs["shell_images"])
+        cameras = inputs["cameras"]
+        replace_radius = params["replace_radius_deg"]
+        reference_radius = params["reference_radius_deg"]
+
+        if reference_radius > replace_radius:
+            raise ValueError(
+                f"inject_shell_views: reference_radius_deg "
+                f"({reference_radius}) exceeds replace_radius_deg "
+                f"({replace_radius}), so it would mark frames as references "
+                f"that were never substituted — i.e. tell the diffusion pass "
+                f"to keep a mesh render verbatim."
+            )
+        if len(shell_images) != len(images):
+            raise ValueError(
+                f"inject_shell_views: {len(shell_images)} shell renders "
+                f"against {len(images)} frames. The two batches are matched by "
+                f"index, which holds because render_splat with `pattern: \"\"` "
+                f"reuses the source dataset's cameras verbatim and in order — "
+                f"a pattern on that step breaks this."
+            )
+
+        # Cheap proof of that index alignment when the cameras are wired.
+        shell_cameras = inputs.get("shell_cameras")
+        if shell_cameras is not None:
+            drift = max(
+                float(np.linalg.norm(np.asarray(a.position, dtype=np.float64)
+                                     - np.asarray(b.position, dtype=np.float64)))
+                for a, b in zip(cameras, shell_cameras)
+            ) if cameras else 0.0
+            if drift > 1e-4:
+                raise ValueError(
+                    f"inject_shell_views: the shell render's cameras are not "
+                    f"the frame batch's (worst position drift {drift:.6f}). "
+                    f"Render the shell with `pattern: \"\"` and the dataset "
+                    f"wired, so it reuses these cameras verbatim."
+                )
+
+        masks = [np.ones(img.shape[:2], dtype=np.float32) for img in images]
+
+        # Where the photograph was taken from. An anchored render publishes
+        # it; an unanchored one does not, and does not have to — the world
+        # origin is that camera by construction (see the class docstring).
+        supplied = inputs.get("anchor_position")
+        anchor = (np.zeros(3) if supplied is None
+                  else np.asarray(supplied, dtype=np.float64).reshape(3))
+
+        if replace_radius <= 0.0:
+            logger.info("inject_shell_views: replace_radius_deg is 0, nothing "
+                        "substituted; emitting an all-synthetic VACE mask batch")
+            return {"images": images, "masks": masks, "anchor_position": anchor,
+                    "view_roles": [{"index": i, "angle_from_anchor_deg": None,
+                                    "role": "mesh", "source": "mesh"}
+                                   for i in range(len(images))]}
+
+        target = np.asarray(inputs["orbit_target"], dtype=np.float64).reshape(3)
+        anchor_dir = anchor - target
+        if float(np.linalg.norm(anchor_dir)) < 1e-9:
+            raise ValueError(
+                "inject_shell_views: the camera the photo was taken from sits "
+                "on the orbit target, so there is no direction to measure a "
+                "band around. Either anchor_position and orbit_target did not "
+                "come from the same render, or an unanchored run put the orbit "
+                "target on the world origin, where this step assumes the "
+                "SAM-3D-Body camera is."
+            )
+
+        view_roles = []
+        for index, camera in enumerate(cameras):
+            direction = np.asarray(camera.position, dtype=np.float64) - target
+            angle = _angle_between_deg(direction, anchor_dir)
+            # `reference_radius > 0` and not just `angle <= radius`: 0 has
+            # to mean "no reference band at all", and the anchor frame sits
+            # at exactly 0 degrees. Its role here is moot either way — the
+            # inject_anchor after this one overwrites that frame with the
+            # real warped photograph and marks it 0.0 itself.
+            if reference_radius > 0.0 and angle <= reference_radius:
+                role, source = "reference", "shell"
+            elif angle <= replace_radius:
+                role, source = "replace_diffuse", "shell"
+            else:
+                role, source = "mesh", "mesh"
+
+            if source == "shell":
+                shell = shell_images[index]
+                if tuple(shell.shape) != tuple(images[index].shape):
+                    raise ValueError(
+                        f"inject_shell_views: shell render {index} has shape "
+                        f"{tuple(shell.shape)} against the frame's "
+                        f"{tuple(images[index].shape)}. Render the shell at the "
+                        f"same resolution as the orbit."
+                    )
+                images[index] = shell
+                if role == "reference":
+                    # 0.0 = "a real photograph, keep it", uniform over the
+                    # frame: a per-frame flag, not a silhouette. Same
+                    # convention as inject_anchor — see the module docstring.
+                    masks[index] = np.zeros(shell.shape[:2], dtype=np.float32)
+
+            view_roles.append({
+                "index": index,
+                "angle_from_anchor_deg": round(angle, 3),
+                "role": role,
+                "source": source,
+            })
+
+        counts = {role: sum(1 for v in view_roles if v["role"] == role)
+                  for role in ("reference", "replace_diffuse", "mesh")}
+        logger.info(
+            "inject_shell_views: %d/%d frames within %.1f deg of the anchor take "
+            "the shell's render (%d of them marked as VACE references within "
+            "%.1f deg); %d keep the mesh render",
+            counts["reference"] + counts["replace_diffuse"], len(images),
+            replace_radius, counts["reference"], reference_radius, counts["mesh"],
+        )
+        if counts["reference"] + counts["replace_diffuse"] == 0:
+            logger.warning(
+                "inject_shell_views: no frame is within %.1f deg of the anchor, "
+                "so the shell was rendered and then discarded. Either the orbit "
+                "is not anchored (override_cam_from_mesh) or the radius is "
+                "smaller than the path's angular step.", replace_radius,
+            )
+
+        return {"images": images, "masks": masks, "anchor_position": anchor,
+                "view_roles": view_roles}
+
+
+def _angle_between_deg(a: np.ndarray, b: np.ndarray) -> float:
+    """Angle between two directions, in degrees.
+
+    The orbit sphere's own metric: this is what makes one radius mean the
+    same thing whether the camera moved in azimuth, in elevation, or in
+    both — which a helical path does.
+    """
+    norm_a = float(np.linalg.norm(a))
+    norm_b = float(np.linalg.norm(b))
+    if norm_a < 1e-9 or norm_b < 1e-9:
+        return 180.0
+    cosine = float(np.dot(a, b)) / (norm_a * norm_b)
+    return float(np.degrees(np.arccos(min(max(cosine, -1.0), 1.0))))
+
+
 @register_step("composite_splat_views")
 class CompositeSplatViewsStep(Step):
     """Alpha-composite a splat render over every frame close enough to see it.
@@ -295,7 +545,7 @@ class CompositeSplatViewsStep(Step):
              "cameras": List[Camera],
              "splat_center": Optional[Sequence[float]] — the splat's own
              centre in world coordinates, which is the pivot the view angle
-             is measured about. A splat builder publishes it as
+             is measured about. `pointmap_splat` publishes it as
              `splat_stats.world_center`. Falls back to `orbit_target`,
              "orbit_target": Optional[np.ndarray] (3,),
              "anchor_position": Optional[np.ndarray] (3,) — where the photo
@@ -382,7 +632,7 @@ class CompositeSplatViewsStep(Step):
                 f"breaks this."
             )
 
-        # The same cheap proof of index alignment inject_anchor makes.
+        # The same cheap proof of index alignment inject_shell_views makes.
         splat_cameras = inputs.get("splat_cameras")
         if splat_cameras is not None and cameras:
             drift = max(
@@ -641,7 +891,7 @@ def _composite_pivot(inputs: Dict[str, Any]) -> np.ndarray:
     if center is None:
         raise ValueError(
             "composite_splat_views: wire either 'splat_center' (the splat's "
-            "own world centre — a splat builder publishes it as "
+            "own world centre — pointmap_splat publishes it as "
             "splat_stats.world_center) or 'orbit_target'. The view angle has "
             "to be measured about something."
         )

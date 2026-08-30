@@ -1,15 +1,20 @@
-"""detect_face_landmarks — MediaPipe face landmarks for the skeleton overlay.
+"""MediaPipe face landmarks, and the face-only region they enclose.
 
-Native port of `nodes/face_landmarks_node.py`. Feeds `steps/render.py`'s
-optional `face_landmarks` param, which draws face keypoints on the
-skeleton render modes so a diffusion pass gets facial structure to
-condition on, not just a body skeleton.
+Two steps. `detect_face_landmarks` finds the landmarks;
+`face_landmark_mask` turns them into the box a face crop is cut to and the
+matte the face splat is built on.
 
-A Gaussian splat of the subject's real face replaced this overlay for a
-day (2026-08-29), and it was reverted with the rest of the photo-to-splat
-work on 2026-08-30 — the splat never converged to something usable. The
-landmark dots are what the native bootstrap draws again. That history is
-on the `pointmap-splat-integration` branch if the geometry is wanted back.
+Native port of `nodes/face_landmarks_node.py`. Originally this fed
+`steps/render.py`'s optional `face_landmarks` param, which draws face
+keypoints on the skeleton render modes so a diffusion pass gets facial
+structure to condition on, not just a body skeleton. **That is no longer
+what it is for.** A Gaussian splat of the subject's real face replaced the
+landmark dots (2026-08-29), and `render_initial_views` takes no
+`face_landmarks` input any more — dots under the splat show through its
+soft silhouette. The landmarks came back (2026-08-30) for the geometry
+alone: Sapiens2's `parts: face` is Goliath class 3, `Face_Neck`, so the
+face and the neck are one class and "just the face" cannot be selected,
+only intersected. See `FaceLandmarkMaskStep`.
 
 The detection pipeline is **crop-first**, which is the reason this is more
 than a single library call. The ComfyUI-Body2COLMAP reference node
@@ -196,6 +201,207 @@ class DetectFaceLandmarksStep(Step):
                 "image_size": (width, height),
             }
         }
+
+
+@register_step("face_landmark_mask")
+class FaceLandmarkMaskStep(Step):
+    """The face on its own — the region MediaPipe's landmarks enclose.
+
+    Sapiens2's `parts: face` is Goliath class 3, `Face_Neck`: the face and
+    the neck are ONE class, so "just the face" cannot be asked for by
+    naming a different class. It has to come from geometry, and the
+    landmarks are the geometry already available — the same source
+    body2colmap's `fit_face_to_skeleton` has always used, from back when
+    the face reached the render as landmark dots rather than a splat.
+
+    It intersects the hull with a segmentation matte already computed on the
+    crop, and returns that matte with everything outside the face zeroed.
+    `crop_info` is what maps the landmarks — which are in the FULL frame's
+    normalized coordinates — onto the crop's pixel grid; it is the same
+    relation `FacePointmapSplatStep._source_intrinsics` uses to move the
+    camera the other way.
+
+    **It does NOT size the crop, and must not.** The obvious companion
+    change — cut the crop to the face too, since a Face_Neck box runs down
+    the throat and a crop sized to it spends much of Sapiens2's 1024x768 on
+    neck — was built, measured and reverted. It flattens the face. Measured
+    on cyber2_6f, relief over the identical face pixels, with the nose's
+    depth ahead of the face's outer edge in brackets:
+
+        Face_Neck crop (261x348), Face_Neck matte    224.5 mm  (+99.2)
+        Face_Neck crop,           hull matte         200.9 mm  (+99.5)
+        face crop (208x277),      hull matte         144.2 mm  (+22.9)
+
+    The matte costs nothing — the nose still stands 99.5 mm proud. The CROP
+    costs four fifths of it. Sapiens2 upsamples whatever it is given to
+    1024x768, so a 261 px crop is already being magnified 2.9x and a 208 px
+    one 3.7x: tightening the box adds no real pixels of face, only
+    interpolation, and the pointmap head answers a softer, more magnified
+    input with a flatter face. The premise that a tighter crop buys
+    resolution is simply wrong once the crop is smaller than the network's
+    input, which it always is here.
+
+    Both halves are wanted. The hull alone would take background with it
+    wherever the head is turned and the convex boundary cuts past the
+    cheek; the seg matte alone cannot tell a jaw from a throat. The
+    intersection is the face, with the seg's soft silhouette kept where the
+    two boundaries coincide.
+
+    **The edge is feathered, not cut.** `pointmap_splat` keeps the matte's
+    sub-threshold values as the Gaussians' opacity (see `soft_alpha`), so a
+    hard-edged hull would hand it a rim of fully opaque primitives and the
+    face would read as a sticker. `feather_frac` falls the hull off over a
+    few pixels instead, and `soft_alpha` then treats that boundary exactly
+    as it treats a matte's own.
+
+    inputs:  {"face_landmarks": dict — detect_face_landmarks' output,
+              "mask": HxW float32 [0,1] — the matte to intersect,
+              "crop_info": dict, optional — crop_to_box's, when `mask` is
+                           on the crop's grid rather than the full frame's}
+    outputs: {"mask": HxW float32 [0,1] — the face region, feathered, and
+                      multiplied into the input matte}
+
+    Not wired into `render`: the landmarks are here for the mask and the
+    box, and nothing else. `render_initial_views` deliberately takes no
+    `face_landmarks` input any more — dots drawn under the splat show
+    through its soft silhouette.
+    """
+
+    PARAMS = (
+        Param("dilate_frac", float, 0.06,
+              "Grow the landmark hull by this fraction of the face's larger "
+              "side before intersecting. MediaPipe's outline sits on the skin "
+              "at the jaw and the hairline; a little margin keeps the "
+              "transition inside the support region rather than on its edge",
+              minimum=0.0),
+        Param("feather_frac", float, 0.03,
+              "Fall the hull off to zero over this fraction of the face's "
+              "larger side. 0 cuts hard, which hands pointmap_splat a rim of "
+              "opaque Gaussians — see the class docstring", minimum=0.0),
+    )
+
+    def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+        from scipy import ndimage
+
+        landmarks = inputs["face_landmarks"]
+        source = landmarks.get("source")
+        if source != "mediapipe":
+            raise ValueError(
+                f"face_landmark_mask: unsupported landmark source {source!r}. "
+                f"Supported: 'mediapipe' (see DetectFaceLandmarksStep)."
+            )
+        points = np.asarray(landmarks["landmarks"], dtype=np.float64)
+        if points.ndim != 2 or points.shape[0] < 3:
+            raise ValueError(
+                f"face_landmark_mask: expected an (N, 3) landmark array with "
+                f"N >= 3, got {points.shape}"
+            )
+        width_full, height_full = (float(v) for v in landmarks["image_size"])
+
+        # Normalized (full-frame) -> full-frame pixels.
+        full = np.stack([points[:, 0] * width_full, points[:, 1] * height_full], 1)
+
+        if inputs.get("mask") is None:
+            raise KeyError(
+                "face_landmark_mask requires 'mask' — the segmentation matte "
+                "to intersect the landmark hull with. The hull alone takes "
+                "background with it wherever the head is turned and its "
+                "convex boundary cuts past the cheek."
+            )
+        matte = np.asarray(inputs["mask"], dtype=np.float32)
+        if matte.ndim != 2:
+            raise ValueError(
+                f"face_landmark_mask: 'mask' must be a single-channel matte, "
+                f"got shape {matte.shape}"
+            )
+        shape = matte.shape
+        info = inputs.get("crop_info")
+        local = self._to_crop(full, info, shape) if info is not None else full
+
+        region = self._hull(local, shape, params)
+        covered = float((region * (matte >= 0.5)).sum())
+        inside = float((matte >= 0.5).sum())
+        logger.info(
+            "face_landmark_mask: hull keeps %.0f%% of the %d px matte "
+            "(the rest is neck, hair and ears)",
+            100.0 * covered / max(inside, 1.0), int(inside),
+        )
+        region = region * matte
+
+        if float(region.sum()) < 64.0:
+            raise ValueError(
+                "face_landmark_mask: the landmark hull and the matte barely "
+                "overlap. Either they are not from the same photo, or "
+                "`crop_info` does not describe the crop the matte was "
+                "computed on."
+            )
+        logger.info("face_landmark_mask: face region %d px on a %dx%d grid",
+                    int((region >= 0.5).sum()), shape[1], shape[0])
+        return {"mask": region.astype(np.float32)}
+
+    @staticmethod
+    def _to_crop(full: np.ndarray, info: Dict[str, Any],
+                 shape: Tuple[int, int]) -> np.ndarray:
+        """Full-frame landmark pixels -> the crop's pixel grid.
+
+        `u_full = x0 + r * u_c` with `r` the crop's resize factor, so
+        `u_c = (u_full - x0) / r`. Exactly the relation
+        `_source_intrinsics` inverts to carry the camera the other way; a
+        crop emitted at native resolution (which is all crop_to_box makes)
+        has r = 1 and this is a translation.
+        """
+        try:
+            x0, y0, x1, y1 = (float(v) for v in info["box"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(
+                f"face_landmark_mask: 'crop_info' must carry 'box' "
+                f"(x0, y0, x1, y1 in full-image pixels), as crop_to_box "
+                f"writes it. Got {info!r}"
+            ) from exc
+        height, width = shape
+        if x1 <= x0 or y1 <= y0:
+            raise ValueError(f"face_landmark_mask: degenerate crop box {info['box']}")
+        ratio_x, ratio_y = (x1 - x0) / width, (y1 - y0) / height
+        if abs(ratio_x - ratio_y) > 1e-3 * max(ratio_x, ratio_y):
+            raise ValueError(
+                f"face_landmark_mask: crop box {info['box']} against a "
+                f"{width}x{height} matte implies a non-uniform resize "
+                f"({ratio_x:.4f} vs {ratio_y:.4f})"
+            )
+        ratio = 0.5 * (ratio_x + ratio_y)
+        return np.stack([(full[:, 0] - x0) / ratio, (full[:, 1] - y0) / ratio], 1)
+
+    @staticmethod
+    def _hull(points: np.ndarray, shape: Tuple[int, int],
+              params: Dict[str, Any]) -> np.ndarray:
+        """Convex hull of the landmarks, dilated then feathered, as [0,1].
+
+        Convex rather than MediaPipe's own FACEMESH_FACE_OVAL contour: the
+        oval's index list is a mediapipe-version detail, while a hull over
+        whatever points arrived works for both the 468- and 478-point
+        outputs the detector returns. The difference is a slight
+        convexification at the temples, well inside `dilate_frac`.
+        """
+        from scipy import ndimage
+
+        height, width = shape
+        hull = cv2.convexHull(points.astype(np.float32).reshape(-1, 1, 2))
+        filled = np.zeros((height, width), dtype=np.uint8)
+        cv2.fillConvexPoly(filled, np.round(hull).astype(np.int32), 1)
+
+        span = max(np.ptp(points[:, 0]), np.ptp(points[:, 1]))
+        dilate_px = int(round(params["dilate_frac"] * span))
+        if dilate_px > 0:
+            filled = ndimage.binary_dilation(
+                filled.astype(bool), iterations=dilate_px).astype(np.uint8)
+
+        feather_px = params["feather_frac"] * span
+        if feather_px <= 0.0:
+            return filled.astype(np.float32)
+        # Distance INTO the region, so the falloff eats inward from the
+        # boundary and the interior stays at 1 — the same shape a matte has.
+        distance = ndimage.distance_transform_edt(filled)
+        return np.clip(distance / feather_px, 0.0, 1.0).astype(np.float32)
 
 
 def _ensure_model(url: str, path: Path) -> Path:

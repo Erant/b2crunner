@@ -148,17 +148,33 @@ class TestWan22WeightSplit(unittest.TestCase):
 class TestRequiredForSteps(unittest.TestCase):
     def test_blocking_is_scoped_to_the_workflow(self):
         cases = {
-            # sapiens2_pointmap and sapiens2_seg were in this set while the
-            # bootstrap built a photo-to-splat shell and a face splat — three
-            # 1b Sapiens2 repos, ~19 GB of Sapiens2 alone that a fresh pod
-            # blocked on before the run started. All of it went on
-            # 2026-08-30 (see tests/test_workflows.py's BOOTSTRAPS note), and
-            # so did fast_helical_shell. mediapipe is back: the landmark
-            # overlay the face splat had replaced draws again, two small
-            # .task/.tflite files.
-            "fast_helical_native": {"rmbg", "sapiens2", "sam3dbody", "moge2",
+            # sapiens2_pointmap joined this set when the bootstrap started
+            # building a photo-to-splat shell (pointmap_splat): 6.5 GB more
+            # that a fresh pod blocks on before the run starts, on top of
+            # the 6.2 the normal head already costs. Both are Sapiens2 1b
+            # repos and neither substitutes for the other.
+            # sapiens2_pointmap and sapiens2_seg joined this set, and
+            # mediapipe left it, when the face splat replaced the MediaPipe
+            # landmark overlay: three 1b Sapiens2 repos, ~19 GB of Sapiens2
+            # alone that a fresh pod blocks on before the run starts.
+            #
+            # 2026-08-30: mediapipe came back. Not the overlay — the face
+            # splat's mask. `parts: face` is Goliath class 3, `Face_Neck`,
+            # so the neck can only be intersected out of the matte, and the
+            # landmark hull is what does it (see FaceLandmarkMaskStep). Two
+            # small .task/.tflite files against ~19 GB of Sapiens2; it costs
+            # a fresh pod nothing worth measuring.
+            "fast_helical_native": {"rmbg", "sapiens2", "sapiens2_pointmap",
+                                    "sapiens2_seg", "sam3dbody", "moge2",
                                     "mediapipe", "wan22", "wan22_fp8",
                                     "wan22_lora", "seedvr2"},
+            # The parked shell bootstrap needs the same set: it runs the
+            # pointmap head twice (a body shell and a face) and re-poses the
+            # fit, which reads sam3dbody's checkpoint again.
+            "fast_helical_shell": {"rmbg", "sapiens2", "sapiens2_pointmap",
+                                   "sapiens2_seg", "sam3dbody", "moge2",
+                                   "mediapipe", "wan22", "wan22_fp8",
+                                   "wan22_lora", "seedvr2"},
             "fast_helical_full": {"rmbg", "sapiens2", "wan22", "wan22_fp8",
                                   "wan22_lora", "seedvr2"},
         }

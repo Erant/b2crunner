@@ -53,8 +53,7 @@ constrained — where the old pair guessed it per pixel per frame from
 accumulated opacity. docs/spatial-reinforcement.md is the before/after.
 
 **Keep it off for any render that feeds `composite_splat_views`** (the
-face-view renders the photo-to-splat line used to produce). That step
-composites
+face-view renders in fast_helical_shell.yaml). That step composites
 premultiplied colour and enforces premultiplied-over-black, so it refuses a
 confidence render outright — loudly, which is the intended failure.
 

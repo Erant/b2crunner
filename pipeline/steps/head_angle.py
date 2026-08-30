@@ -29,18 +29,27 @@ however much it takes to leave `target_lean_deg` of lean, capped at
 `mode="fixed"` ignores the measurement and rotates back by exactly
 `pitch_deg` (negative leans it further forward).
 
-**It edits the vertices and keypoints directly** and leaves the MHR pose
-parameters describing the *old* geometry. Anything downstream that replays
-those parameters through the body model will therefore discard the nod.
-`refine_pose_to_splat` was exactly such a step and this module used to
-declare itself incompatible with it in INCOMPATIBLE_STEPS; that step went
-with the photo-to-splat work on 2026-08-30 and the declaration went with
-it. The hazard is not gone, only unpopulated — if a re-posing step returns,
-so must the entry.
+**Mutually exclusive with `refine_pose_to_splat`**, and
+`WorkflowSpec.validate()` refuses a workflow enabling both (see
+INCOMPATIBLE_STEPS in pipeline/workflow.py). This step edits the vertices
+and keypoints directly and leaves the MHR pose parameters describing the
+*old* geometry; that step replays those parameters through the body model
+and rebuilds the mesh from them, so it would discard this nod outright —
+and its round-trip gate refuses to run once the two disagree. Nor does it
+subsume this one — but not because it ignores the head. It moves the head
+centre 33 mm back along the sagittal axis, so it is already acting on the
+crane's depth component; it simply answers to the shell, which inherited the
+same craned head from the same photograph, and settles somewhere the
+anatomical prior does not want. (The measured lean goes 32.4 -> 36.0 deg,
+but that metric is relative — the hips came 17 mm forward and the neck 27 mm
+back, rotating the torso axis more than the head-neck vector rotated.)
 
-Expressing this nod in pose space rather than as a vertex deformation would
-remove the conflict at the source, and is the right shape for it if a fit
-that owns the pose ever comes back.
+Expressing this nod in pose space instead of as a vertex deformation would
+remove the mechanical conflict, but it would NOT make the two independent:
+the pose fit would still pull the head toward the shell and partly undo it.
+The real answer is to put the anatomical constraint into that step's
+objective as a term, so a single optimisation trades shell agreement against
+plausibility.
 
 **The reprojection compensation.** A bare rotation preserves the neck's
 length, so straightening a lean also lifts the head: by `L*(cos10 - cos32)`
@@ -48,17 +57,15 @@ length, so straightening a lean also lifts the head: by `L*(cos10 - cos32)`
 f=1731 with the head 2.24 m out is 10.7 px up the frame (plus 6.3 px
 sideways, since the subject is not square to the camera). An eighth of a
 head. That lift is invisible in isolation but it desynchronises
-the mesh from the PHOTOGRAPH, which still shows the head craned — and the
-photograph is what `generate_firstlast` warps onto the anchor frame and
-what `detect_face_landmarks` measured the overlay from. Neither is
-re-projected when the mesh moves, so the drawings and the one real frame
-among them stop agreeing about where the head is.
-
-This was found through a face splat built on those same rays, which the
-misregistration broke outright; that splat has since been removed (see
-pipeline/README.md). The correction stays, because moving the mesh off the
-photograph is wrong whether or not anything downstream is precise enough to
-complain.
+the mesh from the PHOTOGRAPH, which still shows the head craned: the face
+splat is pinned to the photo's rays by construction (`face_pointmap_splat`
+puts every Gaussian on the ray through the pixel it came from), so the
+splat stays put while the mesh head walks out from under it. Worse, that
+step scales the splat's depth by comparing, per image bin, the mesh's front
+surface against the pointmap's median depth UNDER THE FACE MATTE — also in
+the photo's pixels. Move the mesh head off those pixels and the solve
+compares cheek against jaw, biasing the one scalar it produces, and the
+face then swings across the head by parallax as the orbit turns.
 
 So the nod is followed by a compensating translation, graded by the same
 smoothstep and therefore expressed entirely as a SHORTER NECK: the head

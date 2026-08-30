@@ -10,14 +10,15 @@ workflows ship:
 | workflow | starts from | stages |
 |---|---|---|
 | `fast_helical_full` | an existing dataset | the full port of the ComfyUI `fast helical` pipeline. `--param run_upscale=false` drops the SeedVR2 upscale (the old `fast_helical` workflow) to isolate it when output looks wrong |
-| `fast_helical_native` | a front/back reference sheet | a bootstrap prologue — split the sheet, reconstruct a body, nod the craned head back, detect face landmarks, render a circular orbit of outline+skeleton drawings, warp the photo onto the anchor frame — then `fast_helical_full`'s stages verbatim |
+| `fast_helical_native` | a front/back reference sheet | a bootstrap prologue — split the sheet, reconstruct a body, nod the craned head back, build a Gaussian splat of the subject's face from a crop of the front half and composite it onto a circular orbit of outline+skeleton renders, warp the photo onto the anchor frame — then `fast_helical_full`'s stages verbatim |
 
-A third file, `fast_helical_shell.yaml`, and the whole *photo-to-splat* line
-it belonged to — a body-wide Gaussian shell from Sapiens2's pointmap head, a
-pose refit against it, a face splat composited over the drawings — were
-**removed on 2026-08-30**. It did not converge to a usable result. All of it
-is preserved on the `pointmap-splat-integration` branch, which is this
-branch plus that line; read it there before rebuilding any of it.
+A third file, `fast_helical_shell.yaml`, is **parked**: it replaces that
+whole bootstrap with a photo-to-splat *shell* — a body-wide Gaussian shell
+from `pointmap_splat`, a pose refit against it, a shallow 380° helix, and a
+band of frames rendered off the shell instead of drawn. Nothing selects it
+(the web UI maps an image upload to `fast_helical_native` by name), so it
+runs only if you ask: `python -m pipeline.cli run fast_helical_shell`. It is
+kept in the tree so the face splat can be tested without it.
 
 **Neither shipped workflow has been run end-to-end on a pod**, and `fast_helical_native` is
 the less proven of the two: its bootstrap prologue has never executed on
@@ -45,10 +46,11 @@ pip install -r requirements.txt
 The Gaussian-splat steps additionally need `plyfile` for PLY I/O, and
 `render_splat` needs the `brush-splat-render` binary on `PATH` (built
 alongside `brush` in `docker/Dockerfile`) — see `requirements.txt`.
-Face-landmark detection needs `mediapipe` (CPU-only), which
-`fast_helical_native` uses for the face overlay drawn on its skeleton
-renders. Several steps need `scipy` for mask morphology, which arrives
-anyway as a transitive dependency of `body2colmap` (via `pyrender`).
+Face-landmark detection needs `mediapipe` (CPU-only); no shipped workflow
+uses it any more — `fast_helical_native`'s face splat replaced it — but the
+step and its `render` params are still there. The `pointmap_splat` family
+needs `scipy`, which arrives anyway as a transitive dependency of
+`body2colmap` (via `pyrender`).
 
 ## Quickstart
 

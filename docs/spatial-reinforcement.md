@@ -33,7 +33,7 @@ denoise_pass1 -> colmap_export -> brush (train, --export-evidence)
 ```
 
 Identical in all three workflow files (`fast_helical_native.yaml`,
-`fast_helical_full.yaml`); the native and full
+`fast_helical_full.yaml`, `fast_helical_shell.yaml`); the native and full
 files' copies are kept in sync by `tests/test_workflows.py`.
 
 Before 2026-08-30 the middle two lines read `BLACK bg` and `filter_size
@@ -220,8 +220,7 @@ consequences that are wired into the workflows:
   replacing the per-pixel alpha with the per-frame all-1.0 VACE batch
   (section 3 above is unchanged, and so is the ordering it forces).
 - **Keep confidence OFF for the face-view renders** that feed
-  `composite_splat_views`, which nothing wires since the photo-to-splat
-  removal. That step adds
+  `composite_splat_views` in `fast_helical_shell.yaml`. That step adds
   premultiplied colour and enforces premultiplied-over-black
   (`_check_premultiplied` in `steps/anchor_stub.py`), so it refuses a
   confidence render outright. `tests/test_workflows.py` catches the

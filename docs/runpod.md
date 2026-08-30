@@ -101,11 +101,11 @@ and what you put in it decides what runs — no input picker:
   SAM-3D-Body reconstruction and the anchor warp, back half to the denoise
   pass as its reference view), renders its own anchored views, and then
   runs `fast_helical_full`'s stages over that dataset — same `colmap/` and
-  `ply/` deliverables, same Outputs box. Between 2026-08-29 and 2026-08-30
-  that prologue built a photo-to-splat shell and a face splat off Sapiens2's
-  pointmap head; both were removed, along with ~13 GB of prefetch (the
-  pointmap and segmentation checkpoints). **Least proven path**: none of the
-  prologue has ever executed end to end.
+  `ply/` deliverables, same Outputs box. Since 2026-08-29 that prologue
+  builds a photo-to-splat shell from the front half and renders the frames
+  near the source view off it, which costs ~6.5 GB more prefetch (the
+  Sapiens2 pointmap head). **Least proven path**: none of the prologue has
+  ever executed end to end.
 - **A `.zip` of image/prompt pairs** — `image1.jpg` + `image1.txt`,
   `image2.png` + `image2.txt`, ... Each image becomes its own
   reference-sheet run with its text file as the prompt, and the scheduler
@@ -267,6 +267,9 @@ downloading; `--no-wait-for-models` does it for a single CLI run.
 | `rmbg` | `briaai/RMBG-2.0` **(gated)** | `from_pretrained` | `$HF_HOME` = `/data/hf_cache` |
 | `sapiens2_lite` | `facebook/sapiens2-normal-1b` | `from_pretrained` | `$HF_HOME` |
 | `sam3d_body` | `facebook/sam-3d-body-dinov3` **(gated)** + `Ruicheng/moge-2-vitl-normal` (FOV) | `snapshot_download` / `from_pretrained` | `$HF_HOME` |
+| `refine_pose_to_splat` | `facebook/sam-3d-body-dinov3` **(gated)** — the same checkpoint, replayed | `snapshot_download` | `$HF_HOME` |
+| `pointmap_splat`, `face_pointmap_splat` | `facebook/sapiens2-pointmap-1b` | `from_pretrained` | `$HF_HOME` |
+| `sapiens2_seg` | `facebook/sapiens2-seg-1b` | `from_pretrained` | `$HF_HOME` |
 | `wan22_vace_denoise` | `linoyts/Wan2.2-VACE-Fun-14B-diffusers` + `lightx2v/Wan2.2-Lightning` LoRAs | `from_pretrained` / `hf_hub_download` | `$HF_HOME` |
 | `seedvr2` | `seedvr2_ema_3b_fp8_e4m3fn` + `ema_vae_fp16` | its vendored downloader | `$B2C_MODELS_DIR` = `/data/models/SEEDVR2` |
 | `detect_face_landmarks` | MediaPipe `.task` / `.tflite` | Google Storage URL | `$B2C_MODELS_DIR/mediapipe` |
