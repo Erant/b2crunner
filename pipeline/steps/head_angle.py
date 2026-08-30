@@ -1,5 +1,13 @@
 """head_angle_fix — bend a craned-forward head back over the shoulders.
 
+**Superseded in fast_helical_native by `fit_head_to_face` (head_fit.py),
+2026-08-30.** This step turns the head to a fixed lean and has no idea where
+the photograph's face looks; measured on cyber2_6f its auto nod turned the
+head 30 deg away from it (MediaPipe residual 10.5 -> 20.7 px, where the fit
+reaches 2.4). It stays registered and tested for workflows without a photo
+to fit to, and is declared incompatible with the fit (INCOMPATIBLE_STEPS):
+it edits vertices and leaves the pose parameters describing the old head.
+
 SAM-3D-Body, fitted from a straight-on frontal photo (which the native path
 always feeds it), reliably places the head too far forward: the neck-to-head
 vector comes out tilted ~30-45 deg off the torso's own up axis, so the

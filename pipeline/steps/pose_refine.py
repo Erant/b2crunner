@@ -305,6 +305,10 @@ class RefinePoseToSplatStep(Step):
         scale = tensor(pose_params["scale_params"])
         shape = tensor(pose_params["shape_params"])
         expr = tensor(pose_params["expr_params"])
+        # fit_head_to_face records the head joint's scale as a scale_offsets
+        # vector; a replay without it fails the gate below by the head's size.
+        scale_offsets = (tensor(pose_params["scale_offsets"])
+                         if pose_params.get("scale_offsets") is not None else None)
         cam_t0 = tensor(mesh_output["cam_t"])
         n_joints = len(np.asarray(mesh_output["keypoints_3d"]))
 
@@ -315,7 +319,7 @@ class RefinePoseToSplatStep(Step):
                 global_trans=torch.zeros_like(global_rot), global_rot=global_rot,
                 body_pose_params=body_pose, hand_pose_params=hand_pose,
                 scale_params=scale, shape_params=shape, expr_params=expr,
-                return_keypoints=True,
+                return_keypoints=True, scale_offsets=scale_offsets,
             )
             return out[0] * flip, out[1][:, :n_joints] * flip
 

@@ -2,12 +2,29 @@
 # front/back reference sheet, then run fast_helical_full's pipeline over it.
 #
 # BOOTSTRAP (this file only) — split_sheet -> reconstruct_body ->
-# fix_head_angle -> [detect_face -> locate_face -> crop_face -> face_seg ->
-# face_mask -> face_normals -> face_splat] -> render_initial_views ->
-# render_face_views -> composite_face -> warp_reference_to_anchor ->
-# reinject_anchor_initial. The bracketed seven, plus render_face_views,
-# composite_face and face_support_views, are gated on the `face_splat`
-# global.
+# detect_face -> map_face_to_mesh -> fit_head_to_face -> [locate_face ->
+# crop_face -> face_seg -> face_mask -> face_normals -> face_splat] ->
+# render_initial_views -> render_face_views -> composite_face ->
+# face_support_views -> warp_reference_to_anchor -> reinject_anchor_initial.
+# The bracketed six, plus render_face_views, composite_face and
+# face_support_views, are gated on the `face_splat` global.
+#
+# WHAT CHANGED (2026-08-30, latest): two fixes, both measured on cyber2_6f.
+#
+#   * The face splat was built with its depth read along the wrong axis and
+#     its relief scaled by the wrong ratio: a crop's pointmap is depth along
+#     the CROP-centred camera, 12.6 deg off SAM-3D-Body's axis for a head at
+#     the top of a portrait frame, and scaling it to the mesh's distance
+#     multiplied the relief by f_sam/f_pointmap = 3.19 on top of the width.
+#     The face came out 184 mm wide and 338 mm deep, nodded back 12.6 deg,
+#     with a sheet of neck behind it. `pointmap_splat` now integrates in the
+#     pointmap's own camera, rotates onto SAM-3D-Body's rays, and scales the
+#     relief by the width ratio: 178 x 155 mm, looking where the photo does.
+#     This was the "did not converge" that removed the whole line for an
+#     afternoon (7086115, reverted).
+#   * `fix_head_angle` is replaced by `map_face_to_mesh` + `fit_head_to_face`
+#     — see the block below. The auto nod turned the mesh head 30 deg away
+#     from the photograph; the fit turns it to the photograph.
 #
 # WHAT CHANGED (2026-08-29): the MediaPipe face is gone, and a Gaussian
 # splat of the subject's actual face is composited onto the skeleton
@@ -16,42 +33,13 @@
 # identity and the canonical face model carries none; a splat of the real
 # face carries both identity and gaze, which is what these frames are for.
 #
-# WHAT CHANGED (2026-08-30): fix_head_angle now takes `cam_t`, and holds
-# the head on its original camera ray while it nods. The first pod run of
-# the above showed the face splat sitting off the mesh head in the anchor
-# view and swinging across it, in opposite directions, at the two edges of
-# the 45-degree band — the signature of a depth error. Cause: the nod is a
-# rotation at fixed neck length, so it lifted the mesh head ~10 px while
-# leaving the photograph the splat is pinned to exactly where it was. See
-# the step comment below.
-#
-# WHAT CHANGED (2026-08-30, later): the face splat is MASKED to the face,
-# not to the face and the neck, and `align_bin_px` drops from 32 to 8.
-# `detect_face` is back — for the geometry only, not for the dots the
-# 2026-08-29 note deleted. Sapiens2's `parts: face` is Goliath class 3,
-# `Face_Neck`: one class covering both, so the neck can only be intersected
-# out, and MediaPipe's hull is what does it.
-#
-# What the mask buys, visibly, is the band edges. A 2.5-D pointmap shell of
-# a NECK reaches grazing incidence long before the face does, so well inside
-# the 45-degree cull the old mask threw a large smeared tongue of Gaussians
-# across the shoulder. That is gone. It costs 30% of the covered pixels and
-# essentially none of the face: over identical pixels the nose still stands
-# 99.5 mm proud of the face's outer edge, against 99.2 before.
-#
-# The CROP is deliberately unchanged — see the note on locate_face. Cutting
-# it to the face as well is the obvious companion change, and it flattens
-# the face fourfold. It was built, measured and reverted.
-#
-# `align_bin_px` moves the splat only ALONG ITS RAYS: the integration is
-# equivariant under a global scale on its data term, so the bin size cannot
-# change shape, and measurement agrees (relief 224.5 mm at bin 32 against
-# 227.7 at bin 8, nose +99.2 against +100.6). What it changes is depth. 32
-# was a full-frame number; on a face crop it placed the splat 15 mm toward
-# the camera. See FacePointmapSplatStep's docstring for the table.
-#
-# Neither change moves the splat off the photograph's rays, so neither can
-# step the face between the injected anchor photo and frames 2/81.
+# WHAT CHANGED (2026-08-30, earlier): the face splat is MASKED to the face,
+# not to the face and the neck (`face_mask`, a MediaPipe hull intersected
+# with Sapiens2's Face_Neck class — the neck can only be intersected out,
+# not deselected), and `align_bin_px` dropped from 32 to 8. The CROP stays
+# the Face_Neck box: cutting it to the face as well was measured to flatten
+# the face, see the note on locate_face. `fix_head_angle` gained a `cam_t`
+# ray-hold the same day; that step has since left this file (above).
 #
 # The circular orbit, override_cam_from_mesh, the anchor warp and the
 # anchor injection remain exactly as they were, deliberately: this file
@@ -255,45 +243,93 @@ steps:
       cam_t: scene.cam_t
       focal_length: scene.focal_length
       bbox: scene.bbox
+      # The MHR parameters behind the mesh. fit_head_to_face below replays
+      # the body model's forward with the head's share of these as the free
+      # variables, and publishes the updated set, so the mesh and the
+      # parameters describing it never disagree.
+      pose_params: scene.pose_params
 
-  # Stopgap for a systematic SAM-3D-Body failure: fitted from a straight-on
-  # frontal photo (which this path always feeds it), the head comes out too
-  # far forward — the neck-to-head vector tilts 30-45 deg off the torso axis,
-  # so every render shows the neck craned. This nods the head+jaw back over
-  # the shoulders as a rigid piece about the inter-shoulder axis through the
-  # neck joint, graded to zero at the shoulders so nothing below the throat
-  # moves, and bends the MHR70 skeleton by the identical transform so the
-  # overlay still tracks the silhouette. Runs before render_initial_views so
-  # the mesh render, the anchor warp and everything downstream see the
-  # corrected pose. `mode=auto` straightens to ~10 deg of residual lean;
-  # see steps/head_angle.py for the fixed-angle alternative and the knobs.
+  # ------------------------------------------------ the head, re-fitted
+  # SAM-3D-Body's head does not agree with the photograph's face. On
+  # cyber2_6f the raw fit's head landmarks miss MediaPipe's by 10.5 px rms,
+  # and the head is too long and narrow for the subject (face width/height
+  # 0.82 against the photo's 1.20). The face splat below sits on the
+  # photo's rays by construction, so whatever the mesh head does, the
+  # splat looks where the photograph looks — and the outline the diffusion
+  # pass conditions on had better agree with it.
   #
-  # `cam_t` is REQUIRED, and the step refuses to run without it. A bare
-  # rotation keeps the neck's length, so straightening the lean also lifts
-  # the head ~25 mm — about 10 px here, an eighth of a head. That lift is
-  # anatomically harmless and registrationally fatal: it moves the mesh head
-  # but not the PHOTOGRAPH, and the face splat below is pinned to the photo's
-  # pixels by construction, so the mesh walks out from under it and
-  # face_pointmap_splat's depth solve — which compares the two under the face
-  # matte, in the photo's pixels — starts comparing cheek against jaw. The
-  # symptom is a face that sits off the head at the anchor and swings across
-  # it by parallax at the edges of the +/-45 deg band. With `cam_t` the nod is
-  # followed by a compensating translation that puts the head centre back on
-  # its original camera ray at the corrected depth, graded by the same
-  # smoothstep and so expressed as a shorter neck. `focal_length` is optional
-  # and buys only the log line reporting the correction in pixels — worth
-  # wiring, as that number is the misregistration this removes.
-  - id: fix_head_angle
-    step: head_angle_fix
+  # `head_angle_fix` used to run here. It nods the head back to a fixed
+  # 10 deg of forward lean, which on this subject turned it 30 deg AWAY from
+  # the photograph (landmark residual 10.5 -> 20.7 px): the outline head
+  # looked up while the face on it looked slightly down. It is still
+  # registered, still tested, and declared incompatible with the fit below
+  # (INCOMPATIBLE_STEPS) — it deforms the vertices without updating the
+  # parameters the fit replays.
+  #
+  # The fit is dense and lives in the body model's own parameters: a
+  # MediaPipe<->vertex correspondence is built by rendering THIS mesh's
+  # head and landmarking the render (map_face_to_mesh, main env), then the
+  # neck/head rotations, the head joint's scale and the head-only shape
+  # components are optimised so those vertices project onto the photo's
+  # landmarks (fit_head_to_face, sam3dbody env). 10.5 -> 2.4 px on
+  # cyber2_6f, head pitched 7 deg down to where the photo looks, an intact
+  # head from every angle — see steps/head_fit.py for why a vertex
+  # deformation could not do this (it squashes the skull or pitches the
+  # head 23 deg to hide the mid-face's length).
+  #
+  # detect_face is NOT gated on `face_splat` any more: the head fit needs
+  # the landmarks whether or not the face splat is drawn. The face branch
+  # below still is.
+
+  # Where the face is. CPU, no pod, no GPU: the two model files live in
+  # ~/.cache/body2colmap and the step is crop-first internally, which is
+  # what makes it work on a full-body frame where the face is a few percent
+  # of the pixels (see steps/face_landmarks.py's module docstring).
+  - id: detect_face
+    step: detect_face_landmarks
     dispatch: in_process
     inputs:
-      vertices: scene.vertices
-      keypoints_3d: scene.keypoints_3d
-      cam_t: scene.cam_t
-      focal_length: scene.focal_length
+      image: scene.front_image
+    outputs:
+      face_landmarks: scene.face_landmarks
+
+  # Which mesh vertex is each MediaPipe landmark. From the mesh alone: a
+  # shaded render of its head through SAM-3D-Body's camera, landmarked,
+  # each landmark snapped to the nearest visible vertex (446/468 at 0.8 px
+  # on cyber2_6f). Main env — pyrender and MediaPipe, no torch.
+  - id: map_face_to_mesh
+    step: map_face_to_mesh
+    dispatch: in_process
+    inputs:
+      mesh_output: scene
+      image: scene.front_image
+    outputs:
+      face_correspondence: scene.face_correspondence
+
+  # The fit itself, in the sam3dbody env because it needs the MHR body
+  # model (the same checkpoint reconstruct_body loaded — no new download).
+  # Overwrites the geometry AND pose_params, so everything downstream —
+  # the render, the face splat's depth alignment, any later replay — sees
+  # one consistent head. `shape_regularisation` 1.0 keeps the head shape
+  # within ~2 sigma of SAM-3D-Body's; 0.3 fits 0.3 px tighter on a subject
+  # the model finds unusual and looks the same. `fit_shape: false` turns
+  # and scales the head only.
+  - id: fit_head_to_face
+    step: fit_head_to_face
+    dispatch: subprocess
+    env: sam3dbody
+    inputs:
+      mesh_output: scene
+      face_landmarks: scene.face_landmarks
+      face_correspondence: scene.face_correspondence
+      image: scene.front_image
     outputs:
       vertices: scene.vertices
       keypoints_3d: scene.keypoints_3d
+      joints: scene.joints
+      global_rots: scene.global_rots
+      pose_params: scene.pose_params
+      head_fit_stats: scene.head_fit_stats
 
   # -------------------------------------------------------- the face splat
   # What replaced the MediaPipe landmarks: a Gaussian splat of the
@@ -309,20 +345,18 @@ steps:
   # Cropping first is what puts the face in front of the model at the
   # resolution masktest measured its numbers on.
   #
-  # Why it runs AFTER fix_head_angle: that step rewrites scene.vertices and
-  # scene.keypoints_3d, and this splat's depth is scaled onto the mesh's
-  # front surface. Aligning to the pre-nod mesh and then rendering the
-  # post-nod one would put the face at a different distance than the skull
-  # it sits on. Note what the nod does NOT do: it moves the mesh, not the
-  # photograph, so the splat still carries the head at the angle the camera
-  # saw it. What matters here is only that the two agree about depth.
+  # Why it runs AFTER fit_head_to_face: that step rewrites scene.vertices
+  # and scene.keypoints_3d, and this splat's depth is scaled onto the mesh's
+  # front surface. Aligning to the pre-fit mesh and then rendering the
+  # post-fit one would put the face at a different distance than the skull
+  # it sits on. The fit moves the mesh, not the photograph, so the splat
+  # still carries the head at the angle the camera saw it; what matters
+  # here is only that the two agree about depth.
   #
-  # This is the ONLY thing this file changes against the bootstrap that
-  # came before it — the circular orbit, the head-angle fix, the anchor
-  # warp and the anchor injection are all exactly as they were, so a run
-  # that looks different from the last one differs because of the face and
-  # nothing else. The photo-to-splat SHELL bootstrap, which changes all of
-  # those, is parked in fast_helical_shell.yaml.
+  # The circular orbit, the anchor warp and the anchor injection are all
+  # exactly as they were in the bootstrap before the face. The photo-to-
+  # splat SHELL bootstrap, which changes all of those, is parked in
+  # fast_helical_shell.yaml.
   #
   # None of these steps declare `keep_loaded`, so the seg head is read from
   # the HF cache twice (locate, then mask) rather than held in host RAM
@@ -342,18 +376,6 @@ steps:
   # see the note on render_initial_views' inputs. The landmark dots are not
   # coming back; the splat replaced them.
 
-  # Where the face is. CPU, no pod, no GPU: the two model files live in
-  # ~/.cache/body2colmap and the step is crop-first internally, which is
-  # what makes it work on a full-body frame where the face is a few percent
-  # of the pixels (see steps/face_landmarks.py's module docstring).
-  - id: detect_face
-    step: detect_face_landmarks
-    dispatch: in_process
-    when: ${globals.face_splat}
-    inputs:
-      image: scene.front_image
-    outputs:
-      face_landmarks: scene.face_landmarks
 
   # Where to CROP. Unchanged, and deliberately so: the crop stays the
   # Face_Neck box even though the mask below no longer is. Cutting the crop

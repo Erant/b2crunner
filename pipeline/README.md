@@ -153,7 +153,10 @@ pipeline/
 │   ├── fast_helical_native.yaml a bootstrap prologue from a front/back
 │                                sheet, then fast_helical_full.yaml's steps
 │                                verbatim: split → sam3d_body →
-│                                head_angle_fix → a face branch
+│                                detect_face_landmarks → map_face_to_mesh →
+│                                fit_head_to_face (the mesh head re-fitted
+│                                to the photo's face, in the body model's
+│                                own parameters) → a face branch
 │                                (sapiens2_seg → crop_to_box → sapiens2_seg
 │                                → sapiens2_lite → face_pointmap_splat)
 │                                builds a Gaussian head from a crop of the
@@ -581,7 +584,25 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   `face_mode` is the drawing style ("full" = points + connectivity lines |
   "points" | "none"); the view-angle gate is the separate
   `face_max_angle` (90 = full hemisphere, 45 = near-frontal).
-- `head_angle_fix` (`head_angle.py`) — stopgap for a systematic SAM-3D-Body
+- `map_face_to_mesh` + `fit_head_to_face` (`head_fit.py`) — the mesh head
+  re-fitted to the photograph's face. The first renders the mesh head,
+  shaded, through SAM-3D-Body's camera, runs MediaPipe on the render and
+  snaps each of the 468 landmarks to the nearest visible vertex (main env;
+  446/468 at 0.8 px on cyber2_6f). The second (sam3dbody env) replays the
+  MHR body model with the neck/head rotations, the head joint's scale and
+  the head-only shape components free, minimising the 2D distance between
+  those vertices and MediaPipe's landmarks on the photo: 10.5 → 2.4 px rms
+  on cyber2_6f, head pitched 7° down to where the photo looks, and it
+  publishes updated `pose_params` (plus a `scale_offsets` vector) so the
+  parameters keep describing the mesh. Replaces `head_angle_fix` in the
+  native prologue — the auto nod turned that head 30° away from the photo
+  (20.7 px). Why not a vertex deformation: fitted densely it either pitches
+  the head 23° to hide a too-long mid-face or squashes the skull to fit it;
+  see the module docstring. Geometry tests only; the fit needs the gated
+  checkpoint.
+- `head_angle_fix` (`head_angle.py`) — SUPERSEDED in the native prologue by
+  `fit_head_to_face` (incompatible with it: this one deforms vertices
+  without updating the pose parameters the fit replays). Stopgap for a systematic SAM-3D-Body
   failure: fitted from a frontal photo the head comes out craned forward
   (neck-to-head vector 30-45 deg off the torso axis). One weighted rigid nod
   about the inter-shoulder axis through the MHR70 neck joint, smoothstep-
@@ -597,9 +618,14 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   Gaussian shell, in SAM-3D-Body's own world: Sapiens2 pointmap, depth
   re-solved from `sapiens2_lite`'s normals, one oriented Gaussian per
   foreground pixel (matte from `rmbg`, not a seg head). Ported from
-  ~/Projects/masktest with the cameras replaced — the pointmap's own camera
-  is discarded and everything re-derived on the mesh's rays, so the shell
-  reprojects onto the source photo by construction. Run end to end locally:
+  ~/Projects/masktest, then PLACED in the mesh's camera: integrated in the
+  pointmap's own fitted camera (masktest verbatim), rotated onto SAM-3D-Body's
+  rays, and put on the ray through each source pixel with the relief scaled
+  by the width ratio `s·f_pointmap/f_sam`, so the shell reprojects onto the
+  source photo by construction AND keeps the network's shape. (Until
+  2026-08-30 the pointmap camera was discarded outright; on a face crop that
+  nodded the face 12.6° and stretched its relief 3.2× — the bug that got the
+  whole line removed and reverted the same day.) Run end to end locally:
   480k Gaussians, and the anchor gate (best-fit shift against
   `generate_firstlast`'s warp of the photo) lands at (1, 0) px. Wired into
   `fast_helical_native.yaml`'s bootstrap, which is the thing it was written

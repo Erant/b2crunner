@@ -90,13 +90,19 @@ DENOISE_NEGATIVE_PROMPT = (
 #: `face_landmark_mask`) intersects the landmark hull with it. `locate_face`
 #: stays exactly where it was and still sizes the crop — a face-sized crop
 #: was tried and flattens the face fourfold, see the step's docstring.
+#: 2026-08-30 (latest): `fix_head_angle` left the native prologue for
+#: `map_face_to_mesh` + `fit_head_to_face`, which turn the mesh head to the
+#: photograph's face instead of to a fixed lean (steps/head_fit.py), and
+#: `detect_face` moved ahead of them, ungated — the fit needs the landmarks
+#: whether or not the face splat is drawn.
 BOOTSTRAPS = {
     # The shipped default: the older, better-proven bootstrap — circular
-    # orbit, head-angle fix, anchor warp and injection — with only the face
-    # changed. Keeping everything else fixed is the point of the file.
+    # orbit, anchor warp and injection — with the head re-fitted to the
+    # photo and the face splat composited on. Everything else is as it was.
     "fast_helical_native": [
-        "split_sheet", "reconstruct_body", "fix_head_angle",
-        "detect_face", "locate_face", "crop_face", "face_seg", "face_mask",
+        "split_sheet", "reconstruct_body",
+        "detect_face", "map_face_to_mesh", "fit_head_to_face",
+        "locate_face", "crop_face", "face_seg", "face_mask",
         "face_normals", "face_splat",
         "render_initial_views", "render_face_views", "composite_face",
         "face_support_views",

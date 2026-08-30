@@ -345,7 +345,7 @@ def _registry() -> List[ModelSource]:
             # download. It does NOT need moge2 — the focal length comes from
             # the fit it is handed, not from a fresh FOV estimate.
             "sam3dbody", f"{SAM3D} (body reconstruction)",
-            ("sam3d_body", "refine_pose_to_splat"),
+            ("sam3d_body", "refine_pose_to_splat", "fit_head_to_face"),
             sam3d_fetch, sam3d_probe, approx_gb=2.8, gated=True,
         ),
         ModelSource(
@@ -385,7 +385,7 @@ def _registry() -> List[ModelSource]:
         ),
         ModelSource(
             "mediapipe", "MediaPipe face landmarker + detector",
-            ("detect_face_landmarks",), _fetch_mediapipe, _probe_mediapipe, approx_gb=0.01,
+            ("detect_face_landmarks", "map_face_to_mesh"), _fetch_mediapipe, _probe_mediapipe, approx_gb=0.01,
         ),
     ]
 

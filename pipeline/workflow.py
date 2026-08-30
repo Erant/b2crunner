@@ -205,6 +205,14 @@ class WorkflowSpec:
 #: and that quietly produce a wrong result together. A step that merely
 #: needs another to run first belongs in a workflow comment, not here.
 INCOMPATIBLE_STEPS: Dict[frozenset, str] = {
+    frozenset({"head_angle_fix", "fit_head_to_face"}): (
+        "head_angle_fix deforms scene.vertices/keypoints_3d without updating "
+        "the MHR pose parameters; fit_head_to_face replays those parameters "
+        "through the body model (and refuses to run once they no longer "
+        "reproduce the mesh). fit_head_to_face is the replacement: it turns "
+        "the head to where the photograph's face actually looks instead of "
+        "to a fixed lean. Use one or the other."
+    ),
     frozenset({"head_angle_fix", "refine_pose_to_splat"}): (
         "head_angle_fix rewrites scene.vertices/keypoints_3d directly, as a "
         "graded deformation, and does NOT update the MHR pose parameters "
