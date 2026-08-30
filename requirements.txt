@@ -21,6 +21,13 @@ requests>=2.31.0
 # build) is no longer needed here at all:
 #
 #   pip install plyfile
+#
+# `pointmap_splat` needs `scipy` — ndimage for the mask morphology, and
+# sparse/cg for the normal integration. Not listed as a hard requirement
+# because it is already a transitive dependency of body2colmap above
+# (body2colmap -> pyrender -> scipy), so every environment that can run
+# this pipeline at all already has it. It is imported inside functions,
+# like every other non-core dependency in pipeline/steps/.
 
 # The web UI (pipeline/webui.py) — `python -m pipeline.cli ui`. Not a hard
 # requirement because every CLI path works without it; the Docker image

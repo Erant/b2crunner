@@ -284,6 +284,7 @@ def _registry() -> List[ModelSource]:
     from .steps.rmbg import DEFAULT_CHECKPOINT as RMBG
     from .steps.sam3d_body import DEFAULT_CHECKPOINT_REPO as SAM3D
     from .steps.sam3d_body import DEFAULT_FOV_CHECKPOINT_REPO as MOGE
+    from .steps.pointmap_splat import DEFAULT_CHECKPOINT as SAPIENS_POINTMAP
     from .steps.sapiens2 import DEFAULT_CHECKPOINT as SAPIENS
     from .steps.wan22_vace_denoise import DEFAULT_CHECKPOINT as WAN22
 
@@ -293,14 +294,15 @@ def _registry() -> List[ModelSource]:
     #     is eight ONNX variants and a duplicate pytorch_model.bin. The
     #     `*.py` are NOT optional: the step loads it with
     #     trust_remote_code=True, which needs birefnet.py/BiRefNet_config.py.
-    #   sapiens2-normal-* ships the same weights twice (model.safetensors
-    #     and sapiens2_<size>_normal.safetensors — 3.54 GB each on the 0.8b
-    #     default, 1.81 GB each on 0.4b); only the first is what
-    #     from_pretrained loads.
+    #   sapiens2-normal-* and sapiens2-pointmap-* ship the same weights
+    #     twice (model.safetensors and sapiens2_<size>_<task>.safetensors —
+    #     6.16 GB each on the 1b normal default, 6.52 GB each on the 1b
+    #     pointmap); only the first is what from_pretrained loads.
     # 6.3 GB of pod download and volume, for nothing, on every fresh pod.
     _WEIGHTS_ONLY = ["*.json", "*.py", "model.safetensors"]
     rmbg_fetch, rmbg_probe = _hf_snapshot(RMBG, _WEIGHTS_ONLY)
     sapiens_fetch, sapiens_probe = _hf_snapshot(SAPIENS, _WEIGHTS_ONLY)
+    pointmap_fetch, pointmap_probe = _hf_snapshot(SAPIENS_POINTMAP, _WEIGHTS_ONLY)
     sam3d_fetch, sam3d_probe = _hf_snapshot(SAM3D)
     wan22_fetch, wan22_probe = _hf_snapshot(WAN22, WAN22_ALLOW_PATTERNS)
 
@@ -310,8 +312,18 @@ def _registry() -> List[ModelSource]:
             rmbg_fetch, rmbg_probe, approx_gb=0.9, gated=True,  # accurate once filtered
         ),
         ModelSource(
+            # 6.16 GB at the 1b default, measured from the cached blob with
+            # the `model.safetensors`-only filter above (the repo ships the
+            # same weights twice). Was 3.5 at the 0.8b default.
             "sapiens2", f"{SAPIENS} (normal maps)", ("sapiens2_lite",),
-            sapiens_fetch, sapiens_probe, approx_gb=3.5,
+            sapiens_fetch, sapiens_probe, approx_gb=6.2,
+        ),
+        ModelSource(
+            # Same repo layout as the normal heads above, so the same
+            # `model.safetensors`-only filter applies: the 1b pointmap repo
+            # ships the identical weights twice, 6.5 GB each.
+            "sapiens2_pointmap", f"{SAPIENS_POINTMAP} (pointmap / depth)",
+            ("pointmap_splat",), pointmap_fetch, pointmap_probe, approx_gb=6.5,
         ),
         ModelSource(
             "sam3dbody", f"{SAM3D} (body reconstruction)", ("sam3d_body",),

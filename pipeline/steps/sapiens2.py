@@ -5,8 +5,8 @@ Verified against real inference on an L40S pod: both the single-image
 against real wan22_vace_denoise output frames, producing correctly-shaped,
 properly L2-normalized (min/max within [-1, 1]) normal maps. That run used
 the 0.4B checkpoint, which loaded in well under a second — cheap enough to
-not bother with a disk-cached/pre-warmed instance. The default is now 0.8B
-(see below), which is ~2x the weights; the "don't bother pre-warming"
+not bother with a disk-cached/pre-warmed instance. The default is now 1B
+(see below), which is ~3.4x those weights; the "don't bother pre-warming"
 conclusion has not been re-measured against it.
 
 Uses transformers' first-class Sapiens2 support (added to the library
@@ -19,18 +19,28 @@ stack; transformers' AutoModel path achieves the same "no heavy CV
 framework" goal for free, so the "lite" framing in this step's registered
 name is about that outcome, not about using the old inference script.
 
-Default checkpoint is the 0.8B normal-estimation variant —
-facebook/sapiens2-normal-0.8b — chosen over the smaller 0.4B for normal
-quality. Pass params["checkpoint"] for another size: the family is
-0.4b/0.8b/1b/5b, all four confirmed present on the Hub as
-facebook/sapiens2-normal-<size> (an earlier version of this docstring
-listed "0.4b/0.6b/1b/2b/2b" from the model doc, which is wrong).
+Default checkpoint is the 1B normal-estimation variant —
+facebook/sapiens2-normal-1b (2026-08-29; it was 0.8b before that). Pass
+params["checkpoint"] for another size: the family is 0.4b/0.8b/1b/5b, all
+four confirmed present on the Hub as facebook/sapiens2-normal-<size> (an
+earlier version of this docstring listed "0.4b/0.6b/1b/2b/2b" from the
+model doc, which is wrong).
 
-Size is a VRAM decision as well as a quality one: 0.8B is 3.54 GB of
-weights against 0.4B's 1.81 GB, on top of activations that already needed
-`batch_size: 2` rather than the step's default of 8 to fit a 12 GB card at
-720x1280 (see docs/docker-build-notes.md). On a 48 GB L40S or larger this
-is not a concern.
+1b is what `pointmap_splat` was developed and measured against — its
+normals are the relief signal the depth integration is solved from, and
+the pointmap head it pairs with only exists at 1b, so matching the two
+sizes keeps that pair consistent. Every number in that step's docstring
+came from 1b normals.
+
+Size is a VRAM decision as well as a quality one: 1B is **6.16 GB** of
+weights (measured from the cached blob), against 0.8B's 3.54 GB and 0.4B's
+1.81 GB — on top of activations that already needed `batch_size: 2` rather
+than the step's default of 8 to fit a 12 GB card at 720x1280 (see
+docs/docker-build-notes.md). That headroom is now thinner, so a 12 GB card
+running the batched path at upscaled resolution is the case to watch; on a
+48 GB L40S or larger it is not a concern. Drop to 0.8b if a small card
+starts OOMing here — the step takes the checkpoint as a param precisely so
+that is a workflow edit, not a code change.
 
 Output is raw (unnormalized) XYZ normals in camera space, L2-normalized to
 [-1, 1] via the image processor's post_process_normal_estimation and
@@ -51,7 +61,7 @@ import numpy as np
 from ..registry import register_step
 from ..step import Param, Step
 
-DEFAULT_CHECKPOINT = "facebook/sapiens2-normal-0.8b"
+DEFAULT_CHECKPOINT = "facebook/sapiens2-normal-1b"
 
 
 @register_step("sapiens2_lite")
@@ -69,7 +79,8 @@ class Sapiens2LiteStep(Step):
               "1080x1920 float32 normal maps are ~2 GB of host RAM for 81 frames",
               minimum=1),
         Param("checkpoint", str, DEFAULT_CHECKPOINT,
-              "HF repo for the normal-estimation model; the family is 0.3b/0.6b/1b/2b",
+              "HF repo for the normal-estimation model; the family is "
+              "0.4b/0.8b/1b/5b. Smaller is the lever if a 12 GB card OOMs",
               advanced=True),
         Param("device", str, None, "Torch device; empty means cuda if available",
               advanced=True),

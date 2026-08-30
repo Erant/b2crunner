@@ -37,7 +37,9 @@ pip install -r requirements.txt
 The Gaussian-splat steps additionally need `plyfile` for PLY I/O, and
 `render_splat` needs the `brush-splat-render` binary on `PATH` (built
 alongside `brush` in `docker/Dockerfile`) — see `requirements.txt`.
-Face-landmark detection needs `mediapipe` (CPU-only).
+Face-landmark detection needs `mediapipe` (CPU-only). `pointmap_splat`
+needs `scipy`, which arrives anyway as a transitive dependency of
+`body2colmap` (via `pyrender`).
 
 ## Quickstart
 

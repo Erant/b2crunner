@@ -404,7 +404,7 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   not a bug, just an invalid test size for this model/LoRA pairing).
 - `sapiens2_lite` — Sapiens2 surface-normal estimation via transformers'
   first-class support (`AutoModelForNormalEstimation`,
-  `facebook/sapiens2-normal-0.8b`) — not the older facebookresearch/sapiens
+  `facebook/sapiens2-normal-1b`) — not the older facebookresearch/sapiens
   (v1) "lite" torchscript path this step's name originally referenced. Ran
   against `wan22_vace_denoise` output frames on an L40S pod, both
   single-image and batched paths; output correctly shaped and L2-normalized.
@@ -522,6 +522,17 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   `face_mode` is the drawing style ("full" = points + connectivity lines |
   "points" | "none"); the view-angle gate is the separate
   `face_max_angle` (90 = full hemisphere, 45 = near-frontal).
+- `pointmap_splat` (`pointmap_splat.py`) — one photo into a feed-forward
+  Gaussian shell, in SAM-3D-Body's own world: Sapiens2 pointmap, depth
+  re-solved from `sapiens2_lite`'s normals, one oriented Gaussian per
+  foreground pixel (matte from `rmbg`, not a seg head). Ported from
+  ~/Projects/masktest with the cameras replaced — the pointmap's own camera
+  is discarded and everything re-derived on the mesh's rays, so the shell
+  reprojects onto the source photo by construction. Run end to end locally:
+  480k Gaussians, and the anchor gate (best-fit shift against
+  `generate_firstlast`'s warp of the photo) lands at (1, 0) px. **Not in any
+  workflow** — it exists to feed extra reference views to VACE and a
+  non-degenerate helical first pass.
 - `load_splat`/`save_splat`/`render_splat` — `render_splat`'s camera-path
   resolution (which cameras, what focal length, which framing bounds,
   point-cloud preservation, metadata pass-through) is verified against
