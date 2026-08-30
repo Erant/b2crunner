@@ -575,12 +575,17 @@ def _rasterize(
                 cmd.append("--confidence-sidecar")
             if confidence.dataset:
                 # Only for a .ply that predates brush's export_evidence. The
-                # dataset options have to match what training saw, and
-                # steps/brush.py passes --alpha-mode transparent (its own
-                # default) whenever it has masks, which is every training in
-                # every shipped workflow.
-                cmd += ["--dataset", str(confidence.dataset),
-                        "--alpha-mode", "transparent"]
+                # dataset options have to match what training saw — the
+                # alpha mode decides whether ground truth is premultiplied
+                # at load, so getting it wrong measures evidence against
+                # pixels training never saw. Matching now means passing NO
+                # --alpha-mode: steps/brush.py stopped forcing one so that a
+                # run can mix masked and transparent views, and brush reads
+                # the mode per view from the dataset's own layout. An export
+                # of RGBA frames with no masks/ sidecar — which is what
+                # colmap_export writes — still loads as transparent, exactly
+                # as the forced flag used to make it.
+                cmd += ["--dataset", str(confidence.dataset)]
             cmd += list(confidence.extra_args)
         _run_render(
             cmd,

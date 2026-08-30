@@ -788,16 +788,19 @@ class TestRenderSplatConfidence(unittest.TestCase):
 
     def test_the_evidence_dataset_carries_the_training_alpha_mode(self):
         """For a .ply that predates export_evidence. The dataset options
-        have to match what training saw, and steps/brush.py passes
-        --alpha-mode transparent whenever it has masks, which is every
-        training in every shipped workflow."""
+        have to match what training saw, and since steps/brush.py stopped
+        forcing an alpha mode — so a run can mix masked and transparent
+        views — matching means passing none here either: brush then reads
+        the mode per view from the dataset's own layout, which for a
+        colmap_export directory (RGBA frames, no masks/ sidecar) is the
+        transparent this used to spell out."""
         argv = _captured_render_argv(
             confidence=_confidence(evidence_dataset="/data/output/colmap_intermediate")
         )
         self.assertEqual(
             argv[argv.index("--dataset") + 1], "/data/output/colmap_intermediate"
         )
-        self.assertEqual(argv[argv.index("--alpha-mode") + 1], "transparent")
+        self.assertNotIn("--alpha-mode", argv)
 
     def test_no_dataset_flag_without_one(self):
         """The .ply's own ev_* block is the normal source; passing an empty

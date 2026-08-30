@@ -656,9 +656,14 @@ steps:
   # resplat_helical.json: train a splat on the denoised views, then
   # re-render it along a new, longer helical orbit.
 
-  # Foreground alpha for brush's --alpha-mode transparent. Distinct from
-  # the denoise control mask above, which this overwrites: past this point
-  # the reference/denoise flag is no longer needed.
+  # The alpha brush trains these frames against. It is baked into the
+  # frames themselves rather than into a masks/ sidecar, which is what
+  # makes them TRANSPARENT views — "nothing is there outside the subject",
+  # so they carve the silhouette. (brush resolves that per view now; see
+  # steps/brush.py. No --alpha-mode is passed, and this layout is what the
+  # forced `transparent` used to spell out.) Distinct from the denoise
+  # control mask above, which this overwrites: past this point the
+  # reference/denoise flag is no longer needed.
   - id: foreground_masks
     step: rmbg
     dispatch: in_process

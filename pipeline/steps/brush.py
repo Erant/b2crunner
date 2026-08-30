@@ -66,6 +66,45 @@ both trainings — an intermediate splat that carries its evidence needs no
 second pass over the dataset to be gated, and the final .ply is a
 deliverable that is more useful with it than without.
 
+**Supporting views** (`support_*` inputs) are views the training should
+fit where they can be trusted and *ignore* everywhere else — the
+confidence-gated splat re-renders are the case this exists for. Their
+background is the cull colour, not emptiness, so they must not be allowed
+to carve the silhouette: a frame whose alpha says "ignore this" is
+brush's **masked** mode, and one whose alpha says "nothing is here" is
+**transparent**. Brush resolves that per view from the export's layout —
+a `masks/<name>` sidecar means masked, an alpha channel embedded in the
+frame means transparent — so this step writes the training views as RGBA
+exactly as it always did and the supporting views as RGB plus a sidecar,
+and passes no `--alpha-mode`. That flag is a *global force*: passing it
+flattens the mix, which is why it is now emitted only when a caller
+explicitly asks for one. See brush's docs/mixed-alpha-modes.md.
+
+Two things about that are sharp enough to name. An RGBA frame whose alpha
+is really a mask, with no sidecar, loads as transparency and is
+premultiplied at load — which destroys the RGB underneath — so intent has
+to come from the layout and cannot be sniffed from the pixels. And brush
+matches a sidecar to a frame by *stem* as well as by full name, so two
+views whose names differ only by extension would share one mask; the
+export refuses that rather than silently flipping a training view to
+masked.
+
+`--normalize-masked-loss` follows from the same mix. The loss kernel
+weights each pixel by the frame's alpha but the trainer averages over the
+whole frame, so a masked view whose mask covers a fifth of the frame
+contributes about a fifth of the gradient of a transparent view of the
+same subject. In a run that is all one mode that is a harmless rescale;
+in a mixed one the supporting views quietly count for less, so
+`normalize_masked_loss: auto` turns it on exactly when the export
+actually carries both.
+
+One consequence for `export_colmap_intermediate`: that step exports the
+dataset without the supporting views (it is handed the same context paths
+the training views come from), so on a run that uses them it is no longer
+a complete record of what brush saw — and `render_splat`'s
+`evidence_dataset` fallback, which measures evidence against it, would
+measure against the training views alone.
+
 Normal-map supervision: per the original node's behavior, a normal map
 that already carries an alpha channel keeps it; otherwise the RGB frame's
 own foreground mask (rmbg's output) is reused as the normal map's alpha,
@@ -80,8 +119,9 @@ from __future__ import annotations
 import logging
 import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 import cv2
 import numpy as np
@@ -104,6 +144,231 @@ logger = logging.getLogger(__name__)
 # deliberately not copied; see the module docstring.
 _COLMAP_MODEL_FILES = ("cameras.txt", "images.txt", "points3D.txt")
 
+# Only used when the caller supplies no names of its own. Kept distinct
+# from the `frame_NNNNN_` the renderers produce so that a glance at a crash
+# directory's images/ says which views were supporting ones.
+_SUPPORT_NAME = "support_{:05d}.png"
+
+_NORMALIZE_CHOICES = ("auto", "on", "off")
+
+# brush's own enum, and the whole list clap will accept. `ignore` was
+# declared here for a long time and is not one of them: it never ran only
+# because nothing ever set it.
+_ALPHA_MODES = ("transparent", "masked")
+
+
+def _forced_alpha_mode(setting: Optional[str]) -> Optional[str]:
+    """The mode to force on every view, or None to let brush decide per view.
+
+    `auto` (and an empty value, for a workflow that clears the param) is the
+    None case: the flag is a global force, so *not passing it* is what lets
+    the export's own layout — a masks/ sidecar here, an embedded alpha there
+    — resolve the mode view by view.
+    """
+    if setting is None or setting in ("", "auto"):
+        return None
+    if setting not in _ALPHA_MODES:
+        raise ValueError(
+            f"alpha_mode must be auto, {' or '.join(_ALPHA_MODES)}, got {setting!r}. "
+            f"brush accepts only its own two modes and would reject the invocation."
+        )
+    return setting
+
+
+def _normalize_masked_loss(setting: str, *, mixed: bool) -> bool:
+    """Whether to pass `--normalize-masked-loss`, from the param and the run.
+
+    `auto` is the interesting one: the flag corrects a weighting that only
+    becomes a bias when the two alpha modes are in the same run (see the
+    module docstring), so "on when the export actually carries both" is
+    what it should mean, not "on when there are masks".
+    """
+    if setting not in _NORMALIZE_CHOICES:
+        raise ValueError(
+            f"normalize_masked_loss must be one of {', '.join(_NORMALIZE_CHOICES)}, "
+            f"got {setting!r}"
+        )
+    if setting == "auto":
+        return mixed
+    return setting == "on"
+
+
+@dataclass(frozen=True)
+class _SupportViews:
+    """The masked half of a mixed training run: views to fit where their
+    mask says to and ignore everywhere else.
+
+    Held together as one object because the four lists have to stay
+    parallel and because the naming rules below are what keep brush's
+    sidecar matching unambiguous — validating that in `run()` would put it
+    two hundred lines from the code that writes the files.
+
+    Empty is the normal case, and falsy: a workflow that wires none of the
+    `support_*` inputs builds exactly the export this step always built.
+    """
+
+    cameras: List[Any]
+    image_names: List[str]
+    images: List[np.ndarray]
+    masks: List[np.ndarray]
+    normal_maps: Optional[List[np.ndarray]]
+
+    def __bool__(self) -> bool:
+        return bool(self.image_names)
+
+    @classmethod
+    def empty(cls) -> "_SupportViews":
+        return cls(cameras=[], image_names=[], images=[], masks=[], normal_maps=None)
+
+    @classmethod
+    def from_inputs(
+        cls, inputs: Dict[str, Any], train_names: Sequence[str]
+    ) -> "_SupportViews":
+        """Read and validate the `support_*` inputs against the training ones.
+
+        Every failure here is one that would otherwise surface as a
+        confusing training rather than an error: a supporting view with no
+        mask is a full-weight view fitting the cull colour as if it were
+        the subject, and a name that collides — by stem, not just in full,
+        because that is how brush matches a sidecar — silently flips a
+        training view to masked and stops it carving the silhouette.
+        """
+        cameras = inputs.get("support_cameras")
+        images = inputs.get("support_images")
+        masks = inputs.get("support_masks")
+        names = inputs.get("support_image_names")
+        normal_maps = inputs.get("support_normal_maps")
+
+        supplied = {
+            key: value
+            for key, value in (
+                ("support_cameras", cameras),
+                ("support_images", images),
+                ("support_masks", masks),
+                ("support_image_names", names),
+                ("support_normal_maps", normal_maps),
+            )
+            if value is not None and len(value) > 0
+        }
+        if not supplied:
+            return cls.empty()
+
+        for required in ("support_cameras", "support_images", "support_masks"):
+            if required not in supplied:
+                raise ValueError(
+                    f"{', '.join(sorted(supplied))} given without {required}. A "
+                    f"supporting view needs a camera, a frame and a mask: the mask is "
+                    f"the whole difference between 'fit this where I trust it' and a "
+                    f"view that fits its background too."
+                )
+
+        # Re-read from `supplied` so an empty list means the same as an
+        # absent one everywhere below — a workflow that wires an input to a
+        # context path holding [] is asking for no supporting views, not for
+        # a set of them with no names.
+        cameras = supplied["support_cameras"]
+        images = supplied["support_images"]
+        masks = supplied["support_masks"]
+        names = supplied.get("support_image_names")
+        normal_maps = supplied.get("support_normal_maps")
+
+        count = len(images)
+        for key in ("support_cameras", "support_masks", "support_image_names",
+                    "support_normal_maps"):
+            value = supplied.get(key)
+            if value is not None and len(value) != count:
+                raise ValueError(
+                    f"{key} has {len(value)} entries but support_images has {count}. "
+                    f"Supporting views move together."
+                )
+
+        names = list(names) if names is not None else [
+            _SUPPORT_NAME.format(i + 1) for i in range(count)
+        ]
+        _check_names(names, train_names)
+
+        return cls(
+            cameras=list(cameras),
+            image_names=names,
+            images=list(images),
+            masks=list(masks),
+            normal_maps=list(normal_maps) if normal_maps is not None else None,
+        )
+
+    def write(self, colmap_dir: Path) -> None:
+        """Write the supporting frames into an already-exported COLMAP model.
+
+        RGB into `images/` and the mask beside it in `masks/` — never RGBA,
+        which is the layout that means *transparent* and would have brush
+        premultiply the frame and learn empty space outside the mask.
+        """
+        if not self:
+            return
+        images_dir = colmap_dir / "images"
+        masks_dir = colmap_dir / "masks"
+        images_dir.mkdir(exist_ok=True)
+        masks_dir.mkdir(exist_ok=True)
+
+        for i, (img, filename) in enumerate(zip(self.images, self.image_names)):
+            if img.shape[-1] == 4:
+                img = img[..., :3]
+            elif img.shape[-1] != 3:
+                raise ValueError(
+                    f"Unexpected support image channels: {img.shape[-1]} (expected 3 or 4)"
+                )
+            cv2.imwrite(str(images_dir / filename), img)
+            cv2.imwrite(str(masks_dir / _sidecar_name(filename)),
+                        mask_to_alpha_u8(self.masks[i]))
+
+        if self.normal_maps is not None:
+            normals_dir = colmap_dir / "normals"
+            normals_dir.mkdir(exist_ok=True)
+            for i, (normal, filename) in enumerate(zip(self.normal_maps, self.image_names)):
+                normal_bgr = np.clip(
+                    (normal[..., ::-1] + 1.0) / 2.0 * 255.0, 0, 255
+                ).astype(np.uint8)
+                out = np.dstack([normal_bgr, mask_to_alpha_u8(self.masks[i])])
+                cv2.imwrite(str(normals_dir / _sidecar_name(filename)), out)
+
+        logger.info(
+            "brush: %d supporting view(s) written as RGB + a masks/ sidecar, so brush "
+            "reads them as masked; the training views keep their embedded alpha and "
+            "stay transparent",
+            len(self.image_names),
+        )
+
+
+def _sidecar_name(filename: str) -> str:
+    """The `masks/` (or `normals/`) name brush will match to `filename`.
+
+    Always .png: these are written by this step, and a mask has no business
+    going through a lossy codec.
+    """
+    return Path(filename).with_suffix(".png").name
+
+
+def _check_names(support_names: Sequence[str], train_names: Sequence[str]) -> None:
+    """Refuse names that would make a sidecar ambiguous.
+
+    brush matches `masks/x.*` to an image whose *stem* is `x` as well as to
+    one whose full name is `x`, so `support.jpg` and `support.png` in the
+    same export would share one mask — and if the collision is with a
+    training view, that view silently becomes masked and stops carving the
+    silhouette. Cheap to check here, invisible in a trained splat.
+    """
+    seen: Dict[str, str] = {}
+    for name in list(train_names) + list(support_names):
+        if not name:
+            raise ValueError("A view name is empty; brush resolves frames by name.")
+        stem = Path(name).stem
+        if stem in seen:
+            raise ValueError(
+                f"View names {seen[stem]!r} and {name!r} share the stem {stem!r}. "
+                f"brush matches a masks/ sidecar by stem as well as by full name, so "
+                f"the two would share one mask — rename one of them."
+            )
+        seen[stem] = name
+
 
 @register_step("brush")
 class BrushStep(Step):
@@ -113,8 +378,18 @@ class BrushStep(Step):
              "points_3d": Tuple[np.ndarray, np.ndarray],
              "images": List[np.ndarray] BGR(A),
              "masks": Optional[List[np.ndarray]] float32 [0,1], foreground=1,
-             "normal_maps": Optional[List[np.ndarray]] HxWx3 float32 [-1,1]}
+             "normal_maps": Optional[List[np.ndarray]] HxWx3 float32 [-1,1],
+             "support_cameras": Optional[List[Camera]],
+             "support_images": Optional[List[np.ndarray]] BGR(A),
+             "support_masks": Optional[List[np.ndarray]] float32 [0,1],
+             "support_image_names": Optional[List[str]],
+             "support_normal_maps": Optional[List[np.ndarray]]}
     outputs: {"splat_path": str}
+
+    The `support_*` inputs are the masked half of a mixed run — extra
+    views trained on only where their mask says to (see the module
+    docstring). They are optional and independent of the training views:
+    a run without them builds byte-identical training data to before.
 
     `output_dir` puts the run under `<output_dir>/brush/training_<ms>/`,
     which is what an intermediate training wants: several of them in one
@@ -132,8 +407,23 @@ class BrushStep(Step):
         Param("max_resolution", int, 1920, "Longest edge brush trains at", minimum=1),
         Param("max_splats", int, 10_000_000, "Cap on the number of Gaussians", minimum=1),
         Param("refine_every", int, 200, "Densify/prune interval, in steps", minimum=1),
-        Param("alpha_mode", str, "transparent",
-              "How brush reads the frames' alpha channel", choices=("transparent", "ignore")),
+        Param("alpha_mode", str, "auto",
+              "Force brush to read EVERY view's alpha channel this way, flattening any "
+              "mix. auto (the default) lets brush decide per view from the export's "
+              "layout — a masks/ sidecar means masked ('ignore outside it'), an alpha "
+              "channel in the frame itself means transparent ('nothing is there') — "
+              "which is what lets supporting views train alongside the rendered ones. "
+              "The training views this step writes are RGBA either way, so auto is what "
+              "the old forced 'transparent' did on a run with no support_* views",
+              choices=("auto", "transparent", "masked"), advanced=True),
+        Param("normalize_masked_loss", str, "auto",
+              "Divide a masked view's loss by its mask coverage, so it is not weighted "
+              "down by the fraction of the frame its mask covers (brush's "
+              "--normalize-masked-loss). auto: on exactly when the export carries both "
+              "alpha modes, which is the run where the weighting is a systematic bias "
+              "rather than a harmless rescale. Exact for a binary mask, approximate for "
+              "a soft one",
+              choices=("auto", "on", "off"), advanced=True),
         Param("normal_loss_strength", float, 0.05,
               "Weight on the normal-map supervision loss; 0 disables it", minimum=0.0),
         Param("normal_loss_step_start", int, 5000,
@@ -187,6 +477,7 @@ class BrushStep(Step):
         images = inputs["images"]
         masks = inputs.get("masks")
         normal_maps = inputs.get("normal_maps")
+        support = _SupportViews.from_inputs(inputs, image_names)
 
         if len(images) != len(image_names):
             raise ValueError(f"images ({len(images)}) and image_names ({len(image_names)}) length mismatch")
@@ -202,7 +493,12 @@ class BrushStep(Step):
         max_resolution = params["max_resolution"]
         max_splats = params["max_splats"]
         refine_every = params["refine_every"]
-        alpha_mode = params["alpha_mode"]
+        alpha_mode = _forced_alpha_mode(params["alpha_mode"])
+        # Resolved here rather than at the argv, so a mistyped setting is a
+        # refusal before several hundred MB of frames are written out.
+        normalize_masked_loss = _normalize_masked_loss(
+            params["normalize_masked_loss"], mixed=bool(support) and not alpha_mode
+        )
         normal_loss_strength = params["normal_loss_strength"]
         normal_loss_step_start = params["normal_loss_step_start"]
         normal_loss_every = params["normal_loss_every"]
@@ -225,9 +521,14 @@ class BrushStep(Step):
         with tempfile.TemporaryDirectory(prefix="b2c_colmap_") as temp_dir:
             colmap_dir = Path(temp_dir)
 
-            ColmapExporter(cameras=cameras, image_names=image_names, points_3d=points_3d).export(
-                output_dir=colmap_dir
-            )
+            # The supporting views are part of the same COLMAP model — one
+            # cameras.txt/images.txt covering both — and differ only in how
+            # their frames are written below.
+            ColmapExporter(
+                cameras=list(cameras) + support.cameras,
+                image_names=list(image_names) + support.image_names,
+                points_3d=points_3d,
+            ).export(output_dir=colmap_dir)
 
             images_dir = colmap_dir / "images"
             images_dir.mkdir(exist_ok=True)
@@ -271,6 +572,8 @@ class BrushStep(Step):
                     normal_path = normals_dir / Path(filename).with_suffix(".png").name
                     cv2.imwrite(str(normal_path), out)
 
+            support.write(colmap_dir)
+
             ply_output_name = params["export_name"]
             ply_path = out_root / ply_output_name
             cmd = [
@@ -287,8 +590,26 @@ class BrushStep(Step):
             ]
             if with_viewer:
                 cmd.append("--with-viewer")
-            if masks is not None:
+            # Not passed unless a caller explicitly asked for one:
+            # --alpha-mode is a global force, so passing it is what
+            # *prevents* the mixed run the layout above sets up. What the
+            # old unconditional `--alpha-mode transparent` bought was
+            # nothing — an RGBA frame with no sidecar already loads as
+            # transparent — which is why dropping it leaves every shipped
+            # workflow training on byte-identical data.
+            if alpha_mode:
                 cmd.extend(["--alpha-mode", alpha_mode])
+                if support:
+                    logger.warning(
+                        "brush: alpha_mode=%s forces all %d views to that mode, "
+                        "including the %d supporting view(s) whose masks/ sidecars "
+                        "would otherwise have made them masked. Leave alpha_mode "
+                        "at auto to train on the mix.",
+                        alpha_mode, len(image_names) + len(support.image_names),
+                        len(support.image_names),
+                    )
+            if normalize_masked_loss:
+                cmd.append("--normalize-masked-loss")
             if normal_maps is not None:
                 cmd.extend([
                     "--normal-loss-weight", str(normal_loss_strength),
@@ -444,7 +765,7 @@ def _describe_colmap_export(colmap_dir: Optional[Path]) -> str:
     lines = [describe_path(colmap_dir)]
     for name in _COLMAP_MODEL_FILES:
         lines.append(f"  {describe_path(colmap_dir / name)}")
-    for name in ("images", "normals"):
+    for name in ("images", "masks", "normals"):
         sub = colmap_dir / name
         if not sub.is_dir():
             lines.append(f"  {name}/ absent")

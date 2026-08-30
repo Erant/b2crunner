@@ -313,7 +313,8 @@ def check_brush_binaries() -> Check:
 
     It catches a stale fork build too, not just a `main` one:
     `--normal-loss-every` only landed on normal-map-supervision on
-    2026-08-25, and the Dockerfile's `git clone` is cached on the RUN text
+    2026-08-25, `--export-evidence` and `--normalize-masked-loss` on
+    2026-08-30, and the Dockerfile's `git clone` is cached on the RUN text
     rather than on remote git state. Rebuilding does not reliably shake
     that loose — `--no-cache-filter brush-builder` re-runs the stage but
     the runtime stage's `COPY --from=brush-builder` still matches its old
@@ -324,6 +325,7 @@ def check_brush_binaries() -> Check:
     required_flags = [
         "--normal-loss-weight", "--normal-loss-start-iter",
         "--normal-loss-every",
+        "--export-evidence", "--normalize-masked-loss",
         "--alpha-mode", "--export-name", "--total-train-iters",
     ]
     lines, status = [], OK
