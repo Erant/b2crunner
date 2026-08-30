@@ -10,6 +10,7 @@ step it was told to run, but it still imports this whole package to find it.
 from . import anchor_stub  # noqa: F401
 from . import brush  # noqa: F401
 from . import colmap_export  # noqa: F401
+from . import crop  # noqa: F401
 from . import dataset_io  # noqa: F401
 from . import face_landmarks  # noqa: F401
 from . import head_angle  # noqa: F401

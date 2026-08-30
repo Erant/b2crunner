@@ -72,11 +72,30 @@ DENOISE_NEGATIVE_PROMPT = (
 # `inject_shell_views` does that job — it puts photo-derived content on every
 # frame near the source view, not just the one exactly on it, so the render
 # no longer has to bend its path to land a camera there either.
+#: The face branch — locate_face / crop_face / face_mask / face_normals /
+#: face_splat, then render_face_views + composite_face — is common to both
+#: and gated on each file's `face_splat` global. `detect_face` is in
+#: neither: the splat replaced the MediaPipe landmark overlay it fed.
 BOOTSTRAPS = {
+    # The shipped default: the older, better-proven bootstrap — circular
+    # orbit, head-angle fix, anchor warp and injection — with only the face
+    # changed. Keeping everything else fixed is the point of the file.
     "fast_helical_native": [
-        "split_sheet", "reconstruct_body", "detect_face",
+        "split_sheet", "reconstruct_body", "fix_head_angle",
+        "locate_face", "crop_face", "face_mask", "face_normals", "face_splat",
+        "render_initial_views", "render_face_views", "composite_face",
+        "warp_reference_to_anchor", "reinject_anchor_initial",
+    ],
+    # Parked: the photo-to-splat shell, which replaces the whole bootstrap.
+    # Nothing selects it (webui.WORKFLOW_NATIVE names the file above); it is
+    # kept in the tree so the shell wiring does not have to be reconstructed
+    # from git history, and checked here so it cannot rot silently.
+    "fast_helical_shell": [
+        "split_sheet", "reconstruct_body",
         "front_matte", "front_normals", "shell_splat", "refine_pose",
-        "render_initial_views", "render_shell_views", "inject_shell_band",
+        "locate_face", "crop_face", "face_mask", "face_normals", "face_splat",
+        "render_initial_views", "render_face_views", "composite_face",
+        "render_shell_views", "inject_shell_band",
     ],
 }
 

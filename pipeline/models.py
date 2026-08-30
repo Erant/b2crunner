@@ -286,6 +286,7 @@ def _registry() -> List[ModelSource]:
     from .steps.sam3d_body import DEFAULT_FOV_CHECKPOINT_REPO as MOGE
     from .steps.pointmap_splat import DEFAULT_CHECKPOINT as SAPIENS_POINTMAP
     from .steps.sapiens2 import DEFAULT_CHECKPOINT as SAPIENS
+    from .steps.sapiens2 import DEFAULT_SEG_CHECKPOINT as SAPIENS_SEG
     from .steps.wan22_vace_denoise import DEFAULT_CHECKPOINT as WAN22
 
     # allow_patterns, or these pull the whole repo including formats the
@@ -303,6 +304,7 @@ def _registry() -> List[ModelSource]:
     rmbg_fetch, rmbg_probe = _hf_snapshot(RMBG, _WEIGHTS_ONLY)
     sapiens_fetch, sapiens_probe = _hf_snapshot(SAPIENS, _WEIGHTS_ONLY)
     pointmap_fetch, pointmap_probe = _hf_snapshot(SAPIENS_POINTMAP, _WEIGHTS_ONLY)
+    seg_fetch, seg_probe = _hf_snapshot(SAPIENS_SEG, _WEIGHTS_ONLY)
     sam3d_fetch, sam3d_probe = _hf_snapshot(SAM3D)
     wan22_fetch, wan22_probe = _hf_snapshot(WAN22, WAN22_ALLOW_PATTERNS)
 
@@ -323,7 +325,17 @@ def _registry() -> List[ModelSource]:
             # `model.safetensors`-only filter applies: the 1b pointmap repo
             # ships the identical weights twice, 6.5 GB each.
             "sapiens2_pointmap", f"{SAPIENS_POINTMAP} (pointmap / depth)",
-            ("pointmap_splat",), pointmap_fetch, pointmap_probe, approx_gb=6.5,
+            ("pointmap_splat", "face_pointmap_splat"),
+            pointmap_fetch, pointmap_probe, approx_gb=6.5,
+        ),
+        ModelSource(
+            # The third Sapiens2 head, and the third 6-and-a-bit GB: a
+            # workflow running the face branch pulls normals + pointmap +
+            # seg, ~19 GB of volume before anything else. Only the face
+            # branch needs it — `pointmap_splat` takes RMBG's matte, and
+            # nothing else in the pipeline segments body parts.
+            "sapiens2_seg", f"{SAPIENS_SEG} (body-part segmentation)",
+            ("sapiens2_seg",), seg_fetch, seg_probe, approx_gb=6.5,
         ),
         ModelSource(
             # refine_pose_to_splat needs the same checkpoint: it replays the

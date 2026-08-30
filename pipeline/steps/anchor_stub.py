@@ -26,7 +26,16 @@ in the original ComfyUI-Body2COLMAP repo:
   built for. See that class's docstring for the two radii and why the
   default only substitutes, never trusts.
 
-The alpha convention is what all three write. This is the mechanism behind
+- CompositeSplatViews is the fourth, and the only one that does not
+  replace a frame: it alpha-composites a splat render ON TOP of the mesh
+  drawing, keeping the drawing everywhere the splat is transparent. That is
+  what puts a real face on a skeleton rig, and it is why it survives much
+  further off the source view than a substitution does — a face-only splat
+  read cleanly out to about 30 degrees and still holds at 45, against the
+  15 the body shell's substitution band is set to. See its docstring for
+  the black-background requirement, which is load-bearing.
+
+The alpha convention is what the first three write. This is the mechanism behind
 cyber_6f's initial/ alpha convention (pipeline/steps/wan22_vace_denoise.py's
 docstring): the injected anchor frame is marked alpha=0 ("already real,
 don't denoise"), every synthetic render frame is alpha=255 ("needs
@@ -514,3 +523,252 @@ def _angle_between_deg(a: np.ndarray, b: np.ndarray) -> float:
         return 180.0
     cosine = float(np.dot(a, b)) / (norm_a * norm_b)
     return float(np.degrees(np.arccos(min(max(cosine, -1.0), 1.0))))
+
+
+@register_step("composite_splat_views")
+class CompositeSplatViewsStep(Step):
+    """Alpha-composite a splat render over every frame close enough to see it.
+
+    inputs: {"images": List[np.ndarray] — the mesh render, one per frame,
+             "splat_images": List[np.ndarray] — `render_splat` over the SAME
+             cameras, in the same order (`pattern: ""` is what gives that),
+             "splat_masks": List[np.ndarray] float32 [0,1] — that render's
+             per-pixel alpha, which `render_splat` publishes as its `masks`,
+             "cameras": List[Camera],
+             "splat_center": Optional[Sequence[float]] — the splat's own
+             centre in world coordinates, which is the pivot the view angle
+             is measured about. `pointmap_splat` publishes it as
+             `splat_stats.world_center`. Falls back to `orbit_target`,
+             "orbit_target": Optional[np.ndarray] (3,),
+             "anchor_position": Optional[np.ndarray] (3,) — where the photo
+             was taken from. Omit it for the world origin, which is where it
+             is: `sam3d_to_world` does not recentre, so the SAM-3D-Body
+             camera IS the world origin,
+             "masks": Optional[List[np.ndarray]] — passed through with the
+             splat's coverage unioned in,
+             "splat_cameras": Optional[List[Camera]] — wire it and the two
+             batches are checked to be the same views rather than assumed}
+    outputs: {"images": List[np.ndarray],
+              "masks": List[np.ndarray] — only when `masks` was wired in,
+              "view_roles": List[dict] — per frame: index, angle, role}
+
+    This is the b2crunner side of body2colmap's `skeleton+splat` composite
+    mode (`c65a7f7`). The geometry, the compositing rule and the 45-degree
+    default are all that commit's; what differs is where the layer comes
+    from. body2colmap rasterises it with gsplat inside
+    `OrbitPipeline.render_splat_layer`, and this project deliberately has no
+    gsplat — `render_splat` shells out to `brush-splat-render` instead, which
+    is what removed its last runtime CUDA toolchain (see pyproject.toml).
+    So the layer is rendered by a separate step and composited here.
+    **See docs/revert-when-body2colmap-drops-gsplat.md**: when body2colmap
+    moves to the brush renderer, this step and its wiring come out in favour
+    of the render mode.
+
+    **The splat render must be on a BLACK background.** `brush-splat-render`
+    writes `rgb = colour*alpha + bg*(1-alpha)`, so with `bg = 0` its output
+    is premultiplied by alpha and the composite is exactly
+
+        out = base * (1 - alpha) + splat_rgb
+
+    On any other background the same expression blends toward that
+    background a second time and the splat comes back washed out — the
+    identical trap body2colmap's commit fixed by adding straight-alpha
+    output (`bg_color=None`) to its own renderer. `render_splat`'s default
+    `bg_color` is already black; this step re-checks what it can (an opaque
+    pixel whose colour is far from the base's cannot prove much, but a
+    fully transparent pixel that is not black is proof of the bug) and
+    refuses rather than quietly producing grey ghosts.
+
+    **Why the cull.** The splat is a 2.5-D shell of the side of the subject
+    one photograph saw. Turn the camera away from that view and the open rim
+    swings into frame as a flare of grazing-incidence Gaussians. body2colmap
+    measured the boundary on a Face_Neck head splat: reads cleanly to about
+    30 degrees, the rim starts flaring by 45, and by 60 the shell is mostly
+    edge. 45 is that measurement, not a guess.
+
+    **The pivot is the splat's centre, not the orbit target.** A head sits
+    well above a full-body orbit target, so a camera 30 degrees up from the
+    equator views the *body* at 30 degrees and the *head* at rather less.
+    body2colmap's `splat_view_angle_deg` measures from the splat's own bbox
+    centre for exactly this reason, and this follows it.
+    """
+
+    PARAMS = (
+        Param("max_angle_deg", float, 45.0,
+              "Composite the splat on every frame whose view of it is within "
+              "this angle of the photograph's. Past it the layer is dropped "
+              "entirely rather than faded: what appears out there is the "
+              "shell's open rim, and a half-transparent rim is still a rim. "
+              "0 disables the compositing", minimum=0.0, maximum=180.0),
+        Param("min_alpha", float, 0.004,
+              "Treat alpha below this as fully transparent. Splat renders "
+              "have a long tail of near-zero alpha that would otherwise tint "
+              "the whole frame by a level or two", minimum=0.0, maximum=1.0,
+              advanced=True),
+    )
+
+    def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+        images: List[np.ndarray] = list(inputs["images"])
+        splat_images: List[np.ndarray] = list(inputs["splat_images"])
+        splat_masks: List[np.ndarray] = list(inputs["splat_masks"])
+        cameras = inputs["cameras"]
+        max_angle = params["max_angle_deg"]
+
+        if not (len(splat_images) == len(splat_masks) == len(images)):
+            raise ValueError(
+                f"composite_splat_views: {len(splat_images)} splat renders and "
+                f"{len(splat_masks)} alphas against {len(images)} frames. The "
+                f"batches are matched by index, which holds because "
+                f"render_splat with `pattern: \"\"` reuses the source dataset's "
+                f"cameras verbatim and in order — a pattern on that step "
+                f"breaks this."
+            )
+
+        # The same cheap proof of index alignment inject_shell_views makes.
+        splat_cameras = inputs.get("splat_cameras")
+        if splat_cameras is not None and cameras:
+            drift = max(
+                float(np.linalg.norm(np.asarray(a.position, dtype=np.float64)
+                                     - np.asarray(b.position, dtype=np.float64)))
+                for a, b in zip(cameras, splat_cameras)
+            )
+            if drift > 1e-4:
+                raise ValueError(
+                    f"composite_splat_views: the splat render's cameras are "
+                    f"not the frame batch's (worst position drift "
+                    f"{drift:.6f}). Render it with `pattern: \"\"` and the "
+                    f"dataset wired, so it reuses these cameras verbatim."
+                )
+
+        masks = inputs.get("masks")
+        masks = None if masks is None else [np.asarray(m).copy() for m in masks]
+
+        if max_angle <= 0.0:
+            logger.info("composite_splat_views: max_angle_deg is 0, nothing "
+                        "composited")
+            return _composite_result(images, masks, [
+                {"index": i, "angle_from_anchor_deg": None, "role": "base"}
+                for i in range(len(images))
+            ])
+
+        pivot = _composite_pivot(inputs)
+        supplied = inputs.get("anchor_position")
+        anchor = (np.zeros(3) if supplied is None
+                  else np.asarray(supplied, dtype=np.float64).reshape(3))
+        source_dir = pivot - anchor
+        if float(np.linalg.norm(source_dir)) < 1e-9:
+            raise ValueError(
+                "composite_splat_views: the camera the photo was taken from "
+                "sits on the splat's centre, so there is no source view "
+                "direction to measure against."
+            )
+
+        view_roles = []
+        for index, camera in enumerate(cameras):
+            direction = pivot - np.asarray(camera.position, dtype=np.float64)
+            angle = _angle_between_deg(direction, source_dir)
+            if angle > max_angle:
+                view_roles.append({"index": index,
+                                   "angle_from_anchor_deg": round(angle, 3),
+                                   "role": "base"})
+                continue
+
+            layer = splat_images[index]
+            alpha = np.asarray(splat_masks[index], dtype=np.float32)
+            if tuple(layer.shape) != tuple(images[index].shape):
+                raise ValueError(
+                    f"composite_splat_views: splat render {index} has shape "
+                    f"{tuple(layer.shape)} against the frame's "
+                    f"{tuple(images[index].shape)}. Render the splat at the "
+                    f"same resolution as the orbit."
+                )
+            _check_premultiplied(layer, alpha, index, params["min_alpha"])
+
+            alpha = np.where(alpha < params["min_alpha"], 0.0, alpha)[..., None]
+            images[index] = np.clip(
+                images[index].astype(np.float32) * (1.0 - alpha)
+                + layer.astype(np.float32),
+                0, 255,
+            ).astype(np.uint8)
+            if masks is not None:
+                # The splat is real subject coverage, exactly as the mesh
+                # silhouette is, so a mask derived from the result has to
+                # include it — body2colmap's `_composite_splat` unions alpha
+                # for the same reason, and excludes the skeleton, which is
+                # an annotation rather than geometry.
+                masks[index] = np.maximum(masks[index], alpha[..., 0])
+
+            view_roles.append({"index": index,
+                               "angle_from_anchor_deg": round(angle, 3),
+                               "role": "composited"})
+
+        composited = sum(1 for role in view_roles if role["role"] == "composited")
+        logger.info(
+            "composite_splat_views: %d/%d frames within %.1f deg of the source "
+            "view take the splat layer",
+            composited, len(images), max_angle,
+        )
+        if composited == 0:
+            logger.warning(
+                "composite_splat_views: no frame is within %.1f deg of the "
+                "source view, so the splat was rendered and then discarded. "
+                "Either anchor_position and the cameras did not come from the "
+                "same render, or the radius is smaller than the path's "
+                "angular step.", max_angle,
+            )
+        return _composite_result(images, masks, view_roles)
+
+
+def _composite_result(images, masks, view_roles) -> Dict[str, Any]:
+    """Only publish `masks` when one was wired in — a step that returns an
+    output a workflow did not ask for is harmless, but one that invents an
+    empty mask batch downstream steps then threshold is not."""
+    result: Dict[str, Any] = {"images": images, "view_roles": view_roles}
+    if masks is not None:
+        result["masks"] = masks
+    return result
+
+
+def _composite_pivot(inputs: Dict[str, Any]) -> np.ndarray:
+    """Where to measure the view angle about: the splat's centre if known.
+
+    See CompositeSplatViewsStep's docstring — for a head on a full-body
+    orbit the splat's centre and the orbit target are not interchangeable.
+    """
+    center = inputs.get("splat_center")
+    if center is None:
+        center = inputs.get("orbit_target")
+    if center is None:
+        raise ValueError(
+            "composite_splat_views: wire either 'splat_center' (the splat's "
+            "own world centre — pointmap_splat publishes it as "
+            "splat_stats.world_center) or 'orbit_target'. The view angle has "
+            "to be measured about something."
+        )
+    return np.asarray(center, dtype=np.float64).reshape(3)
+
+
+def _check_premultiplied(layer: np.ndarray, alpha: np.ndarray, index: int,
+                         min_alpha: float) -> None:
+    """Refuse a splat render that was not made on a black background.
+
+    Only one direction of this is provable from the images alone: where
+    alpha is zero the render must be black, because `colour*0 + bg*1` is
+    the background and nothing else. A non-black value there is proof the
+    caller passed a `bg_color`, and the composite that follows would blend
+    toward it twice.
+    """
+    transparent = alpha < min_alpha
+    if not transparent.any():
+        return
+    worst = int(layer[transparent].max())
+    if worst > 8:
+        raise ValueError(
+            f"composite_splat_views: splat render {index} is {worst}/255 "
+            f"bright where it is fully transparent, so it was rendered on a "
+            f"non-black background. This step composites premultiplied "
+            f"colour (out = base*(1-a) + rgb), which only holds for "
+            f"bg_color [0, 0, 0] — anything else blends toward the "
+            f"background twice. Set `bg_color: [0.0, 0.0, 0.0]` on the "
+            f"render_splat that feeds this step."
+        )

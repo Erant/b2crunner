@@ -10,12 +10,19 @@ workflows ship:
 | workflow | starts from | stages |
 |---|---|---|
 | `fast_helical_full` | an existing dataset | the full port of the ComfyUI `fast helical` pipeline. `--param run_upscale=false` drops the SeedVR2 upscale (the old `fast_helical` workflow) to isolate it when output looks wrong |
-| `fast_helical_native` | a front/back reference sheet | a bootstrap prologue — split the sheet, reconstruct a body, build a photo-to-splat shell from the front half with `pointmap_splat`, re-pose the body to agree with it, render a shallow 380° helix whose frames near the source view are photoreal renders off that shell — then `fast_helical_full`'s stages verbatim |
+| `fast_helical_native` | a front/back reference sheet | a bootstrap prologue — split the sheet, reconstruct a body, nod the craned head back, build a Gaussian splat of the subject's face from a crop of the front half and composite it onto a circular orbit of outline+skeleton renders, warp the photo onto the anchor frame — then `fast_helical_full`'s stages verbatim |
 
-**Neither has been run end-to-end on a pod**, and `fast_helical_native` is
+A third file, `fast_helical_shell.yaml`, is **parked**: it replaces that
+whole bootstrap with a photo-to-splat *shell* — a body-wide Gaussian shell
+from `pointmap_splat`, a pose refit against it, a shallow 380° helix, and a
+band of frames rendered off the shell instead of drawn. Nothing selects it
+(the web UI maps an image upload to `fast_helical_native` by name), so it
+runs only if you ask: `python -m pipeline.cli run fast_helical_shell`. It is
+kept in the tree so the face splat can be tested without it.
+
+**Neither shipped workflow has been run end-to-end on a pod**, and `fast_helical_native` is
 the less proven of the two: its bootstrap prologue has never executed on
-real hardware, though the shell half of it has run once locally outside the
-workflow machinery. Past the prologue it is a copy of `fast_helical_full` —
+real hardware. Past the prologue it is a copy of `fast_helical_full` —
 kept in sync by `tests/test_workflows.py`. The
 [coverage section](pipeline/README.md#coverage-vs-the-comfyui-node-pack)
 tracks what is verified against what.
@@ -39,7 +46,9 @@ pip install -r requirements.txt
 The Gaussian-splat steps additionally need `plyfile` for PLY I/O, and
 `render_splat` needs the `brush-splat-render` binary on `PATH` (built
 alongside `brush` in `docker/Dockerfile`) — see `requirements.txt`.
-Face-landmark detection needs `mediapipe` (CPU-only). `pointmap_splat`
+Face-landmark detection needs `mediapipe` (CPU-only); no shipped workflow
+uses it any more — `fast_helical_native`'s face splat replaced it — but the
+step and its `render` params are still there. The `pointmap_splat` family
 needs `scipy`, which arrives anyway as a transitive dependency of
 `body2colmap` (via `pyrender`).
 

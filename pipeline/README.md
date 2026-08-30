@@ -150,27 +150,42 @@ pipeline/
 │   │                            — the old fast_helical.yaml — for
 │   │                            isolating the upscaler when output looks
 │   │                            wrong
-│   └── fast_helical_native.yaml a bootstrap prologue from a front/back
+│   ├── fast_helical_native.yaml a bootstrap prologue from a front/back
 │                                sheet, then fast_helical_full.yaml's steps
-│                                verbatim. Since 2026-08-29 that prologue
-│                                runs through a photo-to-splat shell: split
-│                                → sam3d_body → detect_face_landmarks →
-│                                rmbg + sapiens2_lite + pointmap_splat build
-│                                a Gaussian shell from the sheet's front
-│                                half → refine_pose_to_splat re-poses the
-│                                body to agree with it → render draws a 380°
-│                                helix (not a circle, and no longer anchored)
-│                                → render_splat re-renders the shell along
-│                                those same cameras → inject_shell_views
-│                                swaps them into the frames within 15° of the
-│                                source view and marks them as the batch's
-│                                real-photograph frames. That last step
-│                                replaced generate_firstlast + inject_anchor,
-│                                and the pose fit replaced fix_head_angle
-│                                (INCOMPATIBLE_STEPS). rmbg/
+│                                verbatim: split → sam3d_body →
+│                                head_angle_fix → a face branch
+│                                (sapiens2_seg → crop_to_box → sapiens2_seg
+│                                → sapiens2_lite → face_pointmap_splat)
+│                                builds a Gaussian head from a crop of the
+│                                sheet's front half → render draws an
+│                                anchored circular orbit of outline+skeleton
+│                                frames → render_splat + composite_splat_views
+│                                put that face on every drawing within 45° of
+│                                the source view → generate_firstlast +
+│                                inject_anchor warp the photo onto the anchor
+│                                frame. Since 2026-08-29 the face splat has
+│                                replaced detect_face_landmarks; nothing else
+│                                about this bootstrap changed, deliberately —
+│                                it is the file for testing the face in
+│                                isolation. rmbg/
 │                                wan22_vace_denoise/sapiens2/sam3d_body
 │                                verified on real hardware, render's own
 │                                rasterisation not — see its STATUS note
+│   └── fast_helical_shell.yaml  PARKED, selected by nothing. The same tail,
+│                                but the whole bootstrap replaced by a
+│                                photo-to-splat shell: rmbg + sapiens2_lite +
+│                                pointmap_splat build a body-wide Gaussian
+│                                shell → refine_pose_to_splat re-poses the
+│                                fit to agree with it → a 380° helix (not a
+│                                circle, and not anchored) → render_splat
+│                                re-renders the shell along those same
+│                                cameras → inject_shell_views swaps it into
+│                                the frames within 15° of the source view and
+│                                marks them as the batch's real-photograph
+│                                frames, replacing generate_firstlast +
+│                                inject_anchor. The pose fit replaces
+│                                fix_head_angle (INCOMPATIBLE_STEPS). Carries
+│                                the same face branch as the file above
 └── tests/                 stdlib unittest, no pytest dependency. Run with
                            `python -m unittest discover -s tests -t .`.
                            Most tests are golden-output tests against
@@ -564,6 +579,24 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   `fast_helical_native.yaml`'s bootstrap, which is the thing it was written
   for: photographic reference views for VACE around the source view, and a
   non-degenerate helical first pass. Never run on a pod.
+- `face_pointmap_splat` (`pointmap_splat.py`) — the same step against a
+  head crop, and the reason `PointmapSplatStep` is now a base class with two
+  registered specializations rather than one step. It differs in exactly two
+  things: `_source_intrinsics`, which re-expresses SAM-3D-Body's camera on
+  the crop's pixel grid so a crop pixel still unprojects onto the ray through
+  the full-image pixel it was cut from, and two measured defaults
+  (`splat_scale` 0.5, `fill_max_frac` 0.05 — a segmentation mask of a head
+  fragments without hole filling where an RMBG matte of a body must never be
+  filled). Fed by `sapiens2_seg` (a Face_Neck mask, `parts` configurable) and
+  `crop_to_box`. Synthetic tests only; the gate is
+  `tests/test_face_splat.py::TestCropIsANoOpOnTheRays`.
+- `composite_splat_views` (`anchor_stub.py`) — alpha-composites that face
+  onto the skeleton drawings on every frame within 45° of the source view,
+  which is roughly half the orbit against the shell band's 15. This is
+  b2crunner's stand-in for body2colmap's `skeleton+splat` render mode, whose
+  geometry and constants it takes: that mode rasterises through gsplat, which
+  this project dropped. **See `docs/revert-when-body2colmap-drops-gsplat.md`
+  — this step comes back out when body2colmap moves to the brush renderer.**
 - `refine_pose_to_splat` (`pose_refine.py`) — re-poses a SAM-3D-Body fit so
   its mesh agrees with that shell in novel views, which is what stops the
   skeleton overlay drifting off the subject a few degrees either side of the

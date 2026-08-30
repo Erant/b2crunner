@@ -38,6 +38,27 @@ comes out soft, which is exactly what the silhouette alpha wants. Normals
 come from the existing `sapiens2_lite` step rather than being re-inferred
 here.
 
+Two specializations
+-------------------
+`PointmapSplatStep` is the base and is not registered. What a workflow
+names is one of:
+
+  * **`pointmap_splat`** — the whole subject from the whole photograph.
+    The body shell described everywhere below; unchanged.
+  * **`face_pointmap_splat`** — a head, from a crop of that same
+    photograph, with a segmentation mask instead of RMBG's matte. It exists
+    because Sapiens2 resizes its input to 1024x768, so a face occupying 6%
+    of a full-body frame reaches the network as ~40 px of head and there is
+    no relief left in it to integrate. Cropping first is what puts the face
+    in front of the model at the resolution masktest measured on.
+
+They differ in exactly two things: `_source_intrinsics`, which says where
+the image sits in SAM-3D-Body's camera (the full frame, or a crop of it),
+and two measured defaults (`splat_scale`, `fill_max_frac`). Everything
+between — the mask morphology, the intrinsics fit, the depth solve, the
+scale fit to the mesh, the Gaussian construction, the PLY layout — is
+shared verbatim, which is the point of the split.
+
 How it is wired
 ---------------
 `workflows/fast_helical_native.yaml` is that wiring; read it for the whole
@@ -245,7 +266,7 @@ import cv2
 import numpy as np
 
 from ..registry import register_step
-from ..step import REQUIRED, Param, Step
+from ..step import REQUIRED, Param, Step, with_defaults
 
 logger = logging.getLogger(__name__)
 
@@ -1012,9 +1033,21 @@ def _write_debug(directory: Path, image: np.ndarray, mask: np.ndarray,
 # ---------------------------------------------------------------------------
 # the step
 # ---------------------------------------------------------------------------
-@register_step("pointmap_splat")
 class PointmapSplatStep(Step):
     """Single photo -> a Gaussian-splat shell in SAM-3D-Body's world.
+
+    **The base class, not a registered step.** Two specializations sit at
+    the bottom of this module and they are what a workflow names:
+    `pointmap_splat` (a whole body, from the full frame) and
+    `face_pointmap_splat` (a head, from a crop of it). See
+    `_source_intrinsics` for the one thing that genuinely differs between
+    them; everything else is a pair of measured defaults.
+
+    Instantiable and complete on its own, deliberately: the full-frame
+    behaviour lives here as the default rather than in a subclass, because
+    a whole image is the general case and a crop is the special one. That
+    is also what keeps tests/test_pointmap_splat.py exercising the base
+    directly.
 
     inputs:  {"image": HxWx3 BGR uint8,          the photo sam3d_body was run on
               "mask": HxW float32 [0,1],         rmbg's matte for that photo
@@ -1177,7 +1210,8 @@ class PointmapSplatStep(Step):
             outputs, source_sizes=[(height, width)], target_sizes=[(height, width)]
         )
         if self._device.startswith("cuda"):
-            logger.info("pointmap_splat: pointmap done, peak VRAM %.2f GB",
+            logger.info("%s: pointmap done, peak VRAM %.2f GB",
+                        self.STEP_NAME or "pointmap_splat",
                         torch.cuda.max_memory_allocated() / 1e9)
         return result[0]["pointmap"].permute(1, 2, 0).float().cpu().numpy().astype(np.float32)
 
@@ -1190,16 +1224,38 @@ class PointmapSplatStep(Step):
             if params["dtype"] != "float32":
                 raise
             logger.warning(
-                "pointmap_splat: out of memory at float32, retrying in bfloat16 "
-                "(expect depth terracing of a few mm; see this module's docstring)"
+                "%s: out of memory at float32, retrying in bfloat16 "
+                "(expect depth terracing of a few mm; see this module's docstring)",
+                self.STEP_NAME or "pointmap_splat",
             )
             torch.cuda.empty_cache()
             return self._infer_pointmap(image_bgr, "bfloat16")
+
+    # -- the one seam between the specializations -------------------------
+    def _source_intrinsics(self, inputs: Dict[str, Any], params: Dict[str, Any],
+                           width: int, height: int) -> Tuple[float, float, float]:
+        """The pinhole every pixel of `inputs["image"]` is unprojected through.
+
+        SAM-3D-Body's camera, expressed on *this image's* pixel grid. The
+        whole placement argument is that a Gaussian ends up on the ray
+        through the full-image pixel it came from, so a step that is handed
+        a crop has to say where that crop sits — see
+        `FacePointmapSplatStep._source_intrinsics`, which is the only
+        override.
+
+        Here, the image IS the full frame: the focal is the fit's own and
+        the principal point is the image centre, which is what SAM-3D-Body
+        assumes (MoGe-2 returns a centred principal point) and what
+        body2colmap assumes for every camera it builds.
+        """
+        focal = float(inputs["mesh_output"]["focal_length"])
+        return focal, width / 2.0, height / 2.0
 
     # -- run --------------------------------------------------------------
     def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
         from body2colmap.splat_scene import SplatScene
 
+        label = self.STEP_NAME or type(self).__name__
         image = np.asarray(inputs["image"])
         matte = np.asarray(inputs["mask"], dtype=np.float32)
         normal_map = np.asarray(inputs["normal_map"], dtype=np.float32)
@@ -1209,16 +1265,14 @@ class PointmapSplatStep(Step):
         for name, array in (("mask", matte), ("normal_map", normal_map)):
             if array.shape[:2] != (height, width):
                 raise ValueError(
-                    f"pointmap_splat: '{name}' is {array.shape[1]}x{array.shape[0]} "
+                    f"{label}: '{name}' is {array.shape[1]}x{array.shape[0]} "
                     f"but 'image' is {width}x{height}. All three must be the same "
                     f"photo — this step's whole placement argument rests on it."
                 )
 
-        # SAM-3D-Body's camera: focal from the fit (MoGe-2 by default),
-        # principal point at the image centre — the convention body2colmap
-        # assumes for every camera it builds.
-        focal = float(mesh_output["focal_length"])
-        cx, cy = width / 2.0, height / 2.0
+        # SAM-3D-Body's camera on this image's pixel grid — the full frame's
+        # here, a crop's in the face specialization. See _source_intrinsics.
+        focal, cx, cy = self._source_intrinsics(inputs, params, width, height)
         vertices_cam = (np.asarray(mesh_output["vertices"], dtype=np.float64)
                         + np.asarray(mesh_output["cam_t"], dtype=np.float64).reshape(3))
 
@@ -1228,10 +1282,10 @@ class PointmapSplatStep(Step):
         mask = clean_mask(matte, params["mask_threshold"], params["fill_max_frac"],
                           params["min_component_frac"], params["close_iters"])
         if mask.sum() < 64:
-            raise ValueError("pointmap_splat: the foreground matte is essentially empty")
+            raise ValueError(f"{label}: the foreground matte is essentially empty")
         alpha = soft_alpha(matte, mask, params["alpha_erode"])
-        logger.info("pointmap_splat: mask %d px (%.1f%% of frame), %d soft-edge px",
-                    int(mask.sum()), 100 * mask.mean(),
+        logger.info("%s: mask %d px (%.1f%% of frame), %d soft-edge px",
+                    label, int(mask.sum()), 100 * mask.mean(),
                     int(((alpha > 0.02) & (alpha < 0.98)).sum()))
 
         xyz_pointmap = self._pointmap(image, params)
@@ -1241,17 +1295,17 @@ class PointmapSplatStep(Step):
         # discarded in favour of SAM-3D-Body's.
         f_pointmap, cx_pointmap, cy_pointmap, reproj_rms = fit_intrinsics(xyz_pointmap, mask)
         logger.info(
-            "pointmap_splat: pointmap implies f=%.1f cx=%.1f cy=%.1f (RMS %.2f px); "
+            "%s: pointmap implies f=%.1f cx=%.1f cy=%.1f (RMS %.2f px); "
             "using SAM-3D-Body's f=%.1f cx=%.1f cy=%.1f (ratio %.3f)",
-            f_pointmap, cx_pointmap, cy_pointmap, reproj_rms, focal, cx, cy,
+            label, f_pointmap, cx_pointmap, cy_pointmap, reproj_rms, focal, cx, cy,
             focal / f_pointmap if f_pointmap else float("nan"),
         )
         if reproj_rms > 2.0:
             logger.warning(
-                "pointmap_splat: the pointmap is a poor pinhole fit (RMS %.2f px). "
+                "%s: the pointmap is a poor pinhole fit (RMS %.2f px). "
                 "masktest measured 3.4 px over a full body, so this is expected "
                 "there; well above it means the depth map is not trustworthy",
-                reproj_rms,
+                label, reproj_rms,
             )
 
         stats: Dict[str, Any] = {
@@ -1275,9 +1329,9 @@ class PointmapSplatStep(Step):
             scale, align_stats = depth_scale_to_mesh(z_raw, mask, front, bin_px)
             stats["depth_alignment"] = dict(align_stats, scale=scale)
             logger.info(
-                "pointmap_splat: depth scale to mesh %.4f over %d bins "
+                "%s: depth scale to mesh %.4f over %d bins "
                 "(p10-p90 of the per-bin ratio %.4f-%.4f)",
-                scale, align_stats["bins_compared"],
+                label, scale, align_stats["bins_compared"],
                 *align_stats["scale_ratio_p10_p90"],
             )
         z_aligned = z_raw * scale
@@ -1289,9 +1343,9 @@ class PointmapSplatStep(Step):
             spread_after = float(np.ptp(np.percentile(z_aligned[mask], [2, 98])))
             stats["depth_spread_m"] = {"pointmap": spread_before, "mesh_prior": spread_after}
             logger.info(
-                "pointmap_splat: depth prior from the mesh — p2..p98 depth "
+                "%s: depth prior from the mesh — p2..p98 depth "
                 "spread %.3f m (pointmap) -> %.3f m (mesh)",
-                spread_before, spread_after,
+                label, spread_before, spread_after,
             )
 
         # Normals, and the depth solve, both in SAM-3D-Body's camera.
@@ -1310,7 +1364,7 @@ class PointmapSplatStep(Step):
             "before_median": float(np.median(before)) if before.size else None,
             "after_median": float(np.median(after)) if after.size else None,
         }
-        logger.info("pointmap_splat: normal agreement median %.1f deg -> %.1f deg",
+        logger.info("%s: normal agreement median %.1f deg -> %.1f deg", label,
                     float(np.median(before)) if before.size else float("nan"),
                     float(np.median(after)) if after.size else float("nan"))
 
@@ -1324,11 +1378,15 @@ class PointmapSplatStep(Step):
         path = Path(params["filepath"])
         write_ply(path, gaussians)
         stats["n_splats"] = int(len(gaussians["means"]))
-        stats["world_bounds"] = [
-            [float(v) for v in gaussians["means"].min(0)],
-            [float(v) for v in gaussians["means"].max(0)],
-        ]
-        logger.info("pointmap_splat: wrote %d gaussians to %s", stats["n_splats"], path)
+        lo = gaussians["means"].min(0)
+        hi = gaussians["means"].max(0)
+        stats["world_bounds"] = [[float(v) for v in lo], [float(v) for v in hi]]
+        # The pivot a view-angle cull measures around. body2colmap's
+        # `OrbitPipeline.splat_view_angle_deg` uses the splat's own bbox
+        # centre for exactly this, and for a head sitting well above a
+        # full-body orbit target the two are not interchangeable.
+        stats["world_center"] = [float(v) for v in (lo + hi) / 2.0]
+        logger.info("%s: wrote %d gaussians to %s", label, stats["n_splats"], path)
 
         if params["debug_dir"]:
             _write_debug(Path(params["debug_dir"]), image, mask, alpha,
@@ -1343,3 +1401,142 @@ class PointmapSplatStep(Step):
             sh_degree=0,
         )
         return {"splat_path": str(path), "splat_scene": scene, "splat_stats": stats}
+
+
+# ---------------------------------------------------------------------------
+# The two specializations. Everything above is shared; these are the names a
+# workflow writes.
+# ---------------------------------------------------------------------------
+@register_step("pointmap_splat")
+class BodyPointmapSplatStep(PointmapSplatStep):
+    """The whole subject, from the whole photograph. `PointmapSplatStep` verbatim.
+
+    Thin on purpose. The base is already the full-frame case (see its
+    docstring), so this class exists to carry the registered name and to
+    state the input contract that goes with it: the matte is RMBG-2.0's,
+    over the same photo `sam3d_body` was fitted to, at that photo's own
+    resolution.
+
+    It keeps the name `pointmap_splat` rather than becoming
+    `body_pointmap_splat` for symmetry with `face_pointmap_splat`: the name
+    is written into workflows/fast_helical_native.yaml, the BOOTSTRAPS table
+    in tests/test_workflows.py, pipeline/models.py's prefetch registry,
+    docs/runpod.md and two READMEs, and renaming it buys nothing but the
+    symmetry.
+    """
+
+
+@register_step("face_pointmap_splat")
+class FacePointmapSplatStep(PointmapSplatStep):
+    """A head, from a crop of that same photograph.
+
+    Same numerics, same world. The difference is that the image handed to
+    it is a *cut* of the frame `sam3d_body` was fitted to, so the camera it
+    unprojects through has to be SAM-3D-Body's camera re-expressed on the
+    crop's pixel grid — see `_source_intrinsics`. Get that wrong and every
+    Gaussian lands on the wrong ray, which is the one failure this whole
+    approach has no way to absorb.
+
+    Why a crop at all: Sapiens2 resizes its input to 1024x768. A face
+    occupying 6% of a 867x1552 full-body frame arrives at the network as
+    roughly 40 px of head, and no amount of normal integration recovers
+    relief that was never sampled. Cropping first is what puts the face in
+    front of the model at the resolution masktest measured everything on.
+
+    inputs:  the base's four, plus
+             {"crop_info": dict} — `crop_to_box`'s output:
+                 {"box": (x0, y0, x1, y1),   in FULL-image pixels
+                  "full_size": (W, H),       the frame the box indexes into
+                  "crop_size": (w, h)}       what was actually emitted
+    outputs: the base's three; `splat_stats` additionally carries `crop`.
+
+    Two defaults differ from the body's, both measured (masktest's SPEC.md):
+
+      * `splat_scale` 0.5 rather than 0.4. The tangential radius is
+        resolution-dependent, and a head crop *downsamples* into the
+        network's 1024x768 where a full body upsamples out of it, so
+        adjacent output pixels sit further apart in world terms and the
+        primitives have to be correspondingly larger to close.
+      * `fill_max_frac` 0.05 rather than 0. Hole filling is wrong for an
+        RMBG matte of a body — see `fill_small_holes` — and *required* for a
+        segmentation mask of a head, where eyes, nostrils and lips are
+        separate classes and the mask fragments into about a dozen pieces
+        without it. The merged eye/mouth hole measures 2.7% of a head mask,
+        which is what 0.05 is sized against.
+    """
+
+    PARAMS = with_defaults(
+        PointmapSplatStep.PARAMS,
+        splat_scale=0.5,
+        fill_max_frac=0.05,
+    )
+
+    def _source_intrinsics(self, inputs: Dict[str, Any], params: Dict[str, Any],
+                           width: int, height: int) -> Tuple[float, float, float]:
+        """SAM-3D-Body's pinhole, re-expressed on the crop's pixel grid.
+
+        A full-image pixel `u_full` and the crop pixel `u_c` it became are
+        related by `u_full = x0 + r * u_c`, with `r` the crop's resize
+        factor (1 when the crop is emitted at native resolution, which is
+        what `crop_to_box` does). Substituting that into the full frame's
+        pinhole `u_full = f_s * X/Z + W/2` gives
+
+            f  = f_s / r
+            cx = (W/2 - x0) / r
+            cy = (H/2 - y0) / r
+
+        so unprojecting a crop pixel lands on exactly the ray through the
+        full-image pixel it was cut from. This is the same relation
+        body2colmap's `splat_anchor.compute_anchor_transform` derives in the
+        other direction — it carries a splat built in a crop's own frame
+        into the full image's — except that doing it here means the splat is
+        written in the mesh's world to begin with and needs no anchoring at
+        all.
+
+        A non-uniform resize is refused rather than averaged away: it would
+        need two focals, and every camera downstream carries one.
+        """
+        info = inputs["crop_info"]
+        try:
+            x0, y0, x1, y1 = (float(v) for v in info["box"])
+            width_full, height_full = (float(v) for v in info["full_size"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(
+                f"face_pointmap_splat: 'crop_info' must carry 'box' "
+                f"(x0, y0, x1, y1 in full-image pixels) and 'full_size' "
+                f"(width, height), as crop_to_box writes them. Got {info!r}"
+            ) from exc
+
+        if x1 <= x0 or y1 <= y0:
+            raise ValueError(f"face_pointmap_splat: degenerate crop box {info['box']}")
+
+        ratio_x = (x1 - x0) / width
+        ratio_y = (y1 - y0) / height
+        if abs(ratio_x - ratio_y) > 1e-3 * max(ratio_x, ratio_y):
+            raise ValueError(
+                f"face_pointmap_splat: crop box {info['box']} against a "
+                f"{width}x{height} crop implies a non-uniform resize "
+                f"({ratio_x:.4f} horizontally vs {ratio_y:.4f} vertically). "
+                f"The crop must keep the frame's aspect ratio — one camera "
+                f"carries one focal length."
+            )
+
+        ratio = 0.5 * (ratio_x + ratio_y)
+        focal = float(inputs["mesh_output"]["focal_length"]) / ratio
+        cx = (width_full / 2.0 - x0) / ratio
+        cy = (height_full / 2.0 - y0) / ratio
+        logger.info(
+            "face_pointmap_splat: crop (%.0f, %.0f)-(%.0f, %.0f) of %.0fx%.0f at "
+            "%.3f px/px -> f=%.1f cx=%.1f cy=%.1f",
+            x0, y0, x1, y1, width_full, height_full, ratio, focal, cx, cy,
+        )
+        return focal, cx, cy
+
+    def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+        result = super().run(inputs, params)
+        info = inputs["crop_info"]
+        result["splat_stats"]["crop"] = {
+            "box": [int(v) for v in info["box"]],
+            "full_size": [int(v) for v in info["full_size"]],
+        }
+        return result

@@ -153,10 +153,21 @@ class TestRequiredForSteps(unittest.TestCase):
             # that a fresh pod blocks on before the run starts, on top of
             # the 6.2 the normal head already costs. Both are Sapiens2 1b
             # repos and neither substitutes for the other.
+            # sapiens2_pointmap and sapiens2_seg joined this set, and
+            # mediapipe left it, when the face splat replaced the MediaPipe
+            # landmark overlay: three 1b Sapiens2 repos, ~19 GB of Sapiens2
+            # alone that a fresh pod blocks on before the run starts.
             "fast_helical_native": {"rmbg", "sapiens2", "sapiens2_pointmap",
-                                    "sam3dbody", "moge2",
+                                    "sapiens2_seg", "sam3dbody", "moge2",
                                     "wan22", "wan22_fp8", "wan22_lora",
-                                    "seedvr2", "mediapipe"},
+                                    "seedvr2"},
+            # The parked shell bootstrap needs the same set: it runs the
+            # pointmap head twice (a body shell and a face) and re-poses the
+            # fit, which reads sam3dbody's checkpoint again.
+            "fast_helical_shell": {"rmbg", "sapiens2", "sapiens2_pointmap",
+                                   "sapiens2_seg", "sam3dbody", "moge2",
+                                   "wan22", "wan22_fp8", "wan22_lora",
+                                   "seedvr2"},
             "fast_helical_full": {"rmbg", "sapiens2", "wan22", "wan22_fp8",
                                   "wan22_lora", "seedvr2"},
         }

@@ -128,6 +128,36 @@ def coerce_param(value: Any, param: "Param", where: str) -> Any:
     return value
 
 
+def with_defaults(params: Tuple["Param", ...], **overrides: Any) -> Tuple["Param", ...]:
+    """`params` with some defaults replaced — a specialization's declaration.
+
+    Two steps that share their numerics but not their tuning are the case
+    this exists for: `pointmap_splat` (a whole body, RMBG's matte) and
+    `face_pointmap_splat` (a head crop, a segmentation mask) run identical
+    code and disagree on two measured constants. Re-typing the base's whole
+    PARAMS tuple to change them would put every *other* default in two
+    places, where they drift silently.
+
+    `Param` is a frozen dataclass, so this is `dataclasses.replace` over the
+    tuple, order preserved. An override naming a param the base does not
+    declare raises — same reasoning as `Step.resolve_params`: a typo that
+    quietly does nothing is worse than a refusal.
+    """
+    from dataclasses import replace
+
+    declared = {param.name for param in params}
+    unknown = sorted(set(overrides) - declared)
+    if unknown:
+        raise ParamError(
+            f"with_defaults: no such param(s) {', '.join(unknown)}. "
+            f"The base declares: {', '.join(param.name for param in params)}"
+        )
+    return tuple(
+        replace(param, default=overrides[param.name]) if param.name in overrides else param
+        for param in params
+    )
+
+
 class Step(ABC):
     # The params this step accepts. Empty means "undeclared": the runner
     # passes a workflow's overrides through untouched and the UI has nothing

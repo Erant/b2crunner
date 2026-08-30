@@ -268,7 +268,8 @@ downloading; `--no-wait-for-models` does it for a single CLI run.
 | `sapiens2_lite` | `facebook/sapiens2-normal-1b` | `from_pretrained` | `$HF_HOME` |
 | `sam3d_body` | `facebook/sam-3d-body-dinov3` **(gated)** + `Ruicheng/moge-2-vitl-normal` (FOV) | `snapshot_download` / `from_pretrained` | `$HF_HOME` |
 | `refine_pose_to_splat` | `facebook/sam-3d-body-dinov3` **(gated)** — the same checkpoint, replayed | `snapshot_download` | `$HF_HOME` |
-| `pointmap_splat` | `facebook/sapiens2-pointmap-1b` | `from_pretrained` | `$HF_HOME` |
+| `pointmap_splat`, `face_pointmap_splat` | `facebook/sapiens2-pointmap-1b` | `from_pretrained` | `$HF_HOME` |
+| `sapiens2_seg` | `facebook/sapiens2-seg-1b` | `from_pretrained` | `$HF_HOME` |
 | `wan22_vace_denoise` | `linoyts/Wan2.2-VACE-Fun-14B-diffusers` + `lightx2v/Wan2.2-Lightning` LoRAs | `from_pretrained` / `hf_hub_download` | `$HF_HOME` |
 | `seedvr2` | `seedvr2_ema_3b_fp8_e4m3fn` + `ema_vae_fp16` | its vendored downloader | `$B2C_MODELS_DIR` = `/data/models/SEEDVR2` |
 | `detect_face_landmarks` | MediaPipe `.task` / `.tflite` | Google Storage URL | `$B2C_MODELS_DIR/mediapipe` |
