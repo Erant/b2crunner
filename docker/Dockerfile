@@ -90,9 +90,37 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # That diff also turned up a third flag, --total-steps, which is absent from
 # BOTH branches: upstream renamed it --total-train-iters and the fork carries
 # the rename. Fixed on the Python side in steps/brush.py, not here.
+#
+# BRUSH_REF is the commit that branch tip is expected to be, and it is not
+# decoration: it is what makes a moved pin invalidate this stage's cache.
+# `git clone --depth 1 --branch X` bakes no remote state into the RUN text,
+# so Docker matches its old cache record however far the branch has moved —
+# which is how `erantimus/b2crunner:c35b577` shipped a brush two commits
+# behind and nothing caught it (docs/docker-build-notes.md, the 2026-08-25
+# update). `--no-cache-filter brush-builder` does not fix that on its own:
+# the stage re-executes, and the runtime stage's `COPY --from=brush-builder`
+# still reports CACHED and keeps the old binary, because a COPY's cache key
+# comes from the producing stage's *key*, not from what it produced. An ARG
+# referenced in the RUN below is part of that key, so moving this line is
+# what correctly invalidates both.
+#
+# It is also checked, which is the half `--no-cache-filter brush-builder,runtime`
+# never gave: if the branch has moved past the pin, the build FAILS here
+# rather than producing an image whose brush is a surprise. Moving the pin is
+# a one-line edit; reconstructing which commit a shipped binary came from
+# meant diffing its `--help` against the branch's history.
 ARG BRUSH_BRANCH=normal-map-supervision
+ARG BRUSH_REF=8eed7a61f48bbfb92a7326b52b5f86692d1d40ec
 RUN git clone --depth 1 --branch ${BRUSH_BRANCH} \
-        https://github.com/Erant/brush.git /src/brush
+        https://github.com/Erant/brush.git /src/brush \
+    && cd /src/brush \
+    && head="$(git rev-parse HEAD)" \
+    && if [ "$head" != "${BRUSH_REF}" ]; then \
+           echo "brush ${BRUSH_BRANCH} is at $head, not the pinned ${BRUSH_REF}." >&2; \
+           echo "Either the branch moved (update BRUSH_REF, and check steps/brush.py" >&2; \
+           echo "and steps/splat.py still match its CLI) or --build-arg BRUSH_REF is stale." >&2; \
+           exit 1; \
+       fi
 WORKDIR /src/brush
 
 # Two binaries out of this one clone: `brush` (apps/brush-app, training +
@@ -119,9 +147,14 @@ WORKDIR /src/brush
 # older tip renders frames nothing downstream then filters. It degrades
 # loudly rather than silently: an old renderer rejects --confidence
 # outright, and a new renderer against an old training's .ply warns that it
-# found no ev_* block and falls back to plain alpha. The clone above is
-# --depth 1 --branch, i.e. always that branch's tip, so this is a question
-# of when the image was last built, not of a pin to move.
+# found no ev_* block and falls back to plain alpha.
+#
+# 2026-08-30: and past the MIXED ALPHA MODES commit (8eed7a61), which is
+# what BRUSH_REF above pins. steps/brush.py stopped passing --alpha-mode so
+# that a run can mix masked and transparent views, and passes
+# --normalize-masked-loss when it does; both are that commit's. An older
+# binary rejects the second flag outright and silently flattens the mix on
+# the first, so the pin is the check that they arrive together.
 RUN cargo build --release -p brush-app -p brush-splat-render \
     && install -m 0755 target/release/brush /out-brush \
     && install -m 0755 target/release/brush-splat-render /out-brush-splat-render
