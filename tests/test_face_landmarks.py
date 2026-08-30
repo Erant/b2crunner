@@ -249,3 +249,134 @@ class TestDetectionEndToEnd(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+class TestFaceLandmarkMask(unittest.TestCase):
+    """The face-only region, and the crop mapping it depends on.
+
+    The mapping is the part worth testing hardest. `face_landmark_mask`
+    receives landmarks in the FULL frame's normalized coordinates and a
+    matte on a CROP's pixel grid, and if it maps between them wrongly the
+    result is not an error — it is a plausible-looking mask over the wrong
+    part of the face, which is exactly the failure that is invisible until
+    a pod run.
+    """
+
+    FULL = (400, 600)  # width, height
+
+    def _landmarks(self, cx=0.5, cy=0.4, rx=0.1, ry=0.13, n=64):
+        """An ellipse of landmark points, in normalized full-frame coords."""
+        t = np.linspace(0, 2 * np.pi, n, endpoint=False)
+        return {
+            "source": "mediapipe",
+            "landmarks": np.stack(
+                [cx + rx * np.cos(t), cy + ry * np.sin(t), np.zeros(n)], 1
+            ).astype(np.float32),
+            "image_size": self.FULL,
+        }
+
+    def _run(self, inputs, **params):
+        return run_step("face_landmark_mask", inputs, params)
+
+    # -- the region -------------------------------------------------------
+    def _full_frame(self, **params):
+        """The hull against a matte covering the whole frame."""
+        full = np.ones((self.FULL[1], self.FULL[0]), np.float32)
+        return self._run({"face_landmarks": self._landmarks(), "mask": full},
+                         **params)["mask"]
+
+    def test_the_region_takes_the_mattes_grid_and_dtype(self):
+        mask = self._full_frame()
+        self.assertEqual(mask.shape, (self.FULL[1], self.FULL[0]))
+        self.assertEqual(mask.dtype, np.float32)
+
+    def test_a_matte_is_required(self):
+        """The hull alone takes background with it wherever the head is
+        turned and its convex boundary cuts past the cheek."""
+        with self.assertRaises(KeyError) as caught:
+            self._run({"face_landmarks": self._landmarks()})
+        self.assertIn("mask", str(caught.exception))
+
+    def test_the_hull_covers_the_landmarks_and_not_the_far_corner(self):
+        mask = self._full_frame()
+        self.assertGreater(mask[int(0.4 * 600), int(0.5 * 400)], 0.99)  # centre
+        self.assertEqual(mask[0, 0], 0.0)                               # corner
+
+    def test_the_edge_is_feathered_not_cut(self):
+        """A hard edge hands pointmap_splat a rim of fully opaque Gaussians
+        and the face reads as a sticker — see soft_alpha."""
+        soft = self._full_frame()
+        hard = self._full_frame(feather_frac=0.0)
+        partial = ((soft > 0.02) & (soft < 0.98)).sum()
+        self.assertGreater(partial, 100)
+        self.assertEqual(((hard > 0.02) & (hard < 0.98)).sum(), 0)
+
+    def test_dilate_grows_the_region(self):
+        tight = self._full_frame(dilate_frac=0.0, feather_frac=0.0)
+        grown = self._full_frame(dilate_frac=0.2, feather_frac=0.0)
+        self.assertGreater(grown.sum(), tight.sum())
+
+    # -- the intersection, which is the point ------------------------------
+    def _crop_info(self, box, crop_size):
+        return {"box": box, "full_size": self.FULL, "crop_size": crop_size}
+
+    def test_a_matte_is_cut_to_the_hull_on_the_crops_grid(self):
+        """The landmarks say where the face is in the FULL frame; the matte
+        lives on a crop of it. Get the mapping wrong and the mask lands on
+        the wrong part of the face without raising."""
+        box = (150, 180, 250, 300)          # around the ellipse, native res
+        w, h = box[2] - box[0], box[3] - box[1]
+        matte = np.ones((h, w), np.float32)  # a matte covering the whole crop
+        out = self._run({"face_landmarks": self._landmarks(),
+                         "mask": matte,
+                         "crop_info": self._crop_info(box, (w, h))})
+        mask = out["mask"]
+        self.assertEqual(mask.shape, (h, w))
+        # the ellipse centre (0.5*400, 0.4*600) = (200, 240) full-frame,
+        # which is (50, 60) in the crop
+        self.assertGreater(mask[60, 50], 0.99)
+        self.assertEqual(mask[0, 0], 0.0)
+        self.assertLess(mask.sum(), matte.sum())
+
+    def test_the_matte_bounds_the_result(self):
+        """Intersection, not replacement: where the seg says background, the
+        face region must not resurrect it."""
+        box = (150, 180, 250, 300)
+        w, h = box[2] - box[0], box[3] - box[1]
+        matte = np.zeros((h, w), np.float32)
+        matte[:, : w // 2] = 1.0
+        out = self._run({"face_landmarks": self._landmarks(), "mask": matte,
+                         "crop_info": self._crop_info(box, (w, h))})
+        self.assertTrue(np.all(out["mask"][:, w // 2:] == 0.0))
+
+    def test_a_disjoint_matte_is_refused(self):
+        box = (0, 0, 40, 40)
+        out_of_reach = np.ones((40, 40), np.float32)
+        with self.assertRaises(ValueError) as caught:
+            self._run({"face_landmarks": self._landmarks(), "mask": out_of_reach,
+                       "crop_info": self._crop_info(box, (40, 40))})
+        self.assertIn("barely", str(caught.exception))
+
+    def test_a_non_uniform_crop_resize_is_refused(self):
+        box = (150, 180, 250, 300)
+        with self.assertRaises(ValueError) as caught:
+            self._run({"face_landmarks": self._landmarks(),
+                       "mask": np.ones((60, 100), np.float32),
+                       "crop_info": self._crop_info(box, (100, 60))})
+        self.assertIn("non-uniform", str(caught.exception))
+
+    def test_an_unknown_landmark_source_is_refused(self):
+        lm = self._landmarks()
+        lm["source"] = "dlib"
+        full = np.ones((self.FULL[1], self.FULL[0]), np.float32)
+        with self.assertRaises(ValueError) as caught:
+            self._run({"face_landmarks": lm, "mask": full})
+        self.assertIn("dlib", str(caught.exception))
+
+    def test_too_few_landmarks_is_refused(self):
+        lm = self._landmarks(n=2)
+        full = np.ones((self.FULL[1], self.FULL[0]), np.float32)
+        with self.assertRaises(ValueError) as caught:
+            self._run({"face_landmarks": lm, "mask": full})
+        self.assertIn("N >= 3", str(caught.exception))

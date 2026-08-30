@@ -72,23 +72,32 @@ DENOISE_NEGATIVE_PROMPT = (
 # `inject_shell_views` does that job — it puts photo-derived content on every
 # frame near the source view, not just the one exactly on it, so the render
 # no longer has to bend its path to land a camera there either.
-#: The face branch — locate_face / crop_face / face_mask / face_normals /
-#: face_splat, then render_face_views + composite_face + face_support_views
-#: — is common to both and gated on each file's `face_splat` global.
-#: `detect_face` is in neither: the splat replaced the MediaPipe landmark
-#: overlay it fed.
+#: The face branch — detect_face / locate_face / crop_face / face_seg /
+#: face_mask / face_normals / face_splat, then render_face_views +
+#: composite_face + face_support_views — is common to both and gated on each
+#: file's `face_splat` global.
 #:
 #: 2026-08-30: `face_support_views` joined it. The face renders now reach
 #: the trainings twice — composited into the drawings, and again as brush
 #: supporting views, which is the only one of the two a diffusion pass
 #: cannot rewrite.
+#:
+#: 2026-08-30 (later): `detect_face` came BACK. Not a reversal of the
+#: 2026-08-29 note — the landmarks are geometry now, not an overlay, and
+#: nothing draws them. Sapiens2's `parts: face` is Goliath class 3,
+#: `Face_Neck`, so the neck can only be intersected out of the matte, not
+#: deselected from it: `face_seg` produces it and `face_mask` (now
+#: `face_landmark_mask`) intersects the landmark hull with it. `locate_face`
+#: stays exactly where it was and still sizes the crop — a face-sized crop
+#: was tried and flattens the face fourfold, see the step's docstring.
 BOOTSTRAPS = {
     # The shipped default: the older, better-proven bootstrap — circular
     # orbit, head-angle fix, anchor warp and injection — with only the face
     # changed. Keeping everything else fixed is the point of the file.
     "fast_helical_native": [
         "split_sheet", "reconstruct_body", "fix_head_angle",
-        "locate_face", "crop_face", "face_mask", "face_normals", "face_splat",
+        "detect_face", "locate_face", "crop_face", "face_seg", "face_mask",
+        "face_normals", "face_splat",
         "render_initial_views", "render_face_views", "composite_face",
         "face_support_views",
         "warp_reference_to_anchor", "reinject_anchor_initial",
@@ -100,7 +109,8 @@ BOOTSTRAPS = {
     "fast_helical_shell": [
         "split_sheet", "reconstruct_body",
         "front_matte", "front_normals", "shell_splat", "refine_pose",
-        "locate_face", "crop_face", "face_mask", "face_normals", "face_splat",
+        "detect_face", "locate_face", "crop_face", "face_seg", "face_mask",
+        "face_normals", "face_splat",
         "render_initial_views", "render_face_views", "composite_face",
         "face_support_views",
         "render_shell_views", "inject_shell_band",

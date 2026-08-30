@@ -23,7 +23,8 @@
 #
 # BOOTSTRAP (this file only) — split_sheet -> reconstruct_body ->
 # front_matte -> front_normals -> shell_splat -> refine_pose ->
-# [locate_face -> crop_face -> face_mask -> face_normals -> face_splat] ->
+# [detect_face -> locate_face -> crop_face -> face_seg -> face_mask ->
+# face_normals -> face_splat] ->
 # render_initial_views -> render_face_views -> composite_face ->
 # render_shell_views -> inject_shell_band. The bracketed five, plus
 # render_face_views and composite_face, are gated on the `face_splat`
@@ -406,13 +407,40 @@ steps:
   #
   # None of these steps declare `keep_loaded`, so the seg head is read from
   # the HF cache twice (locate, then mask) rather than held in host RAM
-  # through two 81-frame diffusion passes. Set `keep_loaded: true` on both
-  # sapiens2_seg steps to trade the other way; the step implements
-  # release_vram, so it will not squat on the card between them.
+  # through two 81-frame diffusion passes.
 
-  # Pass one: segment the whole frame, only to find the head. `box` is the
-  # tight bounding box of the largest connected component of the selected
-  # classes.
+  # WHAT CHANGED (2026-08-30): the mask is the FACE, not the face and the
+  # neck. Sapiens2's `parts: face` is Goliath class 3, `Face_Neck` — one
+  # class covering both — so "just the face" has to be intersected out
+  # geometrically rather than selected, and MediaPipe's landmarks are that
+  # geometry. They also give a face-only crop BOX, which a Face_Neck box
+  # cannot: that one runs down the throat. Kept in step with
+  # fast_helical_native.yaml, which is where this was measured; see its own
+  # note and FaceLandmarkMaskStep's docstring.
+  #
+  # Landmarks for GEOMETRY ONLY — not wired into `render`. The dots are not
+  # coming back; the splat replaced them. See the note at the top of this
+  # file about what a `when:`-skipped detect_face used to cost.
+  - id: detect_face
+    step: detect_face_landmarks
+    dispatch: in_process
+    when: ${globals.face_splat}
+    inputs:
+      image: scene.front_image
+    outputs:
+      face_landmarks: scene.face_landmarks
+
+  # Where to CROP. Unchanged, and deliberately so: the crop stays the
+  # Face_Neck box even though the mask below no longer is. Cutting the crop
+  # to the face as well was built and measured, and it flattens the face —
+  # relief 224.5 -> 144.2 mm, the nose going from 99.2 mm proud of the
+  # face's outer edge to 22.9. Sapiens2 upsamples whatever it gets to
+  # 1024x768, so a tighter box adds no real pixels of face, only
+  # interpolation, and the pointmap head answers a softer input with a
+  # flatter face. See FaceLandmarkMaskStep's docstring for the table.
+  #
+  # `box` is the tight bounding box of the largest connected component of
+  # the selected classes.
   - id: locate_face
     step: sapiens2_seg
     dispatch: in_process
@@ -444,11 +472,12 @@ steps:
       image: scene.face_image
       crop_info: scene.face_crop_info
 
-  # Pass two: the mask that is actually used, at crop resolution. Its
-  # output is a summed class *probability*, which is what the splat step
-  # wants — it thresholds for the support region and keeps the soft values
-  # at the silhouette as the Gaussians' opacity.
-  - id: face_mask
+  # Segmentation at crop resolution. Its output is a summed class
+  # *probability*, which is what the splat step wants — it thresholds for
+  # the support region and keeps the soft values at the silhouette as the
+  # Gaussians' opacity. The neck comes off in the next step, which is the
+  # only place it can.
+  - id: face_seg
     step: sapiens2_seg
     dispatch: in_process
     when: ${globals.face_splat}
@@ -456,6 +485,19 @@ steps:
       image: scene.face_image
     params:
       parts: face
+    outputs:
+      mask: scene.face_seg_matte
+
+  # Face_Neck minus the neck. `crop_info` maps the landmarks, which are in
+  # the FULL frame's normalized coordinates, onto the crop's pixel grid.
+  - id: face_mask
+    step: face_landmark_mask
+    dispatch: in_process
+    when: ${globals.face_splat}
+    inputs:
+      face_landmarks: scene.face_landmarks
+      mask: scene.face_seg_matte
+      crop_info: scene.face_crop_info
     outputs:
       mask: scene.face_matte
 

@@ -1450,7 +1450,7 @@ class FacePointmapSplatStep(PointmapSplatStep):
                   "crop_size": (w, h)}       what was actually emitted
     outputs: the base's three; `splat_stats` additionally carries `crop`.
 
-    Two defaults differ from the body's, both measured (masktest's SPEC.md):
+    Three defaults differ from the body's, all measured:
 
       * `splat_scale` 0.5 rather than 0.4. The tangential radius is
         resolution-dependent, and a head crop *downsamples* into the
@@ -1463,12 +1463,51 @@ class FacePointmapSplatStep(PointmapSplatStep):
         separate classes and the mask fragments into about a dozen pieces
         without it. The merged eye/mouth hole measures 2.7% of a head mask,
         which is what 0.05 is sized against.
+      * `align_bin_px` 8 rather than 32. The base's 32 is a full-frame
+        number — "big enough to hold enough mesh vertices to stand in for a
+        z-buffer" over a whole body. On a face crop it is far too coarse,
+        and it errs in one direction: the chin overhangs the throat, so the
+        nearest projected vertex in a 32 px bin reports the mesh's front
+        surface too NEAR, and `depth_scale_to_mesh` pulls the splat toward
+        the camera by that much.
+
+        Measured on cyber2_6f (2026-08-30) by feeding this step's own
+        estimator the mesh as its own pointmap — so a perfect estimator
+        must return exactly 1.0 — with the truth from a rasterised triangle
+        z-buffer of the head rather than a finer bin, which would flatter
+        small bins by construction:
+
+            bin px   32     24     16     12      8      4
+            error  -15.3  -10.0   -7.2   -5.5   -3.1   -0.6  mm
+
+        Nothing is paid for it. Over 60 Monte Carlo pointmaps carrying the
+        shape error this module's own docstring measures (0.94 mm median
+        after a global scale, p99 4.6 mm), the run-to-run spread is ~1 mm
+        at EVERY bin size — small bins remove the bias without adding
+        noise, and the ordering survives degrading the pointmap 13x. The
+        two costs that could have bitten do not: at bin 8 a bin still holds
+        9 mesh vertices and the vertex-based front sits 0.9 mm from the
+        z-buffer's own minimum (erring far, so slightly cancelling), and
+        `min_pixels` still admits 93% of the mask's bins while the usable
+        count rises from 28 to 308.
+
+        8 rather than 4 for two reasons, neither of them noise. A 4 px bin
+        holds exactly 16 pixels against a `min_pixels` of 16, so a bin needs
+        100% mask coverage to count — it works, but it balances on the
+        threshold. And the truth it was scored against is a 2x-supersampled
+        z-buffer, only ~2x finer than a 4 px bin, so the 4-vs-8 gap is
+        inside what that measurement can resolve. The 8-vs-32 gap is not.
+
+        The base default stays at 32: a full frame has thin structures
+        where a small bin can hold mesh from a hand and pointmap pixels
+        from a sleeve, and none of the above measures that.
     """
 
     PARAMS = with_defaults(
         PointmapSplatStep.PARAMS,
         splat_scale=0.5,
         fill_max_frac=0.05,
+        align_bin_px=8,
     )
 
     def _source_intrinsics(self, inputs: Dict[str, Any], params: Dict[str, Any],

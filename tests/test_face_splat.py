@@ -191,15 +191,22 @@ class TestFaceIntrinsics(unittest.TestCase):
 
 
 class TestSpecializationDefaults(unittest.TestCase):
-    def test_the_two_measured_defaults_differ_and_nothing_else_does(self):
+    def test_the_three_measured_defaults_differ_and_nothing_else_does(self):
         body = ps.BodyPointmapSplatStep.declared_params()
         face = ps.FacePointmapSplatStep.declared_params()
         self.assertEqual(sorted(body), sorted(face))
         differing = {name for name in body
                      if body[name].default != face[name].default}
-        self.assertEqual(differing, {"splat_scale", "fill_max_frac"})
+        self.assertEqual(differing,
+                         {"splat_scale", "fill_max_frac", "align_bin_px"})
         self.assertEqual(face["splat_scale"].default, 0.5)
         self.assertEqual(face["fill_max_frac"].default, 0.05)
+        # 8, not the base's 32. A 32 px bin on a face crop reports the mesh's
+        # front surface too near — the chin overhangs the throat — and
+        # depth_scale_to_mesh pulls the splat 15 mm toward the camera by it.
+        # Measured against a rasterised z-buffer; see the step's docstring.
+        self.assertEqual(face["align_bin_px"].default, 8)
+        self.assertEqual(body["align_bin_px"].default, 32)
 
     def test_with_defaults_refuses_a_name_the_base_does_not_declare(self):
         base = (Param("count", int, 6), Param("scale", float, 0.5))
