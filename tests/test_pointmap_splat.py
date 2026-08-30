@@ -382,7 +382,8 @@ class TestPly(unittest.TestCase):
 class TestStepRun(unittest.TestCase):
     """The whole step, with only the 1B forward pass stubbed out."""
 
-    def _run(self, tmp: str, scale_the_pointmap_by: float = 2.5, **params):
+    def _run(self, tmp: str, scale_the_pointmap_by: float = 2.5,
+             pointmap_camera=(FOCAL, CX, CY), **params):
         z, normals, mask = _sphere()
         # The "mesh": SAM-3D-Body vertices sampled off the true surface,
         # with cam_t already folded out so vertices + cam_t is the truth.
@@ -401,8 +402,11 @@ class TestStepRun(unittest.TestCase):
         vv, uu = np.mgrid[0:HEIGHT, 0:WIDTH].astype(np.float64)
         ripple = 1.0 + 0.02 * np.sin(2 * np.pi * uu / 8) * np.sin(2 * np.pi * vv / 8)
         z_stub = np.where(mask, z * ripple, 0.0) / scale_the_pointmap_by
-        pointmap = ps.backproject(z_stub, 1400.0, CX + 40, CY - 30)   # and a
-        # different camera, whose intrinsics the step must ignore.
+        # Through the network's own camera. By default the same pinhole
+        # the normals were made in, so the surface the "network" reports is
+        # the sphere and the integration can be judged; the placement test
+        # hands in a different one.
+        pointmap = ps.backproject(z_stub, *pointmap_camera)
 
         step = _StubbedStep(pointmap.astype(np.float32))
         merged = dict({"filepath": str(Path(tmp) / "shell.ply")}, **params)
@@ -450,11 +454,12 @@ class TestStepRun(unittest.TestCase):
 
     def test_run_reports_the_two_cameras_and_the_silhouette(self):
         with tempfile.TemporaryDirectory() as tmp:
-            result, _ = self._run(tmp)
+            result, _ = self._run(tmp, pointmap_camera=(1400.0, CX + 40, CY - 30))
 
             stats = result["splat_stats"]
             # The pointmap's own camera is measured (1400 px, off-centre
-            # principal point) and then discarded in favour of the mesh's.
+            # principal point); the mesh's is the one the Gaussians are
+            # placed through, and both are reported.
             self.assertAlmostEqual(stats["pointmap_intrinsics"]["f"], 1400.0, delta=1.0)
             self.assertEqual(stats["sam3d_intrinsics"]["f"], FOCAL)
             self.assertAlmostEqual(stats["focal_ratio_sam3d_over_pointmap"],
@@ -463,6 +468,52 @@ class TestStepRun(unittest.TestCase):
             self.assertLess(max(abs(offset[0]), abs(offset[1])), 5.0)
             self.assertEqual(result["splat_scene"].sh_degree, 0)
             self.assertEqual(len(result["splat_scene"].means), stats["n_splats"])
+
+    def test_run_keeps_the_networks_shape_through_a_different_camera(self):
+        """A crop's pointmap camera has its principal point at the crop's
+        centre and its own focal. The Gaussians must still land on the
+        pixels' rays in SAM-3D-Body's camera (tested above) — and the
+        surface between those rays must keep the shape the network saw,
+        not the shape re-reading its depth through the other camera makes:
+        the relief scales with the width (k), not with the distance."""
+        # A few degrees off axis, like a head near the top of a portrait
+        # frame (not more: the relief of an object seen obliquely genuinely
+        # changes with the axis it is measured along, and this asserts on
+        # the relief the network reported).
+        f_net, cx_net, cy_net = 500.0, CX + 20, CY - 45
+        with tempfile.TemporaryDirectory() as tmp:
+            result, (z_true, mask) = self._run(
+                tmp, scale_the_pointmap_by=2.5, pointmap_camera=(f_net, cx_net, cy_net),
+                integration_lambda=0.0)          # keep the stub's own shape
+            stats = result["splat_stats"]
+            placement = stats["placement"]
+
+            # The rotation is the angle between the two principal rays.
+            expected = np.degrees(np.arctan(np.hypot(cx_net - CX, cy_net - CY) / f_net))
+            self.assertAlmostEqual(placement["rotation_deg"], expected, delta=2.0)
+            self.assertGreater(placement["ray_residual_deg"]["median"], 0.0)
+
+            # k = scale * f_net / f_sam, and the depth is the mesh's.
+            scale = stats["depth_alignment"]["scale"]
+            self.assertAlmostEqual(placement["width_ratio_k"], scale * f_net / FOCAL, places=6)
+            self.assertAlmostEqual(placement["depth_m"], float(np.median(z_true[mask])), delta=0.03)
+
+            # Relief-to-width is the network's own. The network's surface is
+            # the stub depth backprojected through ITS camera: measure its
+            # relief and width there, and compare with the placed splat's.
+            z_net = np.where(mask, z_true, 0.0) / 2.5
+            net_relief = float(np.ptp(np.percentile(z_net[mask], [2, 98])))
+            net_width = float(np.ptp(np.nonzero(mask)[1])) * float(np.median(z_net[mask])) / f_net
+            _, _, data = _read_ply(Path(result["splat_path"]))
+            cam = data[:, 0:3].astype(np.float64) * ps.FLIP
+            placed_relief = float(np.ptp(np.percentile(cam[:, 2], [2, 98])))
+            placed_width = float(np.ptp(np.percentile(cam[:, 0], [0.5, 99.5])))
+            self.assertAlmostEqual(placed_relief / placed_width, net_relief / net_width,
+                                   delta=0.15 * net_relief / net_width)
+            # ...whereas scaling the relief by the distance alone would have
+            # stretched it by f_sam / f_net = 1.8x.
+            self.assertLess(placed_relief / placed_width,
+                            1.3 * net_relief / net_width)
 
     def test_run_refuses_inputs_from_a_different_photo(self):
         """A size mismatch is the shape "these came from different images"

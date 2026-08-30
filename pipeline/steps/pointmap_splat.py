@@ -115,80 +115,94 @@ Two camera frames are in play and they are the same physical camera, from
 two different monocular estimates of it:
 
   * the *pointmap* frame — OpenCV (X right, Y down, Z into the scene),
-    camera at the origin, with whatever focal length the Sapiens2 network
-    implicitly committed to for this image;
+    camera at the origin, with whatever focal length AND principal point
+    the Sapiens2 network implicitly committed to for the image it was
+    given. For a crop that principal point is the CROP's centre, so the
+    network's optical axis is turned toward the crop by atan(offset / f)
+    — 12.6 deg for a head at the top of cyber2_6f's portrait frame;
   * the *SAM-3D-Body* frame — also OpenCV, also camera at the origin, with
     `mesh_output["focal_length"]` (MoGe-2's estimate, see steps/sam3d_body.py)
-    and the principal point at the image centre. `pred_vertices + pred_cam_t`
-    lives here; `body2colmap.coordinates.sam3d_to_world` turns it into the
-    pipeline's world frame with a 180-degree rotation about X, i.e. an
-    elementwise `diag(1, -1, -1)`.
+    and the principal point at the FULL frame's centre. `pred_vertices +
+    pred_cam_t` lives here; `body2colmap.coordinates.sam3d_to_world` turns
+    it into the pipeline's world frame with a 180-degree rotation about X,
+    i.e. an elementwise `diag(1, -1, -1)`.
 
-**The pointmap's own camera is discarded, as instructed: SAM-3D-Body's is
-the one that counts**, because every camera downstream — the mesh render's
-anchor, the orbit path, the COLMAP export, `render_splat` — is built on it.
-So this step keeps only the pointmap's *depth* and re-derives everything
-else in SAM-3D-Body's camera:
+Every camera downstream — the mesh render's anchor, the orbit path, the
+COLMAP export, `render_splat` — is built on the second, so the Gaussians
+must end up on ITS rays; but the surface's SHAPE is only coherent in the
+first, because that is the camera the network's depth is depth along and
+the camera its normals are expressed in. So the step does both, in order:
 
-    z'    = s * z_integrated
-    X_cam = (u - cx) * z' / f_s,  cx = W/2      \\ the same pinhole
-    Y_cam = (v - cy) * z' / f_s,  cy = H/2      /  body2colmap assumes
-    Z_cam = z'
-    P_world = P_cam * diag(1, -1, -1)           # no recentring: the world
-                                                # origin IS the camera
+    1. fit (f_p, cx_p, cy_p) to the pointmap; take the normals into that
+       frame; integrate the depth there — masktest, verbatim;
+    2. rotate the result so the pointmap camera's rays line up with
+       SAM-3D-Body's through the same pixels (`rays_rotation`, a Wahba
+       fit over the mask). Depth taken after this is depth along the axis
+       everything downstream shares;
+    3. put every Gaussian on SAM-3D-Body's ray through its own pixel, at
 
-Every Gaussian therefore sits on the ray through the pixel it came from, so
-the shell reprojects onto the photo it was built from, and onto the mesh's
-silhouette, by construction (measured on a real 867x1552 body shot: every
-Gaussian within 2e-5 px of its source pixel, 100% of them on foreground).
-That is the property the anchor frame depends on, and it is why the shear
-this introduces — the two focals need not agree — is spent on the *shape*
-rather than on the framing.
+           z = z_mesh + k * (z_net - z_net_ref),   k = s * f_p / f_s
 
-The shear is then largely undone by where the normal integration happens:
-it is solved **in SAM-3D-Body's camera**, not the pointmap's. The relief
-comes out of the normals interpreted through `f_s`, and the pointmap's
-depth only pins the low frequencies through the data term. So the surface
-this writes is the one whose normals are the predicted normals *for the
-camera the pipeline actually uses* — which also means the normals need no
-transformation before they orient the Gaussians. In masktest, which had no
-second camera to answer to, integration ran in the pointmap's own frame.
+       where `s` is the mesh-depth scale from `depth_scale_to_mesh` and
+       `k` — the WIDTH ratio, how much wider the surface is when its pixels
+       are re-read through the narrower camera at the mesh's distance — is
+       what the relief is scaled by, so relief-to-width stays what the
+       network said.
 
-What that costs, measured on the same body shot by sweeping the focal the
-step is told SAM-3D-Body found (the pointmap fits itself 1099 px there;
-SAM-3D-Body's own dimensions-only default, `sqrt(h**2 + w**2)`, is 1778):
+Steps 1 and 3 together are what make the anchor frame exact (every
+Gaussian reprojects onto its source pixel by construction — measured on a
+real 867x1552 body shot at 2e-5 px) without deforming the face.
+
+**What this replaced, and why it mattered** (2026-08-30). Until then this
+step discarded the pointmap camera outright: it read the network's depth
+as depth along SAM-3D-Body's axis, integrated in that camera, and scaled
+the depth by `s` alone. On a full-frame body shell the principal points
+coincide and the only damage is a relief stretched by f_s/f_p (1.57 on
+the smoke-test shot — the "over-rotated novel views" the old table below
+blamed on a focal disagreement). On a face crop it was fatal twice over:
+the depth was assigned along an axis 12.6 deg off the one it was measured
+along, so the face nodded back by that angle; and the relief was scaled by
+f_s/f_p = 3.19 on top of the width, so a 178 mm wide face came out 338 mm
+deep, with the integration making the normals agree LESS (36.5 -> 40.3
+deg) because it was reading them in the wrong frame. Corrected: 178 x
+155 mm, the face looking at the camera the way the photo does, no neck
+sheet. The measurement and the figure are in output/face_mask_compare/
+(`diag_fixed_placement.py`, `diag_shipped_vs_fixed.png`) of the run that
+fixed it. The old focal-ratio table is kept below for the record of what
+the stretch cost; the ratio itself is now a diagnostic, not a price.
+
+What that cost, measured on the smoke-test body shot by sweeping the focal
+the step was told SAM-3D-Body found, UNDER THE OLD PLACEMENT (the pointmap
+fits itself 1099 px there; SAM-3D-Body's own dimensions-only default,
+`sqrt(h**2 + w**2)`, is 1778):
 
     f_s / f_pointmap   normal agreement after integration
     1.00               19.5 deg -> 6.3 deg
     1.18               21.6 deg -> 7.5 deg
     1.62               26.8 deg -> 12.5 deg
 
-So the residual is the price of the disagreement and nothing else — which
-makes `focal_ratio_sam3d_over_pointmap` and
-`normal_agreement_deg.after_median` in `splat_stats` the pair to read
-together. A ratio near 1 says the two monocular estimates of this lens
-agree and the shell is as good as masktest's; a ratio like 1.6 says
-somebody's FOV estimate is wrong (`fov_estimator=""` on sam3d_body is one
-way to get exactly that) and the shell will be visibly stretched in depth
-from a side view.
+Normal agreement is now measured in the pointmap camera, where the
+integration happens, and does not depend on the ratio.
 
 Scale — the remaining degree of freedom, since depth and metric size trade
 off exactly under a fixed projection — is fitted to the mesh:
-`_depth_scale_to_mesh` compares the pointmap's depth to the mesh's front
-surface over a coarse grid of image bins and takes the median ratio. That
-puts the shell at the mesh's distance, hence at the mesh's height, which is
-what makes the orbit radius computed from the mesh frame it correctly. The
-integration is invariant to it (a scale on z is a constant offset on
-`w = log z`, and only differences of `w` enter the gradient equations), so
-the two commute and the fit is done once, up front.
+`depth_scale_to_mesh` compares the (rotated) pointmap depth to the mesh's
+front surface over a coarse grid of image bins and takes the median ratio.
+That puts the shell at the mesh's distance, hence at the mesh's height,
+which is what makes the orbit radius computed from the mesh frame it
+correctly. The integration is invariant to it (a scale on z is a constant
+offset on `w = log z`, and only differences of `w` enter the gradient
+equations), so integrating first and scaling afterwards is exact.
 
 What is different from masktest
 -------------------------------
 1. No segmentation head; the matte is an input (RMBG-2.0), and the soft
    silhouette alpha is that matte rather than a sum of seg class
    probabilities.
-2. Integration and Gaussian construction happen in SAM-3D-Body's camera,
-   and the world is not recentred on the splat's own centroid.
+2. The Gaussians are placed in SAM-3D-Body's camera (rotated onto its
+   rays, relief by the width ratio — see "Coordinate frames"), and the
+   world is not recentred on the splat's own centroid. The integration
+   itself is masktest's, in the pointmap's own camera.
 3. Inference goes through transformers' first-class Sapiens2 support
    (`AutoModelForPointmapEstimation`) rather than the mmengine/`init_model`
    path against a vendored `sapiens2` checkout. Same weights — the two
@@ -438,6 +452,47 @@ def camera_frame_normals(normal_map: np.ndarray, f: float, cx: float, cy: float)
     # has n . ray < 0.
     n[(n * ray).sum(2) > 0] *= -1.0
     return n
+
+
+def rays_rotation(mask: np.ndarray, f_from: float, cx_from: float, cy_from: float,
+                  f_to: float, cx_to: float, cy_to: float) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """The rotation carrying one pinhole's rays onto another's, over `mask`.
+
+    Two cameras with the same centre see the same pixel grid through
+    different rays when their intrinsics differ. For a crop, the network's
+    fitted principal point sits at the crop's centre while SAM-3D-Body's
+    sits at the FULL frame's — hundreds of pixels away — so the network's
+    optical axis is rotated toward the crop by atan(offset / f). This is
+    that rotation, solved as a Wahba problem (Kabsch on unit rays) so it
+    also absorbs any small yaw and the sign conventions come out right.
+
+    A rotation cannot make the two ray fields coincide when the focals
+    differ (a face subtends 18 deg in the pointmap camera of cyber2_6f's
+    crop and 5.7 deg in SAM-3D-Body's); the residual is reported and is
+    what the placement in `PointmapSplatStep.run` spends on the shape
+    rather than on the framing. Returns (R, stats) with R applied as
+    `R @ ray_from ~ ray_to`.
+    """
+    height, width = mask.shape
+    vv, uu = np.mgrid[0:height, 0:width].astype(np.float64)
+    a = np.stack([(uu - cx_from) / f_from, (vv - cy_from) / f_from, np.ones_like(uu)], 2)[mask]
+    b = np.stack([(uu - cx_to) / f_to, (vv - cy_to) / f_to, np.ones_like(uu)], 2)[mask]
+    a /= np.linalg.norm(a, axis=1, keepdims=True)
+    b /= np.linalg.norm(b, axis=1, keepdims=True)
+    u, _, vt = np.linalg.svd(a.T @ b)
+    sign = np.sign(np.linalg.det(vt.T @ u.T)) or 1.0
+    rotation = vt.T @ np.diag([1.0, 1.0, sign]) @ u.T
+    angle = float(np.degrees(np.arccos(np.clip((np.trace(rotation) - 1) / 2, -1.0, 1.0))))
+    residual = np.degrees(np.arccos(np.clip(((a @ rotation.T) * b).sum(1), -1.0, 1.0)))
+    axis = np.array([rotation[2, 1] - rotation[1, 2], rotation[0, 2] - rotation[2, 0],
+                     rotation[1, 0] - rotation[0, 1]])
+    norm = float(np.linalg.norm(axis))
+    stats = {
+        "rotation_deg": angle,
+        "rotation_axis": [float(v) for v in (axis / norm if norm > 1e-12 else axis)],
+        "ray_residual_deg": {"median": float(np.median(residual)), "max": float(residual.max())},
+    }
+    return rotation, stats
 
 
 def normal_angle_error(xyz: np.ndarray, n_cam: np.ndarray, mask: np.ndarray,
@@ -1291,12 +1346,16 @@ class PointmapSplatStep(Step):
         xyz_pointmap = self._pointmap(image, params)
         z_raw = xyz_pointmap[..., 2].astype(np.float64)
 
-        # Diagnostic only (see fit_intrinsics): the pointmap's own camera is
-        # discarded in favour of SAM-3D-Body's.
+        # --- 1. the network's own camera, and the surface as it saw it ----
+        # The pointmap is a coherent pinhole projection in the camera the
+        # network implicitly committed to (0.5 px RMS on a head crop), and
+        # its depth is depth along THAT camera's axis. Everything about the
+        # surface's shape — the normals' frame, the integration, the relief
+        # — belongs in this camera, exactly as masktest did it.
         f_pointmap, cx_pointmap, cy_pointmap, reproj_rms = fit_intrinsics(xyz_pointmap, mask)
         logger.info(
-            "%s: pointmap implies f=%.1f cx=%.1f cy=%.1f (RMS %.2f px); "
-            "using SAM-3D-Body's f=%.1f cx=%.1f cy=%.1f (ratio %.3f)",
+            "%s: pointmap camera f=%.1f cx=%.1f cy=%.1f (RMS %.2f px); "
+            "SAM-3D-Body's on this grid f=%.1f cx=%.1f cy=%.1f (focal ratio %.3f)",
             label, f_pointmap, cx_pointmap, cy_pointmap, reproj_rms, focal, cx, cy,
             focal / f_pointmap if f_pointmap else float("nan"),
         )
@@ -1308,6 +1367,76 @@ class PointmapSplatStep(Step):
                 label, reproj_rms,
             )
 
+        n_pointmap = camera_frame_normals(normal_map, f_pointmap, cx_pointmap, cy_pointmap)
+        lam = params["integration_lambda"]
+        if lam > 0:
+            z_integrated = integrate_depth(z_raw, n_pointmap, mask, f_pointmap, cx_pointmap,
+                                           cy_pointmap, lam=lam,
+                                           grazing_floor=params["grazing_floor"])
+        else:
+            z_integrated = z_raw.astype(np.float32)
+        surface = backproject(z_integrated.astype(np.float64), f_pointmap, cx_pointmap, cy_pointmap)
+        before = normal_angle_error(backproject(z_raw, f_pointmap, cx_pointmap, cy_pointmap),
+                                    n_pointmap, mask)
+        after = normal_angle_error(surface, n_pointmap, mask)
+        logger.info("%s: normal agreement median %.1f deg -> %.1f deg", label,
+                    float(np.median(before)) if before.size else float("nan"),
+                    float(np.median(after)) if after.size else float("nan"))
+
+        # --- 2. into SAM-3D-Body's camera: rotate, then re-ray ------------
+        # Same optical centre, different rays. The rotation turns the crop
+        # camera's axis onto the full frame's (12.6 deg on cyber2_6f's head
+        # crop; ~0 for a full-frame body shell); the depth taken AFTER it is
+        # depth along the axis every camera downstream shares.
+        rotation, rotation_stats = rays_rotation(mask, f_pointmap, cx_pointmap, cy_pointmap,
+                                                 focal, cx, cy)
+        rotated = surface @ rotation.T
+        n_cam = n_pointmap @ rotation.T
+        z_rotated = rotated[..., 2]
+
+        # Scale is the one degree of freedom a single view leaves, and it is
+        # taken from the mesh: the median per-bin ratio of the mesh's front
+        # depth to the network's puts the surface at the mesh's distance.
+        bin_px = params["align_bin_px"]
+        front = mesh_front_depth(vertices_cam, focal, cx, cy, (height, width), bin_px)
+        scale = 1.0
+        if params["align_depth"]:
+            scale, align_stats = depth_scale_to_mesh(z_rotated, mask, front, bin_px)
+            stats_alignment = dict(align_stats, scale=scale)
+            logger.info(
+                "%s: depth scale to mesh %.4f over %d bins "
+                "(p10-p90 of the per-bin ratio %.4f-%.4f)",
+                label, scale, align_stats["bins_compared"],
+                *align_stats["scale_ratio_p10_p90"],
+            )
+        else:
+            stats_alignment = {"scale": 1.0}
+
+        # The placement. Every Gaussian goes on the ray through its own
+        # pixel in SAM-3D-Body's camera — that is what makes the anchor
+        # frame exact — at a depth that keeps the network's SHAPE:
+        #
+        #     z = z_mesh + k * (z_net - z_net_ref),   k = scale * f_net / f_sam
+        #
+        # k is the ratio of the two cameras' pixel footprints at the two
+        # distances, i.e. how much wider the surface becomes when its pixels
+        # are re-read through the narrower camera at the mesh's distance.
+        # Scaling the relief by the same k keeps relief-to-width what the
+        # network said. Scaling it by `scale` alone — the depth ratio, which
+        # is what this step did before 2026-08-30 — stretches the relief by
+        # f_sam / f_net on top of that: 3.19x on cyber2_6f's face, which came
+        # out 184 mm wide and 338 mm deep, its integration made WORSE by the
+        # normals (36.5 -> 40.3 deg) because they were read in a frame 12.6
+        # deg off the depth's.
+        z_ref_net = float(np.median(z_rotated[mask]))
+        z_ref_mesh = scale * z_ref_net
+        width_ratio = scale * f_pointmap / focal
+        z_placed = np.where(mask, z_ref_mesh + width_ratio * (z_rotated - z_ref_net), 0.0)
+        z_placed_raw = np.where(
+            mask, z_ref_mesh + width_ratio * ((backproject(z_raw, f_pointmap, cx_pointmap,
+                                                            cy_pointmap) @ rotation.T)[..., 2]
+                                               - z_ref_net), 0.0)
+
         stats: Dict[str, Any] = {
             "image_size": [width, height],
             "mask_pixels": int(mask.sum()),
@@ -1318,29 +1447,31 @@ class PointmapSplatStep(Step):
             "sam3d_intrinsics": {"f": focal, "cx": cx, "cy": cy},
             "focal_ratio_sam3d_over_pointmap": (focal / f_pointmap) if f_pointmap else None,
             "silhouette": silhouette_agreement(mask, vertices_cam, focal, cx, cy),
+            "depth_alignment": stats_alignment,
+            "placement": dict(
+                rotation_stats,
+                width_ratio_k=width_ratio,
+                depth_m=z_ref_mesh,
+                relief_mm=float(np.ptp(np.percentile(z_placed[mask], [2, 98]))) * 1000.0,
+                width_mm=float(np.ptp(np.nonzero(mask)[1])) * z_ref_mesh / focal * 1000.0,
+            ),
+            "normal_agreement_deg": {
+                "before_median": float(np.median(before)) if before.size else None,
+                "after_median": float(np.median(after)) if after.size else None,
+            },
         }
-
-        # Depth alignment. The integration is invariant to a global scale on
-        # its data term, so this is applied first and never revisited.
-        bin_px = params["align_bin_px"]
-        front = mesh_front_depth(vertices_cam, focal, cx, cy, (height, width), bin_px)
-        scale = 1.0
-        if params["align_depth"]:
-            scale, align_stats = depth_scale_to_mesh(z_raw, mask, front, bin_px)
-            stats["depth_alignment"] = dict(align_stats, scale=scale)
-            logger.info(
-                "%s: depth scale to mesh %.4f over %d bins "
-                "(p10-p90 of the per-bin ratio %.4f-%.4f)",
-                label, scale, align_stats["bins_compared"],
-                *align_stats["scale_ratio_p10_p90"],
-            )
-        z_aligned = z_raw * scale
+        logger.info(
+            "%s: placed at %.3f m — rotated %.1f deg onto SAM-3D-Body's rays, width "
+            "ratio k=%.3f, relief %.1f mm over %.1f mm of width",
+            label, z_ref_mesh, rotation_stats["rotation_deg"], width_ratio,
+            stats["placement"]["relief_mm"], stats["placement"]["width_mm"],
+        )
 
         stats["depth_prior"] = params["depth_prior"]
         if params["depth_prior"] == "mesh":
-            z_aligned = mesh_depth_prior(z_aligned, mask, front, bin_px)
-            spread_before = float(np.ptp(np.percentile(z_raw[mask] * scale, [2, 98])))
-            spread_after = float(np.ptp(np.percentile(z_aligned[mask], [2, 98])))
+            spread_before = float(np.ptp(np.percentile(z_placed[mask], [2, 98])))
+            z_placed = mesh_depth_prior(z_placed, mask, front, bin_px)
+            spread_after = float(np.ptp(np.percentile(z_placed[mask], [2, 98])))
             stats["depth_spread_m"] = {"pointmap": spread_before, "mesh_prior": spread_after}
             logger.info(
                 "%s: depth prior from the mesh — p2..p98 depth "
@@ -1348,25 +1479,8 @@ class PointmapSplatStep(Step):
                 label, spread_before, spread_after,
             )
 
-        # Normals, and the depth solve, both in SAM-3D-Body's camera.
-        n_cam = camera_frame_normals(normal_map, focal, cx, cy)
-        lam = params["integration_lambda"]
-        if lam > 0:
-            z_refined = integrate_depth(z_aligned, n_cam, mask, focal, cx, cy,
-                                        lam=lam, grazing_floor=params["grazing_floor"])
-        else:
-            z_refined = z_aligned.astype(np.float32)
-
-        xyz = backproject(z_refined.astype(np.float64), focal, cx, cy)
-        before = normal_angle_error(backproject(z_aligned, focal, cx, cy), n_cam, mask)
-        after = normal_angle_error(xyz, n_cam, mask)
-        stats["normal_agreement_deg"] = {
-            "before_median": float(np.median(before)) if before.size else None,
-            "after_median": float(np.median(after)) if after.size else None,
-        }
-        logger.info("%s: normal agreement median %.1f deg -> %.1f deg", label,
-                    float(np.median(before)) if before.size else float("nan"),
-                    float(np.median(after)) if after.size else float("nan"))
+        xyz = backproject(z_placed, focal, cx, cy)
+        z_aligned, z_refined = z_placed_raw, z_placed     # for the debug dump
 
         gaussians = build_gaussians(
             xyz, n_cam, cv2.cvtColor(image, cv2.COLOR_BGR2RGB), alpha, mask, focal,
