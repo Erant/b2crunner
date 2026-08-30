@@ -51,10 +51,49 @@ The real answer is to put the anatomical constraint into that step's
 objective as a term, so a single optimisation trades shell agreement against
 plausibility.
 
-**Known limitations** (it is a stopgap): the anchor camera / `cam_t` and
-`focal_length` are untouched, so the warped reference photo at the anchor
-frame still frames the head where the photo has it — a few degrees of nod
-does not visibly break the warp, but a large correction will. The 2D face
+**The reprojection compensation.** A bare rotation preserves the neck's
+length, so straightening a lean also lifts the head: by `L*(cos10 - cos32)`
+= 0.14 L, which on cyber_6f's 163 mm neck is 23 mm, and at that fit's
+f=1731 with the head 2.24 m out is 10.7 px up the frame (plus 6.3 px
+sideways, since the subject is not square to the camera). An eighth of a
+head. That lift is invisible in isolation but it desynchronises
+the mesh from the PHOTOGRAPH, which still shows the head craned: the face
+splat is pinned to the photo's rays by construction (`face_pointmap_splat`
+puts every Gaussian on the ray through the pixel it came from), so the
+splat stays put while the mesh head walks out from under it. Worse, that
+step scales the splat's depth by comparing, per image bin, the mesh's front
+surface against the pointmap's median depth UNDER THE FACE MATTE — also in
+the photo's pixels. Move the mesh head off those pixels and the solve
+compares cheek against jaw, biasing the one scalar it produces, and the
+face then swings across the head by parallax as the orbit turns.
+
+So the nod is followed by a compensating translation, graded by the same
+smoothstep and therefore expressed entirely as a SHORTER NECK: the head
+centre is put back on its original ray from the SAM-3D-Body camera, at the
+depth the rotation gave it. Same pixel, corrected distance. Since a pinhole
+at the origin maps every point on a ray to one pixel, this needs only
+`cam_t` — no focal length, no principal point (`focal_length` is optional,
+and used solely to report the correction in pixels).
+
+Note what this does to the `auto` residual: the compensation moves the head
+along the torso axis, which is the large component of the neck vector, so
+the residual LEAN comes out a couple of degrees above `target_lean_deg` —
+11.9 rather than 10 on cyber_6f, over a neck 6.4% shorter. The head's
+forward DISPLACEMENT is unchanged from the bare rotation; the angle grew
+only because the neck did. The step logs both, plus the reprojection it
+cancelled, so a run says outright how far the face splat used to be off.
+
+The drift grows with the correction, and near `max_correction_deg` it eats
+most of the angular benefit (a capped 20-degree nod on a 58-degree lean
+leaves ~48 degrees of measured lean, on a fifth less neck, while moving the
+head exactly as far back as the bare nod would). If that ever matters,
+the fix is to solve `auto` for the angle whose POST-compensation lean hits
+the target — a bisection over the same transform — not to weaken this.
+
+**Known limitations** (it is a stopgap): only the ray is restored, not the
+distance, so the head is left slightly smaller in projection than the
+photograph's — the nod takes it 59 mm further out on cyber_6f, i.e. ~2.6%
+at that camera, and the face matte overhangs the mesh head by that much. The 2D face
 landmarks from `detect_face` are likewise not re-projected. `scene.joints`
 (the 127-joint rig) and `scene.global_rots` are passed through unchanged;
 nothing downstream of here consumes them.
@@ -101,17 +140,58 @@ def _rodrigues(v: np.ndarray, axis: np.ndarray, angle: np.ndarray) -> np.ndarray
     return v * cos + k_cross_v * sin + k * k_dot_v * (1.0 - cos)
 
 
+def _project(points: np.ndarray, focal: float) -> np.ndarray:
+    """Pixel offsets from the principal point, for points in the camera frame.
+
+    Only ever used on DIFFERENCES of two projections, so the principal point
+    cancels and never has to be known. Nothing else here needs the focal
+    length either — see `_ray_shift`.
+    """
+    p = np.atleast_2d(np.asarray(points, dtype=np.float64))
+    return focal * p[:, :2] / p[:, 2:3]
+
+
+def _ray_shift(before: np.ndarray, after: np.ndarray, cam_t: np.ndarray) -> np.ndarray:
+    """Translation putting `after` back on the camera ray through `before`.
+
+    A pinhole with the camera at the origin maps every point of a ray to one
+    pixel, so "same pixel" is "same ray" and neither the focal length nor the
+    principal point enters. Of the one-parameter family of points on that ray
+    we take the one at `after`'s own depth, which is what keeps the nod's
+    depth correction while discarding its image-plane drift. The returned
+    vector therefore has no z component in the camera frame.
+    """
+    h0 = np.asarray(before, dtype=np.float64) + cam_t
+    h1 = np.asarray(after, dtype=np.float64) + cam_t
+    if h0[2] <= 1e-6 or h1[2] <= 1e-6:
+        raise ValueError(
+            f"head_angle_fix: the head centre is not in front of the camera "
+            f"(z={h0[2]:.4f} before the nod, {h1[2]:.4f} after) — 'cam_t' is "
+            f"probably not SAM-3D-Body's `pred_cam_t` for this mesh"
+        )
+    return (h1[2] / h0[2]) * h0 - h1
+
+
 @register_step("head_angle_fix")
 class HeadAngleFixStep(Step):
     """Nod a craned-forward head back toward the torso axis.
 
     inputs:  {"vertices": (N, 3) float — SAM-3D-Body `pred_vertices`,
-              "keypoints_3d": (70, 3) float — MHR70 `pred_keypoints_3d`}
+              "keypoints_3d": (70, 3) float — MHR70 `pred_keypoints_3d`,
+              "cam_t": (3,) float — SAM-3D-Body `pred_cam_t`, REQUIRED,
+              "focal_length": float — optional, only to log pixels}
+
     outputs: {"vertices": (N, 3) float, "keypoints_3d": (70, 3) float}
 
     Both arrive in SAM-3D-Body's raw output space and are returned in it,
-    bent by one weighted rotation. Wire the outputs back over the same
+    bent by one weighted rotation plus the compensating translation the
+    module docstring describes. Wire the outputs back over the same
     `scene.vertices` / `scene.keypoints_3d` the reconstruction wrote.
+
+    `cam_t` is required and not optional-with-a-fallback on purpose: without
+    it there is no ray to hold the head on, and the silent alternative — a
+    bare rotation — is the behaviour this step had when the face splat was
+    landing off the mesh head.
     """
 
     PARAMS = (
@@ -122,7 +202,9 @@ class HeadAngleFixStep(Step):
         Param("target_lean_deg", float, 10.0,
               "auto mode: forward lean to leave, in degrees between the "
               "neck-to-head vector and the torso-up axis. The head is nodded "
-              "back only by the excess over this",
+              "back only by the excess over this. The lean measured after the "
+              "reprojection compensation lands a couple of degrees above it, "
+              "because that shortens the neck — see the module docstring",
               minimum=0.0, maximum=90.0),
         Param("max_correction_deg", float, 35.0,
               "auto mode: never nod the head back by more than this, however "
@@ -145,6 +227,17 @@ class HeadAngleFixStep(Step):
     def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
         vertices = np.asarray(inputs["vertices"], dtype=np.float64)
         joints = np.asarray(inputs["keypoints_3d"], dtype=np.float64)
+        # Checked before the passthrough branches below, so a workflow that
+        # forgot to wire it fails on every input rather than only on the ones
+        # whose head happens to need nodding.
+        if inputs.get("cam_t") is None:
+            raise KeyError(
+                "head_angle_fix requires 'cam_t' (SAM-3D-Body's pred_cam_t) to "
+                "hold the head on its original camera ray while it nods — wire "
+                "scene.cam_t. See the module docstring."
+            )
+        cam_t = np.asarray(inputs["cam_t"], dtype=np.float64).reshape(3)
+        focal = inputs.get("focal_length")
         if joints.shape[0] < 70:
             raise ValueError(
                 f"head_angle_fix expects an MHR70 (70-joint) skeleton, got "
@@ -218,22 +311,63 @@ class HeadAngleFixStep(Step):
             )
         lo = params["blend_lo_frac"] * up_comp
 
+        def _weight(points: np.ndarray) -> np.ndarray:
+            t = np.clip(((points - neck) @ spine_up - lo) / span, 0.0, 1.0)
+            return t * t * (3.0 - 2.0 * t)  # smoothstep
+
+        # The compensation is solved for the head CENTRE and then applied
+        # graded, so it has to be divided by that point's own weight for the
+        # head to receive exactly it. With the default blend band the head is
+        # fully weighted and the division is by 1.
+        head_weight = float(_weight(head_center[None])[0])
+        head_rotated = neck + _rodrigues(
+            head_center - neck, shoulder_axis, head_weight * theta_full
+        )
+        if head_weight < 1e-6:
+            logger.warning(
+                "head_angle_fix: the blend band leaves the head centre "
+                "unweighted (blend_hi_frac=%.2f); nodding without the "
+                "reprojection compensation", params["blend_hi_frac"]
+            )
+            shift = np.zeros(3)
+        else:
+            shift = _ray_shift(head_center, head_rotated, cam_t) / head_weight
+
         def _bend(points: np.ndarray) -> np.ndarray:
             rel = points - neck
-            height = rel @ spine_up
-            t = np.clip((height - lo) / span, 0.0, 1.0)
-            weight = t * t * (3.0 - 2.0 * t)  # smoothstep
+            weight = _weight(points)
             rotated = _rodrigues(rel, shoulder_axis, weight * theta_full)
-            return neck + rotated
+            return neck + rotated + weight[..., None] * shift
 
         new_vertices = _bend(vertices)
         new_joints = _bend(joints)
 
+        head_final = head_rotated + head_weight * shift
+        head_vec_final = head_final - neck
+        neck_scale = float(np.linalg.norm(head_vec_final) / np.linalg.norm(head_vec))
+        residual_lean = float(np.degrees(np.arctan2(
+            abs(float(head_vec_final @ forward)), float(head_vec_final @ spine_up),
+        )))
+
         logger.info(
             "head_angle_fix: head leaned %.1f deg forward; nodded back %.1f deg "
-            "(mode=%s) to ~%.1f deg residual lean",
-            lean_deg, correction_deg, mode, lean_deg - correction_deg,
+            "(mode=%s), then translated %.1f mm to hold its camera ray — neck "
+            "%.1f%% shorter, %.1f deg residual lean",
+            lean_deg, correction_deg, mode, 1000.0 * float(np.linalg.norm(shift)),
+            100.0 * (1.0 - neck_scale), residual_lean,
         )
+        if focal is not None:
+            base = _project(head_center + cam_t, float(focal))
+            uncompensated = _project(head_rotated + cam_t, float(focal)) - base
+            residual = _project(head_final + cam_t, float(focal)) - base
+            logger.info(
+                "head_angle_fix: head centre reprojection — the bare nod would "
+                "have moved it (%+.1f, %+.1f) px, compensated to (%+.1f, %+.1f) "
+                "px. The face splat is pinned to the photo's pixels, so the "
+                "first pair is what it used to be misregistered by.",
+                uncompensated[0, 0], uncompensated[0, 1],
+                residual[0, 0], residual[0, 1],
+            )
 
         out_vertices = new_vertices.astype(np.asarray(inputs["vertices"]).dtype, copy=False)
         out_joints = new_joints.astype(np.asarray(inputs["keypoints_3d"]).dtype, copy=False)

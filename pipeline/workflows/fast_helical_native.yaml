@@ -15,14 +15,23 @@
 # identity and the canonical face model carries none; a splat of the real
 # face carries both identity and gaze, which is what these frames are for.
 #
-# **That is the ONLY change.** The circular orbit, override_cam_from_mesh,
-# fix_head_angle, the anchor warp and the anchor injection are all exactly
-# as they were, deliberately: this file exists to test the face in
-# isolation, so a run that looks different from the last one differs
-# because of the face and nothing else. A separate, larger change — the
-# photo-to-splat SHELL, which replaces the whole bootstrap with a helical
-# orbit, a body-wide Gaussian shell, a pose refit and a substituted band of
-# frames — is parked in fast_helical_shell.yaml and selected by nothing.
+# WHAT CHANGED (2026-08-30): fix_head_angle now takes `cam_t`, and holds
+# the head on its original camera ray while it nods. The first pod run of
+# the above showed the face splat sitting off the mesh head in the anchor
+# view and swinging across it, in opposite directions, at the two edges of
+# the 45-degree band — the signature of a depth error. Cause: the nod is a
+# rotation at fixed neck length, so it lifted the mesh head ~10 px while
+# leaving the photograph the splat is pinned to exactly where it was. See
+# the step comment below.
+#
+# The circular orbit, override_cam_from_mesh, the anchor warp and the
+# anchor injection remain exactly as they were, deliberately: this file
+# exists to test the face in isolation, so a run that looks different from
+# the last one differs because of the face and nothing else. A separate,
+# larger change — the photo-to-splat SHELL, which replaces the whole
+# bootstrap with a helical orbit, a body-wide Gaussian shell, a pose refit
+# and a substituted band of frames — is parked in fast_helical_shell.yaml
+# and selected by nothing.
 #
 # The compositing is a b2crunner step rather than body2colmap's own
 # `skeleton+splat` render mode, because that mode rasterises through gsplat
@@ -229,12 +238,30 @@ steps:
   # the mesh render, the anchor warp and everything downstream see the
   # corrected pose. `mode=auto` straightens to ~10 deg of residual lean;
   # see steps/head_angle.py for the fixed-angle alternative and the knobs.
+  #
+  # `cam_t` is REQUIRED, and the step refuses to run without it. A bare
+  # rotation keeps the neck's length, so straightening the lean also lifts
+  # the head ~25 mm — about 10 px here, an eighth of a head. That lift is
+  # anatomically harmless and registrationally fatal: it moves the mesh head
+  # but not the PHOTOGRAPH, and the face splat below is pinned to the photo's
+  # pixels by construction, so the mesh walks out from under it and
+  # face_pointmap_splat's depth solve — which compares the two under the face
+  # matte, in the photo's pixels — starts comparing cheek against jaw. The
+  # symptom is a face that sits off the head at the anchor and swings across
+  # it by parallax at the edges of the +/-45 deg band. With `cam_t` the nod is
+  # followed by a compensating translation that puts the head centre back on
+  # its original camera ray at the corrected depth, graded by the same
+  # smoothstep and so expressed as a shorter neck. `focal_length` is optional
+  # and buys only the log line reporting the correction in pixels — worth
+  # wiring, as that number is the misregistration this removes.
   - id: fix_head_angle
     step: head_angle_fix
     dispatch: in_process
     inputs:
       vertices: scene.vertices
       keypoints_3d: scene.keypoints_3d
+      cam_t: scene.cam_t
+      focal_length: scene.focal_length
     outputs:
       vertices: scene.vertices
       keypoints_3d: scene.keypoints_3d
