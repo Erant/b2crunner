@@ -74,6 +74,14 @@ must all be the same photo — `scene.front_image`:
 `fix_head_angle`, not before: this step reads `mesh_output["vertices"]`,
 and the head correction rewrites them.
 
+`refine_pose_to_splat` is the natural next step after this one — it
+re-poses the body so the mesh agrees with the shell in novel views, which
+is what stops the rendered skeleton drifting off the subject a few degrees
+either side of the anchor. Note it is mutually exclusive with
+`fix_head_angle` (see `INCOMPATIBLE_STEPS` in pipeline/workflow.py), so a
+workflow picks one; and re-running this step afterwards, on the re-posed
+mesh, is the untried second iteration of the loop.
+
 Coordinate frames
 -----------------
 Two camera frames are in play and they are the same physical camera, from
@@ -685,9 +693,13 @@ def mesh_depth_prior(z: np.ndarray, mask: np.ndarray, front: np.ndarray,
     `align_bin_px` (32 px) is far too coarse for a hand: fingers get dragged
     toward the depth of whatever shares their bin, and visibly deform.
 
-    So: useful as an experiment, wrong as a default. Fixing it properly
-    means a real per-pixel mesh depth and a blend weight that backs off
-    where the mesh is thin or absent.
+    So: useful as an experiment, wrong as a default — and superseded.
+    `refine_pose_to_splat` addresses the same disagreement from the other
+    end, moving the *body* onto the shell instead of the shell onto the
+    body, which keeps the mesh a valid body and so cannot deform a finger
+    at all. Prefer that. This option is kept because it is the only lever
+    that acts when no body fit is available to re-pose, and because the
+    comparison is what established which direction to push.
 
     Returns a depth map, defined inside `mask`.
     """

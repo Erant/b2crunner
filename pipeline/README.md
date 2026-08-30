@@ -404,7 +404,7 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   not a bug, just an invalid test size for this model/LoRA pairing).
 - `sapiens2_lite` — Sapiens2 surface-normal estimation via transformers'
   first-class support (`AutoModelForNormalEstimation`,
-  `facebook/sapiens2-normal-1b`) — not the older facebookresearch/sapiens
+  `facebook/sapiens2-normal-0.8b`) — not the older facebookresearch/sapiens
   (v1) "lite" torchscript path this step's name originally referenced. Ran
   against `wan22_vace_denoise` output frames on an L40S pod, both
   single-image and batched paths; output correctly shaped and L2-normalized.
@@ -522,6 +522,18 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   `face_mode` is the drawing style ("full" = points + connectivity lines |
   "points" | "none"); the view-angle gate is the separate
   `face_max_angle` (90 = full hemisphere, 45 = near-frontal).
+- `head_angle_fix` (`head_angle.py`) — stopgap for a systematic SAM-3D-Body
+  failure: fitted from a frontal photo the head comes out craned forward
+  (neck-to-head vector 30-45 deg off the torso axis). One weighted rigid nod
+  about the inter-shoulder axis through the MHR70 neck joint, smoothstep-
+  graded 0 at the neck to full at the crown. **Vertices and keypoints get
+  the identical transform** (one `_bend` closure applied to both), so the
+  skeleton overlay still tracks the silhouette — verified on a real fit:
+  every joint stays inside its own mesh through the nod (median +24 -> +25
+  mm behind the front surface, 0% outside). It does NOT update the MHR pose
+  parameters, which is why it cannot be combined with
+  `refine_pose_to_splat` — see `INCOMPATIBLE_STEPS` in `workflow.py`.
+  Synthetic-skeleton tests only.
 - `pointmap_splat` (`pointmap_splat.py`) — one photo into a feed-forward
   Gaussian shell, in SAM-3D-Body's own world: Sapiens2 pointmap, depth
   re-solved from `sapiens2_lite`'s normals, one oriented Gaussian per
@@ -533,6 +545,17 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   `generate_firstlast`'s warp of the photo) lands at (1, 0) px. **Not in any
   workflow** — it exists to feed extra reference views to VACE and a
   non-degenerate helical first pass.
+- `refine_pose_to_splat` (`pose_refine.py`) — re-poses a SAM-3D-Body fit so
+  its mesh agrees with that shell in novel views, which is what stops the
+  skeleton overlay drifting off the subject a few degrees either side of the
+  anchor. Adam over `body_pose_params`/`global_rot`/`cam_t` through the MHR
+  body model's own differentiable forward, with shape/scale frozen so bone
+  lengths are preserved by construction. Measured: skeleton pixels landing
+  off the splat 5.1% -> 2.8% over +-19 deg (11.3% -> 5.2% at 28 deg), anchor
+  drift 1.79 px median. Runs in the `sam3dbody` venv, since it needs that
+  model. Tests cover the depth buffers, target self-consistency and the PLY
+  reader; the optimisation itself needs the gated 2.8 GB checkpoint and is
+  not exercised in CI.
 - `load_splat`/`save_splat`/`render_splat` — `render_splat`'s camera-path
   resolution (which cameras, what focal length, which framing bounds,
   point-cloud preservation, metadata pass-through) is verified against

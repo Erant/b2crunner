@@ -29,6 +29,28 @@ however much it takes to leave `target_lean_deg` of lean, capped at
 `mode="fixed"` ignores the measurement and rotates back by exactly
 `pitch_deg` (negative leans it further forward).
 
+**Mutually exclusive with `refine_pose_to_splat`**, and
+`WorkflowSpec.validate()` refuses a workflow enabling both (see
+INCOMPATIBLE_STEPS in pipeline/workflow.py). This step edits the vertices
+and keypoints directly and leaves the MHR pose parameters describing the
+*old* geometry; that step replays those parameters through the body model
+and rebuilds the mesh from them, so it would discard this nod outright —
+and its round-trip gate refuses to run once the two disagree. Nor does it
+subsume this one — but not because it ignores the head. It moves the head
+centre 33 mm back along the sagittal axis, so it is already acting on the
+crane's depth component; it simply answers to the shell, which inherited the
+same craned head from the same photograph, and settles somewhere the
+anatomical prior does not want. (The measured lean goes 32.4 -> 36.0 deg,
+but that metric is relative — the hips came 17 mm forward and the neck 27 mm
+back, rotating the torso axis more than the head-neck vector rotated.)
+
+Expressing this nod in pose space instead of as a vertex deformation would
+remove the mechanical conflict, but it would NOT make the two independent:
+the pose fit would still pull the head toward the shell and partly undo it.
+The real answer is to put the anatomical constraint into that step's
+objective as a term, so a single optimisation trades shell agreement against
+plausibility.
+
 **Known limitations** (it is a stopgap): the anchor camera / `cam_t` and
 `focal_length` are untouched, so the warped reference photo at the anchor
 frame still frames the head where the photo has it — a few degrees of nod

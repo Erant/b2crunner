@@ -593,3 +593,62 @@ class TestWorkflowFiles(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestIncompatibleSteps(unittest.TestCase):
+    """Step pairs that each work and are wrong together.
+
+    `head_angle_fix` deforms the mesh directly without touching the MHR pose
+    parameters; `refine_pose_to_splat` regenerates the mesh *from* those
+    parameters. Run together, one silently discards the other — and they are
+    corrections in opposite directions besides (the head fix is an
+    anatomical prior; the pose fit chases what the shell observed, and the
+    shell inherited the same craned head from the same photo).
+    """
+
+    def _spec(self, *step_names, globals_=None):
+        from pipeline.workflow import StepSpec, WorkflowSpec
+
+        return WorkflowSpec(
+            name="synthetic",
+            globals=dict(globals_ or {}),
+            steps=[StepSpec(id=f"s{i}", step=name)
+                   for i, name in enumerate(step_names)],
+        )
+
+    def test_the_shipped_workflows_do_not_mix_them(self):
+        for path in sorted(WORKFLOW_DIR.glob("*.yaml")):
+            spec = WorkflowSpec.from_yaml(path)
+            spec.validate()          # raises if any pair is enabled together
+
+    def test_enabling_both_is_refused(self):
+        spec = self._spec("head_angle_fix", "refine_pose_to_splat")
+        with self.assertRaises(ValueError) as caught:
+            spec.validate()
+        message = str(caught.exception)
+        self.assertIn("head_angle_fix", message)
+        self.assertIn("refine_pose_to_splat", message)
+        # The refusal has to say why, not just that.
+        self.assertIn("pose parameters", message)
+
+    def test_either_one_alone_is_fine(self):
+        self._spec("head_angle_fix").validate()
+        self._spec("refine_pose_to_splat").validate()
+
+    def test_a_when_gated_step_that_is_off_does_not_count(self):
+        """`when:` is how this pipeline makes a step optional, so a pair is
+        only a conflict when both actually run."""
+        from pipeline.workflow import StepSpec, WorkflowSpec
+
+        spec = WorkflowSpec(
+            name="synthetic",
+            globals={"fix_head": False},
+            steps=[StepSpec(id="a", step="head_angle_fix",
+                            when="${globals.fix_head}"),
+                   StepSpec(id="b", step="refine_pose_to_splat")],
+        )
+        spec.validate()
+
+        spec.globals["fix_head"] = True
+        with self.assertRaises(ValueError):
+            spec.validate()

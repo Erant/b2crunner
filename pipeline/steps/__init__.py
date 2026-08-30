@@ -15,6 +15,7 @@ from . import face_landmarks  # noqa: F401
 from . import head_angle  # noqa: F401
 from . import mask_splat  # noqa: F401
 from . import pointmap_splat  # noqa: F401
+from . import pose_refine  # noqa: F401
 from . import reference_sheet  # noqa: F401
 from . import render  # noqa: F401
 from . import rmbg  # noqa: F401

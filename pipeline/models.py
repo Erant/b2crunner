@@ -326,7 +326,14 @@ def _registry() -> List[ModelSource]:
             ("pointmap_splat",), pointmap_fetch, pointmap_probe, approx_gb=6.5,
         ),
         ModelSource(
-            "sam3dbody", f"{SAM3D} (body reconstruction)", ("sam3d_body",),
+            # refine_pose_to_splat needs the same checkpoint: it replays the
+            # MHR body model's forward with the pose as free variables, so a
+            # workflow that re-poses without also fitting would otherwise
+            # prefetch nothing and then block mid-run on a gated 2.8 GB
+            # download. It does NOT need moge2 — the focal length comes from
+            # the fit it is handed, not from a fresh FOV estimate.
+            "sam3dbody", f"{SAM3D} (body reconstruction)",
+            ("sam3d_body", "refine_pose_to_splat"),
             sam3d_fetch, sam3d_probe, approx_gb=2.8, gated=True,
         ),
         ModelSource(

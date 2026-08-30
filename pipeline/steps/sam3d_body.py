@@ -236,4 +236,17 @@ class SAM3DBodyStep(Step):
             "cam_t": np.asarray(person["pred_cam_t"]),
             "focal_length": float(person["focal_length"]),
             "bbox": np.asarray(person["bbox"]),
+            # The MHR pose parameters behind that mesh. Nothing needed them
+            # until `refine_pose_to_splat`, which re-runs the body model's
+            # own forward with them as free variables — re-posing the body
+            # rather than warping it. A few hundred floats; publishing them
+            # is what saves that step a second 2.8 GB inference pass.
+            "pose_params": {
+                "global_rot": np.asarray(person["global_rot"]),
+                "body_pose_params": np.asarray(person["body_pose_params"]),
+                "hand_pose_params": np.asarray(person["hand_pose_params"]),
+                "scale_params": np.asarray(person["scale_params"]),
+                "shape_params": np.asarray(person["shape_params"]),
+                "expr_params": np.asarray(person["expr_params"]),
+            },
         }
