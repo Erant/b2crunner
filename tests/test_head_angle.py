@@ -140,12 +140,12 @@ class TestHeadAngleFix(unittest.TestCase):
     def test_the_head_center_reprojects_where_it_started(self):
         """The invariant the whole compensation exists for.
 
-        `face_pointmap_splat` puts every Gaussian on the ray through the
+        A photo-pinned overlay puts every sample on the ray through the
         pixel it came from, so the photo-derived face sits at the
         photograph's head position no matter what the mesh does. If the nod
         moves the mesh head off that pixel, the splat is composited onto a
         head that is no longer under it — and that step's depth solve, which
-        compares mesh against pointmap under the face matte, starts
+        compares mesh against photograph under the face matte, starts
         comparing the wrong surfaces.
         """
         for lean in (25.0, 38.0, 55.0):

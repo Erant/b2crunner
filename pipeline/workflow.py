@@ -204,30 +204,12 @@ class WorkflowSpec:
 #: Keep this for genuine incompatibilities only: two steps that each work,
 #: and that quietly produce a wrong result together. A step that merely
 #: needs another to run first belongs in a workflow comment, not here.
-INCOMPATIBLE_STEPS: Dict[frozenset, str] = {
-    frozenset({"head_angle_fix", "refine_pose_to_splat"}): (
-        "head_angle_fix rewrites scene.vertices/keypoints_3d directly, as a "
-        "graded deformation, and does NOT update the MHR pose parameters "
-        "behind them. refine_pose_to_splat replays those parameters through "
-        "the body model and regenerates the mesh from them, so it would "
-        "silently discard the nod (and its own round-trip gate refuses to "
-        "run at all once the two disagree). They also pull in different "
-        "directions, and NOT because one ignores the head: re-posing moves "
-        "the head centre 33 mm back along the sagittal axis, i.e. it is "
-        "already correcting the crane's depth component. It just answers to "
-        "a different authority — the shell, which inherited the same craned "
-        "head from the same photograph — so it settles at a different "
-        "answer than the anatomical prior wants, and would partly undo a nod "
-        "applied before it. (The measured lean goes 32.4 -> 36.0 deg, but "
-        "that metric is relative: the hips came 17 mm forward and the neck "
-        "27 mm back, rotating the torso axis more than the head-neck vector "
-        "rotated.) Pick one. Making them genuinely cooperate is not an "
-        "ordering fix — it means putting the anatomical constraint INTO the "
-        "pose objective as a term, so one optimisation balances shell "
-        "agreement against plausibility, rather than two steps overwriting "
-        "each other."
-    ),
-}
+#:
+#: Empty since 2026-08-30: its one entry paired head_angle_fix with
+#: `refine_pose_to_splat`, and that step went with the photo-to-splat work
+#: (see tests/test_workflows.py's BOOTSTRAPS note). The mechanism below is
+#: untouched and wants restoring the moment a genuine pair turns up.
+INCOMPATIBLE_STEPS: Dict[frozenset, str] = {}
 
 
 def apply_ui_overrides(

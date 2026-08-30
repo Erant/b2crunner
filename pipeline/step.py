@@ -132,8 +132,9 @@ def with_defaults(params: Tuple["Param", ...], **overrides: Any) -> Tuple["Param
     """`params` with some defaults replaced — a specialization's declaration.
 
     Two steps that share their numerics but not their tuning are the case
-    this exists for: `pointmap_splat` (a whole body, RMBG's matte) and
-    `face_pointmap_splat` (a head crop, a segmentation mask) run identical
+    this exists for: two specializations of one splat builder — a whole
+    body from RMBG's matte, and a head crop from a segmentation mask — ran
+    identical
     code and disagree on two measured constants. Re-typing the base's whole
     PARAMS tuple to change them would put every *other* default in two
     places, where they drift silently.

@@ -60,60 +60,31 @@ DENOISE_NEGATIVE_PROMPT = (
 )
 
 
-# The from-a-sheet workflows, and the bootstrap prologue each one runs before
-# it picks up fast_helical_full.yaml's steps verbatim. Pinned here rather than
+# The from-a-sheet workflow, and the bootstrap prologue it runs before it
+# picks up fast_helical_full.yaml's steps verbatim. Pinned here rather than
 # derived, because "the prologue changed shape" is exactly the edit that
 # should make somebody look: this list is how the pipeline is allowed to
 # manufacture the dataset fast_helical_full expects.
 #
-# 2026-08-29: it changed shape. `fix_head_angle` left (it cannot run beside
-# `refine_pose_to_splat`), the matte/normals/shell/re-pose steps arrived, and
-# `warp_reference_to_anchor` + `reinject_anchor_initial` left because
-# `inject_shell_views` does that job — it puts photo-derived content on every
-# frame near the source view, not just the one exactly on it, so the render
-# no longer has to bend its path to land a camera there either.
-#: The face branch — detect_face / locate_face / crop_face / face_seg /
-#: face_mask / face_normals / face_splat, then render_face_views +
-#: composite_face + face_support_views — is common to both and gated on each
-#: file's `face_splat` global.
-#:
-#: 2026-08-30: `face_support_views` joined it. The face renders now reach
-#: the trainings twice — composited into the drawings, and again as brush
-#: supporting views, which is the only one of the two a diffusion pass
-#: cannot rewrite.
-#:
-#: 2026-08-30 (later): `detect_face` came BACK. Not a reversal of the
-#: 2026-08-29 note — the landmarks are geometry now, not an overlay, and
-#: nothing draws them. Sapiens2's `parts: face` is Goliath class 3,
-#: `Face_Neck`, so the neck can only be intersected out of the matte, not
-#: deselected from it: `face_seg` produces it and `face_mask` (now
-#: `face_landmark_mask`) intersects the landmark hull with it. `locate_face`
-#: stays exactly where it was and still sizes the crop — a face-sized crop
-#: was tried and flattens the face fourfold, see the step's docstring.
+# 2026-08-30: it changed shape, back. The photo-to-splat line — the body
+# shell, the face splat, the re-pose, the shell-view injection and the
+# fast_helical_shell.yaml that carried them — was removed entirely; it never
+# converged. `detect_face` is once again the MediaPipe landmark overlay it
+# was before 2026-08-29, and the whole face branch, `refine_pose_to_splat`,
+# `inject_shell_views` and the second bootstrap file are gone with it. That
+# work lives on the `pointmap-splat-integration` branch.
+#
+# INCOMPATIBLE_STEPS is empty as a result — its one entry paired
+# `head_angle_fix` with `refine_pose_to_splat` — so the tests that exercised
+# it went too. Restore them alongside the next genuine pair; the mechanism
+# in pipeline/workflow.py is untouched.
 BOOTSTRAPS = {
-    # The shipped default: the older, better-proven bootstrap — circular
-    # orbit, head-angle fix, anchor warp and injection — with only the face
-    # changed. Keeping everything else fixed is the point of the file.
+    # The only from-a-sheet workflow: circular orbit, head-angle fix, the
+    # MediaPipe landmark overlay, anchor warp and injection.
     "fast_helical_native": [
-        "split_sheet", "reconstruct_body", "fix_head_angle",
-        "detect_face", "locate_face", "crop_face", "face_seg", "face_mask",
-        "face_normals", "face_splat",
-        "render_initial_views", "render_face_views", "composite_face",
-        "face_support_views",
+        "split_sheet", "reconstruct_body", "fix_head_angle", "detect_face",
+        "render_initial_views",
         "warp_reference_to_anchor", "reinject_anchor_initial",
-    ],
-    # Parked: the photo-to-splat shell, which replaces the whole bootstrap.
-    # Nothing selects it (webui.WORKFLOW_NATIVE names the file above); it is
-    # kept in the tree so the shell wiring does not have to be reconstructed
-    # from git history, and checked here so it cannot rot silently.
-    "fast_helical_shell": [
-        "split_sheet", "reconstruct_body",
-        "front_matte", "front_normals", "shell_splat", "refine_pose",
-        "detect_face", "locate_face", "crop_face", "face_seg", "face_mask",
-        "face_normals", "face_splat",
-        "render_initial_views", "render_face_views", "composite_face",
-        "face_support_views",
-        "render_shell_views", "inject_shell_band",
     ],
 }
 
@@ -906,62 +877,3 @@ class TestWorkflowFiles(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-
-class TestIncompatibleSteps(unittest.TestCase):
-    """Step pairs that each work and are wrong together.
-
-    `head_angle_fix` deforms the mesh directly without touching the MHR pose
-    parameters; `refine_pose_to_splat` regenerates the mesh *from* those
-    parameters. Run together, one silently discards the other — and they are
-    corrections in opposite directions besides (the head fix is an
-    anatomical prior; the pose fit chases what the shell observed, and the
-    shell inherited the same craned head from the same photo).
-    """
-
-    def _spec(self, *step_names, globals_=None):
-        from pipeline.workflow import StepSpec, WorkflowSpec
-
-        return WorkflowSpec(
-            name="synthetic",
-            globals=dict(globals_ or {}),
-            steps=[StepSpec(id=f"s{i}", step=name)
-                   for i, name in enumerate(step_names)],
-        )
-
-    def test_the_shipped_workflows_do_not_mix_them(self):
-        for path in sorted(WORKFLOW_DIR.glob("*.yaml")):
-            spec = WorkflowSpec.from_yaml(path)
-            spec.validate()          # raises if any pair is enabled together
-
-    def test_enabling_both_is_refused(self):
-        spec = self._spec("head_angle_fix", "refine_pose_to_splat")
-        with self.assertRaises(ValueError) as caught:
-            spec.validate()
-        message = str(caught.exception)
-        self.assertIn("head_angle_fix", message)
-        self.assertIn("refine_pose_to_splat", message)
-        # The refusal has to say why, not just that.
-        self.assertIn("pose parameters", message)
-
-    def test_either_one_alone_is_fine(self):
-        self._spec("head_angle_fix").validate()
-        self._spec("refine_pose_to_splat").validate()
-
-    def test_a_when_gated_step_that_is_off_does_not_count(self):
-        """`when:` is how this pipeline makes a step optional, so a pair is
-        only a conflict when both actually run."""
-        from pipeline.workflow import StepSpec, WorkflowSpec
-
-        spec = WorkflowSpec(
-            name="synthetic",
-            globals={"fix_head": False},
-            steps=[StepSpec(id="a", step="head_angle_fix",
-                            when="${globals.fix_head}"),
-                   StepSpec(id="b", step="refine_pose_to_splat")],
-        )
-        spec.validate()
-
-        spec.globals["fix_head"] = True
-        with self.assertRaises(ValueError):
-            spec.validate()

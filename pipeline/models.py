@@ -284,9 +284,7 @@ def _registry() -> List[ModelSource]:
     from .steps.rmbg import DEFAULT_CHECKPOINT as RMBG
     from .steps.sam3d_body import DEFAULT_CHECKPOINT_REPO as SAM3D
     from .steps.sam3d_body import DEFAULT_FOV_CHECKPOINT_REPO as MOGE
-    from .steps.pointmap_splat import DEFAULT_CHECKPOINT as SAPIENS_POINTMAP
     from .steps.sapiens2 import DEFAULT_CHECKPOINT as SAPIENS
-    from .steps.sapiens2 import DEFAULT_SEG_CHECKPOINT as SAPIENS_SEG
     from .steps.wan22_vace_denoise import DEFAULT_CHECKPOINT as WAN22
 
     # allow_patterns, or these pull the whole repo including formats the
@@ -295,16 +293,18 @@ def _registry() -> List[ModelSource]:
     #     is eight ONNX variants and a duplicate pytorch_model.bin. The
     #     `*.py` are NOT optional: the step loads it with
     #     trust_remote_code=True, which needs birefnet.py/BiRefNet_config.py.
-    #   sapiens2-normal-* and sapiens2-pointmap-* ship the same weights
-    #     twice (model.safetensors and sapiens2_<size>_<task>.safetensors —
-    #     6.16 GB each on the 1b normal default, 6.52 GB each on the 1b
-    #     pointmap); only the first is what from_pretrained loads.
+    #   sapiens2-normal-* ships the same weights twice (model.safetensors
+    #     and sapiens2_<size>_<task>.safetensors, 6.16 GB each on the 1b
+    #     default); only the first is what from_pretrained loads.
     # 6.3 GB of pod download and volume, for nothing, on every fresh pod.
+    #
+    # The pointmap and segmentation heads used to be pulled here too — a
+    # third and fourth Sapiens2 repo, ~19 GB of Sapiens2 before anything
+    # else on a fresh pod. Both went with the photo-to-splat work on
+    # 2026-08-30; nothing left in the pipeline loads either.
     _WEIGHTS_ONLY = ["*.json", "*.py", "model.safetensors"]
     rmbg_fetch, rmbg_probe = _hf_snapshot(RMBG, _WEIGHTS_ONLY)
     sapiens_fetch, sapiens_probe = _hf_snapshot(SAPIENS, _WEIGHTS_ONLY)
-    pointmap_fetch, pointmap_probe = _hf_snapshot(SAPIENS_POINTMAP, _WEIGHTS_ONLY)
-    seg_fetch, seg_probe = _hf_snapshot(SAPIENS_SEG, _WEIGHTS_ONLY)
     sam3d_fetch, sam3d_probe = _hf_snapshot(SAM3D)
     wan22_fetch, wan22_probe = _hf_snapshot(WAN22, WAN22_ALLOW_PATTERNS)
 
@@ -321,31 +321,8 @@ def _registry() -> List[ModelSource]:
             sapiens_fetch, sapiens_probe, approx_gb=6.2,
         ),
         ModelSource(
-            # Same repo layout as the normal heads above, so the same
-            # `model.safetensors`-only filter applies: the 1b pointmap repo
-            # ships the identical weights twice, 6.5 GB each.
-            "sapiens2_pointmap", f"{SAPIENS_POINTMAP} (pointmap / depth)",
-            ("pointmap_splat", "face_pointmap_splat"),
-            pointmap_fetch, pointmap_probe, approx_gb=6.5,
-        ),
-        ModelSource(
-            # The third Sapiens2 head, and the third 6-and-a-bit GB: a
-            # workflow running the face branch pulls normals + pointmap +
-            # seg, ~19 GB of volume before anything else. Only the face
-            # branch needs it — `pointmap_splat` takes RMBG's matte, and
-            # nothing else in the pipeline segments body parts.
-            "sapiens2_seg", f"{SAPIENS_SEG} (body-part segmentation)",
-            ("sapiens2_seg",), seg_fetch, seg_probe, approx_gb=6.5,
-        ),
-        ModelSource(
-            # refine_pose_to_splat needs the same checkpoint: it replays the
-            # MHR body model's forward with the pose as free variables, so a
-            # workflow that re-poses without also fitting would otherwise
-            # prefetch nothing and then block mid-run on a gated 2.8 GB
-            # download. It does NOT need moge2 — the focal length comes from
-            # the fit it is handed, not from a fresh FOV estimate.
             "sam3dbody", f"{SAM3D} (body reconstruction)",
-            ("sam3d_body", "refine_pose_to_splat"),
+            ("sam3d_body",),
             sam3d_fetch, sam3d_probe, approx_gb=2.8, gated=True,
         ),
         ModelSource(

@@ -2,73 +2,52 @@
 # front/back reference sheet, then run fast_helical_full's pipeline over it.
 #
 # BOOTSTRAP (this file only) — split_sheet -> reconstruct_body ->
-# fix_head_angle -> [detect_face -> locate_face -> crop_face -> face_seg ->
-# face_mask -> face_normals -> face_splat] -> render_initial_views ->
-# render_face_views -> composite_face -> warp_reference_to_anchor ->
-# reinject_anchor_initial. The bracketed seven, plus render_face_views,
-# composite_face and face_support_views, are gated on the `face_splat`
-# global.
+# fix_head_angle -> detect_face -> render_initial_views ->
+# warp_reference_to_anchor -> reinject_anchor_initial.
 #
-# WHAT CHANGED (2026-08-29): the MediaPipe face is gone, and a Gaussian
-# splat of the subject's actual face is composited onto the skeleton
-# drawings in its place. `detect_face` is deleted and render_initial_views
-# no longer takes a `face_landmarks` input. Landmark dots carry almost no
-# identity and the canonical face model carries none; a splat of the real
-# face carries both identity and gaze, which is what these frames are for.
+# WHAT CHANGED (2026-08-30): the photo-to-splat line is gone, all of it.
+# For a day this file built a Gaussian splat of the subject's real face
+# from Sapiens2's pointmap head and composited it over these drawings, and
+# a sibling file did the same for the whole body as a shell. It did not
+# converge to anything usable, so the pointmap head, the segmentation head,
+# `pointmap_splat`/`face_pointmap_splat`, `crop_to_box`,
+# `refine_pose_to_splat`, `inject_shell_views` and
+# fast_helical_shell.yaml were all removed together, and the two Sapiens2
+# checkpoints they needed — pointmap and seg, ~13 GB of prefetch — with
+# them. The MediaPipe landmark overlay this file drew before is back.
 #
-# WHAT CHANGED (2026-08-30): fix_head_angle now takes `cam_t`, and holds
-# the head on its original camera ray while it nods. The first pod run of
-# the above showed the face splat sitting off the mesh head in the anchor
-# view and swinging across it, in opposite directions, at the two edges of
-# the 45-degree band — the signature of a depth error. Cause: the nod is a
-# rotation at fixed neck length, so it lifted the mesh head ~10 px while
-# leaving the photograph the splat is pinned to exactly where it was. See
-# the step comment below.
+# That work is preserved in full on the `pointmap-splat-integration`
+# branch, which is this branch plus the whole line. Read it there before
+# rebuilding any of it; the failure was not a wiring bug. Two findings
+# worth carrying over, both measured on cyber2_6f:
 #
-# WHAT CHANGED (2026-08-30, later): the face splat is MASKED to the face,
-# not to the face and the neck, and `align_bin_px` drops from 32 to 8.
-# `detect_face` is back — for the geometry only, not for the dots the
-# 2026-08-29 note deleted. Sapiens2's `parts: face` is Goliath class 3,
-# `Face_Neck`: one class covering both, so the neck can only be intersected
-# out, and MediaPipe's hull is what does it.
+#   * A tighter face crop FLATTENS the face — relief 224.5 -> 144.2 mm,
+#     the nose going from 99.2 mm proud of the face's outer edge to 22.9.
+#     Sapiens2 upsamples to 1024x768, so a tighter box adds no real pixels,
+#     only interpolation, and the pointmap head answers a softer input with
+#     a flatter face.
+#   * SAM-3D-Body's head agrees with the photograph on POSITION (centroid
+#     within 0.05 of an inter-eye distance) and, on a frontal subject, on
+#     ORIENTATION (1.1 deg). It disagrees on SIZE by 15-20%, and the sign
+#     flips between subjects. That is the degeneracy one photo cannot
+#     resolve, and it is what a face pinned to the photo's rays sits
+#     inside.
 #
-# What the mask buys, visibly, is the band edges. A 2.5-D pointmap shell of
-# a NECK reaches grazing incidence long before the face does, so well inside
-# the 45-degree cull the old mask threw a large smeared tongue of Gaussians
-# across the shoulder. That is gone. It costs 30% of the covered pixels and
-# essentially none of the face: over identical pixels the nose still stands
-# 99.5 mm proud of the face's outer edge, against 99.2 before.
+# What survives here from that line, deliberately unwired: brush's
+# `support_*` inputs and `select_support_views`. Nothing feeds them now —
+# the face renders were their only producer — but the plumbing and its
+# tests are intact for the next thing that wants to supervise a training
+# with real views. `composite_splat_views` likewise.
 #
-# The CROP is deliberately unchanged — see the note on locate_face. Cutting
-# it to the face as well is the obvious companion change, and it flattens
-# the face fourfold. It was built, measured and reverted.
-#
-# `align_bin_px` moves the splat only ALONG ITS RAYS: the integration is
-# equivariant under a global scale on its data term, so the bin size cannot
-# change shape, and measurement agrees (relief 224.5 mm at bin 32 against
-# 227.7 at bin 8, nose +99.2 against +100.6). What it changes is depth. 32
-# was a full-frame number; on a face crop it placed the splat 15 mm toward
-# the camera. See FacePointmapSplatStep's docstring for the table.
-#
-# Neither change moves the splat off the photograph's rays, so neither can
-# step the face between the injected anchor photo and frames 2/81.
+# WHAT CHANGED (2026-08-30, earlier): fix_head_angle takes `cam_t` and
+# holds the head on its original camera ray while it nods. That predates
+# the removal and stays: a bare rotation preserves the neck's length, so
+# straightening the lean also lifts the head ~10 px, which moves the MESH
+# and not the photograph the anchor warp injects. See the step comment.
 #
 # The circular orbit, override_cam_from_mesh, the anchor warp and the
-# anchor injection remain exactly as they were, deliberately: this file
-# exists to test the face in isolation, so a run that looks different from
-# the last one differs because of the face and nothing else. A separate,
-# larger change — the photo-to-splat SHELL, which replaces the whole
-# bootstrap with a helical orbit, a body-wide Gaussian shell, a pose refit
-# and a substituted band of frames — is parked in fast_helical_shell.yaml
-# and selected by nothing.
+# anchor injection are as they have always been.
 #
-# The compositing is a b2crunner step rather than body2colmap's own
-# `skeleton+splat` render mode, because that mode rasterises through gsplat
-# and this project deliberately has none (see pyproject.toml — dropping it
-# removed the last runtime CUDA toolchain). The geometry, the blend and the
-# 45-degree cull are all body2colmap's, from c65a7f7. See
-# docs/revert-when-body2colmap-drops-gsplat.md: this is the part to take
-# back out when that library moves to the brush renderer.
 # This is the part fast_helical_full is handed ready-made: a dataset rendered
 # with override_cam_from_mesh whose extras carry orbit_target /
 # anchor_position / focal_length_mm / original_focal_length, with a warped
@@ -93,11 +72,6 @@
 #   colmap/              cameras.txt + images.txt + points3D.txt, images/, normals/
 #   ply/                 scene.ply — a second brush training, normal-supervised
 #   colmap_preupscale/   debug: a COLMAP dataset from the pre-upscale frames
-#
-# plus one intermediate this file writes on the way through:
-#
-#   face/face.ply        the photo-derived Gaussian head, composited onto
-#                        every drawing within 45 degrees of the source view
 #
 # export_colmap / export_ply switch the first two off; export_colmap_preupscale
 # (with run_upscale on) opts into the third. The web UI's Outputs box drives
@@ -159,22 +133,6 @@ globals:
   # throw away. Workflow-level toggles, not step params, so they stay here.
   export_colmap: true
   export_ply: true
-
-  # Whether the face branch runs: a Gaussian splat of the subject's actual
-  # face, composited onto the skeleton drawings wherever the camera can see
-  # it (+-45 deg). It REPLACES the MediaPipe landmark overlay this file used
-  # to draw — `detect_face` is gone, not disabled — so turning this off
-  # leaves the skeleton frames with no face at all rather than falling back
-  # to landmarks. That is a real gap and it is deliberate: a YAML input
-  # cannot be conditionally wired, so a `when:`-skipped detect_face would
-  # make render_initial_views raise on an unresolvable context path.
-  # Putting the landmarks back means pasting the detect_face block and one
-  # `face_landmarks:` input line back in; the step, its params on `render`,
-  # and its tests are all still there.
-  #
-  # Costs a third 1B Sapiens2 head (~6.5 GB, segmentation) on top of the
-  # normal head, plus the pointmap head the splat itself needs.
-  face_splat: true
 
   # Whether the SeedVR2 upscale (stage 5) runs. On by default. `run_upscale:
   # false` skips both the `upscale` step and `rescale_cameras` (which exists
@@ -272,17 +230,19 @@ steps:
   # rotation keeps the neck's length, so straightening the lean also lifts
   # the head ~25 mm — about 10 px here, an eighth of a head. That lift is
   # anatomically harmless and registrationally fatal: it moves the mesh head
-  # but not the PHOTOGRAPH, and the face splat below is pinned to the photo's
-  # pixels by construction, so the mesh walks out from under it and
-  # face_pointmap_splat's depth solve — which compares the two under the face
-  # matte, in the photo's pixels — starts comparing cheek against jaw. The
-  # symptom is a face that sits off the head at the anchor and swings across
-  # it by parallax at the edges of the +/-45 deg band. With `cam_t` the nod is
-  # followed by a compensating translation that puts the head centre back on
-  # its original camera ray at the corrected depth, graded by the same
-  # smoothstep and so expressed as a shorter neck. `focal_length` is optional
-  # and buys only the log line reporting the correction in pixels — worth
-  # wiring, as that number is the misregistration this removes.
+  # but not the PHOTOGRAPH, and the anchor frame carries the photograph. The
+  # landmark overlay is drawn from the same photo's 2D landmarks and is not
+  # re-projected either. With `cam_t` the nod is followed by a compensating
+  # translation that puts the head centre back on its original camera ray at
+  # the corrected depth, graded by the same smoothstep and so expressed as a
+  # shorter neck. `focal_length` is optional and buys only the log line
+  # reporting the correction in pixels — worth wiring, as that number is the
+  # misregistration this removes.
+  #
+  # It was the face splat that made this urgent (that splat was pinned to
+  # the photo's rays, so a mesh that walked away from them broke it). The
+  # splat is gone; the compensation stays, because moving the mesh off the
+  # photograph is wrong regardless of who notices.
   - id: fix_head_angle
     step: head_angle_fix
     dispatch: in_process
@@ -294,193 +254,28 @@ steps:
     outputs:
       vertices: scene.vertices
       keypoints_3d: scene.keypoints_3d
-
-  # -------------------------------------------------------- the face splat
-  # What replaced the MediaPipe landmarks: a Gaussian splat of the
-  # subject's actual head, built from a CROP of the same photograph by
-  # `face_pointmap_splat` and composited onto the skeleton drawings below.
-  # Landmark dots carry almost no identity and the canonical face model
-  # carries none; a splat of the real face carries both identity and gaze,
-  # which is the point when these frames condition a video model.
+  # MediaPipe face landmarks off the front half of the sheet, for the face
+  # overlay render.py draws on the skeleton (steps/face_landmarks.py). The
+  # SAM-3D-Body rig render.py consumes has no facial detail past a few head
+  # joints, so without this the initial render — and the diffusion pass it
+  # conditions — gets a bare body skeleton with no eyes/nose/mouth. CPU,
+  # ~10 MB of model files fetched to the volume on first use. Raises if it
+  # finds no face, which for a front/back sheet should not happen; the
+  # two-stage detect-crop-retry in that step is there because the face is a
+  # small part of a full-body frame.
   #
-  # Why a crop. Sapiens2 resizes whatever it is given to 1024x768, so a
-  # face occupying a few percent of a full-body frame reaches the network
-  # as about 40 px of head and there is no relief left in it to integrate.
-  # Cropping first is what puts the face in front of the model at the
-  # resolution masktest measured its numbers on.
-  #
-  # Why it runs AFTER fix_head_angle: that step rewrites scene.vertices and
-  # scene.keypoints_3d, and this splat's depth is scaled onto the mesh's
-  # front surface. Aligning to the pre-nod mesh and then rendering the
-  # post-nod one would put the face at a different distance than the skull
-  # it sits on. Note what the nod does NOT do: it moves the mesh, not the
-  # photograph, so the splat still carries the head at the angle the camera
-  # saw it. What matters here is only that the two agree about depth.
-  #
-  # This is the ONLY thing this file changes against the bootstrap that
-  # came before it — the circular orbit, the head-angle fix, the anchor
-  # warp and the anchor injection are all exactly as they were, so a run
-  # that looks different from the last one differs because of the face and
-  # nothing else. The photo-to-splat SHELL bootstrap, which changes all of
-  # those, is parked in fast_helical_shell.yaml.
-  #
-  # None of these steps declare `keep_loaded`, so the seg head is read from
-  # the HF cache twice (locate, then mask) rather than held in host RAM
-  # through two 81-frame diffusion passes. Set `keep_loaded: true` on both
-  # sapiens2_seg steps to trade the other way; the step implements
-  # release_vram, so it will not squat on the card between them.
-
-  # WHAT CHANGED (2026-08-30): the mask is the FACE, not the face and the
-  # neck. Sapiens2's `parts: face` is Goliath class 3, `Face_Neck` — one
-  # class covering both — so "just the face" cannot be selected by naming a
-  # different class; it has to be intersected out geometrically. MediaPipe's
-  # landmarks are that geometry. On cyber2_6f the hull keeps 74% of the
-  # Face_Neck matte; what it drops is the neck, which is what smeared across
-  # the shoulder at the edges of the 45-degree band.
-  #
-  # This is landmarks for GEOMETRY ONLY. They are not wired into `render` —
-  # see the note on render_initial_views' inputs. The landmark dots are not
-  # coming back; the splat replaced them.
-
-  # Where the face is. CPU, no pod, no GPU: the two model files live in
-  # ~/.cache/body2colmap and the step is crop-first internally, which is
-  # what makes it work on a full-body frame where the face is a few percent
-  # of the pixels (see steps/face_landmarks.py's module docstring).
+  # Reinstated 2026-08-30. For one day (2026-08-29) a Gaussian splat of the
+  # subject's real face was composited over these drawings instead, built by
+  # Sapiens2's pointmap head from a crop of this same photo. It never
+  # converged to something usable and the whole photo-to-splat line was
+  # backed out; the work is on the `pointmap-splat-integration` branch.
   - id: detect_face
     step: detect_face_landmarks
     dispatch: in_process
-    when: ${globals.face_splat}
     inputs:
       image: scene.front_image
     outputs:
       face_landmarks: scene.face_landmarks
-
-  # Where to CROP. Unchanged, and deliberately so: the crop stays the
-  # Face_Neck box even though the mask below no longer is. Cutting the crop
-  # to the face as well was built and measured, and it flattens the face —
-  # relief 224.5 -> 144.2 mm, the nose going from 99.2 mm proud of the
-  # face's outer edge to 22.9. Sapiens2 upsamples whatever it gets to
-  # 1024x768, so a tighter box adds no real pixels of face, only
-  # interpolation, and the pointmap head answers a softer input with a
-  # flatter face. See FaceLandmarkMaskStep's docstring for the table.
-  #
-  # `box` is the tight bounding box of the largest connected component of
-  # the selected classes.
-  - id: locate_face
-    step: sapiens2_seg
-    dispatch: in_process
-    when: ${globals.face_splat}
-    inputs:
-      image: scene.front_image
-    params:
-      # Face_Neck (class 3) alone — masktest's measured default, and what
-      # every number behind the 45-degree cull was taken with. `head` adds
-      # hair, glasses and lips, which is where the rest of the identity
-      # lives; nobody has measured it, and hair is where the pointmap is
-      # least reliable. Worth trying on a pod, not worth defaulting to.
-      parts: face
-    outputs:
-      box: scene.face_box
-
-  # Cut it out at native resolution and record where it came from. The box
-  # is the face's own now, not a segmentation box running down the throat,
-  # so `padding` 0.35 buys margin around a FACE rather than around a face
-  # and a neck.
-  # `crop_info` is what lets face_pointmap_splat re-express SAM-3D-Body's
-  # camera on the crop's pixel grid, so every Gaussian still lands on the
-  # ray through the full-image pixel it came from.
-  - id: crop_face
-    step: crop_to_box
-    dispatch: in_process
-    when: ${globals.face_splat}
-    inputs:
-      image: scene.front_image
-      box: scene.face_box
-    outputs:
-      image: scene.face_image
-      crop_info: scene.face_crop_info
-
-  # Segmentation at crop resolution. Its output is a summed class
-  # *probability*, which is what the splat step wants — it thresholds for
-  # the support region and keeps the soft values at the silhouette as the
-  # Gaussians' opacity. Still Face_Neck: `head` adds hair, glasses and lips,
-  # which is where the rest of the identity lives, but nobody has measured
-  # it and hair is where the pointmap is least reliable. The neck comes off
-  # in the next step, which is the only place it can.
-  - id: face_seg
-    step: sapiens2_seg
-    dispatch: in_process
-    when: ${globals.face_splat}
-    inputs:
-      image: scene.face_image
-    params:
-      parts: face
-    outputs:
-      mask: scene.face_seg_matte
-
-  # Face_Neck minus the neck. `crop_info` is what maps the landmarks, which
-  # are in the FULL frame's normalized coordinates, onto the crop's pixel
-  # grid — the same relation face_pointmap_splat's `_source_intrinsics`
-  # inverts to carry the camera the other way.
-  #
-  # Both halves are load-bearing. The hull alone takes background with it
-  # wherever the head is turned and its convex boundary cuts past the cheek;
-  # the seg matte alone cannot tell a jaw from a throat. The intersection is
-  # the face, and it keeps the seg's soft silhouette where the two
-  # boundaries coincide — the hull's own edge is feathered rather than cut,
-  # because a hard edge would hand pointmap_splat a rim of fully opaque
-  # Gaussians and the face would read as a sticker.
-  - id: face_mask
-    step: face_landmark_mask
-    dispatch: in_process
-    when: ${globals.face_splat}
-    inputs:
-      face_landmarks: scene.face_landmarks
-      mask: scene.face_seg_matte
-      crop_info: scene.face_crop_info
-    outputs:
-      mask: scene.face_matte
-
-  # Normals for the crop, from the same 1b head stage 2 uses on the
-  # denoised batch. These carry the FACE's relief — the whole reason for
-  # cropping — and the depth the splat is built on is integrated from them.
-  - id: face_normals
-    step: sapiens2_lite
-    dispatch: in_process
-    when: ${globals.face_splat}
-    inputs:
-      image: scene.face_image
-    outputs:
-      normal_map: scene.face_normals
-
-  # The face splat itself: Sapiens2's pointmap head over the crop, depth
-  # re-solved from the normals above in SAM-3D-Body's own camera, one
-  # oriented Gaussian per masked pixel, scaled onto the mesh's front
-  # surface. Both defaults that differ from a full-body splat's
-  # (splat_scale 0.5, fill_max_frac 0.05) are declared by the step class,
-  # so nothing is overridden here — see FacePointmapSplatStep's docstring.
-  #
-  # The two numbers to read out of a run before believing it:
-  # `splat_stats.focal_ratio_sam3d_over_pointmap` (near 1 means the two
-  # monocular estimates of this lens agree) and
-  # `splat_stats.normal_agreement_deg.after_median`. A ratio far from 1
-  # means the face is stretched along the view axis and will look
-  # over-rotated as the orbit turns.
-  - id: face_splat
-    step: face_pointmap_splat
-    dispatch: in_process
-    when: ${globals.face_splat}
-    inputs:
-      image: scene.face_image
-      mask: scene.face_matte
-      normal_map: scene.face_normals
-      crop_info: scene.face_crop_info
-      mesh_output: scene
-    params:
-      filepath: ${globals.output_root}/face/face.ply
-    outputs:
-      splat_path: scene.face_splat_path
-      splat_stats: scene.face_splat_stats
 
   # render's mesh_output wants a dict with vertices/cam_t/faces/
   # keypoints_3d/focal_length (see render.py's module docstring on why
@@ -501,11 +296,11 @@ steps:
     dispatch: in_process
     inputs:
       mesh_output: scene
-      # No `face_landmarks`: the face arrives as a splat composited on top
-      # of this render (composite_face, below) rather than as landmark dots
-      # drawn into the skeleton overlay. render.py sets face_mode to None
-      # with no such input and skips the overlay, which is what we want —
-      # dots under the splat would show through its soft silhouette.
+      # detect_face's output, drawn on the skeleton overlay (face_mode
+      # defaults to "full"). Without this input render.py sets face_mode to
+      # None and the overlay is skipped entirely — a body skeleton with no
+      # face, which is what "just the skeleton and outline" looks like.
+      face_landmarks: scene.face_landmarks
     params:
       pattern: circular
       n_frames: 81
@@ -557,117 +352,6 @@ steps:
       framing_bounds: dataset.extras.framing_bounds
       initial_rotation: dataset.extras.initial_rotation
       image_warp: scene.image_warp
-
-  # The face splat, along the same 81 cameras. `pattern: ""` (the step's
-  # default) is what makes these the mesh render's own cameras rather than
-  # a fresh path — the property composite_face depends on, and which it
-  # re-checks from the cameras themselves.
-  #
-  # **bg_color is black and that is load-bearing.** brush-splat-render
-  # writes `rgb = colour*alpha + bg*(1-alpha)`, so only at bg 0 is its
-  # output premultiplied by alpha, which is what makes
-  # `out = base*(1-a) + rgb` the correct blend. On any other background the
-  # composite blends toward it twice and the face comes back washed out.
-  # composite_splat_views refuses a non-black render rather than producing
-  # grey ghosts.
-  - id: render_face_views
-    step: render_splat
-    dispatch: in_process
-    when: ${globals.face_splat}
-    inputs:
-      splat_path: scene.face_splat_path
-      dataset: dataset
-    params:
-      pattern: ""
-      width: ${globals.resolution.0}
-      height: ${globals.resolution.1}
-      bg_color: [0.0, 0.0, 0.0]
-    outputs:
-      images: scene.face_views.images
-      masks: scene.face_views.masks
-      cameras: scene.face_views.cameras
-
-  # Put the face on the skeleton. Every frame whose view of the head is
-  # within 45 degrees of the photograph's takes the layer; past that the
-  # 2.5-D shell's open rim is what would appear, so it is dropped entirely.
-  # body2colmap measured that boundary (c65a7f7): a Face_Neck head splat
-  # reads cleanly to about 30 degrees, the rim starts flaring by 45, and by
-  # 60 the shell is mostly edge.
-  #
-  # The angle is measured about the SPLAT's centre, not the orbit target: a
-  # head sits well above a full-body target, so the two differ by several
-  # degrees. The splat step publishes that centre as
-  # splat_stats.world_center for exactly this.
-  #
-  # No `masks` wired in, on purpose. dataset.masks here is still the mesh
-  # render's per-pixel silhouette, and reinject_anchor_initial below
-  # manufactures the VACE flag batch over the top of it regardless — so
-  # unioning the splat's coverage into it would be work thrown away two
-  # steps later. Wire it in any workflow where those silhouettes survive.
-  #
-  # This runs BEFORE the anchor warp and injection, so the one frame
-  # sitting exactly at the SAM-3D-Body camera ends up carrying the real
-  # photograph rather than a render of the splat built from it. That is the
-  # right way round: at that camera the two agree by construction, and the
-  # photograph has no holes.
-  - id: composite_face
-    step: composite_splat_views
-    dispatch: in_process
-    when: ${globals.face_splat}
-    inputs:
-      images: dataset.images
-      splat_images: scene.face_views.images
-      splat_masks: scene.face_views.masks
-      splat_cameras: scene.face_views.cameras
-      cameras: dataset.cameras
-      splat_center: scene.face_splat_stats.world_center
-      anchor_position: dataset.extras.anchor_position
-    outputs:
-      images: dataset.images
-      view_roles: scene.face_view_roles
-
-  # The face splat's SECOND route into the training. The composite above
-  # puts it on the drawings, where two diffusion passes then have their way
-  # with it; this hands the same renders to `brush` as supporting views —
-  # training evidence weighted by the splat's own coverage and ignored
-  # everywhere else — so the deliverable is pulled back toward the face in
-  # the photograph rather than the one the denoiser invented. See
-  # steps/brush.py's support_* inputs for why that must be brush's MASKED
-  # mode: outside a face matte lies the rest of the subject — neck, hair,
-  # ears — not empty space, and a transparent view would ask the training to
-  # carve it away. Tighter than it used to be, and so more so: since
-  # 2026-08-30 that matte is the face alone, and the neck it no longer
-  # covers is exactly the kind of real surface a transparent view would
-  # delete.
-  #
-  # The face-only matte reaches here on its own, with nothing to wire: these
-  # masks are render_splat's coverage of scene.face_splat_path, and that
-  # splat has one Gaussian per masked pixel. Narrow the matte and the splat
-  # narrows, so its renders and their alpha narrow with it.
-  #
-  # `view_roles` is composite_face's own verdict, reused rather than
-  # re-derived: the frames close enough to the source view to composite are
-  # exactly the frames close enough to supervise, and one cull angle
-  # measured once beats two that can drift apart.
-  #
-  # Both trainings read `scene.support_views.*` with a trailing `?` (an
-  # optional read — see pipeline/workflow.py), so this file, the shell file
-  # and fast_helical_full.yaml can share one tail: with the face branch off,
-  # or in a workflow that has no bootstrap at all, nothing writes that path
-  # and brush trains exactly as it did before.
-  - id: face_support_views
-    step: select_support_views
-    dispatch: in_process
-    when: ${globals.face_splat}
-    inputs:
-      images: scene.face_views.images
-      masks: scene.face_views.masks
-      cameras: scene.face_views.cameras
-      view_roles: scene.face_view_roles
-    outputs:
-      images: scene.support_views.images
-      masks: scene.support_views.masks
-      cameras: scene.support_views.cameras
 
   # Put the real reference photo, warped to the anchor camera's framing,
   # onto the render at that frame — this is what makes cyber_6f/initial's
