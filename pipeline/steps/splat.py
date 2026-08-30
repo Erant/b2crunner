@@ -190,6 +190,13 @@ class RenderSplatStep(Step):
     that is how `outline.json` re-renders the exact same views from a
     trained splat so `replace_views` can swap them back in.
 
+    The `dataset` input is normally the same subject the splat is of, so its
+    framing box is the right one to orbit. When it is not — rendering the
+    head-only face splat alongside a body dataset, say — `bounds_source:
+    splat` frames on the splat's own box instead. The intrinsics are
+    untouched by that choice: only the radius moves, which matters because
+    every view in one brush training shares a single COLMAP camera line.
+
     Rasterisation shells out to the `brush-splat-render` binary (a Rust CLI
     on `PATH`, built into docker/Dockerfile — see the module docstring).
     `render_path` overrides the binary name/path, same convention as
@@ -219,6 +226,16 @@ class RenderSplatStep(Step):
               choices=("full", "torso", "bust", "head")),
         Param("fill_ratio", float, 0.8, "How much of the frame the subject fills",
               minimum=0.0, maximum=1.0),
+        Param("bounds_source", str, "dataset",
+              "Which bounding box sizes and aims the new orbit. 'dataset' is the "
+              "source render's `framing` box, which is what keeps a re-render framed "
+              "identically to the render it replaces. 'splat' ignores that box and "
+              "uses the loaded splat's own, for rendering a splat that is not the "
+              "one the dataset was framed around — a head-only splat orbited on the "
+              "body's box is a smudge in the middle of the frame. Pattern-only, and "
+              "incompatible with override_cam_from_mesh (which takes its target from "
+              "the dataset's metadata and never looks at a box at all)",
+              choices=("dataset", "splat")),
         Param("focal_length_mm", float, 0.0,
               "0 inherits the dataset's, then falls back to one derived from width"),
         Param("override_cam_from_mesh", bool, False,
@@ -601,7 +618,28 @@ def _resolve_cameras(
 
     pattern = params["pattern"]
     override_cam_from_mesh = params["override_cam_from_mesh"]
+    bounds_source = params["bounds_source"]
     extras = dataset.extras if dataset is not None else {}
+
+    # Both of these would otherwise be silent no-ops: neither branch below
+    # that they land in ever computes a bounding box, so a caller asking for
+    # the splat's own bounds would get the dataset's orbit anyway and no
+    # indication of it. That is the exact failure this param exists to
+    # prevent, so it is an error rather than a warning.
+    if bounds_source == "splat":
+        if not pattern:
+            raise ValueError(
+                "bounds_source='splat' sizes a NEW orbit from the splat's own "
+                "bounding box, so it needs a `pattern`. With no pattern the "
+                "dataset's cameras are reused verbatim and no box is consulted."
+            )
+        if override_cam_from_mesh:
+            raise ValueError(
+                "bounds_source='splat' and override_cam_from_mesh are mutually "
+                "exclusive. The anchored path takes its target and radius from the "
+                "source dataset's orbit_target and focal length, and never looks at "
+                "a bounding box — pick one."
+            )
 
     # Focal length: explicit param > inherited from the dataset > auto.
     focal_length_mm = float(params["focal_length_mm"] or 0.0)
@@ -675,16 +713,36 @@ def _resolve_cameras(
     # sizes the radius from that preset's box — the orbit the splat was
     # actually trained on. It must not try to compensate by staying on the
     # full-body orbit: the training cameras are not there.
+    #
+    # `bounds_source: splat` opts out of all of that. It is for rendering a
+    # splat that is NOT the one the dataset was framed around — the face
+    # splat being the case in hand, a head-only shell whose world centre sits
+    # a long way above a full-body orbit target. Framed on the body's box it
+    # comes out as a ~180px smudge in the middle of the frame; framed on its
+    # own it fills the frame. The lens does not change either way, only the
+    # radius: compute_auto_orbit_radius dollies in on the smaller box, which
+    # is what keeps every view sharing one set of intrinsics — COLMAP export
+    # writes a single camera line for the whole set (body2colmap's
+    # ColmapExporter._export_cameras takes cameras[0] and stamps CAMERA_ID 1
+    # on every image), so a per-view focal length would be silently discarded.
     framing = params["framing"]
     framing_bounds = extras.get("framing_bounds") or {}
 
-    raw_bounds = framing_bounds.get(framing) if framing in framing_bounds else None
+    raw_bounds = None if bounds_source == "splat" else framing_bounds.get(framing)
     if raw_bounds is not None:
         # A disk round-trip (Dataset.to_disk/from_disk) brings framing_bounds
         # back as nested plain lists rather than ndarrays; normalise so the
         # solvers below get real arrays either way.
         bounds = tuple(np.asarray(corner, dtype=np.float32) for corner in raw_bounds)
         logger.info("render_splat: using '%s' framing bounds from the dataset", framing)
+    elif bounds_source == "splat":
+        # Asked for, not fallen back to — so no warning, whatever `framing`
+        # says. `framing` is simply not consulted in this mode.
+        bounds = scene.get_bounds()
+        logger.info(
+            "render_splat: framing the orbit on the splat's own bounds "
+            "(bounds_source='splat'); the dataset's '%s' box is ignored", framing,
+        )
     else:
         if framing != "full":
             logger.warning(

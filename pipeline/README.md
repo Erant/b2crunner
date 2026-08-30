@@ -626,9 +626,9 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   the smoke run's recorded manifest; no diffusion pass has yet been
   conditioned on a batch it produced.
 - `load_splat`/`save_splat`/`render_splat` — `render_splat`'s camera-path
-  resolution (which cameras, what focal length, which framing bounds,
-  point-cloud preservation, metadata pass-through) is verified against
-  `cyber_6f`'s recorded metadata: the dataset's `focal_length_mm`
+  resolution (which cameras, what focal length, which bounding box frames
+  the orbit, point-cloud preservation, metadata pass-through) is verified
+  against `cyber_6f`'s recorded metadata: the dataset's `focal_length_mm`
   reproduces its cameras' `fx` exactly, and an anchored override path
   rebuilt from its `orbit_target` lands a camera exactly on its recorded
   `anchor_position`. **Update (2026-08-23):** rasterisation shells out to
@@ -637,6 +637,27 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   a raw binary call and through the step itself against all 81 of
   `cyber_6f`'s real cameras (real content, correct shapes/dtypes back). See
   `docs/docker-build-notes.md` for the full result.
+  **Update (2026-08-30):** `bounds_source` picks which box sizes and aims a
+  new orbit. The default, `dataset`, is the source render's `framing` box —
+  what keeps a re-render lined up with the render it replaces, and what
+  every shipped workflow uses. That is only right while the splat IS what
+  the dataset was framed around, which the face splat is not: it is a
+  head-only shell whose world centre sits well above a full-body orbit
+  target, so orbiting the body's box aims at the chest and sizes a radius
+  for a whole person, landing the head as a small smudge mid-frame.
+  `bounds_source: splat` ignores `framing_bounds` and takes
+  `scene.get_bounds()` instead — a plain min/max over the Gaussian means,
+  so its centre is the same quantity `face_splat_stats.world_center`
+  publishes. **Only the radius moves.** The intrinsics are deliberately
+  untouched, because `ColmapExporter` writes a single camera line for a
+  whole training set (`cameras[0]`, stamped `CAMERA_ID 1` on every image),
+  so a per-view focal length would be silently discarded and those views
+  trained at the wrong lens; getting closer is `compute_auto_orbit_radius`
+  dollying in on the smaller box at the same lens, with `fill_ratio` the
+  knob. It is an error rather than a warning to combine it with no
+  `pattern` or with `override_cam_from_mesh` — neither of those branches
+  computes a box at all, so the request would otherwise be a silent no-op,
+  which is the exact failure the param exists to prevent.
 
 **Real but UNVERIFIED:**
 - `brush` — Gaussian-splat training via the `Erant/brush` CLI (COLMAP

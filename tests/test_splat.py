@@ -71,6 +71,34 @@ def _synthetic_scene(n=64, sh_degree=0):
     )
 
 
+def _boxed_scene(center, half_extent, n=64):
+    """A splat whose Gaussians fill one small box, far from the origin.
+
+    Stands in for the face splat: a head-only shell sitting well above a
+    full-body orbit target, and small enough that the two boxes size very
+    different radii. `_synthetic_scene`'s normal cloud is centred on the
+    origin and cannot show either difference.
+    """
+    from body2colmap.splat_scene import SplatScene
+
+    rng = np.random.default_rng(1)
+    center = np.asarray(center, np.float32)
+    half = np.asarray(half_extent, np.float32)
+    means = center + rng.uniform(-1.0, 1.0, size=(n, 3)).astype(np.float32) * half
+    # Pin two corners so get_bounds() is exactly the box asked for, whatever
+    # the sampler happened to draw.
+    means[0] = center - half
+    means[1] = center + half
+    return SplatScene(
+        means=means,
+        scales=np.full((n, 3), 1e-4, np.float32),
+        quats=np.tile(np.array([1, 0, 0, 0], np.float32), (n, 1)),
+        opacities=np.full((n,), 0.5, np.float32),
+        sh_coeffs=rng.normal(size=(n, 1, 3)).astype(np.float32),
+        sh_degree=0,
+    )
+
+
 class TestSplatIO(unittest.TestCase):
     def setUp(self):
         # PLY I/O lives behind body2colmap's "splat" extra (plyfile), which
@@ -390,6 +418,142 @@ class TestRenderSplatCameras(unittest.TestCase):
             "framing preset had no effect after a to_disk/from_disk round-trip",
         )
         self.assertAlmostEqual(torso_px, full_px, places=5)
+
+
+class TestRenderSplatBoundsSource(unittest.TestCase):
+    """`bounds_source: splat` — frame the orbit on the splat's own box.
+
+    The default, `dataset`, orbits the source render's `framing` box, which
+    is what keeps a re-render lined up with the render it replaces. That is
+    only right while the splat IS what the dataset was framed around. The
+    face splat is not: it is a head-only shell whose world centre sits a long
+    way above a full-body orbit target, so orbiting the body's box points the
+    camera at the chest and sizes a radius for a whole person — the head
+    lands as a small smudge mid-frame. These check the opt-out aims at and
+    sizes from the splat instead, and that it does so without touching the
+    intrinsics, since every view in one brush training shares a single COLMAP
+    camera line.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.ds = Dataset.from_disk(require_stage("initial"))
+        # A body-sized box at chest height, and a head-sized one well above it.
+        cls.body = (np.array([-0.4, -0.9, -2.4], np.float32),
+                    np.array([0.4, 0.9, -1.7], np.float32))
+        cls.head_box = (np.array([-0.09, 0.70, -2.15], np.float32),
+                        np.array([0.09, 0.88, -1.97], np.float32))
+        cls.head_scene = _boxed_scene(
+            (cls.head_box[0] + cls.head_box[1]) / 2.0,
+            (cls.head_box[1] - cls.head_box[0]) / 2.0,
+        )
+
+    def _framed_ds(self):
+        import copy
+
+        framed = copy.copy(self.ds)
+        framed.extras = dict(self.ds.extras)
+        framed.extras["framing_bounds"] = {"full": self.body}
+        return framed
+
+    def _resolve(self, **overrides):
+        # overlap=0 so no camera is duplicated and the positions are evenly
+        # spaced — _orbit() recovers the centre as their mean, which the
+        # default overlap=1 would drag toward the repeated first frame.
+        params = {"pattern": "circular", "n_frames": 12, "framing": "full",
+                  "overlap": 0}
+        params.update(overrides)
+        return _resolve_cameras(
+            scene=self.head_scene, dataset=self._framed_ds(),
+            params=params, width=720, height=1280,
+        )
+
+    def _orbit(self, cams):
+        """(centre, radius) recovered from the cameras themselves."""
+        positions = np.array([c.position for c in cams], np.float32)
+        centre = positions.mean(axis=0)
+        radius = float(np.linalg.norm(positions - centre, axis=1).mean())
+        return centre, radius
+
+    def test_splat_bounds_reaim_and_tighten_the_orbit(self):
+        """The whole point: the head box, not the body box, decides where the
+        camera looks and how close it gets."""
+        on_body, _, _, _ = self._resolve()
+        on_splat, _, _, _ = self._resolve(bounds_source="splat")
+
+        body_centre = (self.body[0] + self.body[1]) / 2.0
+        head_centre = (self.head_box[0] + self.head_box[1]) / 2.0
+
+        got_body, r_body = self._orbit(on_body)
+        got_head, r_head = self._orbit(on_splat)
+
+        np.testing.assert_allclose(got_body, body_centre, atol=1e-3)
+        np.testing.assert_allclose(got_head, head_centre, atol=1e-3)
+        self.assertLess(
+            r_head, r_body,
+            "the splat's smaller box did not dolly the camera in",
+        )
+
+    def test_splat_bounds_leave_the_intrinsics_alone(self):
+        """Only the radius moves. body2colmap's ColmapExporter writes ONE
+        camera line for a whole training set (cameras[0], stamped CAMERA_ID 1
+        on every image), so a focal length that differed per view would be
+        silently discarded and the views trained at the wrong lens."""
+        body_cams, body_px, body_mm, _ = self._resolve()
+        splat_cams, splat_px, splat_mm, _ = self._resolve(bounds_source="splat")
+
+        self.assertAlmostEqual(splat_px, body_px, places=6)
+        self.assertAlmostEqual(splat_mm, body_mm, places=6)
+        self.assertAlmostEqual(splat_mm, self.ds.extras["focal_length_mm"], places=6)
+        self.assertAlmostEqual(splat_cams[0].fx, body_cams[0].fx, places=6)
+        self.assertAlmostEqual(splat_cams[0].fy, body_cams[0].fy, places=6)
+        self.assertEqual(
+            (splat_cams[0].width, splat_cams[0].height),
+            (body_cams[0].width, body_cams[0].height),
+        )
+
+    def test_framing_preset_is_ignored_rather_than_fallen_back_from(self):
+        """A preset the dataset DOES carry is still not consulted — this mode
+        is an opt-out, not the existing missing-preset fallback."""
+        import copy
+
+        framed = copy.copy(self.ds)
+        framed.extras = dict(self.ds.extras)
+        framed.extras["framing_bounds"] = {"full": self.body, "head": self.body}
+
+        cams, _, _, _ = _resolve_cameras(
+            scene=self.head_scene, dataset=framed,
+            params={"pattern": "circular", "n_frames": 12, "framing": "head",
+                    "bounds_source": "splat", "overlap": 0},
+            width=720, height=1280,
+        )
+        centre, _ = self._orbit(cams)
+        np.testing.assert_allclose(
+            centre, (self.head_box[0] + self.head_box[1]) / 2.0, atol=1e-3
+        )
+
+    def test_splat_bounds_need_a_pattern(self):
+        """With no pattern the dataset's cameras are reused verbatim and no
+        box is consulted, so the request would be a silent no-op."""
+        with self.assertRaises(ValueError) as caught:
+            self._resolve(pattern="", bounds_source="splat")
+        self.assertIn("pattern", str(caught.exception))
+
+    def test_splat_bounds_refuse_the_anchored_path(self):
+        """The anchored path takes its target and radius from the dataset's
+        orbit_target and focal length and never looks at a box — accepting
+        both would silently ignore one of them."""
+        with self.assertRaises(ValueError) as caught:
+            self._resolve(override_cam_from_mesh=True, bounds_source="splat")
+        self.assertIn("override_cam_from_mesh", str(caught.exception))
+
+    def test_default_still_frames_on_the_dataset(self):
+        """The declared default must leave every shipped workflow's orbit
+        exactly where it was."""
+        explicit, _, _, _ = self._resolve(bounds_source="dataset")
+        default, _, _, _ = self._resolve()
+        for a, b in zip(explicit, default):
+            np.testing.assert_allclose(a.position, b.position, atol=1e-6)
 
 
 class TestRenderSplatPointcloud(unittest.TestCase):
