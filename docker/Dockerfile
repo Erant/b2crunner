@@ -599,8 +599,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         unzip zip jq tree \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=brush-builder /out-brush /usr/local/bin/brush
-COPY --from=brush-builder /out-brush-splat-render /usr/local/bin/brush-splat-render
 COPY --from=python-builder /opt/venv_base /opt/venv_base
 COPY --from=python-builder /opt/venv_main /opt/venv_main
 COPY --from=python-builder /opt/venv_wan22 /opt/venv_wan22
@@ -677,6 +675,33 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=180s --retries=3 \
 
 COPY docker/entrypoint.sh /usr/local/bin/b2c-entrypoint
 RUN chmod +x /usr/local/bin/b2c-entrypoint
+
+# ---------------------------------------------------------------------------
+# The brush binaries. LAST OF THE FILESYSTEM LAYERS ON PURPOSE — same
+# reasoning as the ENV block below, and measured on the same kind of build.
+# ---------------------------------------------------------------------------
+# These used to sit at the top of the stage, immediately above the five
+# `COPY --from=python-builder /opt/venv_*` lines. Invalidation cascades
+# forward within a stage, so bumping BRUSH_REF — 321 MB of binaries — re-ran
+# every venv copy, the body2colmap pull-forward, and the application copy
+# behind it. What saved that build was the registry rather than the
+# Dockerfile: a re-executed COPY of unchanged bytes produces the same blob
+# digest, so the venvs all came back "Layer already exists" and only the
+# binaries went up the wire. A re-executed RUN has no such property — its
+# output is not byte-reproducible — which is exactly why the 2026-08-25
+# `--no-cache-filter brush-builder,runtime` build pushed 7 GB while a
+# BRUSH_REF bump pushes ~321 MB.
+#
+# So the dedup was luck of the layer types, and it runs out the moment a RUN
+# lands between the brush COPY and the end of the stage. Down here nothing
+# does: a brush bump now invalidates these two layers, the ENV/LABEL metadata
+# below (no filesystem layers at all), and nothing else.
+#
+# Nothing earlier in the build needs the binaries — the step-registry smoke
+# test above imports Python modules, and `pipeline/doctor.py` checks the
+# binaries at container start, not at build time.
+COPY --from=brush-builder /out-brush /usr/local/bin/brush
+COPY --from=brush-builder /out-brush-splat-render /usr/local/bin/brush-splat-render
 
 # Build provenance. Deliberately the LAST thing in the file: a LABEL makes a
 # layer, and every layer after it would be invalidated by a new SHA. Here, a
