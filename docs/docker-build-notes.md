@@ -998,3 +998,33 @@ every flag `steps/brush.py` constructs is in `brush --help`, so a stale
 binary fails at container start rather than mid-training. That only covers
 staleness that changes the CLI surface — two commits that alter training
 behaviour without touching argv would still pass it silently.
+
+#### RESULT (2026-08-30): `BRUSH_REF` is now pinned, and it works
+
+Done, in `534993a`, because the mixed-alpha-modes commit (`8eed7a61`) made
+it load-bearing: `steps/brush.py` stopped passing `--alpha-mode` and started
+passing `--normalize-masked-loss`, which an older binary rejects outright.
+
+The stage keeps the proven `git clone --depth 1 --branch`, and `BRUSH_REF`
+is *asserted* against the clone rather than checked out — a `--depth 1`
+clone cannot check out an arbitrary SHA anyway, and a branch that has moved
+past the pin is better as a failed build than as a silent surprise. Both
+halves of the claim above held on a real build:
+
+- Moving the pin re-ran the clone and a full `cargo build` (7m04s), and —
+  the part `--no-cache-filter brush-builder` never managed — the runtime
+  stage's two `COPY --from=brush-builder` layers re-ran too (`DONE 0.3s`,
+  not `CACHED`). Verified the way the 2026-08-25 failure was found:
+  `/usr/local/bin/brush` in the pushed image has the same md5 and mtime as
+  `/out-brush` in the builder stage, and a different md5 from the previous
+  image's.
+- The `~321 MB instead of every venv` estimate above is **wrong**, and the
+  reason is layer order rather than cache semantics. The two brush COPYs sit
+  at runtime steps 4-5, *above* the five `COPY --from=python-builder`
+  venv copies at steps 6-11, and invalidation cascades forward within a
+  stage — so a 233 MB binary change still re-uploads ~8 GB of venvs whose
+  bytes did not change. Moving the brush COPYs below the venv copies would
+  make the estimate true, for the same reason the ENV block was moved to the
+  bottom of the stage (see the Dockerfile's own comment on that move, which
+  measured 7.97 GB against 26 MB). Not done here: it is a push-bandwidth
+  change, and this build had to re-upload them either way.
