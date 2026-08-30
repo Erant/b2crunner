@@ -151,14 +151,26 @@ pipeline/
 │   │                            isolating the upscaler when output looks
 │   │                            wrong
 │   └── fast_helical_native.yaml a bootstrap prologue from a front/back
-│                                sheet (split → sam3d_body →
-│                                detect_face_landmarks → render →
-│                                generate_firstlast → inject_anchor) then
-│                                fast_helical_full.yaml's steps verbatim.
-│                                rmbg/wan22_vace_denoise/sapiens2/
-│                                sam3d_body verified on real hardware,
-│                                render's own rasterisation and the warp
-│                                not — see its STATUS note
+│                                sheet, then fast_helical_full.yaml's steps
+│                                verbatim. Since 2026-08-29 that prologue
+│                                runs through a photo-to-splat shell: split
+│                                → sam3d_body → detect_face_landmarks →
+│                                rmbg + sapiens2_lite + pointmap_splat build
+│                                a Gaussian shell from the sheet's front
+│                                half → refine_pose_to_splat re-poses the
+│                                body to agree with it → render draws a 380°
+│                                helix (not a circle, and no longer anchored)
+│                                → render_splat re-renders the shell along
+│                                those same cameras → inject_shell_views
+│                                swaps them into the frames within 15° of the
+│                                source view and marks them as the batch's
+│                                real-photograph frames. That last step
+│                                replaced generate_firstlast + inject_anchor,
+│                                and the pose fit replaced fix_head_angle
+│                                (INCOMPATIBLE_STEPS). rmbg/
+│                                wan22_vace_denoise/sapiens2/sam3d_body
+│                                verified on real hardware, render's own
+│                                rasterisation not — see its STATUS note
 └── tests/                 stdlib unittest, no pytest dependency. Run with
                            `python -m unittest discover -s tests -t .`.
                            Most tests are golden-output tests against
@@ -483,7 +495,7 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   first. Two layouts: `flat` (the default, and what that golden comparison
   is against — frames beside the .txt files, as the ComfyUI stage wrote
   them) and `brush` (`images/` and `normals/` subdirectories), which is
-  what both workflows use for the COLMAP dataset they hand back.
+  what all three workflows use for the COLMAP dataset they hand back.
 - `mask_splat` — new step, no single node behind it: it collapses the
   eight-node subgraph of `workflows/api/mask_splat.json`. Verified against
   `cyber_6f/splatted` -> `cyber_6f/masked_splatted` at the `fast helical`
@@ -510,7 +522,13 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   ComfyUI flow injected into, and the port finds the same two from camera
   positions alone. Also verified to survive a `rotate_views` reordering,
   which is the whole reason position is the durable key and
-  `anchor_frame_index` is informational.
+  `anchor_frame_index` is informational. **No longer in the bootstrap**
+  (2026-08-29): `inject_shell_views` does that job there, for a band of
+  frames instead of one. The stage-3 call in the shared tail stays, and
+  no-ops on a from-a-sheet run for want of an anchor image. Its partner
+  `generate_firstlast` is now wired nowhere — the warp it does was only
+  ever for that injection — so its synthetic-data-only verification status
+  is frozen where it stands.
 - `detect_face_landmarks` — MediaPipe face landmarks (CPU, no pod), plus
   the matching `face_landmarks` input and `face_mode`/`face_max_angle`
   params on `render` that consume them. Verified against `cyber_6f`'s real
@@ -542,9 +560,10 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   is discarded and everything re-derived on the mesh's rays, so the shell
   reprojects onto the source photo by construction. Run end to end locally:
   480k Gaussians, and the anchor gate (best-fit shift against
-  `generate_firstlast`'s warp of the photo) lands at (1, 0) px. **Not in any
-  workflow** — it exists to feed extra reference views to VACE and a
-  non-degenerate helical first pass.
+  `generate_firstlast`'s warp of the photo) lands at (1, 0) px. Wired into
+  `fast_helical_native.yaml`'s bootstrap, which is the thing it was written
+  for: photographic reference views for VACE around the source view, and a
+  non-degenerate helical first pass. Never run on a pod.
 - `refine_pose_to_splat` (`pose_refine.py`) — re-poses a SAM-3D-Body fit so
   its mesh agrees with that shell in novel views, which is what stops the
   skeleton overlay drifting off the subject a few degrees either side of the
@@ -556,6 +575,23 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   model. Tests cover the depth buffers, target self-consistency and the PLY
   reader; the optimisation itself needs the gated 2.8 GB checkpoint and is
   not exercised in CI.
+- `inject_shell_views` (`anchor_stub.py`) — the step that spends the shell.
+  Takes the mesh render and a `render_splat` of the shell along the *same*
+  cameras (`pattern: ""`), and swaps the shell's frames in wherever the
+  camera is within `replace_radius_deg` of the anchor's — an angle on the
+  orbit sphere, so a helix's elevation counts like azimuth. It also writes
+  the VACE mask batch: 1.0 for everything by default, since a shell render
+  is not a photograph, with a second `reference_radius_deg` band available
+  for marking the closest frames 0.0 ("keep it") once somebody has looked
+  at them — which is what `fast_helical_native.yaml` now does, because
+  there this step **replaced `generate_firstlast` + `inject_anchor`**: it
+  puts photo-derived content on every frame near the source view rather
+  than only the one exactly on it, so the render no longer bends its path
+  (`override_cam_from_mesh: false`) and nothing warps the photo. At that
+  source view the two agree to a best-fit shift of (1, 0) px. Synthetic
+  camera paths in `tests/test_shell_views.py`, plus two golden ones against
+  the smoke run's recorded manifest; no diffusion pass has yet been
+  conditioned on a batch it produced.
 - `load_splat`/`save_splat`/`render_splat` — `render_splat`'s camera-path
   resolution (which cameras, what focal length, which framing bounds,
   point-cloud preservation, metadata pass-through) is verified against

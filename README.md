@@ -4,28 +4,30 @@ Standalone (non-ComfyUI) execution engine for the Body2COLMAP pipeline,
 extracted from `ComfyUI-Body2COLMAP/pipeline`. See [pipeline/README.md](pipeline/README.md)
 for the full design doc, module map, and current status.
 
-Every node in the ComfyUI pack now has a native counterpart. Three
+Every node in the ComfyUI pack now has a native counterpart. Two
 workflows ship:
 
 | workflow | starts from | stages |
 |---|---|---|
 | `fast_helical_full` | an existing dataset | the full port of the ComfyUI `fast helical` pipeline. `--param run_upscale=false` drops the SeedVR2 upscale (the old `fast_helical` workflow) to isolate it when output looks wrong |
-| `fast_helical_native` | a front/back reference sheet | a bootstrap prologue (split the sheet, reconstruct a body, render its own anchored views) then `fast_helical_full`'s stages verbatim |
+| `fast_helical_native` | a front/back reference sheet | a bootstrap prologue — split the sheet, reconstruct a body, build a photo-to-splat shell from the front half with `pointmap_splat`, re-pose the body to agree with it, render a shallow 380° helix whose frames near the source view are photoreal renders off that shell — then `fast_helical_full`'s stages verbatim |
 
-**Neither has been run end-to-end on a pod**, and `fast_helical_native` is the
-less proven of the two: its bootstrap prologue (`split_reference_sheet` →
-`render` → `generate_firstlast` → `inject_anchor`) has never executed. Past
-that it is a copy of `fast_helical_full` — kept in sync by
-`tests/test_workflows.py`. The
+**Neither has been run end-to-end on a pod**, and `fast_helical_native` is
+the less proven of the two: its bootstrap prologue has never executed on
+real hardware, though the shell half of it has run once locally outside the
+workflow machinery. Past the prologue it is a copy of `fast_helical_full` —
+kept in sync by `tests/test_workflows.py`. The
 [coverage section](pipeline/README.md#coverage-vs-the-comfyui-node-pack)
 tracks what is verified against what.
 
-All three workflows end by producing whichever deliverables you ask for,
-under the run's output directory:
+Both workflows end by producing whichever deliverables you ask for, under
+the run's output directory:
 
 ```
-<run>/colmap/   cameras.txt, images.txt, points3D.txt, images/, normals/
-<run>/ply/      scene.ply — brush, normal-supervised
+<run>/colmap/                cameras.txt, images.txt, points3D.txt, images/, normals/
+<run>/ply/                   scene.ply — brush, normal-supervised
+<run>/colmap_intermediate/   debug: what the first brush training was fed
+<run>/colmap_preupscale/     debug: the same, from the pre-upscale frames
 ```
 
 ## Install
@@ -63,6 +65,11 @@ python -m pipeline.cli params fast_helical_full
 # seen from behind on the right) — the workflow splits it and renders its own views
 python -m pipeline.cli run fast_helical_native --reference-image sheet.png \
     --prompt "a woman in a red jacket"
+
+# the COLMAP dataset the first brush training is handed, for when the
+# helical re-render comes out wrong and the question is what it trained on
+python -m pipeline.cli run fast_helical_full --dataset path/to/b2c_dataset \
+    --param export_colmap_intermediate=true
 
 # what can this machine actually run? (GPU, Vulkan, EGL, venvs, HF access)
 python -m pipeline.cli doctor

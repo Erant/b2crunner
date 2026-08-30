@@ -88,6 +88,15 @@ globals:
   # each way.
   run_upscale: true
 
+  # Debug: also export the COLMAP dataset that the FIRST brush training is
+  # handed — the denoised frames plus the mattes and normals computed for
+  # it, before that splat is re-rendered along the helical orbit and
+  # denoised a second time. Off by default. Lands in
+  # <output_root>/colmap_intermediate/. The web UI drives it from the
+  # Outputs box; `--param export_colmap_intermediate=true` does the same
+  # from the CLI.
+  export_colmap_intermediate: false
+
   # Debug: also export a COLMAP dataset built from the frames as they are
   # BEFORE the upscale (stage 4's output, stage 4b below), to measure what
   # SeedVR2 does to Gaussian-splatting quality. Only meaningful with
@@ -199,6 +208,33 @@ steps:
       images: dataset.images
     outputs:
       normal_maps: scene.normal_maps
+
+  # Debug deliverable: the COLMAP dataset exactly as `train_splat` below is
+  # handed it — the denoised frames, the RMBG mattes and the normal maps
+  # that the FIRST brush training runs on. Gated by
+  # export_colmap_intermediate, off by default.
+  #
+  # One step, not the three stage 4b needs: the masks and normals it wants
+  # are already sitting in the context, computed by the two steps above for
+  # brush itself. Recomputing them would export something subtly different
+  # from what was trained on, which would defeat the point — this is here to
+  # answer "what did the first splat actually see?", which is the question
+  # behind a bad helical re-render, and it is the only stage whose brush
+  # input is otherwise thrown away.
+  - id: export_colmap_intermediate
+    step: colmap_export
+    dispatch: in_process
+    when: ${globals.export_colmap_intermediate}
+    inputs:
+      cameras: dataset.cameras
+      image_names: dataset.image_names
+      points_3d: dataset.points_3d
+      images: dataset.images
+      masks: dataset.masks
+      normal_maps: scene.normal_maps
+    params:
+      output_dir: ${globals.output_root}/colmap_intermediate
+      layout: brush
 
   - id: train_splat
     step: brush

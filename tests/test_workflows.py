@@ -60,8 +60,52 @@ DENOISE_NEGATIVE_PROMPT = (
 )
 
 
+# The from-a-sheet workflows, and the bootstrap prologue each one runs before
+# it picks up fast_helical_full.yaml's steps verbatim. Pinned here rather than
+# derived, because "the prologue changed shape" is exactly the edit that
+# should make somebody look: this list is how the pipeline is allowed to
+# manufacture the dataset fast_helical_full expects.
+#
+# 2026-08-29: it changed shape. `fix_head_angle` left (it cannot run beside
+# `refine_pose_to_splat`), the matte/normals/shell/re-pose steps arrived, and
+# `warp_reference_to_anchor` + `reinject_anchor_initial` left because
+# `inject_shell_views` does that job — it puts photo-derived content on every
+# frame near the source view, not just the one exactly on it, so the render
+# no longer has to bend its path to land a camera there either.
+BOOTSTRAPS = {
+    "fast_helical_native": [
+        "split_sheet", "reconstruct_body", "detect_face",
+        "front_matte", "front_normals", "shell_splat", "refine_pose",
+        "render_initial_views", "render_shell_views", "inject_shell_band",
+    ],
+}
+
+
 def _workflows():
     return sorted(WORKFLOW_DIR.glob("*.yaml"))
+
+
+def _splat_alpha_producer(case, path, spec, mask_at: int) -> int:
+    """Index of the `render_splat` whose per-pixel alpha `mask_splat` is
+    about to threshold — i.e. the last one before it that publishes
+    `dataset.masks`.
+
+    Not simply "the first render_splat in the file": `fast_helical_native`
+    renders a second splat in its bootstrap (the photo-derived shell, along
+    the mesh render's own cameras) into a scratch namespace, publishing no
+    masks at all. That render is not in this relationship with mask_splat,
+    and treating it as the producer would put the entire bootstrap inside a
+    gap that does not exist.
+    """
+    producers = [i for i, step in enumerate(spec.steps[:mask_at])
+                 if step.step == "render_splat"
+                 and "dataset.masks" in step.outputs.values()]
+    case.assertTrue(
+        producers,
+        f"{path.name}: mask_splat runs with no render_splat publishing its "
+        f"alpha as dataset.masks ahead of it, so it has nothing to threshold",
+    )
+    return producers[-1]
 
 
 class TestWorkflowFiles(unittest.TestCase):
@@ -248,35 +292,71 @@ class TestWorkflowFiles(unittest.TestCase):
                 spec.globals["export_colmap_preupscale"] = True
                 self.assertTrue(preupscale <= {s.id for s in spec.enabled_steps()})
 
-    def test_native_mirrors_full_from_denoise_pass1_on(self):
-        """fast_helical_native is a bootstrap prologue (split_sheet ->
-        reconstruct_body -> detect_face -> fix_head_angle ->
-        render_initial_views -> warp_reference_to_anchor ->
-        reinject_anchor_initial) followed by a verbatim copy of
-        fast_helical_full.yaml's steps. There is no include mechanism, so the
-        thing worth checking is that the copy has not drifted.
+    def test_the_intermediate_colmap_is_off_by_default_and_exports_brush_s_own_input(self):
+        """The debug export of what the FIRST brush training is handed. One
+        step, gated by `export_colmap_intermediate`, and — the part worth
+        pinning — it must read the very same context paths `train_splat`
+        does. Recomputing the mattes or the normals here would export
+        something subtly different from what was trained on, which is the
+        one thing this export exists not to do.
+        """
+        for path in _workflows():
+            spec = WorkflowSpec.from_yaml(str(path))
+            steps = {s.id: s for s in spec.steps}
+            if "train_splat" not in steps:
+                continue
+            with self.subTest(workflow=path.name):
+                self.assertIn("export_colmap_intermediate", steps)
+                export = steps["export_colmap_intermediate"]
+                self.assertFalse(spec.globals["export_colmap_intermediate"])
+                self.assertNotIn("export_colmap_intermediate",
+                                 {s.id for s in spec.enabled_steps()})
+                self.assertEqual(export.when, "${globals.export_colmap_intermediate}")
 
-        Everything but `output_root` (deliberately native-specific) is
-        compared: step id, class, dispatch, env, inputs, outputs, when,
-        keep_loaded, and the raw params block.
+                ids = [s.id for s in spec.steps]
+                self.assertLess(ids.index("export_colmap_intermediate"),
+                                ids.index("train_splat"),
+                                "the export must run before the training it "
+                                "describes, on the same context")
+                brush = steps["train_splat"]
+                for name in ("cameras", "image_names", "points_3d", "images",
+                             "masks", "normal_maps"):
+                    self.assertEqual(
+                        export.inputs.get(name), brush.inputs.get(name),
+                        f"{path.name}: the intermediate export reads "
+                        f"'{export.inputs.get(name)}' for '{name}' where brush "
+                        f"reads '{brush.inputs.get(name)}', so it would not be "
+                        f"exporting what was trained on",
+                    )
+
+    def test_native_mirrors_full_from_denoise_pass1_on(self):
+        """Each from-a-sheet workflow is a bootstrap prologue followed by a
+        verbatim copy of fast_helical_full.yaml's steps. There is no include
+        mechanism, so the thing worth checking is that the copies have not
+        drifted — and there are two of them now, which doubles the chance of
+        one being edited and the others not.
+
+        Everything but `output_root` (deliberately per-file) is compared:
+        step id, class, dispatch, env, inputs, outputs, when, keep_loaded,
+        and the raw params block. A bootstrap file may declare globals of
+        its own; what it may not do is disagree about one of full's.
         """
         full = WorkflowSpec.from_yaml(str(WORKFLOW_DIR / "fast_helical_full.yaml"))
-        native = WorkflowSpec.from_yaml(str(WORKFLOW_DIR / "fast_helical_native.yaml"))
+        for name, bootstrap in BOOTSTRAPS.items():
+            with self.subTest(workflow=name):
+                self._assert_mirrors_full(full, name, bootstrap)
 
-        bootstrap = [
-            "split_sheet", "reconstruct_body", "detect_face", "fix_head_angle",
-            "render_initial_views", "warp_reference_to_anchor",
-            "reinject_anchor_initial",
-        ]
+    def _assert_mirrors_full(self, full, name, bootstrap):
+        native = WorkflowSpec.from_yaml(str(WORKFLOW_DIR / f"{name}.yaml"))
         native_ids = [s.id for s in native.steps]
         self.assertEqual(
             native_ids[: len(bootstrap)], bootstrap,
-            "fast_helical_native's bootstrap prologue has changed shape",
+            f"{name}'s bootstrap prologue has changed shape",
         )
         tail = native.steps[len(bootstrap):]
         self.assertEqual(
             [s.id for s in tail], [s.id for s in full.steps],
-            "fast_helical_native's tail has drifted from fast_helical_full's steps",
+            f"{name}'s tail has drifted from fast_helical_full's steps",
         )
         for step in tail:
             twin = next(s for s in full.steps if s.id == step.id)
@@ -294,7 +374,7 @@ class TestWorkflowFiles(unittest.TestCase):
                     # render, so their rerender_splat frames at the default.
                     self.assertEqual(
                         step.params.get("framing"), "${globals.framing}",
-                        "native's rerender_splat should read the framing global",
+                        f"{name}'s rerender_splat should read the framing global",
                     )
                     self.assertNotIn("framing", twin.params)
                     self.assertEqual(
@@ -310,7 +390,7 @@ class TestWorkflowFiles(unittest.TestCase):
             with self.subTest(glob=key):
                 self.assertEqual(
                     native.globals.get(key), value,
-                    f"global '{key}' differs between the two files",
+                    f"global '{key}' differs between {name} and fast_helical_full",
                 )
 
     def test_output_switches_and_the_steps_they_guard_agree(self):
@@ -332,7 +412,7 @@ class TestWorkflowFiles(unittest.TestCase):
         is to gate steps.
         """
         switches = ("export_colmap", "export_ply", "export_colmap_preupscale",
-                    "run_upscale")
+                    "export_colmap_intermediate", "run_upscale")
         for path in _workflows():
             spec = WorkflowSpec.from_yaml(str(path))
             for switch in switches:
@@ -356,6 +436,43 @@ class TestWorkflowFiles(unittest.TestCase):
                         self.assertFalse(ctx_path.startswith("."))
                         self.assertFalse(ctx_path.endswith("."))
 
+    def test_every_input_is_written_before_it_is_read(self):
+        """A step reading a context path nothing upstream writes is the
+        cheapest possible workflow bug and the most annoying one to hit on a
+        pod: the runner raises at that step, forty minutes in, having done
+        every expensive thing ahead of it.
+
+        `dataset` and its fields are seeded by the runner before the first
+        step. Everything else has to come from an earlier step's `outputs:`,
+        matched three ways: the same path, a prefix of it (a step writing
+        `scene.image_warp` satisfies a read of `scene.image_warp.camera`),
+        or a path under it (`mesh_output: scene` reads the namespace
+        `scene.vertices` and friends were assembled into).
+
+        Gating is deliberately ignored — this is a statement about the file,
+        and every `when:`-gated step in the shipped workflows overwrites a
+        path that already exists rather than introducing one.
+        """
+        seeded = {"dataset"}
+        for path in _workflows():
+            spec = WorkflowSpec.from_yaml(str(path))
+            written = set(seeded)
+            for step in spec.steps:
+                for name, ctx_path in step.inputs.items():
+                    satisfied = any(
+                        ctx_path == w
+                        or ctx_path.startswith(w + ".")
+                        or w.startswith(ctx_path + ".")
+                        for w in written
+                    )
+                    with self.subTest(workflow=path.name, step=step.id, input=name):
+                        self.assertTrue(
+                            satisfied,
+                            f"{path.name}: step '{step.id}' reads context path "
+                            f"'{ctx_path}', which no earlier step writes",
+                        )
+                written.update(step.outputs.values())
+
     def test_nothing_clobbers_the_splat_alpha_before_mask_splat(self):
         """Between render_splat and mask_splat, dataset.masks is carrying
         the splat render's per-pixel alpha, and mask_splat exists to
@@ -372,18 +489,10 @@ class TestWorkflowFiles(unittest.TestCase):
         """
         for path in _workflows():
             spec = WorkflowSpec.from_yaml(str(path))
-            ids = [s.id for s in spec.steps]
-            producers = [s for s in spec.steps if s.step == "render_splat"]
-            consumers = [s for s in spec.steps if s.step == "mask_splat"]
-            if not producers or not consumers:
+            if not any(s.step == "mask_splat" for s in spec.steps):
                 continue
-            start = ids.index(producers[0].id)
-            end = ids.index(consumers[0].id)
-            self.assertLess(start, end, f"{path.name}: mask_splat precedes render_splat")
-            self.assertIn(
-                "dataset.masks", producers[0].outputs.values(),
-                f"{path.name}: render_splat does not publish its alpha as dataset.masks",
-            )
+            end = min(i for i, s in enumerate(spec.steps) if s.step == "mask_splat")
+            start = _splat_alpha_producer(self, path, spec, end)
             for step in spec.steps[start + 1:end]:
                 if "dataset.masks" not in step.outputs.values():
                     continue
@@ -434,7 +543,7 @@ class TestWorkflowFiles(unittest.TestCase):
                 )
 
             if resplat_at:
-                lo = min(resplat_at)
+                lo = _splat_alpha_producer(self, path, spec, mask_at)
                 for i in inject_at:
                     if lo < i < mask_at:
                         with self.subTest(workflow=path.name, step=ids[i]):

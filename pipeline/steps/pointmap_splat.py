@@ -6,8 +6,8 @@ one forward pass of Sapiens2's *pointmap* head over the reference photo,
 one oriented Gaussian per foreground pixel. What comes out is a 2.5-D
 shell — the side of the subject the camera can see, and nothing behind it
 — which is useless as a deliverable and valuable as a *source of views*.
-The intended consumers, neither of them wired up yet (this step is
-deliberately not in any workflow):
+The two consumers it was built for, both of them now wired up in
+`workflows/fast_helical_native.yaml`'s bootstrap:
 
   * extra reference views for the VACE conditioning batch, rendered off
     the shell at angles the single photo does not cover;
@@ -38,11 +38,11 @@ comes out soft, which is exactly what the silhouette alpha wants. Normals
 come from the existing `sapiens2_lite` step rather than being re-inferred
 here.
 
-How it would be wired, when the time comes
-------------------------------------------
-Nothing below is in a workflow yet, deliberately. Everything it needs
-already exists on `fast_helical_native`'s bootstrap, and the three feeds
-must all be the same photo — `scene.front_image`:
+How it is wired
+---------------
+`workflows/fast_helical_native.yaml` is that wiring; read it for the whole
+bootstrap. Everything this step needs already existed on that prologue, and
+the three feeds must all be the same photo — `scene.front_image`:
 
     - id: front_matte
       step: rmbg
@@ -63,21 +63,27 @@ must all be the same photo — `scene.front_image`:
         image: scene.front_image
         mask: scene.front_matte
         normal_map: scene.front_normals
-        mesh_output: scene            # after fix_head_angle
+        mesh_output: scene            # sam3d_body's own outputs
       params:
         filepath: ${globals.output_root}/shell/shell.ply
       outputs:
         splat_path: scene.shell_splat_path
         splat_stats: scene.shell_splat_stats
 
-`render_splat` takes that `splat_path` directly. Place it after
-`fix_head_angle`, not before: this step reads `mesh_output["vertices"]`,
-and the head correction rewrites them.
+`render_splat` takes that `splat_path` directly — with `pattern: ""` it
+re-renders the shell along the mesh render's own cameras, which is what
+lets `inject_shell_views` swap those frames into the band around the source
+view and mark them as the batch's real-photograph frames. That is the job
+`generate_firstlast` + `inject_anchor` used to do for one anchored frame,
+which is why neither is in that bootstrap any more. If
+`fix_head_angle` is ever put back in place of the pose fit, it belongs
+BEFORE this step: this one reads `mesh_output["vertices"]`, and the head
+correction rewrites them.
 
-`refine_pose_to_splat` is the natural next step after this one — it
-re-poses the body so the mesh agrees with the shell in novel views, which
-is what stops the rendered skeleton drifting off the subject a few degrees
-either side of the anchor. Note it is mutually exclusive with
+`refine_pose_to_splat` follows it there, for the same reason it was
+written — it re-poses the body so the mesh agrees with the shell in novel
+views, which is what stops the rendered skeleton drifting off the subject a
+few degrees either side of the anchor. Note it is mutually exclusive with
 `fix_head_angle` (see `INCOMPATIBLE_STEPS` in pipeline/workflow.py), so a
 workflow picks one; and re-running this step afterwards, on the re-posed
 mesh, is the untried second iteration of the loop.

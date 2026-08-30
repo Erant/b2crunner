@@ -183,7 +183,29 @@ class OutputGlobalsTests(unittest.TestCase):
         self.assertEqual(
             webui.resolve_output_globals([self.COLMAP, self.PLY], True, False),
             {"run_upscale": True, "export_colmap": True, "export_ply": True,
-             "export_colmap_preupscale": False},
+             "export_colmap_preupscale": False,
+             "export_colmap_intermediate": False},
+        )
+
+    def test_the_intermediate_colmap_is_independent_of_the_upscale(self):
+        """Unlike the pre-upscale export, it has no interaction to fold in:
+        the frames it writes are the ones the first brush training saw,
+        which no other export in the run can stand in for."""
+        for run_upscale in (True, False):
+            with self.subTest(run_upscale=run_upscale):
+                got = webui.resolve_output_globals(
+                    [self.PLY], run_upscale, False, True)
+                self.assertTrue(got["export_colmap_intermediate"])
+                self.assertFalse(got["export_colmap"])
+
+    def test_the_intermediate_colmap_alone_is_a_valid_run(self):
+        """It is somebody deliberately asking what the first training was
+        fed, so it counts as an output rather than tripping the guard."""
+        got = webui.resolve_output_globals([], True, False, True)
+        self.assertEqual(
+            (got["export_colmap"], got["export_ply"],
+             got["export_colmap_preupscale"], got["export_colmap_intermediate"]),
+            (False, False, False, True),
         )
 
     def test_pre_upscale_colmap_only_makes_a_dir_when_upscaling(self):

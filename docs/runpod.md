@@ -101,9 +101,11 @@ and what you put in it decides what runs — no input picker:
   SAM-3D-Body reconstruction and the anchor warp, back half to the denoise
   pass as its reference view), renders its own anchored views, and then
   runs `fast_helical_full`'s stages over that dataset — same `colmap/` and
-  `ply/` deliverables, same Outputs box. **Least proven path**: its
-  bootstrap prologue (`split_reference_sheet` → `render` →
-  `generate_firstlast` → `inject_anchor`) has never executed end to end.
+  `ply/` deliverables, same Outputs box. Since 2026-08-29 that prologue
+  builds a photo-to-splat shell from the front half and renders the frames
+  near the source view off it, which costs ~6.5 GB more prefetch (the
+  Sapiens2 pointmap head). **Least proven path**: none of the prologue has
+  ever executed end to end.
 - **A `.zip` of image/prompt pairs** — `image1.jpg` + `image1.txt`,
   `image2.png` + `image2.txt`, ... Each image becomes its own
   reference-sheet run with its text file as the prompt, and the scheduler
@@ -152,10 +154,19 @@ filters on the result — an unchecked step does not run:
   SeedVR2, so you can train a splat on each and compare. Ignored with the
   upscale off (the frames are then the same, and it just guarantees the
   ordinary `colmap/`).
+- **Intermediate COLMAP dataset (debug)** — also exports
+  `colmap_intermediate/`: the dataset the **first** brush training is
+  handed, i.e. the frames as `denoise_pass1` leaves them plus the RMBG
+  mattes and the normal maps computed for that training. Every other export
+  in a run describes frames from after the helical re-render; this is the
+  only look at what the splat driving that re-render actually saw, which is
+  the question behind a bad re-render. No interaction with the upscale, and
+  it is a valid sole output. Sets `export_colmap_intermediate`.
 
 The **Results** tab has three things: the one `.zip` of the run's
-deliverables (`colmap/` and/or `ply/`, and nothing else — the run
-directory's own frames and the intermediate splat stay on the volume), the
+deliverables (`colmap/` and/or `ply/`, plus either debug export you asked
+for, and nothing else — the run directory's own frames and the intermediate
+splat stay on the volume), the
 final frames, and a **per-step contact sheet**: eight frames spaced evenly
 through the batch, captured after every step, one row per step in run
 order. That last one is for answering "which step broke it" by looking
@@ -194,6 +205,13 @@ python -m pipeline.cli run fast_helical_full --dataset /data/my_dataset \
 # from a front/back reference sheet instead
 python -m pipeline.cli run fast_helical_native --reference-image /data/sheet.png \
     --prompt "a woman in a red jacket"
+
+# the debug COLMAP exports, which the UI's Outputs box also drives:
+# colmap_intermediate/ is the dataset the FIRST brush training is handed
+# (denoised frames + their mattes and normals), colmap_preupscale/ the same
+# idea one stage before SeedVR2
+python -m pipeline.cli run fast_helical_full --dataset /data/my_dataset \
+    --param export_colmap_intermediate=true
 ```
 
 ## When and where the models are downloaded

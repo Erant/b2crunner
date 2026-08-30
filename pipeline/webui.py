@@ -114,9 +114,11 @@ OUTPUT_PLY = "Trained .ply (normal-supervised)"
 OUTPUT_PARAMS = {OUTPUT_COLMAP: "export_colmap", OUTPUT_PLY: "export_ply"}
 
 # Deliverable subdirectories a run can drop under its output_root, scanned
-# by `result_dirs` when packaging the download. `colmap_preupscale/` is the
-# debug export gated by `export_colmap_preupscale` (see the Outputs box).
-RESULT_SUBDIRS = ("colmap", "colmap_preupscale", "ply")
+# by `result_dirs` when packaging the download. Two of them are the debug
+# exports the Outputs box offers: `colmap_preupscale/` (gated by
+# `export_colmap_preupscale`) and `colmap_intermediate/` (gated by
+# `export_colmap_intermediate` — what the first brush training was fed).
+RESULT_SUBDIRS = ("colmap", "colmap_intermediate", "colmap_preupscale", "ply")
 
 
 # --------------------------------------------------------------------------
@@ -166,14 +168,23 @@ def workflow_outputs(name: str) -> List[str]:
 
 def resolve_output_globals(
     selected_outputs: Optional[List[str]], run_upscale: bool, want_preupscale_colmap: bool,
+    want_intermediate_colmap: bool = False,
 ) -> Dict[str, bool]:
-    """The four workflow globals the Outputs box sets, with the pre-upscale
+    """The five workflow globals the Outputs box sets, with the pre-upscale
     COLMAP rules folded in.
 
     `export_colmap_preupscale` only means anything with the upscale on — the
     pre- and post-upscale frames are otherwise the same. So with the upscale
     off, ticking "Pre-upscale COLMAP dataset" just guarantees the ordinary
     `colmap/` (and is a plain no-op if "COLMAP dataset" was already ticked).
+
+    `export_colmap_intermediate` has no such rule: the dataset it writes is
+    the one the FIRST brush training is handed, which is a different set of
+    frames from every other export in the run — earlier than the second
+    denoise pass, the re-render and the upscale alike — so nothing it could
+    collapse into. It stands alone, and it counts as an output on its own:
+    a run that exports only it is a deliberate look at what that training
+    saw.
 
     Raises `gr.Error` if the result would export nothing.
     """
@@ -184,7 +195,8 @@ def resolve_output_globals(
     export_colmap = want_colmap or (want_preupscale_colmap and not run_upscale)
     export_colmap_preupscale = want_preupscale_colmap and run_upscale
 
-    if not (export_colmap or export_colmap_preupscale or want_ply):
+    if not (export_colmap or export_colmap_preupscale
+            or want_intermediate_colmap or want_ply):
         raise gr.Error(
             "Pick at least one output — a run that exports neither a COLMAP "
             "dataset nor a .ply leaves nothing to download."
@@ -194,6 +206,7 @@ def resolve_output_globals(
         "export_colmap": export_colmap,
         "export_ply": want_ply,
         "export_colmap_preupscale": export_colmap_preupscale,
+        "export_colmap_intermediate": bool(want_intermediate_colmap),
     }
 
 
@@ -233,8 +246,8 @@ def workflow_needs_a_dataset(name: str) -> bool:
 
 # Globals the generated panel deliberately does not draw a control for.
 #
-# The deliverable switches, `run_upscale`, and `export_colmap_preupscale`
-# all have a dedicated control in the Outputs box; showing them here too
+# The deliverable switches, `run_upscale`, and the two debug COLMAP
+# exports all have a dedicated control in the Outputs box; showing them here too
 # would give one setting two editable homes that disagree the moment
 # someone touches one.
 #
@@ -253,6 +266,7 @@ def workflow_needs_a_dataset(name: str) -> bool:
 # unlikely.
 HIDDEN_GLOBALS = set(OUTPUT_PARAMS.values()) | {
     "output_root", "run_upscale", "export_colmap_preupscale",
+    "export_colmap_intermediate",
 }
 
 
@@ -531,8 +545,9 @@ def result_dirs(run_dir: Optional[Path]) -> Dict[str, Path]:
     """The deliverable subdirectories this run actually produced.
 
     Keyed by the name they take inside the archive, which is the same name
-    they have on disk — `colmap/`, `colmap_preupscale/`, `ply/`, written
-    there by the workflow's own export steps via `output_root`.
+    they have on disk — `colmap/`, `colmap_intermediate/`,
+    `colmap_preupscale/`, `ply/`, written there by the workflow's own export
+    steps via `output_root`.
     """
     if not run_dir:
         return {}
@@ -748,6 +763,14 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
                              "they are before the upscale, to compare splat "
                              "quality with and without it. Ignored unless "
                              "'Upscale dataset' is on.",
+                    )
+                    intermediate_colmap_in = gr.Checkbox(
+                        value=False, label="Intermediate COLMAP dataset (debug)",
+                        info="Also export colmap_intermediate/ — the dataset the "
+                             "FIRST brush training is handed, i.e. the denoised "
+                             "frames with their mattes and normals, before the "
+                             "splat is re-rendered along the helical orbit and "
+                             "denoised again. What that training actually saw.",
                     )
                     with gr.Row():
                         start_btn = gr.Button("Start run", variant="primary")
@@ -993,7 +1016,7 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
         upload_in.change(on_upload_change, inputs=[upload_in], outputs=[workflow_in])
 
         def on_start(upload_file, prompt, params, selected_outputs,
-                     upscale, preupscale_colmap):
+                     upscale, preupscale_colmap, intermediate_colmap):
             params = params or {}
             global_overrides = dict(params.get("globals", {}))
             step_overrides = {k: dict(v) for k, v in params.get("steps", {}).items()}
@@ -1014,6 +1037,7 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
             # pre-upscale-COLMAP rules folded in. Raises if nothing exports.
             global_overrides.update(resolve_output_globals(
                 selected_outputs, bool(upscale), bool(preupscale_colmap),
+                bool(intermediate_colmap),
             ))
 
             from .cli import resolve_workflow
@@ -1097,7 +1121,7 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
         start_btn.click(
             on_start,
             inputs=[upload_in, prompt_in, param_state, outputs_in,
-                    upscale_in, preupscale_colmap_in],
+                    upscale_in, preupscale_colmap_in, intermediate_colmap_in],
             outputs=[run_picker],
         ).then(stream, inputs=[run_picker], outputs=progress_outputs)
 
@@ -1127,8 +1151,8 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
                     else "the run produced neither; check the Progress tab's step list"
                 )
                 return (
-                    f"### `{directory}`\n\nNo `colmap/`, `colmap_preupscale/` or "
-                    f"`ply/` here yet — {note}.",
+                    f"### `{directory}`\n\nNo `colmap/`, `colmap_intermediate/`, "
+                    f"`colmap_preupscale/` or `ply/` here yet — {note}.",
                     gallery_images(directory),
                     None,
                 )

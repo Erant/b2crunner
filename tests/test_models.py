@@ -148,7 +148,13 @@ class TestWan22WeightSplit(unittest.TestCase):
 class TestRequiredForSteps(unittest.TestCase):
     def test_blocking_is_scoped_to_the_workflow(self):
         cases = {
-            "fast_helical_native": {"rmbg", "sapiens2", "sam3dbody", "moge2",
+            # sapiens2_pointmap joined this set when the bootstrap started
+            # building a photo-to-splat shell (pointmap_splat): 6.5 GB more
+            # that a fresh pod blocks on before the run starts, on top of
+            # the 6.2 the normal head already costs. Both are Sapiens2 1b
+            # repos and neither substitutes for the other.
+            "fast_helical_native": {"rmbg", "sapiens2", "sapiens2_pointmap",
+                                    "sam3dbody", "moge2",
                                     "wan22", "wan22_fp8", "wan22_lora",
                                     "seedvr2", "mediapipe"},
             "fast_helical_full": {"rmbg", "sapiens2", "wan22", "wan22_fp8",
