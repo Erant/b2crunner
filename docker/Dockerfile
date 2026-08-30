@@ -110,6 +110,18 @@ WORKDIR /src/brush
 # not a default one). `-p` also avoids `--workspace`, which would pull in
 # unrelated members this image doesn't need (brush-js, brush-c, the wasm
 # bindings).
+#
+# Both halves have to come from the SAME build, and from one past the
+# confidence work on this branch (2026-08-30). `brush` writes per-Gaussian
+# multi-view evidence into the exported .ply (--export-evidence) and
+# `brush-splat-render --confidence` gates a render on it — that pair is
+# what replaced the pipeline's mask_splat stage, so an image built from an
+# older tip renders frames nothing downstream then filters. It degrades
+# loudly rather than silently: an old renderer rejects --confidence
+# outright, and a new renderer against an old training's .ply warns that it
+# found no ev_* block and falls back to plain alpha. The clone above is
+# --depth 1 --branch, i.e. always that branch's tip, so this is a question
+# of when the image was last built, not of a pin to move.
 RUN cargo build --release -p brush-app -p brush-splat-render \
     && install -m 0755 target/release/brush /out-brush \
     && install -m 0755 target/release/brush-splat-render /out-brush-splat-render

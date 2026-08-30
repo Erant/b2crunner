@@ -574,6 +574,98 @@ class TestWorkflowFiles(unittest.TestCase):
                             )
 
 
+    def test_a_confidence_render_is_paired_with_a_passthrough_mask_splat(self):
+        """The two halves of one decision, and running both is worse than
+        running either.
+
+        `render_splat`'s `confidence` gates on per-Gaussian multi-view
+        evidence and hands back the gate as the frame's alpha, composited
+        over the cull colour. `mask_splat`'s threshold path then thresholds
+        that alpha, composites the grey frames over BLACK and bilateral-
+        filters the gate's soft edge — the old cut applied to output that
+        already made the decision. Conversely a passthrough mask_splat with
+        no confidence render above it drops the fringe stage altogether and
+        hands denoise_pass2 the raw splat alpha's mush.
+        """
+        for path in _workflows():
+            spec = WorkflowSpec.from_yaml(str(path))
+            if not any(s.step == "mask_splat" for s in spec.steps):
+                continue
+            mask_at = min(i for i, s in enumerate(spec.steps) if s.step == "mask_splat")
+            producer = spec.steps[_splat_alpha_producer(self, path, spec, mask_at)]
+            gated = bool(producer.params.get("confidence"))
+            mode = spec.steps[mask_at].params.get("mode", "threshold")
+            with self.subTest(workflow=path.name):
+                self.assertEqual(
+                    mode, "passthrough" if gated else "threshold",
+                    f"{path.name}: '{producer.id}' renders with confidence="
+                    f"{gated} but '{spec.steps[mask_at].id}' runs in "
+                    f"'{mode}' — the fringe decision is made twice, or not "
+                    f"at all",
+                )
+
+    def test_a_confidence_render_has_evidence_to_read(self):
+        """`--confidence` needs per-Gaussian evidence. It comes from the
+        .ply (brush's `export_evidence`, on by default) or from an
+        `evidence_dataset` measured now. With neither, brush-splat-render
+        warns, trusts every splat, and the gate degenerates to the same
+        alpha `mask_splat` used to threshold — with `mask_splat` now in
+        passthrough, i.e. to nothing at all.
+        """
+        for path in _workflows():
+            spec = WorkflowSpec.from_yaml(str(path))
+            trainings = [s for s in spec.steps if s.step == "brush"]
+            for step in spec.steps:
+                if step.step != "render_splat" or not step.params.get("confidence"):
+                    continue
+                with self.subTest(workflow=path.name, step=step.id):
+                    if step.params.get("evidence_dataset"):
+                        continue
+                    self.assertTrue(
+                        trainings,
+                        f"{path.name}: '{step.id}' renders with confidence but "
+                        f"nothing trained the splat in this workflow and no "
+                        f"evidence_dataset is set",
+                    )
+                    for training in trainings:
+                        self.assertNotEqual(
+                            training.params.get("export_evidence"), False,
+                            f"{path.name}: '{training.id}' exports no evidence, "
+                            f"so '{step.id}' has none to gate on",
+                        )
+
+    def test_no_confidence_render_feeds_composite_splat_views(self):
+        """composite_splat_views adds premultiplied colour (out = base*(1-a)
+        + rgb) and enforces premultiplied-over-black, refusing a render that
+        is more than 8/255 bright where it is fully transparent. A
+        confidence render is the cull colour there — 0.5 grey by default —
+        so turning the mode on for a face view is a hard failure at runtime.
+        Caught here instead, where the wiring is visible.
+        """
+        for path in _workflows():
+            spec = WorkflowSpec.from_yaml(str(path))
+            by_id = {s.id: s for s in spec.steps}
+            producers = {}
+            for step in spec.steps:
+                if step.step == "render_splat":
+                    for ctx in step.outputs.values():
+                        producers[ctx] = step.id
+            for step in spec.steps:
+                if step.step != "composite_splat_views":
+                    continue
+                for field in ("splat_images", "splat_masks"):
+                    source = producers.get(step.inputs.get(field))
+                    if source is None:
+                        continue
+                    with self.subTest(workflow=path.name, step=step.id, input=field):
+                        self.assertFalse(
+                            by_id[source].params.get("confidence"),
+                            f"{path.name}: '{step.id}' composites '{source}', "
+                            f"which renders with confidence — its transparent "
+                            f"pixels are the cull colour, not black, and "
+                            f"composite_splat_views refuses that",
+                        )
+
     def test_a_warped_anchor_is_bordered_in_grey_not_white(self):
         """generate_firstlast's border colour has no literal in the YAML —
         it arrives as `image_warp["bg_color"]`, which render.py copies from

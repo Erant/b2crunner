@@ -30,6 +30,33 @@ conversion between body2colmap's OpenGL-convention `Camera` and brush's
 OpenCV-convention one, verified there against a real gsplat oracle (mean
 abs error 0.0008-0.0015 on RGB, comfortably under 1/255).
 
+**Confidence gating (`confidence: true`) replaces `mask_splat`.** brush can
+now write each Gaussian's multi-view evidence into the .ply it exports (see
+steps/brush.py's `export_evidence`), and `brush-splat-render --confidence`
+turns that into a per-pixel confidence `C`, gates on it, and hands back
+`g = smoothstep(gate_lo, gate_hi, C)` as the frame's alpha. That changes
+the output contract, which is the part to be careful with:
+
+  * RGB is `(colour*a + cull*(1-a))*g + cull*(1-g)` — composited over the
+    **cull colour** and then blended toward it by the gate. A transparent
+    pixel is the cull colour, not black.
+  * `bg_color`/`--background` is ignored; `cull_color` is the background.
+  * The alpha is the decision, already made. Thresholding it, dilating it
+    and bilateral-filtering it — `mask_splat` — is wrong rather than
+    redundant afterwards: it would re-composite grey frames over black and
+    smear the gate's soft edge. The shipped workflows run `mask_splat` in
+    `passthrough` for exactly this reason, keeping only its other job
+    (replacing the per-pixel alpha with the per-frame VACE batch).
+
+The decision is made once, in 3-D, from what the training views actually
+constrained — where the old pair guessed it per pixel per frame from
+accumulated opacity. docs/spatial-reinforcement.md is the before/after.
+
+**Keep it off for any render that feeds `composite_splat_views`** (the
+face-view renders in fast_helical_shell.yaml). That step composites
+premultiplied colour and enforces premultiplied-over-black, so it refuses a
+confidence render outright — loudly, which is the intended failure.
+
 **A non-zero exit is not automatically a failed render**, exactly as in
 steps/brush.py — same binary's other half, same known shutdown SIGSEGV.
 If every expected frame is on disk and non-empty, the render is treated as
@@ -75,7 +102,10 @@ from __future__ import annotations
 
 import json
 import logging
+import shutil
 import tempfile
+import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -246,7 +276,42 @@ class RenderSplatStep(Step):
         Param("bg_color", list, [0.0, 0.0, 0.0],
               "RGB in [0,1]. Black, not the recorded run's 127 grey: black is where "
               "that pipeline ends up after mask_splat, and matching its intermediate "
-              "grey would reintroduce the same halo, just dimmer"),
+              "grey would reintroduce the same halo, just dimmer. IGNORED when "
+              "`confidence` is on — `cull_color` is the background there"),
+        Param("confidence", bool, False,
+              "Gate the render on each Gaussian's multi-view evidence instead of "
+              "leaving mask_splat to threshold rendered alpha afterwards. The alpha "
+              "that comes back is then the gate, not accumulated opacity, and the "
+              "RGB is composited over `cull_color` rather than `bg_color`. Needs a "
+              ".ply trained with brush's `export_evidence`, or an `evidence_dataset` "
+              "to measure against. Off for any render feeding composite_splat_views: "
+              "that step requires premultiplied-over-black and refuses this output"),
+        Param("cull_color", list, [0.5, 0.5, 0.5],
+              "RGB in [0,1] that culled pixels resolve to in confidence mode, and "
+              "the colour the kept ones are composited over. One colour for both is "
+              "the point: partial coverage fades toward the same value the gate "
+              "rejects to, so there is no halo to filter away afterwards"),
+        Param("gate_lo", float, 0.45,
+              "Confidence at or below which a pixel is fully culled", minimum=0.0,
+              maximum=1.0),
+        Param("gate_hi", float, 0.65,
+              "Confidence at or above which a pixel is fully kept; between the two "
+              "the gate is a smoothstep", minimum=0.0, maximum=1.0),
+        Param("confidence_sidecar", bool, False,
+              "Also keep each frame's raw per-pixel confidence as <stem>.conf.png. "
+              "Tuning only: the frames themselves are unaffected, and the sidecars "
+              "are copied out of the render's temp directory into the log dir, since "
+              "nothing downstream reads them", advanced=True),
+        Param("evidence_dataset", str, None,
+              "Training dataset directory to measure evidence against when the .ply "
+              "carries none — a run whose splat predates brush's export_evidence. "
+              "The export_colmap_intermediate output is exactly what train_splat "
+              "saw. Unused when the .ply has its own ev_* block", advanced=True),
+        Param("conf_args", list, [],
+              "Extra --conf-* flags passed verbatim to brush-splat-render, for "
+              "tuning the confidence measure itself (--conf-tau, --conf-min-views, "
+              "--conf-angle-margin, ...). Empty leaves the binary's defaults",
+              advanced=True),
         Param("override_pointcloud", bool, False,
               "Sample a fresh point cloud off the splat instead of keeping the "
               "dataset's. The mesh render's cloud describes the actual subject "
@@ -320,13 +385,27 @@ class RenderSplatStep(Step):
         # Black matches where that pipeline ENDS up, which is what matters
         # here — matching its intermediate grey would reintroduce the same
         # halo, just dimmer.
+        #
+        # All of the above is the NON-confidence contract, and it is still
+        # live: the face-view renders that feed composite_splat_views depend
+        # on it, and that step refuses anything else. In confidence mode
+        # `bg_color` is not passed to the binary at all — `cull_color` is
+        # both the background and the reject colour, and there is no halo to
+        # avoid because partial coverage fades toward the same value the
+        # gate rejects to. The history stays here rather than moving,
+        # because it is the reason black and not grey is the default.
         bg_color = tuple(params["bg_color"])
         render_path = params["render_path"]
         image_names = [f"frame_{i + 1:05d}_.png" for i in range(len(cameras))]
 
+        confidence = _confidence_options(params)
+
         logger.info(
-            "render_splat: %d Gaussians (SH degree %d), %d frames at %dx%d via %s",
+            "render_splat: %d Gaussians (SH degree %d), %d frames at %dx%d via %s%s",
             len(scene), scene.sh_degree, len(cameras), width, height, render_path,
+            "" if confidence is None else
+            f", confidence-gated on {confidence.cull_color} "
+            f"(gate {confidence.gate_lo}-{confidence.gate_hi})",
         )
 
         images, masks = _rasterize(
@@ -338,6 +417,7 @@ class RenderSplatStep(Step):
             height=height,
             bg_color=bg_color,
             render_path=render_path,
+            confidence=confidence,
         )
 
         points_3d = _resolve_pointcloud(scene, dataset, params)
@@ -370,13 +450,92 @@ class RenderSplatStep(Step):
         return result
 
 
+@dataclass(frozen=True)
+class _Confidence:
+    """The `--confidence` half of a `brush-splat-render` call, as one value.
+
+    Grouped rather than spread across seven more `_rasterize` keywords
+    because they are meaningless individually: `confidence: false` makes
+    every one of them dead, which is exactly what `None` says here.
+    """
+
+    cull_color: Tuple[float, ...]
+    gate_lo: float
+    gate_hi: float
+    sidecar: bool
+    dataset: Optional[str]
+    extra_args: Tuple[str, ...]
+
+
+def _confidence_options(params: Dict[str, Any]) -> Optional[_Confidence]:
+    """`params` read as a `_Confidence`, or None when the mode is off."""
+    if not params["confidence"]:
+        return None
+    gate_lo = float(params["gate_lo"])
+    gate_hi = float(params["gate_hi"])
+    if gate_lo > gate_hi:
+        raise ValueError(
+            f"render_splat: gate_lo ({gate_lo}) is above gate_hi ({gate_hi}). "
+            f"The gate is a smoothstep from lo to hi, so an inverted pair does "
+            f"not mean 'keep less' — it is undefined."
+        )
+    return _Confidence(
+        cull_color=tuple(float(c) for c in params["cull_color"]),
+        gate_lo=gate_lo,
+        gate_hi=gate_hi,
+        sidecar=bool(params["confidence_sidecar"]),
+        dataset=params["evidence_dataset"] or None,
+        extra_args=tuple(str(a) for a in params["conf_args"]),
+    )
+
+
+def _keep_sidecars(output_dir: Path, image_names: List[str]) -> None:
+    """Copy `<stem>.conf.png` out of the render's temp directory.
+
+    They are diagnostics, not frames: nothing downstream reads them, and
+    `_rasterize` deletes the directory they were written into on the way
+    out — the same way a crash used to take its own evidence with it. Under
+    `logs/` for the reason `paths.crash_dir()` gives: whatever gets copied
+    off a pod to read the run log brings them along.
+    """
+    from ..paths import log_dir
+
+    try:
+        dest = log_dir() / "confidence" / time.strftime("%Y%m%d-%H%M%S")
+        dest.mkdir(parents=True, exist_ok=True)
+        kept = 0
+        for name in image_names:
+            sidecar = output_dir / f"{Path(name).stem}.conf.png"
+            if sidecar.exists():
+                shutil.copy2(sidecar, dest / sidecar.name)
+                kept += 1
+    except OSError as exc:
+        logger.warning("render_splat: could not keep the confidence sidecars: %s", exc)
+        return
+    if kept:
+        logger.info("render_splat: kept %d confidence sidecars in %s", kept, dest)
+    else:
+        logger.warning(
+            "render_splat: confidence_sidecar is on but brush-splat-render wrote "
+            "no .conf.png beside the frames in %s", output_dir,
+        )
+
+
 def _rasterize(
     *, scene, splat_path, cameras, image_names, width, height, bg_color, render_path,
+    confidence: Optional[_Confidence] = None,
 ) -> Tuple[List[np.ndarray], List[np.ndarray]]:
     """Render `cameras` against `scene` via the `brush-splat-render` CLI.
 
     Returns (images, masks): BGR uint8 images and float32 [0,1] foreground
     masks, one per camera, in `cameras` order.
+
+    With `confidence`, the binary's output contract changes and so does what
+    those two mean: the RGB is composited over the cull colour instead of
+    `bg_color`, and the alpha is the confidence gate rather than accumulated
+    opacity. It is still "the splat's per-pixel mask" as far as everything
+    downstream is concerned — foreground is still 1 — which is why the
+    read-back below is unchanged.
     """
     with tempfile.TemporaryDirectory(prefix="b2c_render_splat_") as tmp:
         tmp_dir = Path(tmp)
@@ -398,14 +557,39 @@ def _rasterize(
             "--splat", str(ply_path),
             "--cameras", str(cameras_path),
             "--output-dir", str(output_dir),
-            "--background", ",".join(f"{c:.6f}" for c in bg_color),
         ]
+        if confidence is None:
+            cmd += ["--background", ",".join(f"{c:.6f}" for c in bg_color)]
+        else:
+            # --background is ignored by the binary in this mode, so it is
+            # not passed at all: an argv that carries a background nothing
+            # reads is the kind of thing that gets tuned for a run and then
+            # blamed for the result.
+            cmd += [
+                "--confidence",
+                "--cull-color", ",".join(f"{c:.6f}" for c in confidence.cull_color),
+                "--gate-lo", str(confidence.gate_lo),
+                "--gate-hi", str(confidence.gate_hi),
+            ]
+            if confidence.sidecar:
+                cmd.append("--confidence-sidecar")
+            if confidence.dataset:
+                # Only for a .ply that predates brush's export_evidence. The
+                # dataset options have to match what training saw, and
+                # steps/brush.py passes --alpha-mode transparent (its own
+                # default) whenever it has masks, which is every training in
+                # every shipped workflow.
+                cmd += ["--dataset", str(confidence.dataset),
+                        "--alpha-mode", "transparent"]
+            cmd += list(confidence.extra_args)
         _run_render(
             cmd,
             output_dir=output_dir,
             cameras_path=cameras_path,
             image_names=list(image_names),
         )
+        if confidence is not None and confidence.sidecar:
+            _keep_sidecars(output_dir, list(image_names))
 
         images: List[np.ndarray] = []
         masks: List[np.ndarray] = []

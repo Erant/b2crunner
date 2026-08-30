@@ -19,6 +19,19 @@ those to the next denoise pass propagates the mush. Keeping only near-opaque
 interior (plus a small dilated margin) and blacking out the rest gives the
 denoiser a clean, hard-edged subject to work from.
 
+**Superseded, and kept anyway.** `render_splat`'s `confidence` mode does
+this job properly — it gates on each Gaussian's multi-view evidence, in
+3-D and once, rather than on accumulated alpha per pixel per frame — and
+every shipped workflow now runs this step as `mode: passthrough` behind
+one. Passthrough is not a no-op: it still does the step's *other* job,
+replacing the per-pixel splat alpha in `dataset.masks` with the per-frame
+all-1.0 VACE batch, which is what `denoise_pass2` reads and what
+`inject_anchor` writes its 0.0 into. That is also why the step stays here
+rather than being deleted: the ordering it anchors ("inject_anchor must run
+AFTER mask_splat", see steps/anchor_stub.py) still holds, and `mode:
+threshold` keeps the recorded run reproducible for an A/B. See
+docs/spatial-reinforcement.md.
+
 **Mask conventions.** ComfyUI's MASK is inverted (1.0 = background), so the
 graph binarises the *background* and inverts it. This pipeline's convention
 is foreground = 1 throughout (see steps/rmbg.py), so the equivalent test is
@@ -91,12 +104,25 @@ class MaskSplatStep(Step):
     The pipeline YAMLs use filter_size/dilation of 6/2 (`fast helical`),
     12/4 (`helical`, `tiered` first pass) and 4/0 (`tiered` second pass) —
     dilation=0 is a valid no-dilate case and is handled.
+
+    `mode: passthrough` skips all of that and emits the frames unchanged,
+    for the shipped case where the render upstream was already
+    confidence-gated (`render_splat`'s `confidence` param). The masks are
+    replaced either way — that half is the step's real remaining job — and
+    passthrough does not need `dataset.masks` at all, since it reads no
+    alpha.
     """
 
     # threshold/sigma_* are advanced because they are not free choices: they
     # were fitted against the recorded ComfyUI run this step reproduces (see
     # the module docstring), and moving them breaks that agreement.
     PARAMS = (
+        Param("mode", str, "threshold", choices=("threshold", "passthrough"),
+              help="threshold: the recorded ComfyUI subgraph — alpha cut, dilate, "
+                   "composite over black, bilateral filter. passthrough: leave the "
+                   "frames exactly as they arrived, because render_splat already "
+                   "gated them on per-Gaussian confidence; the masks are still "
+                   "replaced by the all-1.0 VACE batch either way"),
         Param("filter_size", int, 6, "Bilateral filter diameter", minimum=0),
         Param("dilation", int, 2, "Grow the kept region back out by this many pixels; "
               "0 is a valid no-dilate case", minimum=0),
@@ -112,22 +138,21 @@ class MaskSplatStep(Step):
     def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
         dataset: Dataset = inputs["dataset"]
 
+        mode = params["mode"]
         filter_size = params["filter_size"]
         dilation = params["dilation"]
         threshold = params["threshold"]
         sigma_color = params["sigma_color"]
         sigma_space = params["sigma_space"]
 
-        if dataset.masks is None:
-            raise ValueError(
-                "mask_splat needs dataset.masks (the splat render's alpha). "
-                "A dataset loaded from RGBA frames has it; one loaded from "
-                "RGB frames does not."
-            )
-
-        images: List[np.ndarray] = []
-        for img, mask in zip(dataset.images, dataset.masks):
-            images.append(
+        if mode == "threshold":
+            if dataset.masks is None:
+                raise ValueError(
+                    "mask_splat needs dataset.masks (the splat render's alpha). "
+                    "A dataset loaded from RGBA frames has it; one loaded from "
+                    "RGB frames does not."
+                )
+            images: List[np.ndarray] = [
                 _mask_one(
                     img, mask,
                     threshold=threshold,
@@ -136,16 +161,28 @@ class MaskSplatStep(Step):
                     sigma_color=sigma_color,
                     sigma_space=sigma_space,
                 )
+                for img, mask in zip(dataset.images, dataset.masks)
+            ]
+            logger.info(
+                "mask_splat: %d frames (filter_size=%d, dilation=%d, threshold=%d)",
+                len(images), filter_size, dilation, threshold,
+            )
+        else:
+            # Not a copy: the frames go downstream untouched, and the arrays
+            # are the same ones every other step passes along by reference.
+            # `dataset.masks` is not read at all here — a confidence render's
+            # alpha is the gate, already applied to the RGB by the rasteriser
+            # — so unlike the threshold path this mode does not need one.
+            images = list(dataset.images)
+            logger.info(
+                "mask_splat: %d frames passed through unfiltered; the splat render "
+                "gated them already. Masks replaced by the all-1.0 VACE batch.",
+                len(images),
             )
 
         # Fully opaque, matching the all-zero ComfyUI MASK the graph saves.
         h, w = images[0].shape[:2]
         masks = [np.ones((h, w), dtype=np.float32) for _ in images]
-
-        logger.info(
-            "mask_splat: %d frames (filter_size=%d, dilation=%d, threshold=%d)",
-            len(images), filter_size, dilation, threshold,
-        )
 
         out = Dataset(
             images=images,

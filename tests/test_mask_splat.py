@@ -112,6 +112,77 @@ class TestMaskSplatGolden(unittest.TestCase):
         with self.assertRaises(ValueError):
             run_step("mask_splat", {"dataset": no_masks}, {})
 
+    def test_threshold_is_the_declared_default(self):
+        """The golden comparison above runs at the step's default, so it is
+        only a golden test while that default is `threshold`. Every shipped
+        workflow overrides it to passthrough, which is exactly the way a
+        default gets changed to match without anyone noticing."""
+        default = get_step_class("mask_splat").declared_params()["mode"].default
+        self.assertEqual(default, "threshold")
+
+
+class TestMaskSplatPassthrough(unittest.TestCase):
+    """`mode: passthrough` — the shipped mode, behind a confidence render.
+
+    render_splat's `confidence` already decided which pixels survive, in 3-D
+    and once, and composited them over the cull colour. Re-running the old
+    alpha cut on top of that is wrong rather than redundant: it would
+    composite grey frames over black and smear the gate's soft edge. What is
+    left for this step is the half that is still needed — turning the
+    per-pixel splat alpha in dataset.masks into the per-frame all-1.0 VACE
+    batch that denoise_pass2 reads and inject_anchor writes its 0.0 into.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.ds = Dataset.from_disk(require_stage("splatted"))
+
+    def _run(self, dataset):
+        return run_step("mask_splat", {"dataset": dataset}, {"mode": "passthrough"})["dataset"]
+
+    def test_the_frames_come_through_untouched(self):
+        out = self._run(self.ds)
+        self.assertEqual(len(out.images), len(self.ds.images))
+        for before, after in zip(self.ds.images, out.images):
+            np.testing.assert_array_equal(after, before)
+
+    def test_the_masks_are_still_the_vace_batch(self):
+        """Not a pass-through of dataset.masks: that field changes meaning
+        here — in as the splat's per-pixel alpha, out as the per-frame
+        'synthetic, regenerate this' flag."""
+        out = self._run(self.ds)
+        h, w = self.ds.images[0].shape[:2]
+        self.assertEqual(len(out.masks), len(out.images))
+        for mask in out.masks:
+            self.assertEqual(mask.shape, (h, w))
+            self.assertEqual(mask.dtype, np.float32)
+            self.assertTrue(np.all(mask == 1.0))
+
+    def test_it_does_not_need_the_splat_alpha(self):
+        """A confidence render's alpha IS the gate, already applied to the
+        RGB by the rasteriser, so this mode never reads it — and must not
+        refuse a dataset that arrived without one."""
+        no_masks = Dataset(
+            images=self.ds.images[:2], image_names=self.ds.image_names[:2],
+            cameras=self.ds.cameras[:2], points_3d=self.ds.points_3d,
+            resolution=self.ds.resolution, masks=None,
+        )
+        out = self._run(no_masks)
+        self.assertEqual(len(out.masks), 2)
+
+    def test_it_differs_from_the_threshold_path(self):
+        """Guards against a passthrough that quietly still filters — the two
+        modes have to disagree on a real splat render, or the frames
+        denoise_pass2 sees are not the ones the gate produced."""
+        thresholded = run_step(
+            "mask_splat", {"dataset": self.ds}, {"filter_size": 6, "dilation": 2}
+        )["dataset"]
+        passed = self._run(self.ds)
+        self.assertFalse(
+            np.array_equal(thresholded.images[0], passed.images[0]),
+            "passthrough produced the thresholded frame",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

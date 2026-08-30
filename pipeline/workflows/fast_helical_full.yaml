@@ -255,6 +255,14 @@ steps:
       # sh_degree, max_splats, refine_every, the normal-loss group — sits at
       # that step's declared defaults.
       total_steps: 30000
+      # Also steps/brush.py's default, and spelled out for the same reason:
+      # the next-but-one step depends on it. It writes each Gaussian's
+      # multi-view evidence into the exported .ply (ev_* properties), which
+      # is what rerender_splat's `confidence` reads to gate the render
+      # without a second pass over the dataset. Turn it off and that render
+      # warns and falls back to plain alpha — i.e. silently back to the
+      # behaviour mask_splat used to patch up.
+      export_evidence: true
       # Without this brush exports into tempfile.gettempdir() (see
       # steps/brush.py) — the trained .ply then only survives because
       # Dataset.to_disk copies it at the very end. `output_dir` rather than
@@ -296,6 +304,15 @@ steps:
       # resplat_helical.json's Body2COLMAP_HelicalPath node carries.
       lead_in_deg: 30.0
       lead_out_deg: 90.0
+      # Gate the render on the evidence train_splat wrote into the .ply,
+      # which is what makes mask_splat's thresholding stage unnecessary
+      # below. The alpha that comes back is the gate, not accumulated
+      # opacity, and the RGB is composited over `cull_color` — so these
+      # frames are a subject cut out of 0.5 grey with a soft edge, not out
+      # of black with a hard one. `bg_color` is ignored in this mode and is
+      # therefore not set here. See docs/spatial-reinforcement.md.
+      confidence: true
+      cull_color: [0.5, 0.5, 0.5]
     outputs:
       images: dataset.images
       masks: dataset.masks
@@ -304,18 +321,29 @@ steps:
       points_3d: dataset.points_3d
 
   # ---------------------------------------------------------------- stage 3
-  # mask_splat.json: drop the splat's low-confidence fringes. 6/2 is from
-  # `fast helical.yaml`'s own step config, and is also steps/mask_splat.py's
-  # default — spelled out here because it is the number that distinguishes
-  # this pipeline from the `helical` (12/4) and `tiered` (4/0) ones.
+  # This used to be the stage that dropped the splat's low-confidence
+  # fringes: threshold the render's alpha at 239/255, dilate by 2,
+  # composite over black, bilateral-filter (`mask_splat.json`'s subgraph,
+  # at `fast helical.yaml`'s 6/2). rerender_splat's `confidence` above
+  # decides the same thing better — once, in 3-D, from what the training
+  # views actually constrained rather than from accumulated alpha per pixel
+  # per frame — so running the old cut on top of it is now WRONG rather
+  # than merely redundant: it would re-composite the grey frames over black
+  # and smear the gate's soft edge.
+  #
+  # The step stays, in passthrough, because its other half is still needed:
+  # replacing the per-pixel splat alpha in dataset.masks with the per-frame
+  # all-1.0 VACE batch that denoise_pass2 reads and reinject_anchor writes
+  # its 0.0 into. Ordering is unchanged and still load-bearing (see below).
+  # To A/B against the recorded ComfyUI run, set `mode: threshold` and turn
+  # rerender_splat's `confidence` off — 6/2 is that step's own default.
   - id: mask_splat_fringes
     step: mask_splat
     dispatch: in_process
     inputs:
       dataset: dataset
     params:
-      filter_size: 6
-      dilation: 2
+      mode: passthrough
     outputs:
       dataset: dataset
 
@@ -367,6 +395,15 @@ steps:
       width: ${globals.resolution.0}
       height: ${globals.resolution.1}
       # Same as denoise_pass1 — see the note there. Only `strength` differs.
+      #
+      # UNREVIEWED against the confidence render above (2026-08-30): these
+      # frames are now a subject cut out of 0.5 GREY rather than black, and
+      # the negative prompt still asks against 整体发灰 ("an overall grey
+      # cast"). Neither prompt mentions a black background, so nothing here
+      # is knowably wrong — but this is the pair to look at first if
+      # denoise_pass2's output changed character with the gate. Left alone
+      # deliberately: a prompt edit is a quality decision for a real run to
+      # make, not a side effect of the render change.
       steps: 6
       cfg: 1.0
       seed: 0

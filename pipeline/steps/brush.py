@@ -51,6 +51,21 @@ description of the export it was training on and the COLMAP model's own
 several hundred MB and they are the dataset's, still on the volume after
 the temp directory is gone.
 
+**Multi-view evidence** (`export_evidence`, on by default) is measured
+after the last training step and written into the exported .ply as seven
+extra vertex properties (`ev_w_in`, `ev_w_all`, `ev_err`, `ev_views`,
+`ev_dir_0..2`): for each Gaussian, how much of its rendered weight landed
+inside the training masks, how many views actually supported it, how badly
+it disagreed with them, and from which direction it was seen. That is the
+per-Gaussian record of "the training views constrained this", and it is
+what `render_splat`'s `confidence` mode reads to decide, in 3-D and once,
+what `mask_splat` used to guess per pixel per frame from rendered alpha
+alone (see docs/spatial-reinforcement.md). Every other .ply reader ignores
+the extra properties, and the measurement costs seconds, so it is on for
+both trainings — an intermediate splat that carries its evidence needs no
+second pass over the dataset to be gated, and the final .ply is a
+deliverable that is more useful with it than without.
+
 Normal-map supervision: per the original node's behavior, a normal map
 that already carries an alpha channel keeps it; otherwise the RGB frame's
 own foreground mask (rmbg's output) is reused as the normal map's alpha,
@@ -128,6 +143,25 @@ class BrushStep(Step):
               "scales the sampled loss by N, so the expected gradient is unchanged "
               "and only the extra normal render in between is skipped; 1 is brush's "
               "own default", minimum=1),
+        Param("export_evidence", bool, True,
+              "Measure each splat's multi-view evidence against every training view "
+              "after the last step and write it into the exported .ply as ev_* vertex "
+              "properties. That is what render_splat's `confidence` mode reads, and "
+              "having it in the .ply is what lets that render need no dataset. Costs "
+              "seconds (~2s for 100k splats x 81 views) and every other .ply reader "
+              "ignores the extra properties, so it is on for both trainings"),
+        Param("evidence_prune_inmask", float, None,
+              "Drop splats whose in-mask contribution fraction is below this, and "
+              "those no view supported at all, before the export. Implies the "
+              "evidence pass. 0.1-0.3 are sane values; empty (the default) prunes "
+              "nothing, because this has not been looked at on a real run yet and a "
+              "splat dropped here is gone from the deliverable .ply, not merely "
+              "hidden in one render", advanced=True),
+        Param("evidence_normal_weight", float, 0.0,
+              "Fold w * the normal-map residual into the evidence residual, for a "
+              "dataset that has normals/. Costs one extra render per view and is "
+              "untuned; 0 leaves the residual photometric", minimum=0.0,
+              advanced=True),
         Param("output_dir", str, None,
               "Puts this training under <output_dir>/brush/training_<ms>/ — what an "
               "intermediate training wants. Empty falls back to the system temp dir, "
@@ -172,6 +206,9 @@ class BrushStep(Step):
         normal_loss_strength = params["normal_loss_strength"]
         normal_loss_step_start = params["normal_loss_step_start"]
         normal_loss_every = params["normal_loss_every"]
+        export_evidence = params["export_evidence"]
+        evidence_prune_inmask = params["evidence_prune_inmask"]
+        evidence_normal_weight = params["evidence_normal_weight"]
         with_viewer = params["with_viewer"]
 
         export_dir = params["export_dir"]
@@ -258,6 +295,18 @@ class BrushStep(Step):
                     "--normal-loss-start-iter", str(normal_loss_step_start),
                     "--normal-loss-every", str(normal_loss_every),
                 ])
+            # The evidence block. Only the LOD-0 final export carries it,
+            # which is this step's case (no --lod-levels is passed, so brush
+            # exports one level). --evidence-prune-inmask implies the
+            # measurement, but --export-evidence is passed anyway when both
+            # are set: the flag is what says the properties end up IN the
+            # .ply, and the two are independent on the brush side.
+            if export_evidence:
+                cmd.append("--export-evidence")
+            if evidence_prune_inmask is not None:
+                cmd.extend(["--evidence-prune-inmask", str(evidence_prune_inmask)])
+            if evidence_normal_weight > 0:
+                cmd.extend(["--evidence-normal-weight", str(evidence_normal_weight)])
 
             self._run_brush(cmd, ply_path, colmap_dir=colmap_dir)
 

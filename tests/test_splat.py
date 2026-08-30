@@ -30,7 +30,8 @@ from pipeline.steps.splat import (
     _resolve_cameras as _resolve_cameras_raw,
     _resolve_pointcloud as _resolve_pointcloud_raw,
 )
-from tests.helpers import require_stage, run_step
+from pipeline.steps.splat import _confidence_options
+from tests.helpers import redirect_crash_dir, require_stage, run_step
 
 import pipeline.steps  # noqa: F401
 
@@ -639,43 +640,7 @@ class TestRenderSplatBackground(unittest.TestCase):
     """
 
     def _captured_argv(self, bg_color):
-        """Build the brush-splat-render argv without running the binary."""
-        from body2colmap.camera import Camera
-
-        from pipeline.steps import splat as splat_module
-
-        seen = {}
-
-        def fake_render(cmd, **kwargs):
-            seen["cmd"] = cmd
-            out = Path(cmd[cmd.index("--output-dir") + 1])
-            out.mkdir(parents=True, exist_ok=True)
-            cv2.imwrite(str(out / "frame_00001_.png"), np.zeros((4, 4, 4), np.uint8))
-
-        camera = Camera(
-            focal_length=(4.0, 4.0),
-            image_size=(4, 4),
-            principal_point=(2.0, 2.0),
-            position=np.array([0.0, 0.0, 1.0], dtype=np.float32),
-            rotation=np.eye(3, dtype=np.float32),
-        )
-        scene = _synthetic_scene()
-
-        with tempfile.TemporaryDirectory() as tmp:
-            ply = Path(tmp) / "s.ply"
-            run_step("save_splat", {"splat_scene": scene}, {"filepath": str(ply)})
-            with mock.patch.object(splat_module, "_run_render", fake_render):
-                splat_module._rasterize(
-                    scene=scene,
-                    splat_path=str(ply),
-                    cameras=[camera],
-                    image_names=["frame_00001_.png"],
-                    width=4,
-                    height=4,
-                    bg_color=bg_color,
-                    render_path="brush-splat-render",
-                )
-        return seen["cmd"]
+        return _captured_render_argv(bg_color=bg_color)
 
     def test_the_shipped_default_is_black(self):
         """The default the step applies, read from the step rather than
@@ -706,3 +671,200 @@ def _render_splat_default_bg():
     from pipeline.registry import get_step_class
 
     return tuple(get_step_class("render_splat").declared_params()["bg_color"].default)
+
+
+def _captured_render_argv(*, bg_color=(0.0, 0.0, 0.0), confidence=None,
+                          sidecars=()):
+    """Build the brush-splat-render argv without running the binary.
+
+    `sidecars` names the extra files the stand-in writes beside the frames,
+    which is how the confidence sidecars can be checked without a renderer.
+    """
+    from body2colmap.camera import Camera
+
+    from pipeline.steps import splat as splat_module
+
+    seen = {}
+
+    def fake_render(cmd, **kwargs):
+        seen["cmd"] = cmd
+        out = Path(cmd[cmd.index("--output-dir") + 1])
+        out.mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(str(out / "frame_00001_.png"), np.zeros((4, 4, 4), np.uint8))
+        for name in sidecars:
+            cv2.imwrite(str(out / name), np.zeros((4, 4), np.uint8))
+
+    camera = Camera(
+        focal_length=(4.0, 4.0),
+        image_size=(4, 4),
+        principal_point=(2.0, 2.0),
+        position=np.array([0.0, 0.0, 1.0], dtype=np.float32),
+        rotation=np.eye(3, dtype=np.float32),
+    )
+    scene = _synthetic_scene()
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ply = Path(tmp) / "s.ply"
+        run_step("save_splat", {"splat_scene": scene}, {"filepath": str(ply)})
+        with mock.patch.object(splat_module, "_run_render", fake_render):
+            splat_module._rasterize(
+                scene=scene,
+                splat_path=str(ply),
+                cameras=[camera],
+                image_names=["frame_00001_.png"],
+                width=4,
+                height=4,
+                bg_color=bg_color,
+                render_path="brush-splat-render",
+                confidence=confidence,
+            )
+    return seen["cmd"]
+
+
+def _confidence(**overrides):
+    """The `_Confidence` render_splat would build for these params.
+
+    Through `resolve_params` and the step's own reader, so the declared
+    defaults are the ones under test rather than values restated here.
+    """
+    from pipeline.steps.splat import _confidence_options
+
+    return _confidence_options(_rs_params({"confidence": True, **overrides}))
+
+
+class TestRenderSplatConfidence(unittest.TestCase):
+    """`confidence: true` — the mode that replaces mask_splat.
+
+    brush writes each Gaussian's multi-view evidence into the .ply
+    (`export_evidence`), and brush-splat-render gates the render on it,
+    handing back the gate as the frame's alpha. The output contract changes
+    with it: RGB is composited over the CULL colour, `--background` is
+    ignored, and a transparent pixel is grey rather than black. What is
+    checked here is the argv, which is the whole of this step's side of that
+    seam — the gating itself is the renderer's.
+    """
+
+    def test_off_by_default_and_the_old_argv_is_untouched(self):
+        """Every render that is not opted in — the face views that feed
+        composite_splat_views above all — must still get exactly the
+        premultiplied-over-black call it got before."""
+        self.assertIs(_confidence_options(_rs_params({})), None)
+
+        argv = _captured_render_argv(bg_color=(0.0, 0.0, 0.0))
+        self.assertIn("--background", argv)
+        self.assertNotIn("--confidence", argv)
+        self.assertNotIn("--cull-color", argv)
+
+    def test_the_gate_flags_replace_the_background(self):
+        """`--background` is ignored by the binary in this mode, so it is
+        not passed at all: an argv carrying a background nothing reads is
+        the kind of thing that gets tuned for a run and then blamed for the
+        result."""
+        argv = _captured_render_argv(confidence=_confidence())
+
+        self.assertIn("--confidence", argv)
+        self.assertNotIn("--background", argv)
+        self.assertEqual(
+            argv[argv.index("--cull-color") + 1], "0.500000,0.500000,0.500000"
+        )
+        self.assertEqual(argv[argv.index("--gate-lo") + 1], "0.45")
+        self.assertEqual(argv[argv.index("--gate-hi") + 1], "0.65")
+
+    def test_the_declared_defaults_are_the_shipped_ones(self):
+        """Read off the declaration rather than restated, so a changed
+        default fails here instead of silently changing every run."""
+        declared = get_step_class("render_splat").declared_params()
+        self.assertIs(declared["confidence"].default, False)
+        self.assertEqual(tuple(declared["cull_color"].default), (0.5, 0.5, 0.5))
+        self.assertEqual(declared["gate_lo"].default, 0.45)
+        self.assertEqual(declared["gate_hi"].default, 0.65)
+
+    def test_an_inverted_gate_is_refused(self):
+        """The gate is a smoothstep from lo to hi. lo above hi does not mean
+        'keep less', it is undefined — and it would run, silently."""
+        with self.assertRaises(ValueError) as caught:
+            _confidence(gate_lo=0.8, gate_hi=0.2)
+        self.assertIn("gate_lo", str(caught.exception))
+
+    def test_the_evidence_dataset_carries_the_training_alpha_mode(self):
+        """For a .ply that predates export_evidence. The dataset options
+        have to match what training saw, and steps/brush.py passes
+        --alpha-mode transparent whenever it has masks, which is every
+        training in every shipped workflow."""
+        argv = _captured_render_argv(
+            confidence=_confidence(evidence_dataset="/data/output/colmap_intermediate")
+        )
+        self.assertEqual(
+            argv[argv.index("--dataset") + 1], "/data/output/colmap_intermediate"
+        )
+        self.assertEqual(argv[argv.index("--alpha-mode") + 1], "transparent")
+
+    def test_no_dataset_flag_without_one(self):
+        """The .ply's own ev_* block is the normal source; passing an empty
+        --dataset would make the renderer re-measure against nothing."""
+        argv = _captured_render_argv(confidence=_confidence())
+        self.assertNotIn("--dataset", argv)
+
+    def test_conf_args_go_through_verbatim_and_last(self):
+        """The tuning escape hatch for --conf-tau and friends."""
+        argv = _captured_render_argv(
+            confidence=_confidence(conf_args=["--conf-tau", "0.12"])
+        )
+        self.assertEqual(argv[-2:], ["--conf-tau", "0.12"])
+
+    def test_the_sidecars_survive_the_temp_directory(self):
+        """They are written into the render's TemporaryDirectory, which is
+        deleted on the way out — the same way a crash used to take its own
+        evidence with it. Off by default, and kept under the log dir when
+        on."""
+        # redirect_crash_dir sets B2C_LOG_DIR, which is the whole of what
+        # this needs: the sidecars land under the log dir for the reason
+        # crash directories do, so redirecting one redirects both and the
+        # suite writes nothing into the developer's real volume.
+        logs = redirect_crash_dir(self).parent
+
+        argv = _captured_render_argv(
+            confidence=_confidence(confidence_sidecar=True),
+            sidecars=["frame_00001_.conf.png"],
+        )
+        self.assertIn("--confidence-sidecar", argv)
+
+        kept = sorted((logs / "confidence").rglob("*.conf.png"))
+        self.assertEqual([p.name for p in kept], ["frame_00001_.conf.png"])
+
+    def test_no_sidecar_flag_by_default(self):
+        argv = _captured_render_argv(confidence=_confidence())
+        self.assertNotIn("--confidence-sidecar", argv)
+
+    def test_a_sidecar_is_not_mistaken_for_a_frame(self):
+        """The frames come back by name, so a .conf.png beside them must not
+        turn into an 82nd view."""
+        from body2colmap.camera import Camera
+
+        from pipeline.steps import splat as splat_module
+
+        def fake_render(cmd, **kwargs):
+            out = Path(cmd[cmd.index("--output-dir") + 1])
+            out.mkdir(parents=True, exist_ok=True)
+            cv2.imwrite(str(out / "frame_00001_.png"), np.zeros((4, 4, 4), np.uint8))
+            cv2.imwrite(str(out / "frame_00001_.conf.png"), np.zeros((4, 4), np.uint8))
+
+        camera = Camera(
+            focal_length=(4.0, 4.0), image_size=(4, 4), principal_point=(2.0, 2.0),
+            position=np.array([0.0, 0.0, 1.0], dtype=np.float32),
+            rotation=np.eye(3, dtype=np.float32),
+        )
+        scene = _synthetic_scene()
+        with tempfile.TemporaryDirectory() as tmp:
+            ply = Path(tmp) / "s.ply"
+            run_step("save_splat", {"splat_scene": scene}, {"filepath": str(ply)})
+            with mock.patch.object(splat_module, "_run_render", fake_render):
+                images, masks = splat_module._rasterize(
+                    scene=scene, splat_path=str(ply), cameras=[camera],
+                    image_names=["frame_00001_.png"], width=4, height=4,
+                    bg_color=(0.0, 0.0, 0.0), render_path="brush-splat-render",
+                    confidence=_confidence(confidence_sidecar=True),
+                )
+        self.assertEqual(len(images), 1)
+        self.assertEqual(len(masks), 1)
+

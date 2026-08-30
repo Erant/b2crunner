@@ -521,6 +521,19 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   `ToBinaryMask` compares strictly greater-than with no rounding (getting
   this wrong pushed max error to 140), and `ImpactDilateMask` uses a plain
   `dilation x dilation` kernel (200). See that module's docstring.
+  **Update (2026-08-30):** superseded, and kept anyway. `render_splat`'s
+  `confidence` mode makes the same fringe decision properly — once, in 3-D,
+  from each Gaussian's multi-view evidence rather than from accumulated
+  alpha per pixel per frame — so all three workflows now run this step as
+  `mode: passthrough` behind a gated render, and running the old alpha cut
+  on top of one would be wrong rather than merely redundant (it would
+  re-composite the grey frames over black and smear the gate's soft edge).
+  Passthrough is not a no-op: the step's *other* job, replacing the
+  per-pixel splat alpha in `dataset.masks` with the per-frame all-1.0 VACE
+  batch, is still what `denoise_pass2` reads and `inject_anchor` writes its
+  0.0 into — which is also why the step stays, along with the ordering it
+  anchors and the `mode: threshold` path that keeps the recorded run
+  reproducible for an A/B. See `docs/spatial-reinforcement.md`.
 - `views` (`drop_views`/`filter_fov`/`rotate_views`/`replace_views`/
   `merge_datasets`) — verified against `cyber_6f`'s real 81-camera helical
   orbit rather than synthetic data, which matters because the
@@ -658,6 +671,22 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   `pattern` or with `override_cam_from_mesh` — neither of those branches
   computes a box at all, so the request would otherwise be a silent no-op,
   which is the exact failure the param exists to prevent.
+  **Update (2026-08-30):** `confidence: true` gates the render on the
+  per-Gaussian multi-view evidence `brush` now writes into the .ply
+  (`export_evidence`), replacing the `mask_splat` stage that used to
+  threshold rendered alpha afterwards. It changes the binary's output
+  contract, which is the part to be careful with: the RGB is composited
+  over `cull_color` (0.5 grey) rather than `bg_color`, `--background` is
+  ignored and therefore not passed, and the alpha that comes back is the
+  gate `smoothstep(gate_lo, gate_hi, C)` rather than accumulated opacity.
+  Downstream nothing changes — foreground is still 1 — but a transparent
+  pixel is grey, not black, so the mode must stay OFF for any render that
+  feeds `composite_splat_views` (which enforces premultiplied-over-black
+  and refuses it). `confidence_sidecar` keeps the raw per-pixel confidence
+  under the log dir for tuning; `conf_args` passes `--conf-*` flags
+  through verbatim. Argv-level tests only (`tests/test_splat.py`,
+  `tests/test_workflows.py`) — the gating itself is the renderer's, and
+  has not been through this pipeline on a pod.
 
 **Real but UNVERIFIED:**
 - `brush` — Gaussian-splat training via the `Erant/brush` CLI (COLMAP
@@ -683,6 +712,19 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   count) means the training succeeded, and the whole failure is logged at
   WARNING instead. Anything else still raises. See
   `tests/test_brush_exit.py`.
+  **Update (2026-08-30):** `export_evidence` (on by default) has brush
+  measure each Gaussian's multi-view evidence after the last step and write
+  it into the exported `.ply` as seven `ev_*` vertex properties. That is
+  what `render_splat`'s `confidence` mode reads, and having it in the .ply
+  is what lets that render need no second pass over the dataset. It costs
+  seconds and every other .ply reader ignores the properties, so both
+  trainings do it. `evidence_prune_inmask` (off) would drop under-supported
+  splats from the export itself and stays off until it has been looked at
+  on a real run; `evidence_normal_weight` (0) is untuned. Argv-level tests
+  in `tests/test_brush_evidence.py`. Needs a `brush` built past the
+  confidence work on `normal-map-supervision` — an older binary writes no
+  `ev_*`, which the renderer reports as a warning and falls back from, so a
+  mismatched image degrades loudly rather than silently.
 - `render` — camera-path generation (circular/sinusoidal/helical,
   `override_cam_from_mesh` anchor mode) + mesh/depth/skeleton rendering +
   point-cloud sampling, ported from `nodes/render_node.py`. The geometry
