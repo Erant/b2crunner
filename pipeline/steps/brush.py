@@ -39,6 +39,18 @@ cannot stand in for a crashed one), the run is treated as successful and the
 whole failure — exit code and output tail — is logged at WARNING. Any other
 non-zero exit still raises, as does one that left no export behind.
 
+**And a crash saves more than its exit code.** The COLMAP export brush
+trains from is built into a `TemporaryDirectory` and deleted on the way out
+of `run()`, exception or not — so a training that died on a pod left
+nothing to look at but a return code, which is exactly how one
+brush-splat-render crash became undiagnosable (see steps/splat.py). Any
+non-zero exit, tolerated or not, and any clean exit that wrote no export at
+all, now writes the argv, the output tail, the graphics environment, a
+description of the export it was training on and the COLMAP model's own
+.txt files to `paths.crash_dir()` first. Not the training frames: those are
+several hundred MB and they are the dataset's, still on the volume after
+the temp directory is gone.
+
 Normal-map supervision: per the original node's behavior, a normal map
 that already carries an alpha channel keeps it; otherwise the RGB frame's
 own foreground mask (rmbg's output) is reused as the normal map's alpha,
@@ -60,11 +72,22 @@ import cv2
 import numpy as np
 
 from ..masks import mask_to_alpha_u8
-from ..proc import ProcessFailed, stream_command
+from ..proc import (
+    ProcessFailed,
+    crashlog_note,
+    describe_path,
+    save_crashlog,
+    stream_command,
+)
 from ..registry import register_step
 from ..step import Param, Step
 
 logger = logging.getLogger(__name__)
+
+# The COLMAP model itself — small, and the only record of what brush was
+# asked to train on. Its siblings (images/, normals/) are the bulk and are
+# deliberately not copied; see the module docstring.
+_COLMAP_MODEL_FILES = ("cameras.txt", "images.txt", "points3D.txt")
 
 
 @register_step("brush")
@@ -236,7 +259,7 @@ class BrushStep(Step):
                     "--normal-loss-every", str(normal_loss_every),
                 ])
 
-            self._run_brush(cmd, ply_path)
+            self._run_brush(cmd, ply_path, colmap_dir=colmap_dir)
 
         if not ply_path.exists():
             raise RuntimeError(
@@ -245,7 +268,17 @@ class BrushStep(Step):
 
         return {"splat_path": str(ply_path.absolute())}
 
-    def _run_brush(self, cmd: List[str], ply_path: Path) -> None:
+    def _run_brush(
+        self, cmd: List[str], ply_path: Path, colmap_dir: Optional[Path] = None
+    ) -> None:
+        """Run the training, judging a failed exit against the export.
+
+        `colmap_dir` is the export brush is training from — it exists only
+        for the duration of the call, so it is passed in to be described
+        and copied into a crash directory before it is deleted. Optional
+        only because the exit-code tests drive this with a stand-in binary
+        and no COLMAP export at all.
+        """
         # What "this run wrote it" means, captured before launching: an
         # export_dir is reused across runs (${output_root}/ply), so a .ply
         # sitting there already is a previous training's, and accepting it
@@ -271,16 +304,109 @@ class BrushStep(Step):
             # complete on disk (see the module docstring). The artefact is
             # the better witness than the exit code — but only the artefact
             # this run produced.
-            if not _exported_this_run(ply_path, before):
+            exported = _exported_this_run(ply_path, before)
+            saved = _save_brush_crashlog(
+                cmd=cmd, ply_path=ply_path, colmap_dir=colmap_dir,
+                exported=exported, failure=str(exc),
+            )
+            if not exported:
+                logger.error(
+                    "brush failed and left no export from this run at %s. "
+                    "Diagnostics %s.",
+                    ply_path, crashlog_note(saved),
+                )
                 raise
             logger.warning(
                 "brush exited non-zero but %s is complete (%d bytes, written by "
                 "this run) — treating the training as successful. This is the "
                 "known shutdown crash if the output below ends after the export; "
                 "anything else here is a real failure that happened to leave a "
-                "usable .ply. Suppressed failure follows.\n%s",
-                ply_path, ply_path.stat().st_size, exc,
+                "usable .ply, so the diagnostics are kept either way — %s. "
+                "Suppressed failure follows.\n%s",
+                ply_path, ply_path.stat().st_size, crashlog_note(saved), exc,
             )
+            return
+
+        # A clean exit that exported nothing is the failure that used to
+        # surface back in run(), several lines and one deleted temp
+        # directory later, as "Expected output PLY file not found".
+        if not ply_path.exists() or ply_path.stat().st_size == 0:
+            saved = _save_brush_crashlog(
+                cmd=cmd, ply_path=ply_path, colmap_dir=colmap_dir,
+                exported=False, failure="brush exited 0 without writing an export.",
+            )
+            raise RuntimeError(
+                f"brush exited 0 but wrote no usable export: {describe_path(ply_path)}\n"
+                f"Diagnostics {crashlog_note(saved)}."
+            )
+        if not _exported_this_run(ply_path, before):
+            # Deliberately not fatal, unlike the same condition after a
+            # crash: brush said it succeeded, and the only evidence against
+            # it is an unchanged mtime, which a filesystem with coarse
+            # timestamps could produce for a real overwrite. Worth saying
+            # out loud, not worth failing a finished training over.
+            logger.warning(
+                "brush exited 0 but %s has the same mtime it had before the run — "
+                "this may be a previous training's export rather than this one's.",
+                ply_path,
+            )
+
+
+def _save_brush_crashlog(
+    *,
+    cmd: List[str],
+    ply_path: Path,
+    colmap_dir: Optional[Path],
+    exported: bool,
+    failure: str,
+) -> Optional[Path]:
+    """What a crashed training is worth keeping, for `proc.save_crashlog`.
+
+    The COLMAP export is deleted the moment `run()` leaves its
+    `TemporaryDirectory`, so the model files that say what brush was
+    training on go to the crash directory while they exist. The frames
+    beside them do not: they are hundreds of MB, and unlike the model they
+    are the dataset's, still on the volume afterwards. What they were is
+    recorded instead.
+    """
+    return save_crashlog(
+        "brush",
+        cmd=cmd,
+        failure=failure,
+        summary=[
+            f"export:  {describe_path(ply_path)}"
+            + (" — written by this run" if exported else " — NOT written by this run"),
+        ],
+        sections=[("training data", _describe_colmap_export(colmap_dir))],
+        copy=[("colmap", [colmap_dir / name for name in _COLMAP_MODEL_FILES])]
+        if colmap_dir is not None else [],
+    )
+
+
+def _describe_colmap_export(colmap_dir: Optional[Path]) -> str:
+    """The export's shape in text: what brush was handed, and how much of it.
+
+    An empty or half-written `images/` is a failure of this step rather
+    than of brush, and telling the two apart afterwards needs the counts,
+    since the directory itself is gone by then.
+    """
+    if colmap_dir is None:
+        return "<not recorded>"
+    lines = [describe_path(colmap_dir)]
+    for name in _COLMAP_MODEL_FILES:
+        lines.append(f"  {describe_path(colmap_dir / name)}")
+    for name in ("images", "normals"):
+        sub = colmap_dir / name
+        if not sub.is_dir():
+            lines.append(f"  {name}/ absent")
+            continue
+        files = sorted(f for f in sub.iterdir() if f.is_file())
+        total = sum(f.stat().st_size for f in files)
+        lines.append(f"  {name}/ {len(files)} files, {total} bytes")
+        lines += [f"    {f.name}  {f.stat().st_size} bytes" for f in files[:3]]
+        if len(files) > 3:
+            lines.append(f"    ... and {len(files) - 3} more")
+    return "\n".join(lines)
 
 
 def _exported_this_run(ply_path: Path, before_mtime_ns: Optional[int]) -> bool:

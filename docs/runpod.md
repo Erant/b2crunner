@@ -349,6 +349,26 @@ step. `tail -f` it, or read it from the UI's log pane. Subprocess steps
 (`brush`, `brush-splat-render`) relay their output line by line as it
 happens — they used to be silent until they finished.
 
+**Read a crashed binary.** `brush` and `brush-splat-render` both work
+inside a temp directory that goes away with the step — which once left a
+crash on a pod with nothing to look at but its exit code. Both now write
+`/data/logs/crashes/<binary>-<timestamp>/` before that happens, and the run
+log names the directory. Each holds a `report.txt` (argv, exit code, the
+tail of the binary's own output, and the Vulkan/driver environment —
+`NVIDIA_DRIVER_CAPABILITIES` and friends, the thing that decides whether
+either binary can reach a GPU at all) plus what it was working on:
+
+| | saved | not saved |
+|---|---|---|
+| `brush` | the COLMAP model's `.txt` files, a description of the export | the training frames — hundreds of MB, and still on the volume afterwards |
+| `brush-splat-render` | `cameras.json`, a per-frame manifest, the last few frames written | the rest of the orbit's frames |
+
+It triggers on any non-zero exit — including one the guard then tolerates —
+and on a clean exit that produced nothing. Note that a crash which left the
+work *complete* is not a failed step: brush's known shutdown SIGSEGV, and
+the same thing in the renderer, are logged at WARNING, saved, and the
+output is used.
+
 **Get a shell.** SSH if `PUBLIC_KEY` was set; otherwise
 `docker exec`-equivalent through RunPod's web terminal. From a local
 container: `docker run --rm -it b2c/pipeline:latest bash`, or

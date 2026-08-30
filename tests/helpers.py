@@ -82,3 +82,38 @@ def run_step(name: str, inputs: Dict[str, Any], params: Optional[Dict[str, Any]]
 
     step_class = get_step_class(name)
     return step_class().run(inputs, step_class.resolve_params(params or {}))
+
+
+def redirect_crash_dir(case: unittest.TestCase) -> Path:
+    """Point `paths.crash_dir()` at a temp directory for the duration.
+
+    Both external binaries save diagnostics on a failed exit, and testing
+    that means running failures on purpose. Without this the suite writes
+    crash directories into the developer's real volume (or, with no volume,
+    into the repo's own `output/_local_data`) and leaves them there.
+
+    `paths` resolves B2C_LOG_DIR on every call, so the environment variable
+    is all it takes. Returns the `crashes/` directory to look in.
+    """
+    import tempfile
+
+    tmp = tempfile.TemporaryDirectory(prefix="b2c_crash_test_")
+    case.addCleanup(tmp.cleanup)
+    logs = Path(tmp.name) / "logs"
+
+    previous = os.environ.get("B2C_LOG_DIR")
+    os.environ["B2C_LOG_DIR"] = str(logs)
+
+    def restore():
+        if previous is None:
+            os.environ.pop("B2C_LOG_DIR", None)
+        else:
+            os.environ["B2C_LOG_DIR"] = previous
+
+    case.addCleanup(restore)
+    return logs / "crashes"
+
+
+def crash_dirs(crashes: Path) -> list:
+    """Every crash directory saved so far, oldest first."""
+    return sorted(crashes.iterdir()) if crashes.exists() else []

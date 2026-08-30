@@ -482,7 +482,7 @@ class TestRenderSplatBackground(unittest.TestCase):
 
         seen = {}
 
-        def fake_render(cmd):
+        def fake_render(cmd, **kwargs):
             seen["cmd"] = cmd
             out = Path(cmd[cmd.index("--output-dir") + 1])
             out.mkdir(parents=True, exist_ok=True)

@@ -30,6 +30,22 @@ conversion between body2colmap's OpenGL-convention `Camera` and brush's
 OpenCV-convention one, verified there against a real gsplat oracle (mean
 abs error 0.0008-0.0015 on RGB, comfortably under 1/255).
 
+**A non-zero exit is not automatically a failed render**, exactly as in
+steps/brush.py — same binary's other half, same known shutdown SIGSEGV.
+If every expected frame is on disk and non-empty, the render is treated as
+successful and the failure logged at WARNING; a missing frame still raises.
+Because `_rasterize` renders into a fresh temp directory each call, there
+is no stale-artefact question to answer here the way brush's reused
+`export_dir` forces one.
+
+**And a crash saves more than its exit code.** Everything a render is
+holding — the cameras.json naming the views, the frames written so far —
+lives in that temp directory and goes away with it, which is how one
+brush-splat-render crash on a pod ended up with nothing to diagnose. Any
+non-zero exit, and any clean exit that quietly wrote no frames, now copies
+the camera list, a per-frame manifest, the argv, the output tail and the
+Vulkan/driver environment into `paths.crash_dir()` first.
+
 Everything *except* rasterisation still belongs to body2colmap
 (`SplatScene`, `OrbitPath`, the `path`/`utils` helpers); `SplatRenderer`
 (the gsplat wrapper) is no longer used here at all.
@@ -66,13 +82,25 @@ from typing import Any, Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 
-from ..proc import stream_command
+from ..proc import (
+    ProcessFailed,
+    crashlog_note,
+    describe_path,
+    save_crashlog,
+    stream_command,
+)
 from ..registry import register_step
 from ..step import REQUIRED, Param, Step
 
 logger = logging.getLogger(__name__)
 
 _FULL_FRAME_SENSOR_WIDTH_MM = 36.0
+
+# How many of the frames that did land get copied into a crash directory.
+# The last few written are the crash's neighbourhood — the frame it died on
+# and the ones just before it — and a full 100-frame orbit at 720x1280 is
+# not something to copy onto the volume every time a render fails.
+_CRASH_FRAMES_KEPT = 4
 
 # Rebuilt by every render; never inherited from the source dataset's extras.
 _REBUILT_KEYS = {
@@ -355,7 +383,12 @@ def _rasterize(
             "--output-dir", str(output_dir),
             "--background", ",".join(f"{c:.6f}" for c in bg_color),
         ]
-        _run_render(cmd)
+        _run_render(
+            cmd,
+            output_dir=output_dir,
+            cameras_path=cameras_path,
+            image_names=list(image_names),
+        )
 
         images: List[np.ndarray] = []
         masks: List[np.ndarray] = []
@@ -398,16 +431,154 @@ def _write_cameras_json(cameras, image_names, width: int, height: int, path: Pat
     path.write_text(json.dumps(payload))
 
 
-def _run_render(cmd: List[str]) -> None:
-    # Same live relay as the brush training step — see pipeline/proc.py.
-    stream_command(
-        cmd,
-        log_name="brush-splat-render",
-        not_found_hint=(
-            "It is built into the image at /usr/local/bin/brush-splat-render, "
-            "alongside `brush`, from the same Erant/brush clone."
-        ),
+def _run_render(
+    cmd: List[str],
+    *,
+    output_dir: Path,
+    cameras_path: Path,
+    image_names: List[str],
+) -> None:
+    """Run the rasteriser, judging a failed exit against the frames it wrote.
+
+    Same shape as steps/brush.py's `_run_brush`, for the same reason: this
+    is the other half of the same Rust binary, and it has been seen failing
+    on a pod in what looks like brush's known shutdown SIGSEGV — a crash
+    *after* the work is on disk. The artefact is the better witness than
+    the exit code, so a non-zero exit that nonetheless left every expected
+    frame behind is logged at WARNING and treated as a successful render;
+    one with a frame missing still raises.
+
+    Where brush has to prove the .ply is *this* run's (its `export_dir` is
+    reused across runs, so a stale export could stand in for a crashed
+    one), there is no equivalent check to make here: `_rasterize` renders
+    into a fresh `TemporaryDirectory` every call, so anything in
+    `output_dir` was written by the process that just exited.
+
+    Either way — and also on the reverse case, a clean exit that silently
+    produced nothing — the diagnostics are copied out to `crash_dir()`
+    before the temp directory that holds them is deleted.
+    """
+    try:
+        # Same live relay as the brush training step — see pipeline/proc.py.
+        stream_command(
+            cmd,
+            log_name="brush-splat-render",
+            not_found_hint=(
+                "It is built into the image at /usr/local/bin/brush-splat-render, "
+                "alongside `brush`, from the same Erant/brush clone."
+            ),
+        )
+    except ProcessFailed as exc:
+        missing = _missing_renders(output_dir, image_names)
+        saved = _save_render_crashlog(
+            cmd=cmd, cameras_path=cameras_path, output_dir=output_dir,
+            image_names=image_names, missing=missing, failure=str(exc),
+        )
+        if missing:
+            logger.error(
+                "brush-splat-render failed with %d of %d frames missing (first: %s). "
+                "Diagnostics %s.",
+                len(missing), len(image_names), missing[0], crashlog_note(saved),
+            )
+            raise
+        logger.warning(
+            "brush-splat-render exited non-zero but all %d frames are complete — "
+            "treating the render as successful. This is the known shutdown crash "
+            "if the output below ends after the last frame; anything else here is "
+            "a real failure that happened to leave a usable set of renders, so the "
+            "diagnostics are kept either way — %s. Suppressed failure follows.\n%s",
+            len(image_names), crashlog_note(saved), exc,
+        )
+        return
+
+    # A clean exit with frames missing is the failure that used to surface
+    # several lines later as `cv2.imread` returning None, by which point the
+    # temp directory holding the evidence was already gone.
+    missing = _missing_renders(output_dir, image_names)
+    if missing:
+        saved = _save_render_crashlog(
+            cmd=cmd, cameras_path=cameras_path, output_dir=output_dir,
+            image_names=image_names, missing=missing,
+            failure="brush-splat-render exited 0 without writing every frame.",
+        )
+        raise RuntimeError(
+            f"brush-splat-render exited 0 but wrote {len(image_names) - len(missing)} "
+            f"of {len(image_names)} frames (first missing: {missing[0]}).\n"
+            f"Diagnostics {crashlog_note(saved)}."
+        )
+
+
+def _missing_renders(output_dir: Path, image_names: List[str]) -> List[str]:
+    """The expected frames that are absent or empty, in render order.
+
+    Zero-byte counts as missing for the same reason it does for brush's
+    .ply: that is a crash caught mid-write, not a frame.
+    """
+    missing = []
+    for name in image_names:
+        path = output_dir / name
+        if not path.exists() or path.stat().st_size == 0:
+            missing.append(name)
+    return missing
+
+
+def _save_render_crashlog(
+    *,
+    cmd: List[str],
+    cameras_path: Path,
+    output_dir: Path,
+    image_names: List[str],
+    missing: List[str],
+    failure: str,
+) -> Optional[Path]:
+    """What a crashed render is worth keeping, for `proc.save_crashlog`.
+
+    Everything this step hands the binary lives in a `TemporaryDirectory`
+    that is deleted on the way out of `_rasterize`, exception or not — so a
+    crash on a pod left nothing behind but an exit code, and the pod itself
+    does not outlive the investigation. Kept: the cameras.json naming the
+    views it was rendering, a per-frame manifest of what did and did not
+    get written, and the last few frames that did land (the crash's
+    neighbourhood; a full orbit at 720x1280 is not something to copy onto
+    the volume every time a render fails).
+    """
+    written = [name for name in image_names if name not in set(missing)]
+    manifest = "\n".join(
+        f"{name}  {(output_dir / name).stat().st_size} bytes"
+        if (output_dir / name).exists() else f"{name}  missing"
+        for name in image_names
     )
+    return save_crashlog(
+        "brush-splat-render",
+        cmd=cmd,
+        failure=failure,
+        summary=[
+            f"frames:  {len(written)} of {len(image_names)} written"
+            + (f", first missing {missing[0]}" if missing else " (all present)"),
+            f"splat:   {_describe_splat_arg(cmd)}",
+        ],
+        sections=[("frames", manifest)],
+        copy=[
+            # The views it was attempting to render — the thing whose
+            # absence made the pod crash undiagnosable.
+            ("", [cameras_path]),
+            ("frames", [output_dir / name for name in written[-_CRASH_FRAMES_KEPT:]]),
+        ],
+    )
+
+
+def _describe_splat_arg(cmd: List[str]) -> str:
+    """The .ply the render was reading, and whether it is a plausible one.
+
+    A truncated or empty splat is one way this call fails that has nothing
+    to do with the renderer, and the file is the training's, not this
+    step's temp copy, so it is still there to check afterwards — but only
+    if the report says which one it was.
+    """
+    try:
+        return describe_path(Path(cmd[cmd.index("--splat") + 1]))
+    except (ValueError, IndexError):
+        return "no --splat in argv"
 
 
 def _resolve_cameras(

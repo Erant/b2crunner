@@ -72,6 +72,23 @@ def upload_dir() -> Path:
     return _sub("B2C_UPLOAD_DIR", "uploads")
 
 
+def crash_dir() -> Path:
+    """Where a step saves diagnostics off a crashed external binary.
+
+    Under the volume for the same reason as everything else here, and with
+    a sharper edge to it: a crash's evidence is worth nothing if it lives
+    in the temp directory the failing step deletes on its way out (which is
+    exactly how one brush-splat-render crash on a pod became undiagnosable
+    — the views it died rendering went with the temp dir). Under `logs/`
+    rather than beside it because the only thing that names a crash
+    directory is a line in the run log, so whatever you already copy off a
+    pod to read the log brings the crash with it.
+    """
+    path = log_dir() / "crashes"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def models_dir() -> Path:
     """Weights that do NOT come down through huggingface_hub.
 
