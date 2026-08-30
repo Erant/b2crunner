@@ -323,6 +323,7 @@ steps:
       control_video: dataset.images
       control_masks: dataset.masks
       reference_image: dataset.reference_image
+      style_hint: scene.style?    # trailing ?: optional, None when nothing wrote it
     params:                      # OVERRIDES on this step's declared defaults
       width: ${globals.resolution.0}
       height: ${globals.resolution.1}
@@ -346,6 +347,18 @@ the two trainings independently at all.
 A step override naming a param the step does not declare is refused when the
 workflow is validated (`WorkflowSpec.validate`, called by the runner before
 step one), not silently ignored.
+
+**An optional read** is a path with a trailing `?`: if nothing has written
+it, the step is handed `None` rather than the run failing at that step. It
+exists for one shape — a `when:`-gated branch feeding a step that runs
+either way — because a gated step's outputs are simply not in the Context
+when it is off, and there is otherwise no way to say "take these if they
+were built". The shipped case is the face splat's supporting views:
+`face_support_views` writes them under `${globals.face_splat}`, both brush
+trainings read them with a `?`, and `fast_helical_full.yaml` reads the same
+paths while having no bootstrap that could ever write them. Everything else
+stays required, which is what keeps a typo'd path a failure rather than a
+silently missing input.
 
 `when:` is what makes a workflow's tail optional. It resolves like any
 param value, and a falsy result skips the step entirely — its inputs are
@@ -610,6 +623,18 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   geometry and constants it takes: that mode rasterises through gsplat, which
   this project dropped. **See `docs/revert-when-body2colmap-drops-gsplat.md`
   — this step comes back out when body2colmap moves to the brush renderer.**
+- `select_support_views` (`anchor_stub.py`) — the face splat's second route
+  into a training, and the consumer of `brush`'s `support_*` inputs. It
+  takes the same face renders `composite_splat_views` just used, keeps the
+  frames that step gave the role `composited` (its cull angle, measured
+  once, not re-derived), un-premultiplies them back to straight alpha, and
+  hands them to both brush trainings as **masked** views — evidence that
+  counts where the splat's own coverage says to and is ignored everywhere
+  else. The composited copy goes through two diffusion passes and comes out
+  as the denoiser's idea of the face; this copy does not. Both trainings
+  read it through an optional `?` path, so `face_splat: false` and
+  `fast_helical_full.yaml` (no bootstrap at all) train exactly as before.
+  `tests/test_support_views.py`.
 - `refine_pose_to_splat` (`pose_refine.py`) — re-poses a SAM-3D-Body fit so
   its mesh agrees with that shell in novel views, which is what stops the
   skeleton overlay drifting off the subject a few degrees either side of the

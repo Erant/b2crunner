@@ -535,6 +535,40 @@ steps:
       images: dataset.images
       view_roles: scene.face_view_roles
 
+  # The face splat's SECOND route into the training. The composite above
+  # puts it on the drawings, where two diffusion passes then have their way
+  # with it; this hands the same renders to `brush` as supporting views —
+  # training evidence weighted by the splat's own coverage and ignored
+  # everywhere else — so the deliverable is pulled back toward the face in
+  # the photograph rather than the one the denoiser invented. See
+  # steps/brush.py's support_* inputs for why that must be brush's MASKED
+  # mode: outside a Face_Neck matte lies the rest of the subject, not empty
+  # space, and a transparent view would ask the training to carve it away.
+  #
+  # `view_roles` is composite_face's own verdict, reused rather than
+  # re-derived: the frames close enough to the source view to composite are
+  # exactly the frames close enough to supervise, and one cull angle
+  # measured once beats two that can drift apart.
+  #
+  # Both trainings read `scene.support_views.*` with a trailing `?` (an
+  # optional read — see pipeline/workflow.py), so this file, the shell file
+  # and fast_helical_full.yaml can share one tail: with the face branch off,
+  # or in a workflow that has no bootstrap at all, nothing writes that path
+  # and brush trains exactly as it did before.
+  - id: face_support_views
+    step: select_support_views
+    dispatch: in_process
+    when: ${globals.face_splat}
+    inputs:
+      images: scene.face_views.images
+      masks: scene.face_views.masks
+      cameras: scene.face_views.cameras
+      view_roles: scene.face_view_roles
+    outputs:
+      images: scene.support_views.images
+      masks: scene.support_views.masks
+      cameras: scene.support_views.cameras
+
   # Put the real reference photo, warped to the anchor camera's framing,
   # onto the render at that frame — this is what makes cyber_6f/initial's
   # anchor frame byte-identical to anchor.png rather than a mesh render of
@@ -717,6 +751,9 @@ steps:
       images: dataset.images
       masks: dataset.masks
       normal_maps: scene.normal_maps
+      support_images: scene.support_views.images?
+      support_masks: scene.support_views.masks?
+      support_cameras: scene.support_views.cameras?
     params:
       # The expensive knob: brush trains twice in this pipeline (here and
       # train_final_splat) at roughly an hour of GPU each. 30000 equals
@@ -1066,6 +1103,9 @@ steps:
       images: dataset.images
       masks: dataset.masks
       normal_maps: scene.export_normal_maps
+      support_images: scene.support_views.images?
+      support_masks: scene.support_views.masks?
+      support_cameras: scene.support_views.cameras?
     params:
       # See train_splat's note. Same count; a run tuning the deliverable
       # splat alone changes it here.

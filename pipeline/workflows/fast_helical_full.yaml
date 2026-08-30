@@ -251,6 +251,9 @@ steps:
       images: dataset.images
       masks: dataset.masks
       normal_maps: scene.normal_maps
+      support_images: scene.support_views.images?
+      support_masks: scene.support_views.masks?
+      support_cameras: scene.support_views.cameras?
     params:
       # The expensive knob: brush trains twice in this pipeline (here and
       # train_final_splat) at roughly an hour of GPU each. 30000 equals
@@ -592,6 +595,9 @@ steps:
       images: dataset.images
       masks: dataset.masks
       normal_maps: scene.export_normal_maps
+      support_images: scene.support_views.images?
+      support_masks: scene.support_views.masks?
+      support_cameras: scene.support_views.cameras?
     params:
       # See train_splat's note. Same count; a run tuning the deliverable
       # splat alone changes it here.

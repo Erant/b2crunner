@@ -12,6 +12,13 @@ That last one is the reason `enabled` is computed up front in
 WorkflowRunner.run: a typo in `when: ${globals.export_ply}` guarding the
 final brush training would otherwise surface an hour into a run, having
 already spent two denoise passes and a splat training.
+
+The `?` suffix on an input path is the other half of the same feature, and
+is tested here for that reason: a gated step's outputs are absent when it
+is switched off, so a step downstream of one has no way to say "take these
+if they were built" without it. That is what lets all three shipped
+workflows share one tail while only two of them can build the face splat's
+supporting views.
 """
 
 from __future__ import annotations
@@ -135,3 +142,53 @@ class TestRunnerSkips(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestOptionalInputs(unittest.TestCase):
+    """`path?` — absent resolves to None instead of failing the run."""
+
+    def _run(self, steps, globals_=None):
+        spec = _make_spec(steps, globals_)
+        return WorkflowRunner(spec).run({"dataset": None})
+
+    def test_a_required_input_still_fails(self):
+        """The default, and what makes a typo'd path a failure at that step
+        rather than an input that silently arrives as None."""
+        with self.assertRaises(KeyError) as caught:
+            self._run([{"id": "a", "step": "_test_echo",
+                        "inputs": {"value": "nothing.here"},
+                        "outputs": {"value": "out.a"}}])
+        self.assertIn("nothing.here", str(caught.exception))
+
+    def test_an_optional_input_resolves_to_none(self):
+        ctx = self._run([{"id": "a", "step": "_test_echo",
+                          "inputs": {"value": "nothing.here?"},
+                          "outputs": {"value": "out.a"}}])
+        self.assertIsNone(ctx.get("out.a"))
+
+    def test_an_optional_input_that_is_there_is_read(self):
+        """The marker says 'may be absent', not 'ignore it'."""
+        ctx = self._run([
+            {"id": "a", "step": "_test_echo", "params": {"value": 7},
+             "outputs": {"value": "out.a"}},
+            {"id": "b", "step": "_test_echo", "inputs": {"value": "out.a?"},
+             "outputs": {"value": "out.b"}},
+        ])
+        self.assertEqual(ctx.get("out.b"), 7)
+
+    def test_a_gated_producer_feeds_an_ungated_consumer(self):
+        """The shape this exists for: the face branch writes the supporting
+        views when it runs, and the training downstream takes them or
+        trains without them."""
+        steps = [
+            {"id": "branch", "step": "_test_echo", "params": {"value": 3},
+             "when": "${globals.face_splat}", "outputs": {"value": "scene.support"}},
+            {"id": "train", "step": "_test_echo",
+             "inputs": {"value": "scene.support?"}, "outputs": {"value": "out.train"}},
+        ]
+        self.assertEqual(
+            self._run(steps, {"face_splat": True}).get("out.train"), 3
+        )
+        self.assertIsNone(
+            self._run(steps, {"face_splat": False}).get("out.train")
+        )

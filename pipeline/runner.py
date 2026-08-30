@@ -225,9 +225,25 @@ class WorkflowRunner:
 
         inputs = {}
         for name, path in step_spec.inputs.items():
+            # A trailing `?` marks an OPTIONAL read: absent means None
+            # rather than a failed run. That is the only way to wire a
+            # `when:`-gated branch into a step downstream of it — the
+            # branch's outputs simply do not exist when it is switched
+            # off, and the consumer is a step that runs either way. The
+            # shipped case is the face splat's supporting views, which
+            # `train_splat` takes when the face branch built them and
+            # trains without when it did not (and which
+            # fast_helical_full.yaml, having no bootstrap at all, never
+            # has). Steps that accept one must treat None as "not given",
+            # which is what every optional input already means to them.
+            optional = path.endswith("?")
+            path = path[:-1] if optional else path
             try:
                 inputs[name] = ctx.get(path)
             except (KeyError, AttributeError, IndexError, TypeError) as exc:
+                if optional:
+                    inputs[name] = None
+                    continue
                 # Naming the step and the path beats a bare KeyError from
                 # three frames down: an unresolvable input almost always
                 # means an earlier step didn't write where this one reads,

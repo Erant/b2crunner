@@ -35,6 +35,14 @@ in the original ComfyUI-Body2COLMAP repo:
   15 the body shell's substitution band is set to. See its docstring for
   the black-background requirement, which is load-bearing.
 
+- SelectSupportViews is the fifth, and does not touch a frame at all: it
+  picks the frames of a splat render that a composite kept, un-premultiplies
+  them, and hands them to `brush` as *supporting views* — training evidence
+  that counts only where its mask says to. It is the face splat's second
+  route into the training, the first being composited into the drawings
+  before the diffusion passes get their hands on it. See steps/brush.py's
+  `support_*` inputs.
+
 The alpha convention is what the first three write. This is the mechanism behind
 cyber_6f's initial/ alpha convention (pipeline/steps/wan22_vace_denoise.py's
 docstring): the injected anchor frame is marked alpha=0 ("already real,
@@ -719,6 +727,148 @@ class CompositeSplatViewsStep(Step):
         return _composite_result(images, masks, view_roles)
 
 
+@register_step("select_support_views")
+class SelectSupportViewsStep(Step):
+    """Turn a splat render into supporting views for a brush training.
+
+    inputs: {"images": List[np.ndarray] — a `render_splat` batch on a BLACK
+             background, i.e. premultiplied colour,
+             "masks": List[np.ndarray] float32 [0,1] — that render's alpha,
+             "cameras": List[Camera] — the cameras it was rendered from,
+             "view_roles": Optional[List[dict]] — `composite_splat_views`'
+             own per-frame verdict; frames whose role is not `role` are
+             dropped}
+    outputs: {"images": List[np.ndarray], "masks": List[np.ndarray],
+              "cameras": List[Camera]}
+
+    The other half of `brush`'s `support_*` inputs (see steps/brush.py):
+    views the training fits where their mask says to and ignores
+    everywhere else. The face splat is the case this exists for. Its
+    renders carry the subject's actual face, and by the time the second
+    denoise pass and the upscale have been over the batch, the frames
+    brush trains on carry a diffusion model's idea of it — so the render
+    goes into the training a second time, as evidence, weighted by the
+    splat's own coverage.
+
+    **Masked, not transparent.** Outside the face the render is black
+    background, and that is not a statement that nothing is there: the
+    body, the hair and the rest of the frame are all outside a Face_Neck
+    matte. Training on it as transparent would ask the model to carve away
+    the whole subject in the name of one small render, which is what the
+    `masks/` sidecar in steps/brush.py prevents.
+
+    **Which frames.** The same ones `composite_splat_views` kept. Past its
+    cull angle what a 2.5-D shell shows is its own open rim, and a rim is
+    no more supervision than it is a face — so rather than re-deriving the
+    angle here, this reads that step's `view_roles` and keeps the frames it
+    called `composited`. Wire no `view_roles` and every frame is kept,
+    which is right for a splat that is not a shell.
+
+    **Un-premultiplying** is what makes the render straight-alpha, which is
+    what brush's masked mode expects: it does not premultiply masked ground
+    truth, so a `colour*a` frame would ask the model to be dark and
+    semi-transparent along the silhouette instead of opaque and the right
+    colour. Only the soft rim differs — inside the matte alpha is 1 and the
+    two are identical — but the rim is exactly where a face splat's
+    silhouette is decided.
+    """
+
+    PARAMS = (
+        Param("role", str, "composited",
+              "Keep the frames `composite_splat_views` gave this role, when a "
+              "`view_roles` input is wired in. `composited` is the band within its "
+              "cull angle of the source view — the frames the splat can speak for. "
+              "Empty keeps every frame",
+              choices=("composited", "base", "")),
+        Param("unpremultiply", bool, True,
+              "Divide the colour back out by alpha, turning a render made on black "
+              "into the straight-alpha frame brush's masked mode expects. Off leaves "
+              "the render as it came, which darkens the soft silhouette",
+              advanced=True),
+        Param("min_alpha", float, 0.004,
+              "Alpha at or below this is treated as fully transparent: the colour "
+              "there is not recoverable by dividing and the mask weights it at zero "
+              "anyway. Same default as composite_splat_views' own",
+              minimum=0.0, maximum=1.0, advanced=True),
+    )
+
+    def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+        images: List[np.ndarray] = list(inputs["images"])
+        masks: List[np.ndarray] = list(inputs["masks"])
+        cameras = list(inputs["cameras"])
+        view_roles = inputs.get("view_roles")
+        role = params["role"]
+        min_alpha = params["min_alpha"]
+
+        if not (len(images) == len(masks) == len(cameras)):
+            raise ValueError(
+                f"select_support_views: {len(images)} frames, {len(masks)} alphas "
+                f"and {len(cameras)} cameras. The three describe the same views and "
+                f"have to arrive together."
+            )
+
+        keep = list(range(len(images)))
+        if view_roles is not None and role:
+            if len(view_roles) != len(images):
+                raise ValueError(
+                    f"select_support_views: {len(view_roles)} view roles against "
+                    f"{len(images)} frames. Wire the `view_roles` of the "
+                    f"composite_splat_views that took THIS render."
+                )
+            keep = [i for i, entry in enumerate(view_roles) if entry.get("role") == role]
+
+        out_images, out_masks, out_cameras = [], [], []
+        for index in keep:
+            alpha = np.asarray(masks[index], dtype=np.float32)
+            layer = images[index]
+            # The same requirement composite_splat_views has, for a
+            # different reason: dividing by alpha only recovers the
+            # straight colour if the render was premultiplied over black.
+            _check_premultiplied(
+                layer, alpha, index, min_alpha, where="select_support_views",
+                because="Un-premultiplying (rgb / a) only recovers the straight "
+                        "colour these views are supposed to carry for",
+            )
+            out_images.append(
+                _unpremultiply(layer, alpha, min_alpha)
+                if params["unpremultiply"] else layer
+            )
+            out_masks.append(np.where(alpha < min_alpha, 0.0, alpha))
+            out_cameras.append(cameras[index])
+
+        logger.info(
+            "select_support_views: %d/%d frames kept%s as supporting views",
+            len(keep), len(images),
+            f" (role={role})" if view_roles is not None and role else "",
+        )
+        if not keep:
+            # Not an error: brush takes no supporting views and trains
+            # exactly as it did before. Worth saying out loud, because the
+            # run then silently loses the thing this wiring exists for.
+            logger.warning(
+                "select_support_views: no frame has role %r, so the training will "
+                "get no supporting views. Either the render and the roles came from "
+                "different steps, or nothing was within the composite's cull angle.",
+                role,
+            )
+        return {"images": out_images, "masks": out_masks, "cameras": out_cameras}
+
+
+def _unpremultiply(layer: np.ndarray, alpha: np.ndarray, min_alpha: float) -> np.ndarray:
+    """`colour*a` back to `colour`, black where there is no colour to recover.
+
+    Below `min_alpha` the division is both unstable and meaningless — a
+    value of 1/255 divided by an alpha of 0.002 is noise amplified 500x —
+    and the mask hands those pixels a weight of zero regardless, so they
+    are left at black rather than reconstructed.
+    """
+    rgb = layer[..., :3].astype(np.float32)
+    safe = alpha >= min_alpha
+    divisor = np.where(safe, alpha, 1.0)[..., None]
+    straight = np.clip(rgb / divisor, 0, 255)
+    return np.where(safe[..., None], straight, 0.0).astype(np.uint8)
+
+
 def _composite_result(images, masks, view_roles) -> Dict[str, Any]:
     """Only publish `masks` when one was wired in — a step that returns an
     output a workflow did not ask for is harmless, but one that invents an
@@ -749,7 +899,10 @@ def _composite_pivot(inputs: Dict[str, Any]) -> np.ndarray:
 
 
 def _check_premultiplied(layer: np.ndarray, alpha: np.ndarray, index: int,
-                         min_alpha: float) -> None:
+                         min_alpha: float, where: str = "composite_splat_views",
+                         because: str = "This step composites premultiplied "
+                                        "colour (out = base*(1-a) + rgb), which only "
+                                        "holds for") -> None:
     """Refuse a splat render that was not made on a black background.
 
     Only one direction of this is provable from the images alone: where
@@ -757,6 +910,10 @@ def _check_premultiplied(layer: np.ndarray, alpha: np.ndarray, index: int,
     the background and nothing else. A non-black value there is proof the
     caller passed a `bg_color`, and the composite that follows would blend
     toward it twice.
+
+    `where`/`because` only name the caller in the message: both steps that
+    read a splat render depend on it being premultiplied over black, for
+    reasons that differ in the second sentence and not in the check.
     """
     transparent = alpha < min_alpha
     if not transparent.any():
@@ -764,10 +921,9 @@ def _check_premultiplied(layer: np.ndarray, alpha: np.ndarray, index: int,
     worst = int(layer[transparent].max())
     if worst > 8:
         raise ValueError(
-            f"composite_splat_views: splat render {index} is {worst}/255 "
+            f"{where}: splat render {index} is {worst}/255 "
             f"bright where it is fully transparent, so it was rendered on a "
-            f"non-black background. This step composites premultiplied "
-            f"colour (out = base*(1-a) + rgb), which only holds for "
+            f"non-black background. {because} "
             f"bg_color [0, 0, 0] — anything else blends toward the "
             f"background twice. Set `bg_color: [0.0, 0.0, 0.0]` on the "
             f"render_splat that feeds this step."

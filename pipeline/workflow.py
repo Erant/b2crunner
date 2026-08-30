@@ -14,6 +14,7 @@ Two parameter namespaces, and the split is the point:
         inputs:
           control_video: dataset.images
           reference_image: dataset.reference_image
+          style_hint: scene.style?    # optional; None when nothing wrote it
         params:                       # overrides on THIS step's own defaults
           steps: 6                    # this step's own knob, a literal
           width: ${globals.resolution.0}
@@ -29,6 +30,15 @@ step's own `params:`, where it overrides the default the Step class declares
 namespaced by its `id:`, which is what lets one workflow call the same step
 twice and configure the two calls apart — `fast_helical_full.yaml` trains
 `brush` twice and denoises twice.
+
+An input path ending in `?` is **optional**: if nothing has written it, the
+step is handed `None` instead of the run failing. That exists for one shape
+of wiring — a `when:`-gated branch feeding a step that runs either way, e.g.
+the face splat's supporting views into `brush` — since a gated step's
+outputs are simply not in the Context when it is switched off, and there is
+otherwise no way to say "take these if they were built". Everything else
+stays required, which is what makes a typo'd path a failure at that step
+rather than a silently missing input.
 
 Only a step whose Step subclass actually writes to disk (e.g. `save_dataset`)
 touches disk — everything else stays in the in-memory Context between steps.

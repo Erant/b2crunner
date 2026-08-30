@@ -73,9 +73,15 @@ DENOISE_NEGATIVE_PROMPT = (
 # frame near the source view, not just the one exactly on it, so the render
 # no longer has to bend its path to land a camera there either.
 #: The face branch — locate_face / crop_face / face_mask / face_normals /
-#: face_splat, then render_face_views + composite_face — is common to both
-#: and gated on each file's `face_splat` global. `detect_face` is in
-#: neither: the splat replaced the MediaPipe landmark overlay it fed.
+#: face_splat, then render_face_views + composite_face + face_support_views
+#: — is common to both and gated on each file's `face_splat` global.
+#: `detect_face` is in neither: the splat replaced the MediaPipe landmark
+#: overlay it fed.
+#:
+#: 2026-08-30: `face_support_views` joined it. The face renders now reach
+#: the trainings twice — composited into the drawings, and again as brush
+#: supporting views, which is the only one of the two a diffusion pass
+#: cannot rewrite.
 BOOTSTRAPS = {
     # The shipped default: the older, better-proven bootstrap — circular
     # orbit, head-angle fix, anchor warp and injection — with only the face
@@ -84,6 +90,7 @@ BOOTSTRAPS = {
         "split_sheet", "reconstruct_body", "fix_head_angle",
         "locate_face", "crop_face", "face_mask", "face_normals", "face_splat",
         "render_initial_views", "render_face_views", "composite_face",
+        "face_support_views",
         "warp_reference_to_anchor", "reinject_anchor_initial",
     ],
     # Parked: the photo-to-splat shell, which replaces the whole bootstrap.
@@ -95,6 +102,7 @@ BOOTSTRAPS = {
         "front_matte", "front_normals", "shell_splat", "refine_pose",
         "locate_face", "crop_face", "face_mask", "face_normals", "face_splat",
         "render_initial_views", "render_face_views", "composite_face",
+        "face_support_views",
         "render_shell_views", "inject_shell_band",
     ],
 }
@@ -468,9 +476,17 @@ class TestWorkflowFiles(unittest.TestCase):
         or a path under it (`mesh_output: scene` reads the namespace
         `scene.vertices` and friends were assembled into).
 
-        Gating is deliberately ignored — this is a statement about the file,
-        and every `when:`-gated step in the shipped workflows overwrites a
-        path that already exists rather than introducing one.
+        Gating is deliberately ignored — this is a statement about the
+        file, and a `when:`-gated step in the shipped workflows either
+        overwrites a path that already exists or is read only through an
+        optional `?`.
+
+        Optional reads are skipped, because "nothing writes this" is the
+        case they exist for: `train_splat` takes the face splat's
+        supporting views when the face branch built them, trains without
+        them when it did not, and reads the same path in
+        fast_helical_full.yaml, which has no bootstrap to build them at
+        all. See pipeline/workflow.py.
         """
         seeded = {"dataset"}
         for path in _workflows():
@@ -478,6 +494,8 @@ class TestWorkflowFiles(unittest.TestCase):
             written = set(seeded)
             for step in spec.steps:
                 for name, ctx_path in step.inputs.items():
+                    if ctx_path.endswith("?"):
+                        continue
                     satisfied = any(
                         ctx_path == w
                         or ctx_path.startswith(w + ".")
@@ -634,13 +652,16 @@ class TestWorkflowFiles(unittest.TestCase):
                             f"so '{step.id}' has none to gate on",
                         )
 
-    def test_no_confidence_render_feeds_composite_splat_views(self):
-        """composite_splat_views adds premultiplied colour (out = base*(1-a)
-        + rgb) and enforces premultiplied-over-black, refusing a render that
-        is more than 8/255 bright where it is fully transparent. A
-        confidence render is the cull colour there — 0.5 grey by default —
-        so turning the mode on for a face view is a hard failure at runtime.
-        Caught here instead, where the wiring is visible.
+    def test_no_confidence_render_feeds_a_step_that_needs_black(self):
+        """Two steps read a splat render and both require it to be
+        premultiplied over black, refusing one that is more than 8/255
+        bright where it is fully transparent: composite_splat_views, which
+        adds premultiplied colour (out = base*(1-a) + rgb), and
+        select_support_views, which divides it back out (rgb / a) to get the
+        straight-alpha frame brush's masked mode expects. A confidence
+        render is the cull colour there — 0.5 grey by default — so turning
+        the mode on for a face view is a hard failure at runtime. Caught
+        here instead, where the wiring is visible.
         """
         for path in _workflows():
             spec = WorkflowSpec.from_yaml(str(path))
@@ -650,20 +671,82 @@ class TestWorkflowFiles(unittest.TestCase):
                 if step.step == "render_splat":
                     for ctx in step.outputs.values():
                         producers[ctx] = step.id
+            needs_black = {"composite_splat_views": ("splat_images", "splat_masks"),
+                           "select_support_views": ("images", "masks")}
             for step in spec.steps:
-                if step.step != "composite_splat_views":
+                if step.step not in needs_black:
                     continue
-                for field in ("splat_images", "splat_masks"):
+                for field in needs_black[step.step]:
                     source = producers.get(step.inputs.get(field))
                     if source is None:
                         continue
                     with self.subTest(workflow=path.name, step=step.id, input=field):
                         self.assertFalse(
                             by_id[source].params.get("confidence"),
-                            f"{path.name}: '{step.id}' composites '{source}', "
+                            f"{path.name}: '{step.id}' reads '{source}', "
                             f"which renders with confidence — its transparent "
                             f"pixels are the cull colour, not black, and "
-                            f"composite_splat_views refuses that",
+                            f"{step.step} refuses that",
+                        )
+
+    def test_the_supporting_views_reach_both_trainings_optionally(self):
+        """The face splat's renders go into brush as supporting views, and
+        every training reads them the same way in every file.
+
+        Two halves, and both are the wiring rather than the code. The reads
+        are optional (`?`), which is what lets fast_helical_full.yaml — no
+        bootstrap, no face branch — share the same tail as the two files
+        that can build them, and what lets `face_splat: false` turn the
+        whole branch off without touching the training. And the paths on
+        both sides have to be the same ones, or the training silently gets
+        nothing: an optional read of a path nothing writes is exactly the
+        failure this feature is built out of.
+        """
+        # brush's input name -> the output name select_support_views
+        # publishes it under.
+        support = {"support_images": "images", "support_masks": "masks",
+                   "support_cameras": "cameras"}
+        for path in _workflows():
+            spec = WorkflowSpec.from_yaml(str(path))
+            by_id = {s.id: s for s in spec.steps}
+            trainings = [s for s in spec.steps if s.step == "brush"]
+            if not trainings:
+                continue
+            with self.subTest(workflow=path.name):
+                for step in trainings:
+                    for name in support:
+                        self.assertTrue(
+                            step.inputs.get(name, "").endswith("?"),
+                            f"{path.name}: '{step.id}' must read '{name}' "
+                            f"optionally — the branch that writes it is gated",
+                        )
+                if "face_support_views" not in by_id:
+                    continue
+                selector = by_id["face_support_views"]
+                self.assertEqual(selector.step, "select_support_views")
+                self.assertEqual(selector.when, "${globals.face_splat}")
+                # It reads the face render, and the composite's own verdict
+                # on which frames that render can speak for.
+                self.assertEqual(selector.inputs["images"], "scene.face_views.images")
+                self.assertEqual(selector.inputs["view_roles"], "scene.face_view_roles")
+                composite = by_id["composite_face"]
+                self.assertEqual(
+                    composite.outputs["view_roles"], selector.inputs["view_roles"],
+                    f"{path.name}: face_support_views must cull on the roles "
+                    f"composite_face published, not a second copy of them",
+                )
+                ids = [s.id for s in spec.steps]
+                for step in trainings:
+                    self.assertLess(
+                        ids.index("face_support_views"), ids.index(step.id),
+                        f"{path.name}: the supporting views must be selected "
+                        f"before '{step.id}' trains on them",
+                    )
+                    for name, field in support.items():
+                        self.assertEqual(
+                            step.inputs[name].rstrip("?"), selector.outputs[field],
+                            f"{path.name}: '{step.id}' reads '{name}' from a path "
+                            f"face_support_views does not write",
                         )
 
     def test_a_warped_anchor_is_bordered_in_grey_not_white(self):
