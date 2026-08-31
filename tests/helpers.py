@@ -158,7 +158,7 @@ def stub_render_binary(
         "get = lambda n: args[args.index(n) + 1]\n"
         "cams = json.loads(Path(get('--cameras')).read_text())\n"
         "out = Path(get('--output-dir')); out.mkdir(parents=True, exist_ok=True)\n"
-        f"record = {str(record)!r}\n"
+        f"record = {(str(record) if record is not None else None)!r}\n"
         "if record:\n"
         "    Path(record).mkdir(parents=True, exist_ok=True)\n"
         "    Path(record, 'argv.json').write_text(json.dumps(sys.argv[1:]))\n"
