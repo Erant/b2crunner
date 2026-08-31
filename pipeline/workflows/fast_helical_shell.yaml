@@ -40,6 +40,25 @@
 # that same thing — a warped photograph injected at one anchored frame —
 # and this file no longer builds it that way; see below.
 #
+# WHAT CHANGED (2026-08-31, latest): the SHARED TAIL gained supporting
+# views of its own, off the stage-1 denoised batch. Three new steps after
+# normal_maps — `stage1_view_splats` (a Gaussian shell per Nth denoised
+# frame, rendered from +/-10 degrees of elevation), `stage1_support_band`
+# (the same select_support_views the face uses) and `merge_support_views`
+# (which concatenates the face cap and the body views into the one triple
+# brush reads, and runs ungated so scene.support_views.* has exactly one
+# writer). The face branch's outputs moved to scene.face_support_views.*
+# accordingly; its step id did not change.
+#
+# The reason is the circular orbit: all 81 training views share one great
+# circle, so the fit has nothing to triangulate off the path and any novel
+# elevation smears. The shells inject a monocular depth prior from off
+# that path — no new appearance, since the source frames are the
+# training's own. Three settings drive it (`stage1_support_views`,
+# `stage1_support_every_n` = 10, `stage1_support_elevation_deg` = 10);
+# validated against a captured dataset in
+# docs/stage1-support-views-implementation.md, never yet run on a pod.
+#
 # WHAT CHANGED (2026-08-29): this bootstrap used to be five steps — split,
 # reconstruct, detect_face, fix_head_angle, render a *circular* orbit of
 # outline+skeleton drawings — and it is now routed through a photo-to-splat
@@ -273,6 +292,57 @@ settings:
       and its tests are all still there. Costs a third 1B Sapiens2 head
       (~6.5 GB, segmentation) on top of the normal head, plus the pointmap
       head the splat itself needs.
+
+  - name: stage1_support_views
+    label: Stage-1 supporting views
+    type: bool
+    default: true
+    help: >-
+      Whether the stage-1 body shells run: Sapiens2's pointmap head over every
+      Nth denoised frame, a Gaussian shell built from each one, and two renders
+      of that shell taken above and below the frame's own camera. They reach the
+      FIRST brush training as supporting views — evidence it fits where their
+      mask says to and ignores everywhere else — alongside the face cap. The
+      point is the circular orbit's zero parallax: every training frame shares
+      one great circle, so the fit has nothing to triangulate off the path and
+      novel elevations smear into chalky streaks. Note what this is NOT: unlike
+      the face cap it injects no new appearance, since the source frames are the
+      training's own frames. It is a monocular DEPTH PRIOR, and it is the change
+      in this file most able to make the deliverable worse rather than better —
+      see docs/stage1-support-views-implementation.md for the A/B it was
+      measured with. Costs one pointmap forward and one brush-splat-render
+      launch per shell (~2 s and a few seconds each), and the views themselves
+      cost the training roughly 5 minutes and 2.5x the splat count.
+
+  - name: stage1_support_every_n
+    label: Stage-1 shell spacing (every Nth frame)
+    type: int
+    default: 10
+    minimum: 1
+    help: >-
+      Build a shell from one denoised frame in this many, phased so the anchor
+      frame — the single real photograph in the batch — is always among them.
+      This is the cost knob: at 10 an 81-frame orbit gives 8 shells and 16
+      supporting views, at 5 it gives 16 and 32. The validation capture was
+      clean at every sheeted view with 5 and looked nearly as good by eye at 10,
+      while keeping 0.5 dB more on-path fit — which is why 10 is the default
+      here and the comparison on the real helical deliverable is still open.
+
+  - name: stage1_support_elevation_deg
+    label: Stage-1 shell elevation offset
+    type: float
+    default: 10.0
+    minimum: 0.0
+    maximum: 89.0
+    help: >-
+      How far above and below each source camera the two renders are taken.
+      Azimuth and radius are untouched, deliberately: a circular orbit's missing
+      dimension is elevation, not azimuth. The offset is from the camera's OWN
+      elevation, which on this bootstrap is the photographer's (+10-15 deg),
+      not from the equator. The shells were measured to hold together to about
+      +-30; bigger sees more of what the shell does not know, smaller risks
+      being inside select_support_views' 5-degree band around the denoising
+      path, where the views are dropped as competing with a denoised frame.
 
 outputs:
   # What stage 6 can produce, and the switch each one is. `name:` is the
@@ -830,9 +900,12 @@ steps:
       splat_center: scene.face_splat_stats.world_center
     params: {}
     outputs:
-      images: scene.support_views.images
-      masks: scene.support_views.masks
-      cameras: scene.support_views.cameras
+      # `face_support_views`, not `support_views`: `merge_support_views` in
+      # the shared tail is the single writer of scene.support_views.*, and
+      # it takes this branch and the stage-1 body shells as its two inputs.
+      images: scene.face_support_views.images
+      masks: scene.face_support_views.masks
+      cameras: scene.face_support_views.cameras
 
   # The shell, along the orbit above. `pattern: ""` (the step's default) is
   # what makes this the same 81 cameras in the same order rather than a
@@ -1020,10 +1093,129 @@ steps:
     outputs:
       normal_maps: scene.normal_maps
 
-  # Debug deliverable: the COLMAP dataset exactly as `train_splat` below is
-  # handed it — the denoised frames, the RMBG mattes and the normal maps
+  # ------------------------------------- the stage-1 shells' supporting views
+  # The face splat's lever, applied to the denoised body. Every Nth frame of
+  # denoise_pass1's output gets a Gaussian shell built from Sapiens2's
+  # pointmap head, placed in that frame's own orbit camera, and rendered from
+  # two cameras: one `stage1_support_elevation_deg` above the frame's own
+  # elevation and one below, at the same azimuth and radius. Those renders
+  # join the face cap in the single support_* set train_splat reads.
+  #
+  # WHY, in one sentence: this orbit is circular, so all 81 training views
+  # share one great circle and the fit has nothing to triangulate — without
+  # off-path evidence a novel elevation smears into chalky zero-parallax
+  # streaks (measured; see docs/stage1-support-views-implementation.md).
+  #
+  # WHAT KIND of evidence, because it is not the face's kind: the face cap
+  # injects photographic identity two denoise passes destroyed, while these
+  # inject Sapiens2's monocular DEPTH PRIOR — no new appearance at all, since
+  # the source frames are the training's own frames.
+  #
+  # Everything the shells need is already in the context at this point: the
+  # denoised frames (denoise_pass1), the RMBG mattes (foreground_masks), the
+  # normals (normal_maps), the orbit's own cameras and pivot
+  # (render_initial_views) and the mesh that is every shell's shared depth
+  # ruler (reconstruct_body, re-posed by fit_head_to_face). That is why the
+  # block sits here and not earlier.
+  #
+  # The step's own align_bin_px default is 16, not pointmap_splat's 32: the
+  # shell-in-front-of-mesh bias was measured at -11.9 mm at bin 32 against
+  # -4.4 mm at bin 16 (and an overshoot at 8). Nothing here overrides it.
+  #
+  # Only the STAGE-2 training reads what this produces. train_final_splat
+  # takes no supporting views: by then the dataset is the helical re-render,
+  # denoised a second time and upscaled, and these are the circular
+  # bootstrap's renders at the pre-upscale resolution.
+  - id: stage1_view_splats
+    step: pointmap_elevation_views
+    dispatch: in_process
+    when: ${globals.stage1_support_views}
+    inputs:
+      images: dataset.images
+      masks: dataset.masks
+      normal_maps: scene.normal_maps
+      cameras: dataset.cameras
+      mesh_output: scene
+      orbit_target: dataset.extras.orbit_target
+      # Optional: the step phases its sampling so this frame — the one real
+      # photograph in the batch — is always among the shells, and falls back
+      # to frame 0, which is where a circular path's anchor is anyway.
+      anchor_frame_index: dataset.extras.anchor_frame_index?
+    params:
+      every_n: ${globals.stage1_support_every_n}
+      elevation_deg: ${globals.stage1_support_elevation_deg}
+      # Kept after the run: one .ply per shell, which is the only way to
+      # look at what the renders were made of when a batch comes out wrong.
+      output_dir: ${globals.output_root}/stage1_shells
+    outputs:
+      images: scene.stage1_support_render.images
+      masks: scene.stage1_support_render.masks
+      cameras: scene.stage1_support_render.cameras
+      stats: scene.stage1_support_stats
+
+  # The same select_support_views the face branch uses, unchanged, for the
+  # two things it does that these renders need: it un-premultiplies them back
+  # to the straight alpha brush's masked mode expects, and it drops any view
+  # sitting within 5 degrees of the denoising path, where a supporting view
+  # would only compete with a denoised frame that already covers it.
+  #
+  # There is no outer edge to draw here — that is the cap radius in the face
+  # branch, and these views have no cap: there are exactly two per shell and
+  # both are at the elevation offset asked for. At +-20 the guard drops
+  # nothing (measured: 32 of 32 kept); it only bites if the offset is lowered
+  # toward the path, which is exactly when it should.
+  #
+  # The pivot is orbit_target rather than a splat centre. Unlike the face's
+  # head-above-the-target case, a body shell and the orbit share a centre.
+  - id: stage1_support_band
+    step: select_support_views
+    dispatch: in_process
+    when: ${globals.stage1_support_views}
+    inputs:
+      images: scene.stage1_support_render.images
+      masks: scene.stage1_support_render.masks
+      cameras: scene.stage1_support_render.cameras
+      path_cameras: dataset.cameras
+      orbit_target: dataset.extras.orbit_target
+    params: {}
+    outputs:
+      images: scene.body_support_views.images
+      masks: scene.body_support_views.masks
+      cameras: scene.body_support_views.cameras
+
+  # brush takes ONE support_* triple and there are now two producers of one,
+  # so this concatenates them. It runs UNGATED, which is the point: it is
+  # always the writer of scene.support_views.*, so that path has exactly one
+  # writer instead of two branches racing for it. With both branches off it
+  # publishes three empty lists and brush trains exactly as it did before
+  # either existed.
+  - id: merge_support_views
+    step: merge_support_views
+    dispatch: in_process
+    inputs:
+      a_images: scene.face_support_views.images?
+      a_masks: scene.face_support_views.masks?
+      a_cameras: scene.face_support_views.cameras?
+      b_images: scene.body_support_views.images?
+      b_masks: scene.body_support_views.masks?
+      b_cameras: scene.body_support_views.cameras?
+    params: {}
+    outputs:
+      images: scene.support_views.images
+      masks: scene.support_views.masks
+      cameras: scene.support_views.cameras
+
+  # Debug deliverable: the COLMAP dataset of the frames `train_splat` below
+  # is fitted to — the denoised frames, the RMBG mattes and the normal maps
   # that the FIRST brush training runs on. Gated by
   # export_colmap_intermediate, off by default.
+  #
+  # It is NOT everything that training is handed, and this comment used to
+  # say it was. colmap_export has no support_* inputs, so the supporting
+  # views — the face cap, and now the stage-1 shells' elevation pair — are
+  # not in it. That was already true of the face branch and is more true
+  # now; the step is what it is, and the deliverable it names is the
+  # dataset, not the evidence.
   #
   # One step, not the three stage 4b needs: the masks and normals it wants
   # are already sitting in the context, computed by the two steps above for

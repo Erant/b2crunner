@@ -45,6 +45,15 @@ in the original ComfyUI-Body2COLMAP repo:
   composited into the drawings by `render` before the diffusion passes get
   their hands on it. See steps/brush.py's `support_*` inputs.
 
+- MergeSupportViews is the fifth, and exists because there are now two
+  producers of that kind of evidence and `brush` takes one set: the face
+  cap above, and the stage-1 body shells
+  (steps/elevation_views.py's `pointmap_elevation_views`, a shell per Nth
+  denoised frame rendered from +/- an elevation). It concatenates two
+  optional triples, runs ungated so it is always the writer of
+  `scene.support_views.*`, and publishes three empty lists when both
+  branches are off.
+
 The alpha convention is what the first three write. This is the mechanism behind
 cyber_6f's initial/ alpha convention (pipeline/steps/wan22_vace_denoise.py's
 docstring): the injected anchor frame is marked alpha=0 ("already real,
@@ -727,6 +736,86 @@ class SelectSupportViewsStep(Step):
                 min_path_angle,
             )
         return {"images": out_images, "masks": out_masks, "cameras": out_cameras}
+
+
+@register_step("merge_support_views")
+class MergeSupportViewsStep(Step):
+    """Two sets of supporting views into the one set `brush` reads.
+
+    inputs: {"a_images"/"a_masks"/"a_cameras": Optional[List], one triple,
+             "b_images"/"b_masks"/"b_cameras": Optional[List], the other}
+    outputs: {"images": List, "masks": List, "cameras": List}
+
+    `brush` takes a single `support_*` triple (steps/brush.py), and this
+    pipeline now has two producers of one: the face cap
+    (`select_support_views` over `render_face_support_views`) and the
+    stage-1 body shells (`select_support_views` over
+    `pointmap_elevation_views`). Concatenating them is all this does.
+
+    **It runs ungated, so it is always the writer of
+    `scene.support_views.*`.** With both branches switched off it emits
+    three empty lists and `brush` trains exactly as it did before either
+    existed — `_SupportViews.from_inputs` already treats an empty list as
+    absent. That is why the inputs are optional reads (`?`): a
+    `when:`-skipped branch simply never writes its path, and there is no
+    way to conditionally wire an input.
+
+    A missing or `None` triple contributes nothing. Lengths *within* a
+    triple must agree, and the error names which triple — the two arrive
+    from different branches of the workflow, so "3 images and 4 masks" is
+    only actionable if you know whose.
+
+    Order is a's views then b's. Nothing downstream depends on it: brush
+    weights a supporting view by its own mask, not by its position in the
+    list.
+    """
+
+    PARAMS = (
+        Param("require_any", bool, False,
+              "Raise instead of publishing three empty lists. Off by default "
+              "because empty is a legitimate configuration — both branches "
+              "switched off — and brush handles it. Turn it on in a workflow "
+              "whose whole point is the supporting views, where getting none "
+              "means a branch silently did not run"),
+    )
+
+    def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+        images: List[np.ndarray] = []
+        masks: List[np.ndarray] = []
+        cameras: List[Any] = []
+
+        for prefix in ("a", "b"):
+            triple = [inputs.get(f"{prefix}_{name}")
+                      for name in ("images", "masks", "cameras")]
+            if all(part is None for part in triple):
+                continue
+            parts = [list(part or []) for part in triple]
+            if len({len(part) for part in parts}) != 1:
+                raise ValueError(
+                    f"merge_support_views: triple '{prefix}' has "
+                    f"{len(parts[0])} images, {len(parts[1])} masks and "
+                    f"{len(parts[2])} cameras. The three describe the same "
+                    f"views and have to arrive together."
+                )
+            images += parts[0]
+            masks += parts[1]
+            cameras += parts[2]
+
+        if not images:
+            if params["require_any"]:
+                raise ValueError(
+                    "merge_support_views: neither branch produced a supporting "
+                    "view and require_any is set. Check that the branch you "
+                    "expected is switched on and that its select_support_views "
+                    "kept anything."
+                )
+            logger.info(
+                "merge_support_views: no supporting views from either branch; "
+                "the training will run without them, as it did before they existed"
+            )
+        else:
+            logger.info("merge_support_views: %d supporting views", len(images))
+        return {"images": images, "masks": masks, "cameras": cameras}
 
 
 def _direction(pivot: np.ndarray, camera: Any) -> np.ndarray:

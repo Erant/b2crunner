@@ -273,8 +273,9 @@ over-rotated.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -943,7 +944,9 @@ def build_gaussians(xyz: np.ndarray, n_cam: np.ndarray, rgb: np.ndarray,
                     alpha: np.ndarray, mask: np.ndarray, f: float,
                     k_tangent: float = 0.4, k_normal: float = 0.15,
                     max_stretch: float = 3.0, cliff_k: float = 8.0,
-                    supersample: int = 1) -> Dict[str, np.ndarray]:
+                    supersample: int = 1, *,
+                    pose: Optional[Tuple[np.ndarray, np.ndarray]] = None,
+                    ) -> Dict[str, np.ndarray]:
     """Masked camera-frame points + normals -> 3DGS parameters in world coords.
 
     One oriented Gaussian per selected pixel: at the point, flattened into
@@ -964,6 +967,32 @@ def build_gaussians(xyz: np.ndarray, n_cam: np.ndarray, rgb: np.ndarray,
     Unlike masktest this does NOT recentre on the splat's own centroid. The
     world origin has to stay where SAM-3D-Body's camera is, or the shell no
     longer lines up with the mesh, the orbit, or the anchor.
+
+    **`pose` is the one thing that moves that origin**, and it exists for
+    `pointmap_elevation_views`, which builds a shell per orbit frame and
+    every one of those cameras is somewhere other than the world origin.
+    It is a `(R_c2w, position)` pair in body2colmap's camera-local
+    convention — `Camera.rotation` and `Camera.position` — and it is
+    applied at the very END of the function, deliberately:
+
+        means   = means @ R.T + position       # after the existing * FLIP
+        frames  = R @ frames                   # BEFORE mat_to_quat_wxyz
+        normals = normals @ R.T
+
+    Everything above it — `base = k_tangent * z / f`, `cliff_ratio`, the
+    incidence stretch, `view = p_cam / |p_cam|` — genuinely needs a camera
+    AT THE ORIGIN looking down its own axis, so this cannot be a post-hoc
+    fix-up of the returned arrays. Rotating the orthonormal frame before
+    the quaternion conversion avoids quaternion composition entirely, and
+    lengths are invariant under a rigid transform, so `log_scales` needs
+    nothing.
+
+    `None` — both registered steps, whose camera IS the origin — skips the
+    arithmetic entirely rather than passing an identity through it. That is
+    not tidiness: an identity matmul turns ~1e-4 of the floats into -0.0,
+    so only the skipped branch is byte-identical to what this function
+    returned before the argument existed, and that is what
+    tests/test_elevation_views.py pins.
     """
     if supersample > 1:
         xyz = _upsample(xyz.astype(np.float32), supersample)
@@ -1011,7 +1040,16 @@ def build_gaussians(xyz: np.ndarray, n_cam: np.ndarray, rgb: np.ndarray,
 
     means = p_cam * FLIP
     frames = np.stack([t1 * FLIP, t2 * FLIP, n * FLIP], axis=2)   # columns
+    normals = n * FLIP
     log_scales = np.log(np.stack([base * stretch, base, k_normal * base], 1))
+
+    if pose is not None:
+        rotation, position = pose
+        rotation = np.asarray(rotation, dtype=np.float64).reshape(3, 3)
+        position = np.asarray(position, dtype=np.float64).reshape(3)
+        means = means @ rotation.T + position
+        frames = rotation @ frames
+        normals = normals @ rotation.T
 
     dropped = int((mask & (alpha > 1e-3)).sum() - selected.sum())
     logger.info(
@@ -1028,8 +1066,39 @@ def build_gaussians(xyz: np.ndarray, n_cam: np.ndarray, rgb: np.ndarray,
         "opacity": np.log(opacity / (1.0 - opacity)),
         "log_scales": log_scales,
         "quats": mat_to_quat_wxyz(frames),
-        "normals": n * FLIP,
+        "normals": normals,
     }
+
+
+@dataclass
+class ShellResult:
+    """What `PointmapSplatStep._build_shell` returns: one placed shell.
+
+    `gaussians` and `stats` are what `run()` publishes. The rest are the
+    intermediates, kept for two reasons that would otherwise each need
+    their own return value:
+
+      * `_write_debug` draws `mask`, `alpha`, `z_aligned` (the raw
+        pointmap depth, placed) and `z_refined` (the integrated one,
+        placed) and `n_cam`, and it stays in `run()`;
+      * `pointmap_elevation_views` measures shells against each other with
+        `z_refined` + `mask` (the pair residual: shell i's world means
+        projected into camera j against shell j's own depth there) and
+        against the mesh with `front`.
+
+    Depths are along the source camera's OpenCV axis and are 0 outside the
+    mask; `front` is `mesh_front_depth`'s per-bin grid, +inf where no
+    vertex landed.
+    """
+
+    gaussians: Dict[str, np.ndarray]
+    stats: Dict[str, Any]
+    mask: np.ndarray
+    alpha: np.ndarray
+    z_aligned: np.ndarray
+    z_refined: np.ndarray
+    n_cam: np.ndarray
+    front: np.ndarray
 
 
 def write_ply(path: Path, gaussians: Dict[str, np.ndarray]) -> None:
@@ -1306,31 +1375,39 @@ class PointmapSplatStep(Step):
         focal = float(inputs["mesh_output"]["focal_length"])
         return focal, width / 2.0, height / 2.0
 
-    # -- run --------------------------------------------------------------
-    def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
-        from body2colmap.splat_scene import SplatScene
+    # -- the shell, with an explicit camera ------------------------------
+    def _build_shell(self, image: np.ndarray, matte: np.ndarray,
+                     normal_map: np.ndarray, *, focal: float, cx: float, cy: float,
+                     vertices_cam: np.ndarray,
+                     pose: Optional[Tuple[np.ndarray, np.ndarray]],
+                     params: Dict[str, Any], label: str) -> "ShellResult":
+        """One frame -> one Gaussian shell, in the world `pose` names.
 
-        label = self.STEP_NAME or type(self).__name__
-        image = np.asarray(inputs["image"])
-        matte = np.asarray(inputs["mask"], dtype=np.float32)
-        normal_map = np.asarray(inputs["normal_map"], dtype=np.float32)
-        mesh_output = inputs["mesh_output"]
+        Everything from the mask clean through `build_gaussians`, with
+        every frame-dependent quantity an explicit argument rather than
+        something resolved by dispatch. That is the whole point of the
+        extraction: `pointmap_elevation_views` builds seventeen of these,
+        one per orbit camera, and "which camera is this shell in" has to be
+        visible at the call site. The face splat's `_source_intrinsics`
+        override is the cautionary tale — it hid which camera a crop was in
+        until a 12.6-degree nod was measured off the result.
 
+        `vertices_cam` is the mesh in THIS camera's OpenCV frame, and it is
+        the caller's job because the route differs: at the origin it is
+        `vertices + cam_t`, and anywhere else it is
+        `FLIP * (R.T @ (sam3d_to_world(...) - position))` — two FLIPs, which
+        cancel at the identity pose and so are invisible to every
+        identity-pose test. See `elevation_views._vertices_in_camera`.
+
+        `pose` is `(R_c2w, position)` or None; `None` is what both
+        registered steps pass and is byte-identical to what this step did
+        before the argument existed (see `build_gaussians`).
+
+        Nothing about the numerics moved out of `run()` — this is a cut, not
+        a rewrite. What stayed behind is input parsing, the
+        `_source_intrinsics` call, the ply write and the `SplatScene`.
+        """
         height, width = image.shape[:2]
-        for name, array in (("mask", matte), ("normal_map", normal_map)):
-            if array.shape[:2] != (height, width):
-                raise ValueError(
-                    f"{label}: '{name}' is {array.shape[1]}x{array.shape[0]} "
-                    f"but 'image' is {width}x{height}. All three must be the same "
-                    f"photo — this step's whole placement argument rests on it."
-                )
-
-        # SAM-3D-Body's camera on this image's pixel grid — the full frame's
-        # here, a crop's in the face specialization. See _source_intrinsics.
-        focal, cx, cy = self._source_intrinsics(inputs, params, width, height)
-        vertices_cam = (np.asarray(mesh_output["vertices"], dtype=np.float64)
-                        + np.asarray(mesh_output["cam_t"], dtype=np.float64).reshape(3))
-
         if self._model is None or self._checkpoint != params["checkpoint"]:
             self.load(params)
 
@@ -1486,11 +1563,9 @@ class PointmapSplatStep(Step):
             xyz, n_cam, cv2.cvtColor(image, cv2.COLOR_BGR2RGB), alpha, mask, focal,
             k_tangent=params["splat_scale"], k_normal=params["splat_thickness"],
             max_stretch=params["max_stretch"], cliff_k=params["cliff_k"],
-            supersample=params["supersample"],
+            supersample=params["supersample"], pose=pose,
         )
 
-        path = Path(params["filepath"])
-        write_ply(path, gaussians)
         stats["n_splats"] = int(len(gaussians["means"]))
         lo = gaussians["means"].min(0)
         hi = gaussians["means"].max(0)
@@ -1500,11 +1575,47 @@ class PointmapSplatStep(Step):
         # centre for exactly this, and for a head sitting well above a
         # full-body orbit target the two are not interchangeable.
         stats["world_center"] = [float(v) for v in (lo + hi) / 2.0]
+        return ShellResult(gaussians=gaussians, stats=stats, mask=mask, alpha=alpha,
+                           z_aligned=z_aligned, z_refined=z_refined, n_cam=n_cam,
+                           front=front)
+
+    def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+        from body2colmap.splat_scene import SplatScene
+
+        label = self.STEP_NAME or type(self).__name__
+        image = np.asarray(inputs["image"])
+        matte = np.asarray(inputs["mask"], dtype=np.float32)
+        normal_map = np.asarray(inputs["normal_map"], dtype=np.float32)
+        mesh_output = inputs["mesh_output"]
+
+        height, width = image.shape[:2]
+        for name, array in (("mask", matte), ("normal_map", normal_map)):
+            if array.shape[:2] != (height, width):
+                raise ValueError(
+                    f"{label}: '{name}' is {array.shape[1]}x{array.shape[0]} "
+                    f"but 'image' is {width}x{height}. All three must be the same "
+                    f"photo — this step's whole placement argument rests on it."
+                )
+
+        # SAM-3D-Body's camera on this image's pixel grid — the full frame's
+        # here, a crop's in the face specialization. See _source_intrinsics.
+        focal, cx, cy = self._source_intrinsics(inputs, params, width, height)
+        vertices_cam = (np.asarray(mesh_output["vertices"], dtype=np.float64)
+                        + np.asarray(mesh_output["cam_t"], dtype=np.float64).reshape(3))
+
+        shell = self._build_shell(
+            image, matte, normal_map, focal=focal, cx=cx, cy=cy,
+            vertices_cam=vertices_cam, pose=None, params=params, label=label,
+        )
+        gaussians, stats = shell.gaussians, shell.stats
+
+        path = Path(params["filepath"])
+        write_ply(path, gaussians)
         logger.info("%s: wrote %d gaussians to %s", label, stats["n_splats"], path)
 
         if params["debug_dir"]:
-            _write_debug(Path(params["debug_dir"]), image, mask, alpha,
-                         z_aligned, z_refined, n_cam)
+            _write_debug(Path(params["debug_dir"]), image, shell.mask, shell.alpha,
+                         shell.z_aligned, shell.z_refined, shell.n_cam)
 
         scene = SplatScene(
             means=gaussians["means"].astype(np.float32),

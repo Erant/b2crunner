@@ -808,20 +808,44 @@ class TestWorkflowFiles(unittest.TestCase):
                     f"culls about too — for a head on a full-body orbit the "
                     f"splat's centre and the orbit target differ",
                 )
+                # The training reads ONE support_* triple and there are two
+                # producers of one, so the path between them is the merge —
+                # which runs ungated precisely so that path has a single
+                # writer whatever the branches are doing.
+                merge = by_id["merge_support_views"]
+                self.assertEqual(merge.step, "merge_support_views")
+                self.assertIs(
+                    merge.when, True,
+                    f"{path.name}: merge_support_views must run ungated, or "
+                    f"scene.support_views.* has no writer with the branches off",
+                )
+                for name, field in support.items():
+                    self.assertEqual(
+                        merge.inputs[f"a_{field}"].rstrip("?"),
+                        selector.outputs[field],
+                        f"{path.name}: the merge reads 'a_{field}' from a path "
+                        f"face_support_views does not write",
+                    )
+
                 ids = [s.id for s in spec.steps]
                 for step in trainings:
                     if step.id == "train_final_splat":
                         continue
                     self.assertLess(
-                        ids.index("face_support_views"), ids.index(step.id),
+                        ids.index("face_support_views"), ids.index("merge_support_views"),
                         f"{path.name}: the supporting views must be selected "
+                        f"before they are merged",
+                    )
+                    self.assertLess(
+                        ids.index("merge_support_views"), ids.index(step.id),
+                        f"{path.name}: the supporting views must be merged "
                         f"before '{step.id}' trains on them",
                     )
                     for name, field in support.items():
                         self.assertEqual(
-                            step.inputs[name].rstrip("?"), selector.outputs[field],
+                            step.inputs[name].rstrip("?"), merge.outputs[field],
                             f"{path.name}: '{step.id}' reads '{name}' from a path "
-                            f"face_support_views does not write",
+                            f"merge_support_views does not write",
                         )
 
     def test_a_warped_anchor_is_bordered_in_grey_not_white(self):

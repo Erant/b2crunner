@@ -117,14 +117,22 @@ pipeline/
 │                      brush-splat-render binary (not gsplat — see the
 │                      module docstring), verified end to end on GPU
 │                      against all 81 of cyber_6f's real cameras
+│   ├── elevation_views.py pointmap_elevation_views — a Gaussian shell per
+│                      Nth stage-1 denoised frame, rendered from +/- an
+│                      elevation and handed to the first brush training as
+│                      supporting views. Subclasses PointmapSplatStep.
+│                      Validated against a captured dataset outside this
+│                      repo (docs/stage1-support-views-implementation.md);
+│                      never run inside a pipeline run on a pod
 │   ├── colmap_export.py real, verified against cyber_6f's recorded
 │                      colmap/ export (cameras.txt and points3D.txt
 │                      byte-identical, images.txt to 2.4e-7)
-│   ├── anchor_stub.py   generate_firstlast / inject_anchor — real,
-│                      verified locally (pure numpy/cv2 logic, no GPU
-│                      needed): affine + homography warp paths, anchor
-│                      position-matching incl. duplicate cameras, no-anchor
-│                      passthrough
+│   ├── anchor_stub.py   generate_firstlast / inject_anchor /
+│                      inject_shell_views / select_support_views /
+│                      merge_support_views — real, verified locally (pure
+│                      numpy/cv2 logic, no GPU needed): affine + homography
+│                      warp paths, anchor position-matching incl. duplicate
+│                      cameras, no-anchor passthrough
 │   └── reference_sheet.py split_reference_sheet — halves the two-panel
 │                      front/back sheet the from-an-image path starts
 │                      from: front to sam3d_body/generate_firstlast/rmbg,
@@ -747,6 +755,63 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   and these renders are the bootstrap's. `train_splat` reads them through
   an optional `?` path, so `face_splat: false` trains exactly as before.
   `tests/test_support_views.py`.
+- `pointmap_elevation_views` (`elevation_views.py`) — the same lever as the
+  face cap, applied to the **stage-1 denoised batch**, and the second
+  producer of supporting views. For every Nth frame of `denoise_pass1`'s
+  output it runs the pointmap head on that frame, builds a shell placed in
+  that frame's own orbit camera, and renders it from two cameras at
+  ±`elevation_deg` about the source camera's own elevation — same azimuth,
+  same radius, same intrinsics. A subclass of `PointmapSplatStep`, so the
+  head, the mask morphology, the depth solve and the Gaussian construction
+  are all the shared ones; what it adds is a camera.
+
+  **Why elevation and not azimuth.** The orbit is circular: all 81 training
+  views lie on one great circle, which is as close to zero parallax as a
+  camera path gets, and the fit smears into chalky streaks at any novel
+  elevation. What is missing is a second dimension, not more of the first.
+
+  **What kind of evidence, because it is not the face's kind.** The face cap
+  injects photographic identity two denoise passes destroyed. These inject
+  Sapiens2's monocular *depth prior* — no new appearance at all, since the
+  source frames are the training's own frames — at roughly +20% of the view
+  count at the shipped `every_n: 10`. It is the change in the shared tail
+  most able to make the deliverable worse rather than better, which is why
+  it was measured against a captured dataset before landing
+  (`docs/stage1-support-views-implementation.md`).
+
+  Two seams opened in `pointmap_splat.py` for it, and both keep the two
+  registered splat steps byte-identical: `_build_shell`, which is `run()`'s
+  body with every frame-dependent quantity an explicit argument, and a
+  `pose=` on `build_gaussians` applied at the very end (means, the
+  orthonormal frame *before* the quaternion conversion, normals). `None` —
+  what both existing steps pass — skips that arithmetic entirely rather
+  than passing an identity through it, because an identity matmul turns
+  ~1e-4 of the floats into −0.0.
+
+  Two phases, not one loop: every shell is built with the head resident and
+  the plys written, the head is unloaded, and only then is each ply
+  rendered — otherwise the 6.5 GB fp32 head sits on the card while
+  `brush-splat-render` is launched once per shell. The plys are kept under
+  `output_dir` either way.
+
+  Independently built shells are not guaranteed to agree, so the step
+  measures whether they do: a **mesh residual** per shell (placed depth
+  against the mesh's own front surface, per bin, in mm — systematic and
+  same-signed is estimator bias from clothing and hair, one outlier is a
+  bad frame) and a **pair residual** per adjacent pair (shell i's Gaussians
+  projected into camera j against shell j's own depth there). Both are in
+  `stats` and in the log. `max_pair_residual_mm` can drop a shell that
+  disagrees with *both* neighbours; off by default. `align_bin_px` is 16
+  here rather than the base's 32, measured against a real z-buffer of the
+  mesh: −11.9 mm of bias at 32, −4.4 at 16, an overshoot at 8. Validated
+  end-to-end outside this repo; never run inside a pipeline run on a pod.
+- `merge_support_views` (`anchor_stub.py`) — concatenates two optional
+  `(images, masks, cameras)` triples so the face cap and the body views
+  both reach `brush`'s single `support_*` set. It runs **ungated**, which
+  is the whole design: `scene.support_views.*` then has exactly one writer
+  instead of two branches racing for it, and with both branches off it
+  publishes three empty lists and the training runs as it did before either
+  existed. The face branch writes `scene.face_support_views.*` accordingly.
 - `refine_pose_to_splat` (`pose_refine.py`) — re-poses a SAM-3D-Body fit so
   its mesh agrees with that shell in novel views, which is what stops the
   skeleton overlay drifting off the subject a few degrees either side of the

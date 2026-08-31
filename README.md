@@ -9,7 +9,7 @@ ships:
 
 | workflow | starts from | stages |
 |---|---|---|
-| `fast_helical_native` | a front/back reference sheet | a bootstrap prologue — split the sheet, reconstruct a body, nod the craned head back, build a Gaussian splat of the subject's face from a crop of the front half and composite it onto a circular orbit of outline+skeleton renders, warp the photo onto the anchor frame — then the full native port of the ComfyUI `fast helical` pipeline: two denoise passes and two brush trainings around a helical re-render. `--param run_upscale=false` drops the SeedVR2 upscale (the old `fast_helical` workflow) to isolate it when output looks wrong |
+| `fast_helical_native` | a front/back reference sheet | a bootstrap prologue — split the sheet, reconstruct a body, nod the craned head back, build a Gaussian splat of the subject's face from a crop of the front half and composite it onto a circular orbit of outline+skeleton renders, warp the photo onto the anchor frame — then the full native port of the ComfyUI `fast helical` pipeline: two denoise passes and two brush trainings around a helical re-render. The first of those trainings also gets *supporting views* — a cap of renders of the face splat, and a Gaussian shell built off every Nth denoised frame and rendered from ±10° of elevation, which is what gives a circular orbit something to triangulate. `--param run_upscale=false` drops the SeedVR2 upscale (the old `fast_helical` workflow) to isolate it when output looks wrong |
 
 A second file, `fast_helical_shell.yaml`, is **parked**: it replaces that
 whole bootstrap with a photo-to-splat *shell* — a body-wide Gaussian shell

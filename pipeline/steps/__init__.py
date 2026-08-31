@@ -12,6 +12,7 @@ from . import brush  # noqa: F401
 from . import colmap_export  # noqa: F401
 from . import crop  # noqa: F401
 from . import dataset_io  # noqa: F401
+from . import elevation_views  # noqa: F401
 from . import face_landmarks  # noqa: F401
 from . import head_angle  # noqa: F401
 from . import head_fit  # noqa: F401

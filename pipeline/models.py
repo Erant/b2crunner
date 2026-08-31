@@ -324,8 +324,13 @@ def _registry() -> List[ModelSource]:
             # Same repo layout as the normal heads above, so the same
             # `model.safetensors`-only filter applies: the 1b pointmap repo
             # ships the identical weights twice, 6.5 GB each.
+            #
+            # `pointmap_elevation_views` is the third consumer and the one
+            # that makes this list load-bearing: with the face branch off it
+            # is the ONLY step wanting this head, and a run that did not
+            # prefetch it would block mid-pipeline on 6.5 GB of download.
             "sapiens2_pointmap", f"{SAPIENS_POINTMAP} (pointmap / depth)",
-            ("pointmap_splat", "face_pointmap_splat"),
+            ("pointmap_splat", "face_pointmap_splat", "pointmap_elevation_views"),
             pointmap_fetch, pointmap_probe, approx_gb=6.5,
         ),
         ModelSource(
