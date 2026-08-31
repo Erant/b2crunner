@@ -24,10 +24,21 @@ picker (`resolve_upload`). Two shapes are understood:
     prompt for all of them.
 
 Both shapes run the same workflow, `fast_helical_native`, so there is no
-workflow picker either — only the "Upscale dataset" toggle is left as a
-pipeline knob in the UI, the SeedVR2 stage, which used to be the
-`fast_helical` / `fast_helical_full` split and is now one `run_upscale`
-global.
+workflow picker either.
+
+**The form is the pipeline's, not this module's.** A workflow declares what
+it exposes — a `settings:` block of typed, labelled, documented knobs and an
+`outputs:` block of deliverables (see pipeline/workflow.py) — and the Run tab
+draws exactly that: a Settings box, an Outputs box, and nothing else in
+front. The per-step params are still all there, editable, behind one
+"Per-step settings" fold in the second column, which is where they belong:
+there are ~300 of them and on any given run you touch none.
+
+This module used to hold five tables naming the globals of that one file
+(OUTPUT_PARAMS, RESULT_SUBDIRS, HIDDEN_GLOBALS, RESOLUTION_CHOICES,
+GLOBAL_CHOICES), each with a comment asking whoever came next to keep it in
+step with the YAML. Promoting a step knob to the form is now an edit to the
+workflow file alone.
 
 The reference-sheet path is the least proven part of the pipeline — its
 front half (split / render / generate_firstlast / inject_anchor) has never
@@ -48,13 +59,13 @@ two different cards do not contend for either's VRAM — CUDA context
 isolation is a property of the OS process boundary, not something this
 process negotiates.
 
-**What a run hands back** is a choice made before it starts, not after: the
-Outputs checkboxes set the workflow's `export_colmap` / `export_ply` params,
-and a step switched off there never runs (see `when:` in
-pipeline/workflow.py). That matters because the .ply is a full
-30,000-iteration brush training — an hour of GPU you do not want to spend
-discovering you only wanted the COLMAP dataset. The Results tab then offers
-exactly those: one .zip holding `colmap/` and/or `ply/`, and nothing else.
+**What a run hands back** is a choice made before it starts, not after: each
+Outputs checkbox writes the workflow global its export steps read through
+`when:`, and a step switched off there never runs (see pipeline/workflow.py).
+That matters because the .ply is a full 30,000-iteration brush training — an
+hour of GPU you do not want to spend discovering you only wanted the COLMAP
+dataset. The Results tab then offers exactly those: one .zip holding the
+`dir:` of every output that actually got written, and nothing else.
 """
 
 from __future__ import annotations
@@ -78,7 +89,9 @@ from .models import registry
 from .paths import data_dir, output_dir, run_jobs_dir, upload_dir
 from .run_state import PREVIEW_FRAMES, RunJob, RunState
 from .step import Param
-from .workflow import WorkflowSpec, apply_ui_overrides, load_envs
+from .workflow import (
+    Output, WorkflowSpec, apply_ui_overrides, load_envs, truthy,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -95,75 +108,48 @@ PREVIEW_ALL = "All steps"
 # fast_helical_full split and is now one `run_upscale` global.
 WORKFLOW_NATIVE = "fast_helical_native"
 
-# The two things a finished run can hand back from its Outputs checkbox
-# group, as label -> the workflow global that switches it on. Both shipped
-# workflows declare both.
-OUTPUT_COLMAP = "COLMAP dataset"
-OUTPUT_PLY = "Trained .ply (normal-supervised)"
-OUTPUT_PARAMS = {OUTPUT_COLMAP: "export_colmap", OUTPUT_PLY: "export_ply"}
-
-# Deliverable subdirectories a run can drop under its output_root, scanned
-# by `result_dirs` when packaging the download. Two of them are the debug
-# exports the Outputs box offers: `colmap_preupscale/` (gated by
-# `export_colmap_preupscale`) and `colmap_intermediate/` (gated by
-# `export_colmap_intermediate` — what the first brush training was fed).
-RESULT_SUBDIRS = ("colmap", "colmap_intermediate", "colmap_preupscale", "ply")
+# Nothing about a particular workflow's settings or deliverables lives in
+# this module any more: the Outputs box, the Settings box and the download's
+# contents are all read off the workflow's own `settings:` / `outputs:`
+# blocks (see pipeline/workflow.py). What used to be here — OUTPUT_PARAMS,
+# RESULT_SUBDIRS, HIDDEN_GLOBALS, RESOLUTION_CHOICES, GLOBAL_CHOICES — was
+# five tables naming the globals of one file, each with its own comment
+# asking the next person to keep it in step with that file.
 
 
 # --------------------------------------------------------------------------
 # helpers the UI calls
 # --------------------------------------------------------------------------
 
-def workflow_outputs(name: str) -> List[str]:
-    """Which of the Outputs checkboxes this workflow actually understands."""
+def workflow_outputs(name: str) -> List["Output"]:
+    """The deliverables this workflow declares, in the order it declares them."""
     from .cli import resolve_workflow
 
-    spec = WorkflowSpec.from_yaml(resolve_workflow(name))
-    return [label for label, param in OUTPUT_PARAMS.items() if param in spec.globals]
+    return WorkflowSpec.from_yaml(resolve_workflow(name)).outputs
 
 
-def resolve_output_globals(
-    selected_outputs: Optional[List[str]], run_upscale: bool, want_preupscale_colmap: bool,
-    want_intermediate_colmap: bool = False,
-) -> Dict[str, bool]:
-    """The five workflow globals the Outputs box sets, with the pre-upscale
-    COLMAP rules folded in.
+def resolve_outputs(spec: WorkflowSpec) -> Dict[str, bool]:
+    """The output switches `spec.globals` should carry, `requires:` applied.
 
-    `export_colmap_preupscale` only means anything with the upscale on — the
-    pre- and post-upscale frames are otherwise the same. So with the upscale
-    off, ticking "Pre-upscale COLMAP dataset" just guarantees the ordinary
-    `colmap/` (and is a plain no-op if "COLMAP dataset" was already ticked).
+    An output whose `requires:` setting is switched off is forced off here
+    rather than left to produce something under a name that no longer means
+    what it says — the pre-upscale COLMAP export with the upscale off would
+    be the ordinary `colmap/` twice. The UI also disables that checkbox, so
+    this is the second half of one rule, for the paths that do not go
+    through a checkbox at all (`--param`, a stale panel).
 
-    `export_colmap_intermediate` has no such rule: the dataset it writes is
-    the one the FIRST brush training is handed, which is a different set of
-    frames from every other export in the run — earlier than the second
-    denoise pass, the re-render and the upscale alike — so nothing it could
-    collapse into. It stands alone, and it counts as an output on its own:
-    a run that exports only it is a deliberate look at what that training
-    saw.
-
-    Raises `gr.Error` if the result would export nothing.
+    Raises `gr.Error` if nothing would be exported: a run that produces no
+    deliverable leaves nothing to download, and it is an hour of GPU either
+    way.
     """
-    chosen = set(selected_outputs or [])
-    want_colmap = OUTPUT_COLMAP in chosen
-    want_ply = OUTPUT_PLY in chosen
-
-    export_colmap = want_colmap or (want_preupscale_colmap and not run_upscale)
-    export_colmap_preupscale = want_preupscale_colmap and run_upscale
-
-    if not (export_colmap or export_colmap_preupscale
-            or want_intermediate_colmap or want_ply):
+    resolved = spec.apply_output_requirements()
+    if spec.outputs and not any(resolved.values()):
         raise gr.Error(
-            "Pick at least one output — a run that exports neither a COLMAP "
-            "dataset nor a .ply leaves nothing to download."
+            "Pick at least one output — a run that exports nothing leaves "
+            "nothing to download."
         )
-    return {
-        "run_upscale": run_upscale,
-        "export_colmap": export_colmap,
-        "export_ply": want_ply,
-        "export_colmap_preupscale": export_colmap_preupscale,
-        "export_colmap_intermediate": bool(want_intermediate_colmap),
-    }
+    return resolved
+
 
 
 # Exactly the fields `Dataset.from_reference_image` cannot fill in: a
@@ -200,51 +186,37 @@ def workflow_needs_a_dataset(name: str) -> bool:
     return False
 
 
-# Globals the generated panel deliberately does not draw a control for.
-#
-# The deliverable switches, `run_upscale`, and the two debug COLMAP
-# exports all have a dedicated control in the Outputs box; showing them here too
-# would give one setting two editable homes that disagree the moment
-# someone touches one.
-#
-# output_root is excluded for a sharper reason: `start()` only repoints it at
-# the run's own timestamped directory when the submitted overrides do NOT
-# contain the key (mirroring `pipeline.cli run`'s `--param output_root=...`).
-# When the panel was a YAML box showing the workflow's literal default
-# (`output/fast_helical`, relative to the process's cwd), every run
-# round-tripped it back whether the box was touched or not, permanently
-# defeating that repoint — colmap_export and the final brush training wrote
-# under the cwd instead of the run directory, and the Results tab reported
-# "the run produced neither" even though the run had completed and written
-# real output, just not where anything was looking for it. Submitting only
-# what the user actually changed means the same thing cannot happen again,
-# but leaving it off the panel keeps it impossible rather than merely
-# unlikely.
-HIDDEN_GLOBALS = set(OUTPUT_PARAMS.values()) | {
-    "output_root", "run_upscale", "export_colmap_preupscale",
-    "export_colmap_intermediate",
-}
+def workflow_param_panel(
+    name: str,
+) -> tuple[WorkflowSpec, List[Param], List["Output"], List[Dict[str, Any]]]:
+    """Everything the Run tab needs to draw itself, for one workflow.
 
+    Returns (spec, settings, outputs, steps):
 
-def workflow_param_panel(name: str) -> tuple[Dict[str, Any], List[Dict[str, Any]]]:
-    """Everything the Run tab needs to draw a control per param.
-
-    Returns (globals, steps), where each step entry is
-    {"id", "step", "params": [Param], "overrides": {name: value}} — the
-    Param objects carry type/default/help/advanced (pipeline/step.py), and
-    `overrides` is what this workflow set on top, already template-expanded
-    so a field shows the value the run would really use.
-
-    A step's overrides are keyed by its `id:`, which is the whole point: the
-    two `brush` trainings in fast_helical_native get their own section and
-    their own controls.
+      * `settings` — the workflow's declared knobs, as `Param`s, in file
+        order. The panel draws these; a plain `globals:` entry gets no
+        control at all, which is what keeps `output_root` off the form.
+        That used to be a HIDDEN_GLOBALS denylist, and it mattered: `start()`
+        only repoints `output_root` at the run's own timestamped directory
+        when the submitted overrides do not contain the key, so a panel that
+        round-tripped its literal default permanently defeated the repoint —
+        colmap_export and the final training wrote under the process's cwd
+        and the Results tab reported that the run had produced nothing.
+        Undeclared means undrawable now, so that cannot come back.
+      * `outputs` — the deliverables, for the Outputs box.
+      * `steps` — one entry per step, `{"id", "step", "params": [Param],
+        "overrides": {...}, "global_refs": {...}}`, for the per-step fold.
+        `overrides` is what this workflow set on top, already
+        template-expanded so a field shows the value the run would really
+        use, and keyed by the step's `id:` — which is the whole point: the
+        two `brush` trainings in fast_helical_native get their own section
+        and their own controls.
     """
     from .cli import resolve_workflow
     from .registry import get_step_class
     from .templating import global_ref, resolve
 
     spec = WorkflowSpec.from_yaml(resolve_workflow(name))
-    globals_shown = {k: v for k, v in spec.globals.items() if k not in HIDDEN_GLOBALS}
 
     scope = {"globals": spec.globals}
     steps: List[Dict[str, Any]] = []
@@ -259,8 +231,8 @@ def workflow_param_panel(name: str) -> tuple[Dict[str, Any], List[Dict[str, Any]
             "overrides": resolve(step.params, scope),
             # Params this step reads verbatim from a workflow global
             # ({param: "resolution"} etc.). The panel omits these entirely —
-            # their one home is the Globals control. A read-only mirror was
-            # worse: it did not track edits to the global, so it just read as
+            # their one home is the Settings control. A read-only mirror was
+            # worse: it did not track edits to the setting, so it just read as
             # a stale, contradictory second value (f4dca77).
             "global_refs": {
                 pname: ref
@@ -268,34 +240,32 @@ def workflow_param_panel(name: str) -> tuple[Dict[str, Any], List[Dict[str, Any]
                 if pname in declared and (ref := global_ref(raw)) is not None
             },
         })
-    return globals_shown, steps
+    return spec, list(spec.settings), list(spec.outputs), steps
 
 
 # A string default long enough (or with a line break in it) that a one-line
 # box is unusable — the denoise prompts are the case this exists for.
 _MULTILINE_AT = 80
 
-# The `resolution` global is a [width, height] pair, and only a handful of
-# pairs are usable — each has to match a size the denoise model was trained
-# for. A dropdown of those beats the free-form list box `_widget_for` would
-# otherwise draw, which can be typed into a shape no step supports.
-RESOLUTION_CHOICES = [[720, 1280], [600, 1040], [480, 832]]
 
-# Globals that are free-form YAML values but really have a fixed choice set —
-# the one the step param they feed declares. Without this the panel draws a
-# bare text box for them (a global is not a declared Param), which can be
-# typed into a value no step accepts. `framing` feeds render/render_splat's
-# `framing` param; keep this list in step with those `choices=`.
-GLOBAL_CHOICES = {"framing": ("full", "torso", "bust", "head")}
+def _choice_label(value: Any) -> str:
+    """How one entry of a param's `choices` reads in a dropdown.
 
-
-def _res_label(pair: Any) -> str:
-    return f"{pair[0]}x{pair[1]}"
+    Gradio's choices have to be scalars, and a declared choice may not be:
+    `resolution` picks between [width, height] pairs. Rendering a sequence
+    as "720 x 1280" and mapping the label back to the value it came from
+    (`_choice_map`) keeps that generic — this used to be a hardcoded
+    RESOLUTION_CHOICES list plus a parser for its own label format, which
+    only worked for the one setting it was written for.
+    """
+    if isinstance(value, (list, tuple)):
+        return " x ".join(str(item) for item in value)
+    return str(value)
 
 
-def _res_value(label: str) -> List[int]:
-    width, height = str(label).lower().split("x")
-    return [int(width), int(height)]
+def _choice_map(param: Param) -> Dict[str, Any]:
+    """{label -> the value that label stands for} for a param's choices."""
+    return {_choice_label(choice): choice for choice in param.choices}
 
 
 def _widget_for(param: Param, value: Any, label: str, key: str):
@@ -332,16 +302,29 @@ def _widget_for(param: Param, value: Any, label: str, key: str):
             value=value, label=label, info=info,
             precision=0 if param.type is int else None, interactive=True, key=key,
         )
+    # Choices are checked before `type`, so a list-typed setting that
+    # declares them (resolution) gets a dropdown rather than a YAML box a
+    # user can type an unsupported shape into.
+    if param.choices:
+        labels = list(_choice_map(param))
+        current = _choice_label(value) if value is not None else None
+        if current is not None and current not in labels:
+            # A workflow set something outside its own choice list. Show it
+            # rather than silently snapping the control to another value.
+            labels = [current, *labels]
+        return gr.Dropdown(
+            choices=labels, value=current, label=label, info=info,
+            # A scalar choice list is a suggestion — a step param can take a
+            # value nobody thought to list. A non-scalar one is not: there is
+            # no sane way to type "[720, 1280]" into a dropdown.
+            allow_custom_value=param.type is not list,
+            interactive=True, key=key,
+        )
     if param.type is list:
         return gr.Textbox(
             value=yaml.safe_dump(value, default_flow_style=True).strip(),
             label=label, info=(info + " (YAML list)") if info else "YAML list",
             interactive=True, key=key,
-        )
-    if param.choices:
-        return gr.Dropdown(
-            choices=list(param.choices), value=value, label=label, info=info,
-            allow_custom_value=True, interactive=True, key=key,
         )
     text = value if isinstance(value, str) else ""
     multiline = "\n" in text or len(text) > _MULTILINE_AT
@@ -354,10 +337,19 @@ def _widget_for(param: Param, value: Any, label: str, key: str):
 def _widget_value(param: Param, raw: Any) -> Any:
     """Bring a widget's value back to the param's declared type.
 
-    Only the list case needs real work — a list arrives as YAML text. The
-    rest is left to `Step.resolve_params`, which coerces at run time
-    anyway; doing it twice would just mean two places to disagree.
+    Two cases need real work: a dropdown hands back the label it drew, not
+    the value behind it, and a list arrives as YAML text. The rest is left
+    to `Step.resolve_params` and `WorkflowSpec.coerce_global`, which coerce
+    at run time anyway; doing it twice would just mean two places to
+    disagree.
     """
+    if param.choices:
+        mapping = _choice_map(param)
+        if raw in mapping:
+            return mapping[raw]
+        # `allow_custom_value` lets someone type a value that is not on the
+        # list. Fall through to the type handling below so it is still
+        # brought to the right shape.
     if param.type is list:
         try:
             parsed = yaml.safe_load(raw) if isinstance(raw, str) else raw
@@ -486,26 +478,50 @@ def save_upload(path: str, prefix: str) -> Path:
     return destination
 
 
-def result_dirs(run_dir: Optional[Path]) -> Dict[str, Path]:
+def result_subdirs(workflow: str = "") -> List[str]:
+    """The `dir:` of every output the named workflow declares.
+
+    With no name — an older run whose status.json predates this, or one
+    whose workflow file has since been renamed — the union across every
+    shipped workflow, so a finished run is still packaged rather than
+    reported as empty.
+    """
+    from .cli import available_workflows, resolve_workflow
+
+    paths = [resolve_workflow(workflow)] if workflow else available_workflows()
+    names: List[str] = []
+    for path in paths:
+        try:
+            spec = WorkflowSpec.from_yaml(path)
+        except (OSError, ValueError, KeyError):
+            continue
+        for directory in spec.output_dirs().values():
+            if directory not in names:
+                names.append(directory)
+    return names
+
+
+def result_dirs(run_dir: Optional[Path], workflow: str = "") -> Dict[str, Path]:
     """The deliverable subdirectories this run actually produced.
 
     Keyed by the name they take inside the archive, which is the same name
-    they have on disk — `colmap/`, `colmap_intermediate/`,
-    `colmap_preupscale/`, `ply/`, written there by the workflow's own export
-    steps via `output_root`.
+    they have on disk — `colmap/`, `ply/` and the debug exports beside them,
+    written there by the workflow's own export steps via `output_root`. The
+    names come from the workflow's `outputs:` block, so a workflow that adds
+    a deliverable is packaged correctly without touching this module.
     """
     if not run_dir:
         return {}
     root = Path(run_dir)
     found = {}
-    for name in RESULT_SUBDIRS:
+    for name in result_subdirs(workflow):
         candidate = root / name
         if candidate.is_dir() and any(candidate.rglob("*")):
             found[name] = candidate
     return found
 
 
-def build_result_zip(run_dir: Optional[Path]) -> Optional[str]:
+def build_result_zip(run_dir: Optional[Path], workflow: str = "") -> Optional[str]:
     """One archive holding only the deliverables: colmap/ and/or ply/.
 
     Not `shutil.make_archive` over the whole run directory, which is what
@@ -516,7 +532,7 @@ def build_result_zip(run_dir: Optional[Path]) -> Optional[str]:
     top level was a b2c dataset rather than anything COLMAP-shaped, and
     left the person on the other end to work out which parts mattered.
     """
-    directories = result_dirs(run_dir)
+    directories = result_dirs(run_dir, workflow)
     if not directories:
         return None
 
@@ -682,66 +698,23 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
                         info="Fills $SUBJECT_DESC$ in the denoise prompt. The "
                              "fallback when a pair's .txt is missing or empty.",
                     )
-                    default_outputs = workflow_outputs(default_workflow)
-                    outputs_in = gr.CheckboxGroup(
-                        choices=default_outputs,
-                        value=default_outputs,
-                        label="Outputs",
-                        info="What the run produces, and what the Results tab's "
-                             ".zip contains. Unchecking the .ply skips a whole "
-                             "30,000-iteration brush training.",
-                        visible=bool(default_outputs),
-                    )
-                    upscale_in = gr.Checkbox(
-                        value=True, label="Upscale dataset",
-                        info="Run the SeedVR2 upscale (720x1280 -> 1080x1920) "
-                             "before the export. Off = the shorter pipeline that "
-                             "used to be a separate workflow.",
-                    )
-                    preupscale_colmap_in = gr.Checkbox(
-                        value=False, label="Pre-upscale COLMAP dataset (debug)",
-                        info="Also export colmap_preupscale/ from the frames as "
-                             "they are before the upscale, to compare splat "
-                             "quality with and without it. Ignored unless "
-                             "'Upscale dataset' is on.",
-                    )
-                    intermediate_colmap_in = gr.Checkbox(
-                        value=False, label="Intermediate COLMAP dataset (debug)",
-                        info="Also export colmap_intermediate/ — the dataset the "
-                             "FIRST brush training is handed, i.e. the denoised "
-                             "frames with their mattes and normals, before the "
-                             "splat is re-rendered along the helical orbit and "
-                             "denoised again. What that training actually saw.",
-                    )
-                    with gr.Row():
-                        start_btn = gr.Button("Start run", variant="primary")
-                        cancel_btn = gr.Button("Cancel", variant="stop")
-                with gr.Column(scale=1):
-                    summary_out = gr.Markdown(workflow_summary(default_workflow))
-
                     # Only what the user actually changed, in the two
                     # namespaces a run resolves: {"globals": {...},
                     # "steps": {step_id: {...}}}. Everything untouched stays
                     # owned by the workflow file and the step defaults,
-                    # which is what keeps output_root's repoint working (see
-                    # HIDDEN_GLOBALS) and what makes "reset" mean something.
+                    # which is what keeps output_root's repoint working and
+                    # what makes "reset" mean something.
                     param_state = gr.State({"globals": {}, "steps": {}})
 
-                    def _record(scope: str, key: str, param, baseline, step_id="",
-                                coerce=None):
+                    def _record(scope: str, key: str, param, baseline, step_id=""):
                         """A .change() handler that files one widget's value.
 
                         A value equal to what the panel was drawn with is
                         *removed* rather than stored, so nudging a control
                         and putting it back leaves nothing pinned.
-
-                        `coerce` overrides how the raw widget value is brought
-                        back to the param's type — the resolution dropdown
-                        hands back a "720x1280" label, not the [w, h] list the
-                        workflow wants.
                         """
                         def handler(raw, state):
-                            value = coerce(raw) if coerce is not None else _widget_value(param, raw)
+                            value = _widget_value(param, raw)
                             state = {
                                 "globals": dict(state.get("globals", {})),
                                 "steps": {k: dict(v) for k, v in state.get("steps", {}).items()},
@@ -757,104 +730,151 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
                             return state
                         return handler
 
-                    @gr.render(inputs=[workflow_in])
-                    def render_params(name):
-                        globals_shown, step_entries = workflow_param_panel(name)
-
-                        with gr.Accordion("Globals", open=True):
-                            if not globals_shown:
-                                gr.Markdown("_This workflow declares no globals._")
-                            for key, value in globals_shown.items():
-                                if key == "resolution":
-                                    baseline = (
-                                        list(value)
-                                        if isinstance(value, (list, tuple)) else value
-                                    )
-                                    choices = [_res_label(p) for p in RESOLUTION_CHOICES]
-                                    current = (
-                                        _res_label(value)
-                                        if isinstance(value, (list, tuple)) and len(value) == 2
-                                        else None
-                                    )
-                                    if current and current not in choices:
-                                        choices = [current, *choices]
-                                    widget = gr.Dropdown(
-                                        choices=choices, value=current, label=key,
-                                        info="Frame size, width x height. Every step "
-                                             "that resizes reads this; only sizes the "
-                                             "denoise model supports are offered.",
-                                        interactive=True, key=f"{name}:globals:resolution",
-                                    )
-                                    widget.change(
-                                        _record(
-                                            "globals", key, None, baseline,
-                                            coerce=lambda raw: (
-                                                _res_value(raw) if raw else baseline
-                                            ),
-                                        ),
-                                        inputs=[widget, param_state], outputs=[param_state],
-                                    )
-                                    continue
-                                # A workflow's globals are free-form values,
-                                # not declared Params, so the widget is
-                                # picked from the value's own Python type —
-                                # plus a fixed choice set for the few globals
-                                # that mirror a step param's `choices`.
-                                pseudo = Param(
-                                    name=key, type=type(value), default=value,
-                                    choices=GLOBAL_CHOICES.get(key, ()),
-                                )
-                                widget = _widget_for(
-                                    pseudo, value, key,
-                                    key=f"{name}:globals:{key}",
-                                )
-                                widget.change(
-                                    _record("globals", key, pseudo, value),
-                                    inputs=[widget, param_state], outputs=[param_state],
-                                )
-
-                        for entry in step_entries:
-                            label = f"{entry['id']}  ({entry['step']})"
-                            with gr.Accordion(label, open=False):
-                                # Params wired to a global are dropped, not
-                                # drawn read-only: the mirror never tracked the
-                                # Globals control, so it only ever added a
-                                # stale, confusing second value.
-                                refs = entry["global_refs"]
-                                plain = [p for p in entry["params"]
-                                         if not p.advanced and p.name not in refs]
-                                advanced = [p for p in entry["params"]
-                                            if p.advanced and p.name not in refs]
-
-                                def draw(param):
-                                    overridden = param.name in entry["overrides"]
-                                    value = (
-                                        entry["overrides"][param.name] if overridden
-                                        else param.default
-                                    )
-                                    mark = " •" if overridden else ""
-                                    widget = _widget_for(
-                                        param, value, param.name + mark,
-                                        key=f"{name}:steps:{entry['id']}:{param.name}",
-                                    )
-                                    widget.change(
-                                        _record("steps", param.name, param, value, entry["id"]),
-                                        inputs=[widget, param_state], outputs=[param_state],
-                                    )
-
-                                for param in plain:
-                                    draw(param)
-                                if advanced:
-                                    with gr.Accordion("Advanced", open=False):
-                                        for param in advanced:
-                                            draw(param)
-
-                        gr.Markdown(
-                            "_A dot marks a param the workflow sets; the rest show the "
-                            "step's own default. Params wired to a global are set in "
-                            "Globals and not shown here. Advanced holds the knobs that "
-                            "exist because the underlying library has them._"
+                    def _control(param, value, key, scope, step_id=""):
+                        """Draw one param and wire it to `param_state`."""
+                        widget = _widget_for(param, value, param.title, key=key)
+                        widget.change(
+                            _record(scope, param.name, param, value, step_id),
+                            inputs=[widget, param_state], outputs=[param_state],
                         )
+                        return widget
+
+                    # The two boxes a person actually uses, both drawn from
+                    # the workflow's own `settings:` and `outputs:` blocks.
+                    # The 300-odd per-step knobs live in the other column,
+                    # behind one fold.
+                    @gr.render(inputs=[workflow_in])
+                    def render_settings(name):
+                        spec, settings, outputs, _steps = workflow_param_panel(name)
+                        values = spec.globals
+
+                        in_outputs = [s for s in settings if s.group == "outputs"]
+                        plain = [s for s in settings
+                                 if s.group != "outputs" and not s.advanced]
+                        advanced = [s for s in settings
+                                    if s.group != "outputs" and s.advanced]
+
+                        def draw(param):
+                            return _control(
+                                param, values.get(param.name, param.default),
+                                f"{name}:globals:{param.name}", "globals",
+                            )
+
+                        with gr.Accordion("Settings", open=True):
+                            if not plain and not advanced:
+                                gr.Markdown("_This pipeline declares no settings._")
+                            for param in plain:
+                                draw(param)
+                            if advanced:
+                                with gr.Accordion("More settings", open=False):
+                                    for param in advanced:
+                                        draw(param)
+
+                        with gr.Accordion("Outputs", open=True):
+                            if not outputs:
+                                gr.Markdown("_This pipeline declares no outputs._")
+                            # A setting in the outputs group is drawn first:
+                            # it modifies the deliverables rather than the
+                            # run (the SeedVR2 upscale is the case), and the
+                            # checkboxes below can depend on it.
+                            widgets = {param.name: draw(param) for param in in_outputs}
+                            for output in outputs:
+                                param = output.as_param()
+                                required = (
+                                    values.get(output.requires)
+                                    if output.requires else True
+                                )
+                                widgets[output.name] = _control(
+                                    param, values.get(output.name, output.default),
+                                    f"{name}:globals:{output.name}", "globals",
+                                )
+                                if output.requires:
+                                    widgets[output.name].interactive = truthy(required)
+
+                            # `requires:` in the UI: a deliverable that is
+                            # only meaningful alongside another setting
+                            # follows that setting's control. The run-side
+                            # half of the same rule is `resolve_outputs`,
+                            # which forces it off whatever the panel says.
+                            for output in outputs:
+                                source = widgets.get(output.requires)
+                                if source is None:
+                                    continue
+                                source.change(
+                                    lambda on: gr.update(interactive=truthy(on)),
+                                    inputs=[source], outputs=[widgets[output.name]],
+                                )
+
+                            gr.Markdown(
+                                "_What the run produces, and what the Results tab's "
+                                ".zip contains. Each box switches its export steps "
+                                "off entirely — unticking the .ply skips a whole "
+                                "30,000-iteration brush training._"
+                            )
+
+                    with gr.Row():
+                        start_btn = gr.Button("Start run", variant="primary")
+                        cancel_btn = gr.Button("Cancel", variant="stop")
+                with gr.Column(scale=1):
+                    summary_out = gr.Markdown(workflow_summary(default_workflow))
+
+                    # Everything the pipeline did not promote to a setting:
+                    # one accordion per step, each holding that step's own
+                    # declared params. Folded away by default and folded
+                    # again inside — this is ~300 controls, and the reason
+                    # the Settings and Outputs boxes exist.
+                    with gr.Accordion("Per-step settings", open=False):
+                        gr.Markdown(
+                            "_The knobs the pipeline does not expose. A dot marks "
+                            "one the workflow sets; the rest show the step's own "
+                            "default. A param wired to a pipeline setting is not "
+                            "shown here — its one home is the Settings box. "
+                            "Advanced holds the knobs that exist because the "
+                            "underlying library has them._"
+                        )
+
+                        @gr.render(inputs=[workflow_in])
+                        def render_steps(name):
+                            _spec, _settings, _outputs, step_entries = (
+                                workflow_param_panel(name)
+                            )
+                            for entry in step_entries:
+                                label = f"{entry['id']}  ({entry['step']})"
+                                with gr.Accordion(label, open=False):
+                                    # Params wired to a setting are dropped, not
+                                    # drawn read-only: the mirror never tracked
+                                    # the Settings control, so it only ever added
+                                    # a stale, confusing second value.
+                                    refs = entry["global_refs"]
+                                    plain = [p for p in entry["params"]
+                                             if not p.advanced and p.name not in refs]
+                                    advanced = [p for p in entry["params"]
+                                                if p.advanced and p.name not in refs]
+
+                                    def draw(param, entry=entry, name=name):
+                                        overridden = param.name in entry["overrides"]
+                                        value = (
+                                            entry["overrides"][param.name] if overridden
+                                            else param.default
+                                        )
+                                        widget = _widget_for(
+                                            param, value,
+                                            param.title + (" •" if overridden else ""),
+                                            key=f"{name}:steps:{entry['id']}:{param.name}",
+                                        )
+                                        widget.change(
+                                            _record("steps", param.name, param, value,
+                                                    entry["id"]),
+                                            inputs=[widget, param_state],
+                                            outputs=[param_state],
+                                        )
+
+                                    for param in plain:
+                                        draw(param)
+                                    if advanced:
+                                        with gr.Accordion("Advanced", open=False):
+                                            for param in advanced:
+                                                draw(param)
 
         with gr.Tab("Progress"):
             status_out = gr.Markdown(_format_status(RunState()))
@@ -928,8 +948,7 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
             doctor_out = gr.Code(label="Report", lines=30)
 
         # -- wiring --------------------------------------------------------
-        def on_start(upload_file, prompt, params, selected_outputs,
-                     upscale, preupscale_colmap, intermediate_colmap):
+        def on_start(upload_file, prompt, params):
             params = params or {}
             global_overrides = dict(params.get("globals", {}))
             step_overrides = {k: dict(v) for k, v in params.get("steps", {}).items()}
@@ -943,13 +962,6 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
             plan = resolve_upload(path, prompt or "")
             workflow = WORKFLOW_NATIVE
 
-            # run_upscale + the three deliverable switches, with the
-            # pre-upscale-COLMAP rules folded in. Raises if nothing exports.
-            global_overrides.update(resolve_output_globals(
-                selected_outputs, bool(upscale), bool(preupscale_colmap),
-                bool(intermediate_colmap),
-            ))
-
             from .cli import resolve_workflow
 
             workflow_path = resolve_workflow(workflow)
@@ -961,6 +973,14 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
             # overrides are identical across a fanned-out batch, so one
             # check covers every job it produces.
             apply_ui_overrides(spec, global_overrides, step_overrides)
+            # The deliverable switches, with every `requires:` applied and
+            # "exports nothing" refused. Written back into both the spec (so
+            # `validate` and the step list see the run that will actually
+            # happen) and the overrides (so the worker, which re-reads the
+            # pristine YAML, reaches the same answer).
+            forced = resolve_outputs(spec)
+            global_overrides.update(forced)
+            spec.globals.update(forced)
             spec.validate()
 
             fanned_out = len(plan) > 1
@@ -1029,8 +1049,7 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
 
         start_btn.click(
             on_start,
-            inputs=[upload_in, prompt_in, param_state, outputs_in,
-                    upscale_in, preupscale_colmap_in, intermediate_colmap_in],
+            inputs=[upload_in, prompt_in, param_state],
             outputs=[run_picker],
         ).then(stream, inputs=[run_picker], outputs=progress_outputs)
 
@@ -1049,7 +1068,7 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
             if not directory or not Path(directory).exists():
                 return "No output directory yet — pick or start a run first.", [], None
 
-            directories = result_dirs(Path(directory))
+            directories = result_dirs(Path(directory), state.workflow)
             if not directories:
                 # Distinguish "still running" from "ran and produced nothing":
                 # the second means the export steps were switched off or
@@ -1059,9 +1078,11 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
                     if state.status in ("queued", "running")
                     else "the run produced neither; check the Progress tab's step list"
                 )
+                wanted = ", ".join(
+                    f"`{sub}/`" for sub in result_subdirs(state.workflow)
+                ) or "any deliverable"
                 return (
-                    f"### `{directory}`\n\nNo `colmap/`, `colmap_intermediate/`, "
-                    f"`colmap_preupscale/` or `ply/` here yet — {note}.",
+                    f"### `{directory}`\n\nNo {wanted} here yet — {note}.",
                     gallery_images(directory),
                     None,
                 )
@@ -1072,7 +1093,7 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
                 size = sum(f.stat().st_size for f in files)
                 lines.append(f"- **`{name}/`** — {len(files)} files, {size / 1e9:.2f} GB")
 
-            archive = build_result_zip(Path(directory))
+            archive = build_result_zip(Path(directory), state.workflow)
             info = (
                 f"### `{directory}`\n\nThe .zip below contains:\n\n"
                 + "\n".join(lines)

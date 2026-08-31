@@ -37,13 +37,15 @@ project owner:
    service, or inside a Docker container. Swapping a step's execution
    mechanism is a one-line YAML edit, not a code change.
 2. **Research-project flexibility** — workflows are human-edited YAML, not
-   code. Parameters live in two namespaces: a `globals:` block for what the
-   whole flow has to agree on (resolution, seed, prompts, output root),
-   templated into steps as `${globals.x}`, and a per-step block that
-   overrides the defaults the Step class itself declares. Trying a new
-   resolution or step count doesn't require touching Python, and two calls
-   of the same step can be configured apart because a step's params are
-   namespaced under its `id:`.
+   code. A workflow declares the form it wants: a `settings:` block of
+   typed, labelled knobs and an `outputs:` block of deliverables, which is
+   literally what the web UI draws. Those, plus a bare `globals:` block for
+   plumbing with no control, share one namespace that steps read as
+   `${globals.x}`; everything else is a per-step block overriding the
+   defaults the Step class itself declares. Trying a new resolution or step
+   count doesn't require touching Python — nor does promoting a step's knob
+   to the UI — and two calls of the same step can be configured apart
+   because a step's params are namespaced under its `id:`.
 3. **In-memory by default** — datasets pass between steps as plain Python
    objects in a shared `Context`. Nothing touches disk unless a workflow
    explicitly includes a `save_dataset` step. This is a deliberate reversal
@@ -69,7 +71,9 @@ pipeline/
 ├── registry.py         @register_step("name") / get_step_class("name")
 ├── context.py          Context: dotted-path get/set over a dict of objects
 ├── templating.py       "${a.b.c}" resolution against a workflow's globals
-├── workflow.py         StepSpec / WorkflowSpec — the YAML schema; load_envs()
+├── workflow.py         StepSpec / WorkflowSpec — the YAML schema, including
+│                      the settings:/outputs: declarations the UI is drawn
+│                      from; load_envs()
 ├── runner.py           WorkflowRunner — walks a WorkflowSpec, resolves &
 │                      caches dispatchers, moves outputs back into Context
 ├── worker.py            Entry point run *inside* an isolated venv/container
@@ -247,9 +251,10 @@ step computes it at runtime (`device`, resolved to cuda-if-available inside
 that a knob which exists because the underlying library has one, rather than
 because this pipeline tunes it, is advanced.
 
-`python -m pipeline.cli params <workflow>` prints the effective value of
-every param in a workflow, defaults included, which is the fastest way to
-see what a run will actually use.
+`python -m pipeline.cli params <workflow>` prints the workflow's settings and
+outputs — the same form the web UI draws — then the effective value of every
+step param, defaults included with `--all`. The fastest way to see what a run
+will actually use.
 
 `load(params)` / `unload()` are optional hooks for steps that hold expensive
 state (GPU weights). They're only exercised by dispatchers that keep an
@@ -308,10 +313,31 @@ in-memory between steps; disk only enters the picture via a `save_dataset`/
 
 ```yaml
 name: fast_helical_native
-globals:                     # flow-wide knobs, referenced via ${globals.x}
-  resolution: [720, 1280]    # the render size, and wan22_vace_denoise's w/h
+
+settings:                    # the knobs the web UI draws, in this order
+  - name: resolution
+    label: Resolution        # what the control is called; defaults to `name`
+    type: list               # str | int | float | bool | list; inferred if omitted
+    default: [720, 1280]
+    choices: [[720, 1280], [600, 1040]]
+    help: Frame size, width x height.
+    # also: minimum / maximum (a slider), advanced (behind "More settings"),
+    # group: outputs (drawn in the Outputs box instead of Settings)
+
+outputs:                     # the deliverables, and the switch each one is
+  - name: export_ply         # the global its export steps read via `when:`
+    label: Trained .ply
+    dir: ply                 # where it lands under output_root
+    default: true
+    help: A second, normal-supervised brush training.
+  - name: export_colmap_preupscale
+    label: Pre-upscale COLMAP dataset
+    dir: colmap_preupscale
+    default: false
+    requires: run_upscale    # forced off, and its checkbox disabled, without it
+
+globals:                     # plumbing with no control of its own
   output_root: output/fast_helical_native
-  export_ply: true
 
 steps:
   - id: denoise               # unique within the workflow; also the params namespace
@@ -333,10 +359,27 @@ steps:
     when: ${globals.export_ply}  # optional; skip this step when falsy
 ```
 
-**The two namespaces.** `globals:` is for what two or more steps must agree
-on, and it is the only scope `${...}` resolves against. Everything else
-belongs under the step that consumes it, where it overrides the default that
-step's class declares — so a param absent from the file is not unset, it is
+**One namespace, three declarations.** A `settings:` entry, an `outputs:`
+entry and a bare `globals:` key all land in one flat namespace — the only
+scope `${...}` resolves against, and the only thing `--param x=y` and the web
+UI's overrides address. A name declared twice is refused at load. What
+separates them is only what the UI is told:
+
+| block | what it is | drawn as |
+|---|---|---|
+| `settings:` | a knob, declared as a `Param` (same vocabulary as a step param) | a control in the **Settings** box, or the **Outputs** box with `group: outputs`, or behind *More settings* with `advanced: true` |
+| `outputs:` | a deliverable: its switch, its `dir:`, and an optional `requires:` | a checkbox in the **Outputs** box |
+| `globals:` | plumbing (`output_root`) | nothing — undeclared means undrawable, which is what keeps `output_root`'s repoint safe |
+
+A setting reaches the steps as `${globals.<name>}` written at each step that
+reads it — the reference lives where the value is consumed, so it is
+greppable from the step end, and `templating.global_ref` uses it to drop the
+step-level duplicate from the per-step panel so the setting keeps one
+editable home. `validate()` refuses a setting nothing reads, since that is a
+control which silently does nothing.
+
+Everything else belongs under the step that consumes it, where it overrides
+the default that step's class declares — so a param absent from the file is not unset, it is
 at its declared default. That split is what lets one workflow call the same
 step twice and configure the two calls apart: `fast_helical_native.yaml` trains
 `brush` twice (`train_splat`, `train_final_splat`) and denoises twice
@@ -367,10 +410,10 @@ leaves it out, so the model prefetch does not block on a checkpoint only
 that step needs. The runner still reports it, as `step_skipped` at its own
 index, so a step list built from the YAML lines up with the run.
 
-The case it exists for is the two deliverables both `fast_helical`
-workflows end with (the `export_colmap` / `export_ply` globals): the .ply is a full
-30,000-iteration brush training, and starting one you are going to discard
-is an hour of GPU. `false`, `no`, `off`, `0` and the empty string are all
+The case it exists for is the deliverables both `fast_helical` workflows end
+with — the `outputs:` block above, whose switches are exactly these `when:`
+conditions: the .ply is a full 30,000-iteration brush training, and starting
+one you are going to discard is an hour of GPU. `false`, `no`, `off`, `0` and the empty string are all
 falsy as *strings* too — a `when:` usually resolves through a param
 somebody typed, and `bool("false")` is `True`.
 

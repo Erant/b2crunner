@@ -1030,3 +1030,174 @@ class TestIncompatibleSteps(unittest.TestCase):
         spec.globals["fix_head"] = True
         with self.assertRaises(ValueError):
             spec.validate()
+
+
+class TestDeclaredSettings(unittest.TestCase):
+    """The `settings:` and `outputs:` blocks, which are the whole UI.
+
+    The web UI holds no table of a workflow's knobs any more: it draws what
+    these declare. So a mistake here is a mistake on the form, and the point
+    of every check below is that it fires at load rather than at submit or
+    forty minutes into a pod run.
+    """
+
+    def _write(self, body: str) -> str:
+        import os
+        import tempfile
+
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as handle:
+            handle.write(body)
+            path = handle.name
+        self.addCleanup(os.unlink, path)
+        return path
+
+    def test_every_shipped_workflow_declares_its_form(self):
+        for path in _workflows():
+            spec = WorkflowSpec.from_yaml(str(path))
+            with self.subTest(workflow=path.name):
+                self.assertTrue(spec.settings, "no settings: block")
+                self.assertTrue(spec.outputs, "no outputs: block")
+                for param in spec.settings:
+                    self.assertTrue(param.help, f"{param.name} has no help")
+                for output in spec.outputs:
+                    self.assertTrue(output.label and output.help and output.directory)
+
+    def test_resolution_and_framing_are_pipeline_settings(self):
+        """The two knobs the pipeline exists to let somebody turn. Both were
+        bare globals the UI had to carry a hardcoded choice list for."""
+        for path in _workflows():
+            spec = WorkflowSpec.from_yaml(str(path))
+            by_name = {p.name: p for p in spec.settings}
+            with self.subTest(workflow=path.name):
+                self.assertEqual(by_name["resolution"].type, list)
+                self.assertIn([720, 1280], by_name["resolution"].choices)
+                self.assertEqual(
+                    tuple(by_name["framing"].choices),
+                    ("full", "torso", "bust", "head"),
+                )
+
+    def test_a_settings_choice_set_matches_the_step_param_it_feeds(self):
+        """`framing` reaches `render` as `${globals.framing}`, so the two
+        choice lists have to be the same list. They used to be two — one in
+        the step class, one in a GLOBAL_CHOICES dict in webui.py with a
+        comment asking the next person to keep them in step."""
+        from pipeline.registry import get_step_class
+
+        render_choices = get_step_class("render").declared_params()["framing"].choices
+        for path in _workflows():
+            spec = WorkflowSpec.from_yaml(str(path))
+            framing = next(p for p in spec.settings if p.name == "framing")
+            with self.subTest(workflow=path.name):
+                self.assertEqual(tuple(framing.choices), tuple(render_choices))
+
+    def test_the_outputs_dirs_are_the_ones_the_export_steps_write(self):
+        """`dir:` is what packages a finished run, so it has to be the
+        directory the step gated by that output actually writes under
+        output_root."""
+        for path in _workflows():
+            spec = WorkflowSpec.from_yaml(str(path))
+            written = resolve(
+                [step.params for step in spec.steps], {"globals": spec.globals}
+            )
+            blob = repr(written)
+            root = spec.globals["output_root"]
+            for output in spec.outputs:
+                with self.subTest(workflow=path.name, output=output.name):
+                    self.assertIn(f"{root}/{output.directory}", blob)
+
+    def test_a_setting_nothing_reads_is_refused(self):
+        path = self._write(
+            "name: orphan\n"
+            "settings:\n"
+            "  - name: unused\n    default: 3\n    help: nothing reads me\n"
+            "steps:\n"
+            "  - id: a\n    step: rmbg\n    dispatch: in_process\n"
+        )
+        with self.assertRaises(ValueError) as caught:
+            WorkflowSpec.from_yaml(path).validate()
+        self.assertIn("unused", str(caught.exception))
+
+    def test_a_name_declared_twice_is_refused(self):
+        path = self._write(
+            "name: clash\n"
+            "settings:\n"
+            "  - name: run_it\n    default: true\n    help: x\n"
+            "globals:\n  run_it: false\n"
+            "steps:\n"
+            "  - id: a\n    step: rmbg\n    dispatch: in_process\n"
+            "    when: ${globals.run_it}\n"
+        )
+        with self.assertRaises(ValueError) as caught:
+            WorkflowSpec.from_yaml(path)
+        self.assertIn("one home", str(caught.exception))
+
+    def test_a_default_outside_its_own_choices_is_refused(self):
+        path = self._write(
+            "name: badchoice\n"
+            "settings:\n"
+            "  - name: mode\n    default: sideways\n    help: x\n"
+            "    choices: [up, down]\n"
+            "steps:\n"
+            "  - id: a\n    step: rmbg\n    dispatch: in_process\n"
+            "    params:\n      device: ${globals.mode}\n"
+        )
+        with self.assertRaises(ValueError) as caught:
+            WorkflowSpec.from_yaml(path).validate()
+        self.assertIn("choices", str(caught.exception))
+
+    def test_a_default_that_does_not_fit_its_type_is_refused(self):
+        path = self._write(
+            "name: badtype\n"
+            "settings:\n"
+            "  - name: count\n    type: int\n    default: many\n    help: x\n"
+            "steps:\n"
+            "  - id: a\n    step: rmbg\n    dispatch: in_process\n"
+            "    params:\n      batch_size: ${globals.count}\n"
+        )
+        with self.assertRaises(ValueError) as caught:
+            WorkflowSpec.from_yaml(path).validate()
+        self.assertIn("count", str(caught.exception))
+
+    def test_an_output_requiring_something_undeclared_is_refused(self):
+        path = self._write(
+            "name: badreq\n"
+            "outputs:\n"
+            "  - name: export_thing\n    dir: thing\n    label: Thing\n"
+            "    requires: no_such_setting\n"
+            "steps:\n"
+            "  - id: a\n    step: rmbg\n    dispatch: in_process\n"
+            "    when: ${globals.export_thing}\n"
+        )
+        with self.assertRaises(ValueError) as caught:
+            WorkflowSpec.from_yaml(path).validate()
+        self.assertIn("no_such_setting", str(caught.exception))
+
+    def test_an_output_with_no_dir_is_refused(self):
+        path = self._write(
+            "name: nodir\n"
+            "outputs:\n  - name: export_thing\n    label: Thing\n"
+            "steps:\n  - id: a\n    step: rmbg\n    dispatch: in_process\n"
+        )
+        with self.assertRaises(ValueError) as caught:
+            WorkflowSpec.from_yaml(path)
+        self.assertIn("dir", str(caught.exception))
+
+    def test_a_settings_value_is_coerced_the_way_a_step_param_is(self):
+        """`--param run_upscale=no` and a text box both hand over strings,
+        and `bool("no")` is True."""
+        spec = WorkflowSpec.from_yaml(str(WORKFLOW_DIR / "fast_helical_native.yaml"))
+        self.assertIs(spec.coerce_global("run_upscale", "no"), False)
+        self.assertEqual(spec.coerce_global("seed", "7"), 7)
+        # An undeclared global has no type to be brought to.
+        self.assertEqual(spec.coerce_global("output_root", 3), 3)
+
+    def test_one_seed_reaches_every_stochastic_step(self):
+        """It was three step params holding 0, 0 and 42 — one run drawing
+        three unrelated samples."""
+        for path in _workflows():
+            spec = WorkflowSpec.from_yaml(str(path))
+            readers = [step.id for step in spec.steps
+                       if step.params.get("seed") == "${globals.seed}"]
+            with self.subTest(workflow=path.name):
+                self.assertEqual(len(readers), 3, readers)
+                self.assertTrue(any("upscale" in r for r in readers))

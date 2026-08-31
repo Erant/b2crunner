@@ -1,10 +1,22 @@
 """Workflow YAML schema and loader.
 
-Two parameter namespaces, and the split is the point:
+A workflow declares what a person can set and what they can ask for, and
+wires the rest itself:
 
     name: fast_helical
-    globals:                          # affects the whole flow
-      resolution: [720, 1280]
+    settings:                         # the knobs the UI draws, in order
+      - name: resolution
+        label: Resolution
+        type: list
+        default: [720, 1280]
+        choices: [[720, 1280], [600, 1040]]
+        help: Frame size, width x height.
+    outputs:                          # the deliverables, and their switches
+      - name: export_ply
+        label: Trained .ply
+        dir: ply
+        default: true
+    globals:                          # plumbing with no control of its own
       output_root: output/fast_helical
     steps:
       - id: denoise
@@ -22,14 +34,41 @@ Two parameter namespaces, and the split is the point:
           denoised: dataset.images    # written back into the shared Context
         when: ${globals.run_denoise}  # optional; skip the step when falsy
 
-`globals:` is for what two or more steps must agree on — in the shipped
-files just the frame size, the output root, and the two Outputs switches —
-and is the only thing `${...}` resolves against. Everything else belongs in the step that consumes it, under that
-step's own `params:`, where it overrides the default the Step class declares
-(see `Step.PARAMS` in pipeline/step.py). A step's params are therefore
-namespaced by its `id:`, which is what lets one workflow call the same step
-twice and configure the two calls apart — `fast_helical_native.yaml` trains
-`brush` twice and denoises twice.
+**One flat namespace, three ways to declare into it.** A `settings:` entry,
+an `outputs:` entry and a bare `globals:` key all land in `spec.globals`,
+which is the only scope `${...}` resolves against and the only thing
+`--param x=y` and the UI's overrides address. A name declared twice is
+refused at load: a setting has exactly one home.
+
+The three differ only in what they tell the UI:
+
+  * `settings:` is a declared knob — a `Param` (pipeline/step.py), with the
+    same `type`/`default`/`help`/`choices`/`minimum`/`maximum`/`advanced`
+    vocabulary a step param has, plus a `label:` and a `group:`. The UI draws
+    these, through the same widget code it draws step params with. This is
+    where `resolution` and `framing` live: what more than one step must agree
+    on AND what somebody actually wants to change.
+  * `outputs:` is a deliverable — a switch its export steps read through
+    `when:`, plus the `dir:` it lands in under `output_root` (so a finished
+    run can be packaged without a hardcoded list of subdirectory names) and
+    an optional `requires:` naming a setting it is only meaningful with.
+  * `globals:` is what has no control: `output_root`, which the CLI and the
+    run worker repoint at the run's own directory.
+
+Everything else belongs in the step that consumes it, under that step's own
+`params:`, where it overrides the default the Step class declares (see
+`Step.PARAMS` in pipeline/step.py). A step's params are therefore namespaced
+by its `id:`, which is what lets one workflow call the same step twice and
+configure the two calls apart — `fast_helical_native.yaml` trains `brush`
+twice and denoises twice.
+
+A declared setting reaches the steps the way it always has, as
+`${globals.<name>}` at each step that reads it. That the reference is written
+where it is consumed is the point — it is greppable from the step end, and
+`templating.global_ref` uses it to drop the step-level duplicate from the
+panel so the setting keeps one editable home. The risk that buys is a
+setting nothing reads, i.e. a control that silently does nothing, and
+`validate()` refuses that.
 
 An input path ending in `?` is **optional**: if nothing has written it, the
 step is handed `None` instead of the run failing. That exists for one shape
@@ -52,7 +91,145 @@ from typing import Any, Dict, List, Optional
 
 import yaml
 
-from .step import FALSE_STRINGS
+from .step import FALSE_STRINGS, Param, ParamError, coerce_param
+from .templating import referenced_globals
+
+
+#: The `type:` names a `settings:` entry may use, and the Python type each
+#: one means. Deliberately the same five `Param` accepts: a pipeline setting
+#: IS a `Param`, so it is drawn by the widget code the step panel already
+#: uses and coerced by `coerce_param`, rather than by a second mechanism
+#: that would have to be kept in step with the first.
+PARAM_TYPES: Dict[str, type] = {
+    "str": str, "int": int, "float": float, "bool": bool, "list": list,
+}
+
+_SETTING_KEYS = frozenset({
+    "name", "label", "type", "default", "help", "choices",
+    "minimum", "maximum", "advanced", "group",
+})
+
+_OUTPUT_KEYS = frozenset({"name", "label", "dir", "default", "help", "requires"})
+
+
+def setting_from_dict(data: Dict[str, Any]) -> Param:
+    """One `settings:` entry as a `Param`.
+
+    `type:` is a name from `PARAM_TYPES`; leave it out and it is inferred
+    from the default's own Python type, which is what the UI used to guess
+    for an undeclared global. A null default carries no type, so that is the
+    one case where `type:` is mandatory.
+
+    There is no `REQUIRED` here, unlike a step param: a pipeline setting is a
+    control on a form, and a form control has a value in it before anybody
+    touches it. A `settings:` entry with no `default` is a mistake, not a
+    demand that the caller supply one.
+    """
+    if not isinstance(data, dict) or "name" not in data:
+        raise ValueError(f"settings: every entry needs a `name`; got {data!r}")
+    name = data["name"]
+    unknown = sorted(set(data) - _SETTING_KEYS)
+    if unknown:
+        raise ValueError(
+            f"setting {name!r}: unknown key(s) {', '.join(unknown)}. "
+            f"A setting accepts: {', '.join(sorted(_SETTING_KEYS))}."
+        )
+    if "default" not in data:
+        raise ValueError(
+            f"setting {name!r}: needs a `default`. A pipeline setting is a "
+            "control that is already showing a value; there is no REQUIRED "
+            "sentinel at this level."
+        )
+    default = data["default"]
+    declared = data.get("type")
+    if declared is None:
+        if default is None:
+            raise ValueError(
+                f"setting {name!r}: a null default carries no type, so say "
+                f"which it is — type: {' | '.join(PARAM_TYPES)}."
+            )
+        param_type = type(default)
+        if param_type not in PARAM_TYPES.values():
+            param_type = str
+    elif declared not in PARAM_TYPES:
+        raise ValueError(
+            f"setting {name!r}: unknown type {declared!r}. "
+            f"Use one of: {', '.join(PARAM_TYPES)}."
+        )
+    else:
+        param_type = PARAM_TYPES[declared]
+    return Param(
+        name=name,
+        type=param_type,
+        default=default,
+        help=data.get("help", ""),
+        choices=tuple(data.get("choices") or ()),
+        minimum=data.get("minimum"),
+        maximum=data.get("maximum"),
+        advanced=bool(data.get("advanced", False)),
+        label=data.get("label", ""),
+        group=data.get("group", ""),
+    )
+
+
+@dataclass
+class Output:
+    """One deliverable the workflow can be asked to produce.
+
+    `name` is the workflow global its checkbox writes — the same name the
+    `when:` on the steps that build it reads, so the switch is greppable
+    from either end. `directory` (`dir:` in YAML) is where those steps land
+    it under `output_root`, which is what lets the UI package a finished run
+    without a hardcoded list of subdirectory names.
+
+    `requires` names another setting this output is only meaningful with.
+    The pre-upscale COLMAP export is the case: with the upscale off it would
+    be byte-identical to the ordinary one, so its checkbox is disabled and
+    the global forced false rather than quietly exporting something else.
+    """
+
+    name: str
+    label: str = ""
+    directory: str = ""
+    default: bool = True
+    help: str = ""
+    requires: str = ""
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "Output":
+        if not isinstance(data, dict) or "name" not in data:
+            raise ValueError(f"outputs: every entry needs a `name`; got {data!r}")
+        unknown = sorted(set(data) - _OUTPUT_KEYS)
+        if unknown:
+            raise ValueError(
+                f"output {data['name']!r}: unknown key(s) {', '.join(unknown)}. "
+                f"An output accepts: {', '.join(sorted(_OUTPUT_KEYS))}."
+            )
+        if not data.get("dir"):
+            raise ValueError(
+                f"output {data['name']!r}: needs a `dir` — the subdirectory "
+                "under output_root its export steps write, which is how a "
+                "finished run is packaged."
+            )
+        return cls(
+            name=data["name"],
+            label=data.get("label", ""),
+            directory=data["dir"],
+            default=bool(data.get("default", True)),
+            help=data.get("help", ""),
+            requires=data.get("requires", ""),
+        )
+
+    @property
+    def title(self) -> str:
+        return self.label or self.name
+
+    def as_param(self) -> Param:
+        """This switch as the `Param` the UI draws and coercion goes through."""
+        return Param(
+            name=self.name, type=bool, default=self.default,
+            help=self.help, label=self.title,
+        )
 
 
 @dataclass
@@ -126,6 +303,20 @@ class StepSpec:
 class WorkflowSpec:
     name: str
     description: str = ""
+
+    # What a person sees and sets, declared by the workflow itself.
+    # `settings` are knobs, `outputs` are deliverables; both are ordered,
+    # because the order is the order the form draws them in.
+    settings: List[Param] = field(default_factory=list)
+    outputs: List["Output"] = field(default_factory=list)
+
+    # Every setting's and every output's current value lands in here, on top
+    # of whatever the literal `globals:` block holds. That is the whole
+    # integration: `${globals.x}`, `when:`, `--param x=y` and
+    # `apply_ui_overrides` all keep reading one flat namespace and do not
+    # need to know a value came from a declaration rather than a bare
+    # mapping. `globals:` itself is left holding only what has no control —
+    # `output_root`, which the CLI and the run worker repoint.
     globals: Dict[str, Any] = field(default_factory=dict)
     steps: List[StepSpec] = field(default_factory=list)
 
@@ -143,12 +334,84 @@ class WorkflowSpec:
                 "into that step's own `params:` block, which now holds "
                 "overrides on the step's declared defaults."
             )
+        settings = [setting_from_dict(s) for s in data.get("settings") or ()]
+        outputs = [Output.from_dict(o) for o in data.get("outputs") or ()]
+
+        # Three passes onto one namespace, in declaration order, refusing a
+        # name that appears twice. A setting with two homes is the failure
+        # this guards: two controls for one value, disagreeing the moment
+        # somebody touches either.
+        merged: Dict[str, Any] = {}
+        for source, entries in (
+            ("settings", [(s.name, s.default) for s in settings]),
+            ("outputs", [(o.name, o.default) for o in outputs]),
+            ("globals", list((data.get("globals") or {}).items())),
+        ):
+            for key, value in entries:
+                if key in merged:
+                    raise ValueError(
+                        f"{path}: {source} declares {key!r}, which is already "
+                        "declared earlier in the file. A setting has exactly "
+                        "one home."
+                    )
+                merged[key] = value
+
         return cls(
             name=data["name"],
             description=data.get("description", ""),
-            globals=data.get("globals", {}),
+            settings=settings,
+            outputs=outputs,
+            globals=merged,
             steps=[StepSpec.from_dict(s) for s in data["steps"]],
         )
+
+    def declared_globals(self) -> Dict[str, Param]:
+        """Every declared knob, keyed by name — settings and output switches.
+
+        The UI draws from this and `coerce_global` types through it. A bare
+        `globals:` entry is deliberately absent: it has no declaration, which
+        is exactly why it gets no control.
+        """
+        declared = {setting.name: setting for setting in self.settings}
+        declared.update({output.name: output.as_param() for output in self.outputs})
+        return declared
+
+    def coerce_global(self, name: str, value: Any) -> Any:
+        """`value` brought to the type `name` is declared with, if it is.
+
+        Gives an override naming a setting the same lenient coercion a step
+        param already gets, so `--param run_upscale=false` and a text box
+        holding `"720"` mean what they look like. An undeclared global is
+        passed through untouched: there is no type to bring it to.
+        """
+        param = self.declared_globals().get(name)
+        if param is None:
+            return value
+        return coerce_param(value, param, f"workflow '{self.name}'")
+
+    def output_dirs(self) -> Dict[str, str]:
+        """{global name -> subdirectory under output_root} for every output."""
+        return {output.name: output.directory for output in self.outputs}
+
+    def apply_output_requirements(self) -> Dict[str, bool]:
+        """Force off every output whose `requires:` setting is off, in place.
+
+        Returns the resulting {output name -> bool}, which the web UI folds
+        back into the overrides it sends the worker.
+
+        This lives on the spec rather than in the UI so that a `--param`
+        reaches the same answer a checkbox does: `requires:` says the two
+        exports would be the same frames under different names, and that is
+        true however the switch got set.
+        """
+        resolved: Dict[str, bool] = {}
+        for output in self.outputs:
+            wanted = truthy(self.globals.get(output.name, output.default))
+            if output.requires and not truthy(self.globals.get(output.requires)):
+                wanted = False
+            resolved[output.name] = wanted
+        self.globals.update(resolved)
+        return resolved
 
     def enabled_steps(self) -> List[StepSpec]:
         """The steps this spec's current globals actually select.
@@ -170,6 +433,8 @@ class WorkflowSpec:
         this before the first step, for exactly that reason.
         """
         from .registry import get_step_class
+
+        self._validate_declarations()
 
         for step in self.steps:
             step_class = get_step_class(step.step)
@@ -195,6 +460,69 @@ class WorkflowSpec:
                     f"Workflow '{self.name}' enables both '{first}' and "
                     f"'{second}', which cannot be combined. {reason}"
                 )
+
+    def _validate_declarations(self) -> None:
+        """Check the `settings:` and `outputs:` blocks against the steps.
+
+        Same bargain as the step-param check above: every one of these is a
+        mistake that otherwise shows up as a control that silently does
+        nothing, which is worse than a control that isn't there — it looks
+        like it worked.
+        """
+        for param in self.settings:
+            try:
+                value = coerce_param(param.default, param, f"workflow '{self.name}'")
+            except ParamError as exc:
+                raise ValueError(
+                    f"Workflow '{self.name}' setting '{param.name}': its own "
+                    f"default does not fit its declared type. {exc}"
+                ) from None
+            if param.choices and not _among(value, param.choices):
+                raise ValueError(
+                    f"Workflow '{self.name}' setting '{param.name}': default "
+                    f"{param.default!r} is not one of its choices "
+                    f"{list(param.choices)!r}."
+                )
+
+        declared = set(self.declared_globals())
+        for output in self.outputs:
+            if output.requires and output.requires not in declared:
+                raise ValueError(
+                    f"Workflow '{self.name}' output '{output.name}' requires "
+                    f"'{output.requires}', which it does not declare. "
+                    f"It declares: {', '.join(sorted(declared))}."
+                )
+
+        # A setting nothing reads is a dead control: it draws, it records an
+        # override, and the run ignores it. Cheap to catch, and the one new
+        # way this layer can go wrong that the old bare `globals:` could not
+        # (there, an unread global simply had no control either).
+        read: set = set()
+        for step in self.steps:
+            read |= referenced_globals(step.params)
+            read |= referenced_globals(step.when)
+        read |= {output.requires for output in self.outputs if output.requires}
+        orphans = sorted(
+            param.name for param in self.settings if param.name not in read
+        )
+        if orphans:
+            raise ValueError(
+                f"Workflow '{self.name}' declares setting(s) nothing reads: "
+                f"{', '.join(orphans)}. A setting reaches a run through a step's "
+                "`${globals.<name>}`, a `when:`, or an output's `requires:` — "
+                "wire it up or drop it."
+            )
+
+
+def _among(value: Any, choices: Any) -> bool:
+    """`value in choices`, tolerating a list value against a tuple choice."""
+    for choice in choices:
+        if choice == value:
+            return True
+        if isinstance(choice, (list, tuple)) and isinstance(value, (list, tuple)):
+            if list(choice) == list(value):
+                return True
+    return False
 
 
 #: Step pairs that must not run in the same workflow, and why. Checked by
@@ -256,8 +584,16 @@ def apply_ui_overrides(
     Used both by the web UI (to validate before a run is even queued) and by
     `pipeline.run_worker` (to apply the same overrides again when it loads
     its own copy of the spec) — the two must agree on what an override means.
+
+    A value naming a declared setting or output is coerced to its type on
+    the way in, the same way a step param's is: a checkbox and a text box
+    both hand back strings, and `bool("false")` is True.
     """
-    spec.globals.update({k: v for k, v in global_overrides.items() if k in spec.globals})
+    spec.globals.update({
+        key: spec.coerce_global(key, value)
+        for key, value in global_overrides.items()
+        if key in spec.globals
+    })
     by_id = {step.id: step for step in spec.steps}
     for step_id, values in step_overrides.items():
         if step_id in by_id:
@@ -270,6 +606,18 @@ def apply_ui_overrides(
 # switched off is the one failure mode this whole mechanism exists to
 # prevent. Everything else goes through plain truthiness. `FALSE_STRINGS`
 # lives in step.py, which needs the identical rule to coerce a `bool` param.
+def truthy(value: Any) -> bool:
+    """Workflow truthiness, i.e. `when:`'s: the string "false" is False.
+
+    A `when:` or a switch usually resolves through a value somebody typed,
+    and `bool("false")` is True. Shared so the UI's disabled-checkbox rule
+    and the runner's skip-this-step rule cannot drift apart.
+    """
+    if isinstance(value, str):
+        return value.strip().lower() not in FALSE_STRINGS
+    return bool(value)
+
+
 def step_enabled(step: StepSpec, workflow_globals: Dict[str, Any]) -> bool:
     """Whether `step`'s `when:` selects it, given a workflow's globals."""
     from .templating import resolve
@@ -281,9 +629,7 @@ def step_enabled(step: StepSpec, workflow_globals: Dict[str, Any]) -> bool:
             f"Step '{step.id}' has a `when:` of {step.when!r}, which does not "
             f"resolve: {exc}. Workflow globals: {sorted(workflow_globals)}"
         ) from exc
-    if isinstance(value, str):
-        return value.strip().lower() not in FALSE_STRINGS
-    return bool(value)
+    return truthy(value)
 
 
 def load_envs(path: str | Path) -> Dict[str, Dict[str, Any]]:

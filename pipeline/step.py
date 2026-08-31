@@ -74,6 +74,15 @@ class Param:
     `advanced` keeps a param out of the UI's main list and behind a fold. The
     rule for setting it: a knob that exists because the underlying library
     has one, rather than because this pipeline tunes it, is advanced.
+
+    `label` and `group` are for the other producer of `Param`s: a workflow's
+    `settings:` block (pipeline/workflow.py), whose knobs are the ones a
+    person actually sees. A step param is labelled by its `name` — that is
+    the name you would type after `--param` — but a pipeline setting is a
+    control on a form and gets a written label. `group` names the box the UI
+    draws it in; the only value that means anything today is `outputs`,
+    which puts a setting in the Outputs box beside the deliverable
+    checkboxes it modifies (the SeedVR2 upscale is the case).
     """
 
     name: str
@@ -84,6 +93,13 @@ class Param:
     minimum: Optional[float] = None
     maximum: Optional[float] = None
     advanced: bool = False
+    label: str = ""
+    group: str = ""
+
+    @property
+    def title(self) -> str:
+        """What to write on this param's control."""
+        return self.label or self.name
 
 
 class ParamError(ValueError):

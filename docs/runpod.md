@@ -114,28 +114,41 @@ and what you put in it decides what runs — no input picker:
 Both shapes run `fast_helical_native` — there is no workflow picker. The
 read-only **Pipeline** field just confirms it.
 
-The **Params** panel is generated from the workflow and the steps in it,
-not typed as YAML. **Globals** at the top holds what the whole flow shares
-(resolution, seed, the denoise prompts); below it is one collapsible section
-per step, titled `<step id> (<step name>)`, holding that step's own params
-with its declared defaults filled in — a dot marks the ones the workflow
-sets. Knobs that exist because the underlying library has them, rather than
-because this pipeline tunes them, sit behind each section's **Advanced**
-fold.
+**Settings** holds what the pipeline chose to put in front of you, which for
+`fast_helical_native` is four things: **Resolution**, **Framing**, **Seed**,
+and — behind a *More settings* fold — **Face splat**. These are not typed as
+YAML and they are not a fixed list in the UI's code: the workflow file
+declares them, with their type, default, help text and choice list, in a
+`settings:` block (see pipeline/README.md). Adding one is an edit to the
+workflow, not to `webui.py`.
+
+Everything the pipeline did *not* promote is still there and still editable,
+behind the **Per-step settings** fold in the right-hand column: one
+collapsible section per step, titled `<step id> (<step name>)`, holding that
+step's own params with its declared defaults filled in — a dot marks the ones
+the workflow sets. Knobs that exist because the underlying library has them,
+rather than because this pipeline tunes them, sit behind each section's
+**Advanced** fold. It is ~300 controls; on a normal run you open none of
+them.
 
 The per-step sections are why `fast_helical_native`'s two brush trainings and
 two denoise passes can be configured apart: `train_splat` and
-`train_final_splat` get a section each. Only what you actually change is
+`train_final_splat` get a section each. A param the workflow wires to a
+pipeline setting (`render`'s `resolution`, say) is not shown there at all —
+its one editable home is the Settings box. Only what you actually change is
 submitted, so everything you leave alone stays owned by the workflow file
-and the step defaults. `output_root` is deliberately not on the panel — it
-is repointed automatically at this run's directory under `/data/output`,
-and a control for it would let a run write somewhere else instead.
+and the step defaults. `output_root` has no control anywhere: it is a plain
+`globals:` entry rather than a declared setting, and the form draws
+declarations only — it is repointed automatically at this run's directory
+under `/data/output`, and a control for it would let a run write somewhere
+else instead.
 
-`python -m pipeline.cli params <workflow> --all` prints the same tree on
-the command line.
+`python -m pipeline.cli params <workflow>` prints the same settings and
+outputs on the command line, `--all` adds every step param.
 
-**Outputs** picks what the run produces. These are real switches, not
-filters on the result — an unchecked step does not run:
+**Outputs** picks what the run produces, and is likewise the workflow's own
+`outputs:` block. These are real switches, not filters on the result — an
+unchecked step does not run:
 
 - **COLMAP dataset** / **Trained `.ply`** — one, the other, or both; at
   least one has to be selected. The `.ply` is a second full
@@ -147,9 +160,10 @@ filters on the result — an unchecked step does not run:
   global.
 - **Pre-upscale COLMAP dataset (debug)** — with the upscale on, also
   exports `colmap_preupscale/` from the frames as they are *before*
-  SeedVR2, so you can train a splat on each and compare. Ignored with the
-  upscale off (the frames are then the same, and it just guarantees the
-  ordinary `colmap/`).
+  SeedVR2, so you can train a splat on each and compare. It declares
+  `requires: run_upscale`, so with the upscale off the checkbox is greyed
+  out: the frames would then be the same as `colmap/`'s, and it used to
+  silently give you that instead, under a name that says otherwise.
 - **Intermediate COLMAP dataset (debug)** — also exports
   `colmap_intermediate/`: the dataset the **first** brush training is
   handed, i.e. the frames as `denoise_pass1` leaves them plus the RMBG

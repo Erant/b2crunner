@@ -67,7 +67,8 @@ python -m pipeline.cli run fast_helical_native --reference-image sheet.png \
 python -m pipeline.cli run fast_helical_native --reference-image sheet.png \
     --param export_ply=false
 
-# every param a workflow resolves: its globals, then each step's own
+# the form the pipeline declares — its settings and its outputs — then
+# every step's own params (add --all for the ones nothing overrides)
 python -m pipeline.cli params fast_helical_native
 
 # the COLMAP dataset the first brush training is handed, for when the
@@ -80,7 +81,9 @@ python -m pipeline.cli doctor
 
 # the web UI: upload a reference sheet, or a .zip of image/prompt pairs (one
 # run per pair, fanned across every GPU); watch progress, pull the result
-# back as one .zip
+# back as one .zip. Its Settings and Outputs boxes are the workflow's own
+# `settings:` / `outputs:` blocks; the ~300 per-step knobs are still all
+# there, behind the "Per-step settings" fold.
 python -m pipeline.cli ui            # needs `pip install 'gradio>=5.0,<7.0'`
 
 python -m pipeline.cli workflows     # what's available

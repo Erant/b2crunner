@@ -154,6 +154,10 @@ def _run(job: RunJob, status_path: Path) -> int:
     try:
         spec = WorkflowSpec.from_yaml(Path(job.workflow_path))
         apply_ui_overrides(spec, job.global_overrides, job.step_overrides)
+        # The submitter already applied these — this is the same rule stated
+        # where the run actually happens, so a job JSON that reached here by
+        # some other route cannot start an export whose `requires:` is off.
+        spec.apply_output_requirements()
         spec.validate()
 
         if "output_root" in spec.globals and "output_root" not in job.global_overrides:

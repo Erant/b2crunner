@@ -33,6 +33,7 @@ from .dataset import Dataset
 from .logging_setup import setup_logging, timestamped_run_name
 from .paths import REPO_ROOT, configure_tmpdir, output_dir
 from .runner import WorkflowRunner
+from .step import ParamError
 from .workflow import WorkflowSpec, load_envs
 
 logger = logging.getLogger("pipeline.cli")
@@ -117,7 +118,15 @@ def apply_param_overrides(
         )
     for key, value in global_overrides.items():
         logger.info("param override: %s = %r (was %r)", key, value, spec.globals[key])
-    spec.globals.update(global_overrides)
+    # Coerced through the setting's declared type where there is one, so
+    # `--param run_upscale=no` and `--param seed=7` mean what they look like.
+    try:
+        spec.globals.update({
+            key: spec.coerce_global(key, value)
+            for key, value in global_overrides.items()
+        })
+    except ParamError as exc:
+        raise SystemExit(f"--param: {exc}") from None
 
     by_id = {step.id: step for step in spec.steps}
     for step_id, values in step_overrides.items():
@@ -162,6 +171,24 @@ def run_workflow(args: argparse.Namespace) -> int:
 
     global_overrides, step_overrides = parse_param_overrides(args.param)
     apply_param_overrides(spec, global_overrides, step_overrides)
+
+    # An output whose `requires:` setting is off is forced off, the same way
+    # the web UI's checkbox for it is disabled — `--param
+    # export_colmap_preupscale=true --param run_upscale=false` would
+    # otherwise write the ordinary colmap/ under a second name.
+    for name, wanted in spec.apply_output_requirements().items():
+        if not wanted and name in global_overrides and global_overrides[name]:
+            logger.warning(
+                "output %s switched off: it requires %s, which is off",
+                name, next(o.requires for o in spec.outputs if o.name == name),
+            )
+    if spec.outputs and not any(
+        spec.globals[output.name] for output in spec.outputs
+    ):
+        logger.warning(
+            "no outputs selected: this run will produce no deliverable. "
+            "Its intermediate frames still land under the run directory."
+        )
 
     envs = load_envs(args.envs)
     logger.info("envs registry: %s (%s)", args.envs, ", ".join(sorted(envs)) or "empty")
@@ -277,12 +304,14 @@ def list_workflows(args: argparse.Namespace) -> int:
 
 
 def show_params(args: argparse.Namespace) -> int:
-    """Print the two namespaces a run actually resolves.
+    """Print everything a run actually resolves, in the order the UI draws it.
 
-    The whole point of the split is that a step's params are no longer all
-    visible in the workflow file — most of them come from the step class.
-    This is where you see what a run will really use, and it is the fastest
-    check that a `--param` name exists before spending an hour on a pod.
+    Settings and outputs first — the workflow's own declarations, which are
+    exactly the controls the web UI puts in front of you — then the per-step
+    params, most of which come from the step class rather than the workflow
+    file. This is where you see what a run will really use, and it is the
+    fastest check that a `--param` name exists before spending an hour on a
+    pod.
     """
     from . import steps  # noqa: F401  registers every Step
     from .registry import get_step_class
@@ -292,9 +321,35 @@ def show_params(args: argparse.Namespace) -> int:
     spec.validate()
 
     print(f"{spec.name}\n")
-    print("globals:")
-    for key, value in spec.globals.items():
-        print(f"  {key:<28} {_short(value)}")
+
+    if spec.settings:
+        print("settings:  (the pipeline's own knobs; --param <name>=<value>)")
+        for param in spec.settings:
+            flags = "".join([
+                " (advanced)" if param.advanced else "",
+                f" [{param.group}]" if param.group else "",
+            ])
+            print(f"  {param.name:<28} {_short(spec.globals[param.name])}{flags}")
+            if param.help:
+                print(f"  {'':<28} {_ellipsis(param.help, 88)}")
+
+    if spec.outputs:
+        print("\noutputs:   (deliverables; --param <name>=false to skip one)")
+        for output in spec.outputs:
+            needs = f" (needs {output.requires})" if output.requires else ""
+            print(
+                f"  {output.name:<28} {_short(spec.globals[output.name])}"
+                f" -> {output.directory}/{needs}"
+            )
+
+    plumbing = {
+        key: value for key, value in spec.globals.items()
+        if key not in spec.declared_globals()
+    }
+    if plumbing:
+        print("\nglobals:   (no control of their own)")
+        for key, value in plumbing.items():
+            print(f"  {key:<28} {_short(value)}")
 
     scope = {"globals": spec.globals}
     for step in spec.steps:
@@ -320,7 +375,11 @@ def show_params(args: argparse.Namespace) -> int:
 
 
 def _short(value: Any, limit: int = 60) -> str:
-    text = repr(value)
+    return _ellipsis(repr(value), limit)
+
+
+def _ellipsis(text: str, limit: int) -> str:
+    text = " ".join(text.split())
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 

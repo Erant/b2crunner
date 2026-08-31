@@ -75,3 +75,30 @@ def _lookup(path: str, scope: Dict[str, Any]) -> Any:
         else:
             obj = getattr(obj, part)
     return obj
+
+
+def referenced_globals(value: Any) -> "set[str]":
+    """Every `globals.X` name any `${...}` in `value` reads, recursively.
+
+    Both forms count and only the first path segment is kept, so
+    `${globals.resolution.0}` and `${globals.output_root}/colmap` both report
+    `resolution` / `output_root`. A reference to any other scope is ignored —
+    there is no other scope today, but a typo'd one is not a global.
+
+    `WorkflowSpec.validate` uses this to refuse a declared setting that
+    nothing in the workflow reads: a control on the form that changes
+    nothing is worse than no control, because it looks like it worked.
+    """
+    names: "set[str]" = set()
+    if isinstance(value, str):
+        for path in _INLINE.findall(value):
+            head, _, rest = path.partition(".")
+            if head == "globals" and rest:
+                names.add(rest.split(".")[0])
+    elif isinstance(value, dict):
+        for item in value.values():
+            names |= referenced_globals(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            names |= referenced_globals(item)
+    return names

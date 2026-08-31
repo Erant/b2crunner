@@ -124,60 +124,95 @@ class UploadResolutionTests(unittest.TestCase):
             webui.resolve_upload(str(bad), "")
 
 
-class OutputGlobalsTests(unittest.TestCase):
-    """resolve_output_globals folds the pre-upscale-COLMAP rules in."""
+class OutputSwitchTests(unittest.TestCase):
+    """`resolve_outputs` reads the workflow's own `outputs:` block.
 
-    COLMAP = webui.OUTPUT_COLMAP
-    PLY = webui.OUTPUT_PLY
+    Nothing in webui.py names these switches any more, so the cases below
+    are asked of the shipped workflow rather than of a table beside them.
+    """
 
-    def test_both_boxes_with_the_upscale_on(self):
+    def spec(self, **globals_):
+        from pipeline.cli import resolve_workflow
+        from pipeline.workflow import WorkflowSpec
+
+        spec = WorkflowSpec.from_yaml(resolve_workflow("fast_helical_native"))
+        spec.globals.update(globals_)
+        return spec
+
+    def test_the_declared_defaults_are_both_deliverables(self):
         self.assertEqual(
-            webui.resolve_output_globals([self.COLMAP, self.PLY], True, False),
-            {"run_upscale": True, "export_colmap": True, "export_ply": True,
-             "export_colmap_preupscale": False,
-             "export_colmap_intermediate": False},
+            webui.resolve_outputs(self.spec()),
+            {"export_colmap": True, "export_ply": True,
+             "export_colmap_intermediate": False,
+             "export_colmap_preupscale": False},
         )
 
     def test_the_intermediate_colmap_is_independent_of_the_upscale(self):
-        """Unlike the pre-upscale export, it has no interaction to fold in:
-        the frames it writes are the ones the first brush training saw,
-        which no other export in the run can stand in for."""
+        """Unlike the pre-upscale export it declares no `requires:`: the
+        frames it writes are the ones the first brush training saw, which
+        no other export in the run can stand in for."""
         for run_upscale in (True, False):
             with self.subTest(run_upscale=run_upscale):
-                got = webui.resolve_output_globals(
-                    [self.PLY], run_upscale, False, True)
+                got = webui.resolve_outputs(self.spec(
+                    run_upscale=run_upscale, export_colmap=False,
+                    export_colmap_intermediate=True,
+                ))
                 self.assertTrue(got["export_colmap_intermediate"])
                 self.assertFalse(got["export_colmap"])
 
     def test_the_intermediate_colmap_alone_is_a_valid_run(self):
         """It is somebody deliberately asking what the first training was
         fed, so it counts as an output rather than tripping the guard."""
-        got = webui.resolve_output_globals([], True, False, True)
+        got = webui.resolve_outputs(self.spec(
+            export_colmap=False, export_ply=False,
+            export_colmap_intermediate=True,
+        ))
         self.assertEqual(
             (got["export_colmap"], got["export_ply"],
              got["export_colmap_preupscale"], got["export_colmap_intermediate"]),
             (False, False, False, True),
         )
 
-    def test_pre_upscale_colmap_only_makes_a_dir_when_upscaling(self):
-        got = webui.resolve_output_globals([], True, True)
+    def test_pre_upscale_colmap_is_kept_when_upscaling(self):
+        got = webui.resolve_outputs(self.spec(
+            run_upscale=True, export_colmap=False, export_colmap_preupscale=True,
+        ))
         self.assertTrue(got["export_colmap_preupscale"])
         self.assertFalse(got["export_colmap"])
 
-    def test_pre_upscale_colmap_collapses_to_plain_colmap_without_upscale(self):
-        got = webui.resolve_output_globals([], False, True)
-        self.assertFalse(got["export_colmap_preupscale"])
-        self.assertTrue(got["export_colmap"])
+    def test_pre_upscale_colmap_is_forced_off_without_its_requirement(self):
+        """`requires: run_upscale`. With the upscale off it would be the
+        ordinary colmap/ under a second name, so it is refused rather than
+        quietly redirected — which is what this used to do."""
+        with self.assertRaises(gr.Error):
+            webui.resolve_outputs(self.spec(
+                run_upscale=False, export_colmap=False, export_ply=False,
+                export_colmap_preupscale=True,
+            ))
 
-    def test_pre_and_post_colmap_without_upscale_is_one_colmap(self):
-        got = webui.resolve_output_globals([self.COLMAP], False, True)
+    def test_a_forced_off_output_does_not_take_the_others_with_it(self):
+        got = webui.resolve_outputs(self.spec(
+            run_upscale=False, export_colmap=True, export_colmap_preupscale=True,
+        ))
         self.assertEqual(
             (got["export_colmap"], got["export_colmap_preupscale"]), (True, False)
         )
 
+    def test_a_string_requirement_is_read_the_way_when_reads_it(self):
+        """`--param run_upscale=false` arrives as a string, and
+        `bool("false")` is True."""
+        got = webui.resolve_outputs(self.spec(
+            run_upscale="false", export_colmap=True, export_colmap_preupscale=True,
+        ))
+        self.assertFalse(got["export_colmap_preupscale"])
+
     def test_nothing_selected_is_an_error(self):
         with self.assertRaises(gr.Error):
-            webui.resolve_output_globals([], True, False)
+            webui.resolve_outputs(self.spec(
+                export_colmap=False, export_ply=False,
+                export_colmap_intermediate=False,
+                export_colmap_preupscale=False,
+            ))
 
 
 if __name__ == "__main__":

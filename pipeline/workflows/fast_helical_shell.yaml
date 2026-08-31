@@ -168,14 +168,21 @@
 # cyber_6f's recorded reference.png is the whole sheet — the older
 # convention, from before anchor injection; not the target here.
 #
-# **Reading this file.** `globals:` holds only what more than one step has to
-# agree on — `resolution` and `framing`, plus the deliverable switches
-# (export_colmap / export_ply / export_colmap_preupscale), the `run_upscale`
-# toggle, and `output_root`.
+# **Reading this file.** Three declaration blocks sit above `steps:`, and
+# they all feed one flat namespace that `${globals.x}` resolves against:
+#
+#   settings:  the knobs a person sees, declared with the type, default,
+#              help and choices the web UI draws them from. Nothing about
+#              this workflow is hardcoded in pipeline/webui.py any more.
+#   outputs:   the deliverables, each naming the switch its export steps
+#              read through `when:` and the `dir:` it lands in.
+#   globals:   what has no control at all — here just `output_root`.
+#
 # Everything else lives under the step that consumes it, as an override on
 # the default that step's own class declares (pipeline/step.py's
-# `Step.PARAMS`). `python -m pipeline.cli params fast_helical_native --all`
-# prints the effective value of every param, defaults included.
+# `Step.PARAMS`), and reaches the UI only behind the "Per-step settings"
+# fold. `python -m pipeline.cli params fast_helical_shell --all` prints the
+# effective value of every one of them, defaults included.
 name: fast_helical_shell
 description: >-
   From a front/back reference sheet: split it, reconstruct a body, build a
@@ -185,73 +192,148 @@ description: >-
   result — denoise, train+re-render a splat, mask, denoise again, upscale,
   export a COLMAP dataset and/or a normal-supervised .ply.
 
-globals:
-  # The one value more than one step must agree on: [720, 1280] is the
-  # render size, the shell re-render's size, wan22_vace_denoise's
-  # width/height and the stage-2 splat re-render's. The `render` step takes
-  # it whole as `resolution: ${globals.resolution}` and has no width/height
-  # override of its own, so that stage cannot drift; denoise and the two
-  # render_splat calls still split it via `.0`/`.1`. A batch whose frames
-  # are not all one size cannot reach the diffusion pass at all.
-  resolution: [720, 1280]
+settings:
+  # The knobs the Run tab draws, in this order, straight from these
+  # declarations — same `type`/`default`/`help`/`choices`/`advanced`
+  # vocabulary a step param uses (pipeline/step.py's `Param`), so one widget
+  # code path draws both. Each lands in the same namespace `${globals.x}`
+  # reads, so a setting reaches the steps that need it exactly the way it
+  # always has: as a `${globals.<name>}` written at each step that consumes
+  # it. A setting nothing reads is refused at load (`WorkflowSpec.validate`).
 
-  # How much of the body fills the frame, threaded through both renderers
-  # that have to agree on it — the mesh `render` (render_initial_views) and
-  # the stage-2 splat re-render (rerender_splat), which rebuilds its helical
-  # orbit and has to rebuild it around the same preset. `render_shell_views`
-  # needs no `framing` of its own: it reuses the mesh render's cameras
-  # verbatim, so it inherits the framing rather than recomputing it. Split
-  # between step params this would drift; as one global it cannot. `full`
-  # is the whole body (the shipped default and what every prior run used);
-  # torso / bust / head crop progressively tighter, and only the mesh
-  # reconstruction's skeleton makes the tighter presets available —
-  # `render` falls back to `full` for any it cannot compute, and
-  # rerender_splat follows.
-  framing: full
+  - name: resolution
+    label: Resolution
+    type: list
+    default: [720, 1280]
+    choices: [[720, 1280], [600, 1040], [480, 832]]
+    help: >-
+      Frame size, width x height, and the value more than one step must agree
+      on: the render size, wan22_vace_denoise's width/height, and
+      render_splat's. It is also the shell re-render's size. `render` takes it whole
+      and has no width/height override of its own, so that stage cannot
+      drift; denoise and the two render_splat calls split it via .0/.1. A
+      batch whose frames are not all one size cannot reach the diffusion
+      pass at all. Only sizes the denoise model was trained for are offered.
 
-  # Whether the face branch runs: a Gaussian splat of the subject's actual
-  # face, composited onto the skeleton drawings wherever the camera can see
-  # it (+-60 deg, four times the shell band). It REPLACES the MediaPipe
-  # landmark overlay this file used to draw — `detect_face` is gone, not
-  # disabled — so turning this off leaves the skeleton frames with no face
-  # at all rather than falling back to landmarks. That is a real gap and it
-  # is deliberate: a YAML input cannot be conditionally wired, so a
-  # `when:`-skipped detect_face would make render_initial_views raise on an
-  # unresolvable context path. Putting the landmarks back means pasting the
-  # detect_face block and one `face_landmarks:` input line back in; the
-  # step, its params on `render`, and its tests are all still there.
+  - name: framing
+    label: Framing
+    default: full
+    choices: [full, torso, bust, head]
+    help: >-
+      How much of the body fills the frame. Threaded through both renderers
+      that see it — the mesh render (render_initial_views) and the splat
+      re-render (rerender_splat) — because they have to agree: `render` frames
+      the mesh at this preset, the splat is trained on cameras aimed for it,
+      and rerender_splat rebuilds its helical orbit around the same preset.
+      `render_shell_views` needs no framing of its own: it reuses the mesh
+      render's cameras verbatim, so it inherits this rather than recomputing
+      it. `full` is the whole body and what every prior run used; torso / bust /
+      head crop progressively tighter. Only the mesh reconstruction's skeleton
+      makes the tighter presets available — `render` falls back to `full` for
+      any it cannot compute, and rerender_splat follows.
+
+  - name: seed
+    label: Seed
+    type: int
+    default: 0
+    help: >-
+      One seed for every stochastic stage: both wan22_vace_denoise passes and
+      the SeedVR2 upscale. Those were three independent step params (0, 0 and
+      42) before this became a setting. Change it to draw a different sample
+      of the same pipeline.
+
+  - name: run_upscale
+    label: Upscale dataset
+    type: bool
+    default: true
+    group: outputs
+    help: >-
+      Run the SeedVR2 upscale (720x1280 -> 1080x1920) before the export, which
+      also rescales the dataset's camera intrinsics to match, in the same step
+      (steps/seedvr2.py). Off is the shorter pipeline that used to be a
+      separate workflow. Drawn beside the deliverables because it is a
+      property of what you get back rather than of how the run is built.
+
+  - name: face_splat
+    label: Face splat
+    type: bool
+    default: true
+    advanced: true
+    help: >-
+      Whether the face branch runs: a Gaussian splat of the subject's actual
+      face, composited onto the skeleton drawings wherever the camera can see
+      it (+-60 deg, four times the shell band). It REPLACES the MediaPipe landmark overlay this file used
+      to draw — `detect_face` is gone, not disabled — so turning this off
+      leaves the skeleton frames with no face at all rather than falling back
+      to landmarks. That gap is deliberate: a YAML input cannot be
+      conditionally wired, so a `when:`-skipped detect_face would make
+      render_initial_views raise on an unresolvable context path. Putting the
+      landmarks back means pasting the detect_face block and one
+      `face_landmarks:` input line back in; the step, its params on `render`,
+      and its tests are all still there. Costs a third 1B Sapiens2 head
+      (~6.5 GB, segmentation) on top of the normal head, plus the pointmap
+      head the splat itself needs.
+
+outputs:
+  # What stage 6 can produce, and the switch each one is. `name:` is the
+  # workflow global the `when:` on its export steps reads, so the switch is
+  # greppable from either end; `dir:` is where those steps land it under
+  # output_root, which is how a finished run is packaged for download
+  # without pipeline/webui.py holding a list of subdirectory names.
   #
-  # Costs a third 1B Sapiens2 head (~6.5 GB, segmentation) on top of the
-  # normal and pointmap ones.
-  face_splat: true
+  # The web UI's Outputs box is exactly this list. `--param export_ply=false`
+  # does the same from the CLI. Turning one off skips its steps entirely —
+  # which for export_ply means not starting a second 30,000-iteration brush
+  # training you were going to throw away.
 
-  # Which deliverables stage 6 produces; both default on. Same switches,
-  # same `when:` gating and same web-UI meaning as fast_helical_native.yaml.
-  export_colmap: true
-  export_ply: true
+  - name: export_colmap
+    label: COLMAP dataset
+    dir: colmap
+    default: true
+    help: >-
+      cameras.txt, images.txt and points3D.txt, plus images/ and normals/,
+      built from the frames as they finally are.
 
-  # Whether the SeedVR2 upscale (stage 5) runs, which also rescales the
-  # dataset's camera intrinsics to match as part of the same step (see
-  # steps/seedvr2.py). Same toggle and default as fast_helical_native.yaml
-  # — keep them in sync.
-  run_upscale: true
+  - name: export_ply
+    label: Trained .ply (normal-supervised)
+    dir: ply
+    default: true
+    help: >-
+      A second brush training over that dataset, normal-supervised, exported
+      as scene.ply. A full 30,000 iterations — roughly an hour of GPU.
 
-  # Debug: also export the COLMAP dataset that the FIRST brush training is
-  # handed — the denoised frames plus the mattes and normals computed for
-  # it, before that splat is re-rendered along the helical orbit and
-  # denoised a second time. Off by default. Lands in
-  # <output_root>/colmap_intermediate/. The web UI drives it from the
-  # Outputs box; `--param export_colmap_intermediate=true` does the same
-  # from the CLI.
-  export_colmap_intermediate: false
+  - name: export_colmap_intermediate
+    label: Intermediate COLMAP dataset (debug)
+    dir: colmap_intermediate
+    default: false
+    help: >-
+      Debug: the dataset the FIRST brush training is handed — the denoised
+      frames plus the mattes and normals computed for them, before that splat
+      is re-rendered along the helical orbit and denoised a second time. What
+      that training actually saw, for when the re-render comes out wrong.
 
-  # Debug: also export a COLMAP dataset built from the pre-upscale frames
-  # (stage 4b). Only meaningful with run_upscale: true. Off by default.
-  export_colmap_preupscale: false
+  - name: export_colmap_preupscale
+    label: Pre-upscale COLMAP dataset (debug)
+    dir: colmap_preupscale
+    default: false
+    requires: run_upscale
+    help: >-
+      Debug: the same export built from the frames as they are BEFORE the
+      upscale (stage 4b), to measure what SeedVR2 does to Gaussian-splatting
+      quality. With the upscale off it would be the ordinary colmap/ under a
+      second name, so `requires:` disables it there rather than exporting
+      something else.
 
-  # Every path this workflow writes hangs off this one global, and
+globals:
+  # What has no control of its own, and therefore no `settings:` entry.
+  #
+  # Every path this workflow writes to disk hangs off this one global, and
   # `pipeline.cli run` repoints it at the run's own directory under
-  # B2C_OUTPUT_DIR unless you pass `--param output_root=...`.
+  # B2C_OUTPUT_DIR (i.e. the mounted volume) unless you pass
+  # `--param output_root=...`. The literal below is only what you get from
+  # a bare `WorkflowRunner` with no CLI: relative to the working directory,
+  # which on a pod is the container's writable layer — small, and gone when
+  # the pod is recycled.
   output_root: output/fast_helical_shell
 
 steps:
@@ -877,7 +959,7 @@ steps:
       # a run tunes is visible in the step's params block.
       steps: 6
       cfg: 1.0
-      seed: 0
+      seed: ${globals.seed}
       # The one value the two passes disagree on: pass 1 denoises the
       # circular render from scratch, pass 2 (strength 0.8) cleans up the
       # helical re-render.
@@ -1146,7 +1228,7 @@ steps:
       # make, not a side effect of the render change.
       steps: 6
       cfg: 1.0
-      seed: 0
+      seed: ${globals.seed}
       strength: 0.8
       prompt: "时间静止，人物完全静止。身体如雕塑般僵硬，胸口没有起伏，头部保持固定\
         角度，面部肌肉完全不动，维持单一的中性表情。双眼一眨不眨，眼睑保持张\
@@ -1249,6 +1331,10 @@ steps:
       batch_size: 1
       vae_encode_tiled: true
       vae_decode_tiled: true
+      # Was 42, its own number, while both denoise passes were 0. One
+      # `seed` setting now feeds all three, so a run is one sample rather
+      # than three unrelated ones.
+      seed: ${globals.seed}
     outputs:
       images: dataset.images
       cameras: dataset.cameras

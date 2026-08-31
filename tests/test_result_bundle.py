@@ -118,18 +118,24 @@ class TestResultBundle(unittest.TestCase):
 
 
 class TestOutputSelection(unittest.TestCase):
-    def test_the_shipped_workflow_offers_both(self):
-        """The shipped workflow declares export_colmap / export_ply."""
+    def test_the_shipped_workflow_declares_its_deliverables(self):
+        """The Outputs box IS the workflow's `outputs:` block: its labels,
+        its order, and the `dir:` each one lands in."""
+        outputs = webui.workflow_outputs("fast_helical_native")
         self.assertEqual(
-            sorted(webui.workflow_outputs("fast_helical_native")),
-            sorted([webui.OUTPUT_COLMAP, webui.OUTPUT_PLY]),
+            [(o.name, o.directory) for o in outputs],
+            [("export_colmap", "colmap"),
+             ("export_ply", "ply"),
+             ("export_colmap_intermediate", "colmap_intermediate"),
+             ("export_colmap_preupscale", "colmap_preupscale")],
         )
+        self.assertTrue(all(o.label and o.help for o in outputs))
+        preupscale = outputs[-1]
+        self.assertEqual(preupscale.requires, "run_upscale")
 
-    def test_a_workflow_without_the_params_offers_nothing(self):
-        """The control hides itself rather than pretending to switch
-        something the workflow has never heard of. No shipped workflow lacks
-        the switches any more, so this exercises one that declares no
-        globals at all."""
+    def test_a_workflow_without_an_outputs_block_offers_nothing(self):
+        """The box hides itself rather than pretending to switch something
+        the workflow has never heard of."""
         import os
 
         with tempfile.NamedTemporaryFile(
@@ -142,6 +148,7 @@ class TestOutputSelection(unittest.TestCase):
             bare = handle.name
         self.addCleanup(os.unlink, bare)
         self.assertEqual(webui.workflow_outputs(bare), [])
+        self.assertEqual(webui.result_subdirs(bare), [])
 
     def test_which_workflows_can_start_from_a_photo(self):
         """The gate on the UI's photo input. It got this wrong once by
@@ -184,22 +191,24 @@ class TestOutputSelection(unittest.TestCase):
                 empty = len(value) == 0 if field != "points_3d" else len(value[0]) == 0
                 self.assertTrue(empty, f"{field} is no longer empty on a photo-seeded Dataset")
 
-    def test_the_switches_are_not_also_editable_in_the_params_panel(self):
+    def test_the_switches_are_not_also_settings(self):
         """Two editable homes for one setting disagree the moment someone
-        touches either."""
-        globals_shown, _steps = webui.workflow_param_panel("fast_helical_native")
-        self.assertNotIn("export_colmap", globals_shown)
-        self.assertNotIn("export_ply", globals_shown)
-        # resolution is the one global the panel does draw — the switches and
-        # output_root are the exceptions, not the rule.
-        self.assertIn("resolution", globals_shown)
+        touches either. A deliverable's switch belongs to the Outputs box;
+        `WorkflowSpec.from_yaml` refuses it being declared twice, and the
+        Settings box draws `settings:` only."""
+        _spec, settings, outputs, _steps = webui.workflow_param_panel(
+            "fast_helical_native")
+        names = {s.name for s in settings}
+        self.assertFalse(names & {o.name for o in outputs})
+        self.assertIn("resolution", names)
+        self.assertIn("framing", names)
 
     def test_a_step_param_wired_to_a_global_is_marked_read_only(self):
         """The render step's `resolution` is `${globals.resolution}` in
         fast_helical_native. It has to stay a declared param (that is how the
         value crosses the dispatcher), so the panel is what keeps it from
         being a second editable home for the frame size."""
-        _globals, steps = webui.workflow_param_panel("fast_helical_native")
+        *_, steps = webui.workflow_param_panel("fast_helical_native")
         render = next(s for s in steps if s["step"] == "render")
         self.assertEqual(render["global_refs"].get("resolution"), "resolution")
 
@@ -209,14 +218,67 @@ class TestOutputSelection(unittest.TestCase):
             for pname, ref in step["global_refs"].items():
                 self.assertTrue(ref and not ref.startswith("$"))
 
-    def test_output_root_is_not_drawn_either(self):
+    def test_output_root_is_not_drawn_at_all(self):
         """Sharper than the switches: `pipeline.run_worker` only repoints
         output_root at the run directory when the submitted overrides do not
         already carry it. A control for it would let a run write under the
         process's cwd instead, which is how the Results tab once reported
-        "the run produced neither" for a run that had completed fine."""
-        globals_shown, _steps = webui.workflow_param_panel("fast_helical_native")
-        self.assertNotIn("output_root", globals_shown)
+        "the run produced neither" for a run that had completed fine.
+
+        It is a bare `globals:` key, not a declared setting, and the panel
+        draws declarations only — so this is now structural rather than a
+        denylist that could be forgotten."""
+        spec, settings, outputs, _steps = webui.workflow_param_panel(
+            "fast_helical_native")
+        self.assertIn("output_root", spec.globals)
+        drawn = {s.name for s in settings} | {o.name for o in outputs}
+        self.assertNotIn("output_root", drawn)
+
+
+class TestSettingWidgets(unittest.TestCase):
+    """A declared setting draws and reads back as the value it declared.
+
+    The resolution control used to be a hand-written special case — a
+    RESOLUTION_CHOICES list, an f-string label format and a parser for it.
+    It is now the generic choices path, so this pins the round trip rather
+    than the format.
+    """
+
+    def _setting(self, name):
+        _spec, settings, _outputs, _steps = webui.workflow_param_panel(
+            "fast_helical_native")
+        return next(s for s in settings if s.name == name)
+
+    def test_a_list_choice_round_trips_through_its_label(self):
+        resolution = self._setting("resolution")
+        self.assertEqual(webui._choice_label([720, 1280]), "720 x 1280")
+        self.assertEqual(
+            webui._widget_value(resolution, "600 x 1040"), [600, 1040]
+        )
+
+    def test_a_scalar_choice_is_its_own_label(self):
+        framing = self._setting("framing")
+        self.assertEqual(webui._widget_value(framing, "bust"), "bust")
+
+    def test_a_choices_setting_draws_a_dropdown_not_a_yaml_box(self):
+        """`resolution` is `type: list`, and the list branch used to win —
+        a free-form YAML box a shape no step supports can be typed into."""
+        import gradio as gr
+
+        resolution = self._setting("resolution")
+        with gr.Blocks():
+            widget = webui._widget_for(resolution, [720, 1280], "Resolution", "k")
+        self.assertIsInstance(widget, gr.Dropdown)
+        self.assertEqual([c[0] for c in widget.choices][0], "720 x 1280")
+        self.assertFalse(widget.allow_custom_value)
+
+    def test_a_setting_is_labelled_by_its_label_not_its_name(self):
+        self.assertEqual(self._setting("run_upscale").title, "Upscale dataset")
+        # A step param has no label and falls back to the name you would
+        # type after --param.
+        *_, steps = webui.workflow_param_panel("fast_helical_native")
+        param = steps[0]["params"][0]
+        self.assertEqual(param.title, param.name)
 
 
 if __name__ == "__main__":
