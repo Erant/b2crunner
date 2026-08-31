@@ -92,7 +92,10 @@ pipeline/
 │                      into the same image, targeting RunPod), never
 │                      actually built/run
 │   ├── sam3d_body.py    real, verified against real inference
-│   ├── seedvr2.py       real, verified against real inference
+│   ├── seedvr2.py       real, verified against real inference; also
+│                      rescales the dataset's camera intrinsics to match
+│                      the upscaled frames — the SeedVR2 upscale itself
+│                      would otherwise silently invalidate them
 │   ├── render.py        real, verified on GPU — camera-path + mesh/skeleton
 │                      render; pyrender/EGL confirmed hitting real hardware
 │                      (GL_VENDOR: NVIDIA) on a local RTX 4070 Ti
@@ -101,10 +104,7 @@ pipeline/
 │                      cyber_6f's real photos
 │   ├── views.py         drop_views / filter_fov / rotate_views /
 │                      replace_views / merge_datasets — real, verified
-│                      locally against cyber_6f's 81 real cameras — plus
-│                      fit_cameras_to_images, which rescales intrinsics
-│                      to the size the frames actually are (what the
-│                      SeedVR2 upscale silently invalidates)
+│                      locally against cyber_6f's 81 real cameras
 │   ├── mask_splat.py    real, verified against cyber_6f's recorded
 │                      splatted/ -> masked_splatted/ stage output
 │   ├── splat.py         load_splat / save_splat / render_splat — camera

@@ -16,8 +16,9 @@ Two layouts, via `params["layout"]`:
 Note what neither layout does: rescale intrinsics. The cameras written
 here are whatever the dataset holds, so a dataset whose frames were
 resized without its cameras being updated exports a cameras.txt that
-disagrees with its own images — see steps/views.py's
-`fit_cameras_to_images`, which is the workflow-level fix.
+disagrees with its own images — see steps/seedvr2.py, the one step that
+resizes frames, which rescales the cameras that describe them to match as
+part of the same step.
 
 Ported from nodes/export_node.py in the original ComfyUI-Body2COLMAP repo,
 minus the ComfyUI-specific parts (folder_paths output-dir resolution,

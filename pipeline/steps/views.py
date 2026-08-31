@@ -9,9 +9,6 @@ no GPU, no graphics context:
     nodes/replace_views_node.py   -> replace_views
     nodes/merge_dataset_node.py   -> merge_datasets
 
-plus one that has no ComfyUI counterpart, `fit_cameras_to_images` — see its
-own docstring for the upscale/intrinsics mismatch it exists to close.
-
 `workflows/api/outline.json` chains filter_fov -> rotate_views ->
 replace_views, and `resplat_tiered.json` needs merge_datasets to combine
 three circular orbits rendered at different framings, so none of the
@@ -494,105 +491,6 @@ class MergeDatasetsStep(Step):
             extras=extras,
         )
         return {"dataset": out}
-
-
-@register_step("fit_cameras_to_images")
-class FitCamerasToImagesStep(Step):
-    """Rescale a dataset's intrinsics to the size its frames actually are.
-
-    Nothing else in the pipeline resizes images out from under the cameras
-    that describe them — except `seedvr2`, which is a video upscaler: it
-    takes 720x1280 frames and hands back 1080x1920 ones, and there is no
-    way for it to return cameras (it runs in its own venv, and the IPC
-    boundary carries plain arrays, not `Camera` objects). So after an
-    upscale the dataset holds 1080x1920 images alongside cameras that still
-    say `fx=1213.9, 720x1280`, and every consumer downstream of that point
-    believes the wrong thing:
-
-      * `colmap_export` writes a cameras.txt describing a 720x1280 PINHOLE
-        camera next to 1080x1920 images. That is what the recorded
-        ComfyUI-era export in `cyber_6f/colmap` does too (720x1280
-        intrinsics, 1080x1920 frames) — it is not a regression this port
-        introduced, it is a bug it inherited;
-      * `brush` reads that COLMAP directory to train, so the splat is
-        fitted with a focal length half what the images were taken with.
-
-    Scaling is the whole operation: fx, fy, cx and cy all multiply by the
-    same per-axis ratio, because an upscale is a pure resampling of the
-    same view frustum. Poses are untouched — the camera did not move.
-
-    A dataset whose frames already match its cameras passes through
-    unchanged (and says so in the log), so this is safe to leave in a
-    workflow whose upscale step is switched off.
-
-    inputs: {"dataset": Dataset}
-    outputs: {"dataset": Dataset}
-
-    Takes no params — the scale factor comes from comparing the frames to
-    the cameras that describe them.
-    """
-
-    def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
-        from body2colmap.camera import Camera
-
-        dataset: Dataset = inputs["dataset"]
-        if not dataset.images or not dataset.cameras:
-            raise ValueError(
-                "fit_cameras_to_images needs both images and cameras; this dataset has "
-                f"{len(dataset.images)} images and {len(dataset.cameras)} cameras."
-            )
-
-        cameras = []
-        changed = 0
-        for index, camera in enumerate(dataset.cameras):
-            image = dataset.images[min(index, len(dataset.images) - 1)]
-            height, width = image.shape[:2]
-            x_scale = width / float(camera.width)
-            y_scale = height / float(camera.height)
-            if x_scale == 1.0 and y_scale == 1.0:
-                cameras.append(camera)
-                continue
-            changed += 1
-            cameras.append(
-                Camera(
-                    focal_length=(camera.fx * x_scale, camera.fy * y_scale),
-                    image_size=(width, height),
-                    principal_point=(camera.cx * x_scale, camera.cy * y_scale),
-                    position=camera.position,
-                    rotation=camera.rotation,
-                )
-            )
-
-        first = dataset.images[0]
-        resolution = (int(first.shape[1]), int(first.shape[0]))
-        if changed:
-            logger.info(
-                "fit_cameras_to_images: rescaled %d/%d cameras to %dx%d "
-                "(was %dx%d, fx %.1f -> %.1f)",
-                changed, len(cameras), resolution[0], resolution[1],
-                dataset.cameras[0].width, dataset.cameras[0].height,
-                dataset.cameras[0].fx, cameras[0].fx,
-            )
-        else:
-            logger.info(
-                "fit_cameras_to_images: cameras already match the frames (%dx%d); "
-                "nothing to do", resolution[0], resolution[1],
-            )
-
-        updated = Dataset(
-            images=dataset.images,
-            image_names=dataset.image_names,
-            cameras=cameras,
-            points_3d=dataset.points_3d,
-            resolution=resolution,
-            masks=dataset.masks,
-            reference_image=dataset.reference_image,
-            anchor_image=dataset.anchor_image,
-            prompt=dataset.prompt,
-            splat_path=dataset.splat_path,
-            extras=dict(dataset.extras),
-        )
-        return {"dataset": updated}
 
 
 def _scene_scale(positions: np.ndarray) -> float:

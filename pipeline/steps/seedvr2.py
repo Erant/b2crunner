@@ -42,11 +42,26 @@ outright on just 5 frames — real memory pressure, not a bug. Pass
 params.vae_encode_tiled / params.vae_decode_tiled (True) for any resolution
 much above the input's native size; that's exactly what those flags exist
 for (confirmed: identical call with them on succeeded immediately after).
+
+This step also rescales the dataset's camera intrinsics to match, which
+used to be a separate `fit_cameras_to_images` step a workflow had to chain
+right behind this one. SeedVR2 resamples the frames but has no way to
+resize the cameras that describe them itself — it hands back plain arrays,
+not `Camera` objects, and nothing else in the pipeline resizes images out
+from under their cameras — so a dataset that skipped that follow-up step
+held 1080x1920 images next to cameras still claiming 720x1280 (fx=1213.9):
+`colmap_export` would write a cameras.txt that disagrees with its own
+images, and `brush` would fit a splat at half the focal length the photos
+were actually taken at (exactly the bug the recorded ComfyUI-era export in
+`cyber_6f/colmap` has). Doing the rescale here instead keeps the dataset
+congruent the moment this step returns, rather than for one step and then
+not the next — every consumer of `cameras` is a `Dataset` field.
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict
+import logging
+from typing import Any, Dict, List
 
 import cv2
 import numpy as np
@@ -54,6 +69,67 @@ import numpy as np
 from ..paths import models_dir
 from ..registry import register_step
 from ..step import Param, Step
+
+logger = logging.getLogger(__name__)
+
+
+def _fit_cameras_to_images(cameras: List[Any], images: List[np.ndarray]) -> tuple:
+    """Rescale `cameras`' intrinsics to the size `images` actually are.
+
+    Scaling is the whole operation: fx, fy, cx and cy all multiply by the
+    same per-axis ratio, because an upscale is a pure resampling of the
+    same view frustum. Poses are untouched — the camera did not move.
+
+    Cameras that already match their image pass through unchanged (and say
+    so in the log), so calling this on a dataset seedvr2 left alone (or
+    that never upscaled at all) is a no-op.
+
+    Returns (cameras, resolution) where resolution is the (width, height)
+    of the first image, i.e. `Dataset.resolution`'s shape.
+    """
+    from body2colmap.camera import Camera
+
+    if not images or not cameras:
+        raise ValueError(
+            "seedvr2 needs both images and cameras to keep them in sync; got "
+            f"{len(images)} images and {len(cameras)} cameras."
+        )
+
+    rescaled = []
+    changed = 0
+    for index, camera in enumerate(cameras):
+        image = images[min(index, len(images) - 1)]
+        height, width = image.shape[:2]
+        x_scale = width / float(camera.width)
+        y_scale = height / float(camera.height)
+        if x_scale == 1.0 and y_scale == 1.0:
+            rescaled.append(camera)
+            continue
+        changed += 1
+        rescaled.append(
+            Camera(
+                focal_length=(camera.fx * x_scale, camera.fy * y_scale),
+                image_size=(width, height),
+                principal_point=(camera.cx * x_scale, camera.cy * y_scale),
+                position=camera.position,
+                rotation=camera.rotation,
+            )
+        )
+
+    first = images[0]
+    resolution = (int(first.shape[1]), int(first.shape[0]))
+    if changed:
+        logger.info(
+            "seedvr2: rescaled %d/%d cameras to %dx%d (was %dx%d, fx %.1f -> %.1f)",
+            changed, len(rescaled), resolution[0], resolution[1],
+            cameras[0].width, cameras[0].height, cameras[0].fx, rescaled[0].fx,
+        )
+    else:
+        logger.info(
+            "seedvr2: cameras already match the frames (%dx%d); nothing to do",
+            resolution[0], resolution[1],
+        )
+    return rescaled, resolution
 
 
 @register_step("seedvr2")
@@ -259,4 +335,5 @@ class SeedVR2Step(Step):
             cv2.cvtColor(np.clip(frame * 255.0, 0, 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
             for frame in result
         ]
-        return {"images": images}
+        cameras, resolution = _fit_cameras_to_images(inputs["cameras"], images)
+        return {"images": images, "cameras": cameras, "resolution": resolution}

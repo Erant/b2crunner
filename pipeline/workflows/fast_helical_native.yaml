@@ -175,11 +175,11 @@ globals:
   face_splat: true
 
   # Whether the SeedVR2 upscale (stage 5) runs. On by default. `run_upscale:
-  # false` skips both the `upscale` step and `rescale_cameras` (which exists
-  # only to repair the intrinsics the upscale invalidates). The web UI
-  # drives it from the "Upscale dataset" checkbox; `--param
+  # false` skips the `upscale` step, which also skips the camera-intrinsics
+  # rescale it does as part of the same step (see steps/seedvr2.py). The
+  # web UI drives it from the "Upscale dataset" checkbox; `--param
   # run_upscale=false` does the same from the CLI. Same toggle, same
-  # default, same guarded steps as fast_helical_shell.yaml — keep them in
+  # default, same guarded step as fast_helical_shell.yaml — keep them in
   # sync.
   run_upscale: true
 
@@ -1153,6 +1153,19 @@ steps:
 
   # ---------------------------------------------------------------- stage 5
   # upscale.json — skipped entirely when run_upscale is false.
+  #
+  # seedvr2 resamples the frames and, in the same step, rescales the
+  # dataset's camera intrinsics to match: it runs in its own venv, so the
+  # IPC boundary in only carries plain arrays, not Camera objects, and
+  # without the rescale the dataset would come out of this step holding
+  # 1080x1920 images described by 720x1280 intrinsics — both stage-6
+  # consumers would then believe the wrong focal length. cameras.txt would
+  # claim a 720x1280 PINHOLE camera, and brush would fit a splat at half
+  # the focal length the images were rendered with. The recorded ComfyUI-
+  # era export has exactly this mismatch (cyber_6f/colmap: 720x1280
+  # intrinsics, 1080x1920 frames), so this is an inherited bug, not a new
+  # one — and a prime suspect for output that looks *almost* right. See
+  # steps/seedvr2.py.
   - id: upscale
     step: seedvr2
     dispatch: subprocess
@@ -1160,6 +1173,7 @@ steps:
     when: ${globals.run_upscale}
     inputs:
       images: dataset.images
+      cameras: dataset.cameras
     params:
       # SeedVR2's `resolution` is the target output *shortest edge*, not a
       # multiplier — asking for less than the input's shortest edge
@@ -1178,29 +1192,8 @@ steps:
       vae_decode_tiled: true
     outputs:
       images: dataset.images
-
-  # seedvr2 resamples the frames and cannot return cameras — it runs in its
-  # own venv, and that IPC boundary carries plain arrays, not Camera
-  # objects. So without this step the dataset now holds 1080x1920 images
-  # described by 720x1280 intrinsics, and both stage-6 consumers believe
-  # the wrong focal length: cameras.txt would claim a 720x1280 PINHOLE
-  # camera, and brush would fit a splat at half the focal length the images
-  # were rendered with. The recorded ComfyUI-era export has exactly this
-  # mismatch (cyber_6f/colmap: 720x1280 intrinsics, 1080x1920 frames), so
-  # this is an inherited bug, not a new one — and a prime suspect for
-  # output that looks *almost* right.
-  #
-  # Skipped with `run_upscale: false` (it is a no-op on a dataset whose
-  # frames already match its cameras) — same `when:` as `upscale`, so the
-  # two are always on or off together.
-  - id: rescale_cameras
-    step: fit_cameras_to_images
-    dispatch: in_process
-    when: ${globals.run_upscale}
-    inputs:
-      dataset: dataset
-    outputs:
-      dataset: dataset
+      cameras: dataset.cameras
+      resolution: dataset.resolution
 
   # ---------------------------------------------------------------- stage 6
   # colmap.json: background-remove, re-estimate normals against the frames

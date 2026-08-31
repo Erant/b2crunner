@@ -312,11 +312,12 @@ class TestWorkflowFiles(unittest.TestCase):
 
     def test_run_upscale_gates_the_upscale_stage(self):
         """fast_helical.yaml used to be a separate workflow minus the
-        upscale; it is now the `run_upscale` global gating `upscale` and
-        `rescale_cameras` on this one file. Off -> both drop out of
-        enabled_steps(); on (the default) -> both run."""
+        upscale; it is now the `run_upscale` global gating `upscale` on
+        this one file (which also rescales the dataset's cameras as part
+        of the same step — see steps/seedvr2.py). Off -> it drops out of
+        enabled_steps(); on (the default) -> it runs."""
         spec = WorkflowSpec.from_yaml(str(WORKFLOW_DIR / "fast_helical_native.yaml"))
-        gated = {"upscale", "rescale_cameras"}
+        gated = {"upscale"}
         self.assertTrue(gated <= {s.id for s in spec.enabled_steps()})
         spec.globals["run_upscale"] = False
         self.assertFalse(gated & {s.id for s in spec.enabled_steps()})
