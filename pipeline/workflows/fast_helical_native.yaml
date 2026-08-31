@@ -294,9 +294,11 @@ settings:
       +-0.003 (docs/camera-pose-refinement.md). It runs twice — once on the
       denoised bootstrap batch, once on the re-rendered helical one — because
       both paths are generated rather than measured, and each run costs a
-      COLMAP feature/match/triangulate/BA pass over the training frames (about
-      three minutes on CPU at 81 frames, less with the CUDA build in the pod
-      image). Off gives the poses exactly as the renderer wrote them, which is
+      COLMAP feature/match/triangulate/BA pass over the training frames. At 81
+      frames, measured: 27 s of features and matching on the pod image's CUDA
+      build (2.8 s + 24.3 s) against 209 s on a CPU one, plus a bundle
+      adjustment that is CPU-bound either way. Off gives the poses exactly as
+      the renderer wrote them, which is
       what every run before 2026-08-31 used. Note what it never sees: the
       supporting views, which are renders made FROM these poses and so have no
       independent evidence to offer about them.

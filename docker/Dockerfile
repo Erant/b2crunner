@@ -178,9 +178,13 @@ RUN cargo build --release -p brush-app -p brush-splat-render \
 # matching, both of which are ONNX graphs, and COLMAP picks their execution
 # provider from a compile-time flag: `SelectONNXExecutionProvider` returns
 # CUDA when COLMAP_CUDA_ENABLED is defined and CPU otherwise
-# (src/colmap/feature/onnx_utils.cc). A CPU build is not an error — it is
-# ~3 min per refinement at 81 frames, twice per run — it is just the slow
-# path, and `pipeline/doctor.py`'s colmap check WARNs when it sees one.
+# (src/colmap/feature/onnx_utils.cc). A CPU build is not an error, it is just
+# the slow path, and `pipeline/doctor.py`'s colmap check WARNs when it sees
+# one. Measured on this stage's own binary against the 81-frame dataset in
+# docs/camera-pose-refinement.md, CPU vs the CUDA provider on an RTX 4070 Ti:
+# extraction 32.6 s -> 2.8 s, exhaustive matching 176 s -> 24.3 s. So 209 s
+# of the refinement becomes 27 s, twice per run; the bundle adjustment behind
+# it is Ceres on the CPU either way.
 #
 # AND WHY THE ONNX RUNTIME IS OVERRIDDEN, which is the sharp edge of turning
 # CUDA on. COLMAP's FETCH_ONNX (on by default) downloads a prebuilt ONNX
@@ -208,22 +212,34 @@ FROM nvidia/cuda:13.0.2-cudnn-devel-ubuntu24.04 AS colmap-builder
 ENV DEBIAN_FRONTEND=noninteractive
 
 # COLMAP's own docker/Dockerfile's build list, minus the parts this image
-# has no use for: no qt6/glew (GUI_ENABLED=OFF), no gtest/gmock
+# has no use for: no qt6 (GUI_ENABLED=OFF), no gtest/gmock
 # (TESTS_ENABLED=OFF), and no libmkl-full-dev — that is ~2 GB of builder to
 # hand Ceres a faster dense solver for a problem with 81 cameras, so Ceres
-# gets the BLAS libceres-dev already depends on.
+# gets the reference BLAS/LAPACK instead.
 #
-# libcurl4-openssl-dev + libssl-dev are NOT optional here even though the
-# ONNX weights are fetched by pipeline/models.py rather than by COLMAP:
-# DOWNLOAD_ENABLED is what compiles `MaybeDownloadAndCacheFile`, which is
-# also the function that passes a local path straight through. With it off,
-# the `--AlikedExtraction.n32_model_path` the step hands over would be a
-# path COLMAP cannot even accept.
+# `openimageio-tools` is NOT a trimmable extra, and dropping it was the
+# first thing that broke this stage. `libopenimageio-dev`'s CMake package
+# declares imported targets for OpenImageIO's *command-line tools* —
+# `OpenImageIO::iconvert` and friends — and those binaries ship in
+# `openimageio-tools`, a separate package that `--no-install-recommends`
+# does not pull in. `find_package(OpenImageIO)` then fails outright with
+# "The imported target OpenImageIO::iconvert references the file
+# /usr/bin/iconvert but this file does not exist", at
+# FindDependencies.cmake:75, long before anything is compiled. COLMAP
+# builds nothing against those tools; it is the config file that insists.
+#
+# libcurl4-openssl-dev + libssl-dev are NOT optional here either, even
+# though the ONNX weights are fetched by pipeline/models.py rather than by
+# COLMAP: DOWNLOAD_ENABLED is what compiles `MaybeDownloadAndCacheFile`,
+# which is also the function that passes a local path straight through.
+# With it off, the `--AlikedExtraction.n32_model_path` the step hands over
+# would be a path COLMAP cannot even accept.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git ca-certificates cmake ninja-build build-essential \
         libboost-program-options-dev libboost-graph-dev libboost-system-dev \
-        libeigen3-dev libopenimageio-dev libmetis-dev \
+        libeigen3-dev libopenimageio-dev openimageio-tools libmetis-dev \
         libgoogle-glog-dev libsqlite3-dev libcgal-dev libceres-dev \
+        libblas-dev liblapack-dev libglew-dev \
         libcurl4-openssl-dev libssl-dev curl \
     && rm -rf /var/lib/apt/lists/*
 
@@ -740,16 +756,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg \
         # COLMAP's runtime dependencies, for the camera refinement. Taken
         # from COLMAP's own docker/Dockerfile runtime stage, minus the qt6
-        # and glew entries the GUI would want (GUI_ENABLED=OFF) — same
-        # ubuntu24.04 as the colmap-builder stage, so these are the same
-        # package versions it linked against. Everything CUDA the ONNX
-        # provider needs (libcudart.so.13, libcublas*.so.13, libcufft,
-        # libcurand, libnvrtc, libcudnn.so.9) is already in this base
-        # image, which is the whole reason the builder overrides ONNX to
-        # the CUDA 13 tarball.
+        # entries the GUI would want (GUI_ENABLED=OFF) — same ubuntu24.04
+        # as the colmap-builder stage, so these are the same package
+        # versions it linked against. Everything CUDA the ONNX provider
+        # needs (libcudart.so.13, libcublas*.so.13, libcufft, libcurand,
+        # libnvrtc, libcudnn.so.9) is already in this base image, which is
+        # the whole reason the builder overrides ONNX to the CUDA 13
+        # tarball.
+        #
+        # libglew2.2 IS needed despite GUI_ENABLED=OFF, and leaving it out
+        # was the second thing that broke this: `colmap` links libGLEW
+        # regardless of the GUI, so the binary dies with exit 127 and
+        # `error while loading shared libraries: libGLEW.so.2.2` on every
+        # invocation. It cost a full image build to find because the
+        # colmap-builder stage cannot show it — that stage has libglew-dev
+        # installed, so the binary runs fine right up until it is copied
+        # somewhere that does not. `doctor`'s colmap check is what caught
+        # it; that is the check earning its place on the first build.
         libboost-program-options1.83.0 libmetis5 libceres4t64 \
         libopenimageio2.4t64 libgoogle-glog0v6t64 libcurl4 libssl3t64 \
-        libomp5 libopengl0 \
+        libomp5 libopengl0 libglew2.2 \
         # ---------------------------------------------------------------
         # Debugging surface. This image is meant to be built once and then
         # left alone for the whole verification round, so anything you

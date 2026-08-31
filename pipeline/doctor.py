@@ -422,8 +422,9 @@ def check_colmap() -> Check:
         status = WARN
         lines.append(
             "  built WITHOUT CUDA — ALIKED and LightGlue fall back to the ONNX "
-            "CPU provider. Correct, but ~3 min per refinement at 81 frames "
-            "instead of seconds; rebuild with -DCUDA_ENABLED=ON."
+            "CPU provider. Still correct, just slower: measured at 81 frames, "
+            "209 s of features and matching against 27 s on a CUDA build. "
+            "Rebuild with -DCUDA_ENABLED=ON."
         )
 
     try:

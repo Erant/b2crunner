@@ -801,8 +801,10 @@ oracle images the new renderer was validated against, per
 ## The colmap-builder stage (added 2026-08-31), and what to check
 
 New stage, for `refine_cameras` (`docs/camera-pose-refinement.md`). Upstream
-COLMAP, pinned at 4.2.0's `921c0006`, `-DCUDA_ENABLED=ON`. It has not been
-built. Three things to check the first time it is:
+COLMAP, pinned at 4.2.0's `921c0006`, `-DCUDA_ENABLED=ON`. **Built and
+verified on 2026-08-31** — the notes below are what it took, kept because
+two of the three cost a build each to find. Three things to check when
+this pin moves:
 
 1.  **It should fail loudly, not quietly, if CUDA is off.** The last RUN in
     the stage is `colmap version | grep -q "with CUDA"`. That string is
@@ -842,9 +844,29 @@ built. Three things to check the first time it is:
     banner, WARNs on a non-CUDA build, and FAILs on a binary that will not
     start or is missing a command the step drives.
 
-It is also the slowest stage after python-builder: COLMAP's defaults build
-PoseLib and faiss from FetchContent as well, and none of that is cached
-across a `COLMAP_REF` bump.
+4.  **Two packages that look trimmable and are not**, both found by
+    building. `openimageio-tools` — `libopenimageio-dev`'s CMake package
+    declares imported targets for OpenImageIO's command-line tools, whose
+    binaries ship in that separate package, so `find_package(OpenImageIO)`
+    fails outright with "the imported target OpenImageIO::iconvert
+    references the file /usr/bin/iconvert but this file does not exist".
+    And `libglew2.2` in the **runtime** stage: `colmap` links libGLEW even
+    with GUI_ENABLED=OFF, so leaving it out gives a binary that exits 127
+    with `error while loading shared libraries: libGLEW.so.2.2`. The second
+    is the nastier one — the colmap-builder stage has libglew-dev, so the
+    binary runs perfectly there and only dies once it is copied into the
+    runtime stage. `doctor`'s colmap check caught it on the first full
+    build, which is that check earning its keep immediately.
+
+Timing, measured on the built stage against the 81-frame dataset, CPU vs
+the CUDA provider on an RTX 4070 Ti: ALIKED extraction 32.6 s -> 2.8 s,
+exhaustive LightGlue matching 176 s -> 24.3 s. The bundle adjustment behind
+them is Ceres on the CPU either way.
+
+The stage itself compiles in ~3 minutes, but it is the slowest after
+python-builder in wall-clock terms because COLMAP's defaults build PoseLib
+and faiss from FetchContent as well, and none of that is cached across a
+`COLMAP_REF` bump.
 
 ## Still unverified after all of the above
 

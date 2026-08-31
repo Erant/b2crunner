@@ -6,7 +6,7 @@ docs/camera-pose-refinement.md says is load-bearing:
 
   * reading COLMAP's world-to-camera poses back into body2colmap `Camera`s,
   * the Sim(3) that puts the gauge back (trap 1 — without it the model
-    comes back 15-24% larger and nothing warns you),
+    comes back 15-26% larger and nothing warns you),
   * and the checks that assert it happened.
 
 So those are what is tested, against synthetic orbits where the right
@@ -81,7 +81,7 @@ class TestPoseRoundTrip(unittest.TestCase):
 
 class TestGauge(unittest.TestCase):
     def test_a_23_percent_inflation_is_undone_exactly(self):
-        """Trap 1, at the top of the observed range (+15.1% to +23.5%)."""
+        """Trap 1, inside the observed range (+15.1% to +26.4%)."""
         given = _orbit()
         drifted = _transform(given, scale=1.235, degrees=17.0, translation=[0.4, -0.2, 0.9])
 

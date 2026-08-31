@@ -41,13 +41,16 @@ backdrop that happens to be rigid and supplies only ~15% of the keypoints
 anyway, but one that moves, or is generated inconsistently per frame,
 would quietly poison the solve with nothing in the output to say so.
 
-Trap 1 — BA inflates the model by 15-24%, silently
+Trap 1 — BA inflates the model by 15-26%, silently
 --------------------------------------------------
 `bundle_adjuster` fixes the gauge with `TWO_CAMS_FROM_WORLD`: the first
 camera's pose plus part of the second's. Global scale therefore hangs off
 one cam1<->cam2 baseline and the rest of the reconstruction is free to grow
-around it — +15.1%, +21.6%, +19.3%, +23.5% across four runs of this exact
-pipeline. Nothing warns you: the reconstruction stays self-consistent,
+around it — +15.1%, +21.6%, +19.3%, +23.5% across four runs of the scratch
+script this ports, and +21.7%, +23.2%, +26.4% across three of this step.
+That last one is outside the range the first four suggested, so treat the
+figure as unbounded rather than as 20%-ish: what matters is that step 5
+removes it exactly, not that it stays small. Nothing warns you: the reconstruction stays self-consistent,
 reprojection error looks fine, `model_analyzer` is happy, and what you get
 is a splat a fifth too large in a frame whose `points3D.txt` init no longer
 matches it. Step 5 is the fix, and `_check_scale` below is the assertion
@@ -267,7 +270,7 @@ class RefineCamerasStep(Step):
         Param("max_scale_drift", float, 0.01,
               "Refuse a result whose mean camera radius about the scene "
               "centroid moved by more than this fraction — the assertion for "
-              "trap 1, which is a 15-24% miss. 1% rather than the 0.1% the "
+              "trap 1, which is a 15-26% miss. 1% rather than the 0.1% the "
               "doc observed, and the difference is not slack: a correction "
               "that is not itself a similarity moves the radius by roughly "
               "the SQUARE of its size (a mean shift of 5% of the radius "
@@ -690,7 +693,7 @@ def _align_to(refined: Sequence[Any], given: Sequence[Any]) -> Tuple[List[Any], 
     given ones and applied to the refined poses. Every relative correction
     BA made is kept; the global frame is restored exactly (measured:
     orbit radius 1.8036 -> 1.8034, centroid preserved). This is trap 1's
-    only fix — without it the model comes back 15-24% larger, in a frame
+    only fix — without it the model comes back 15-26% larger, in a frame
     whose points3D.txt init no longer matches it, and nothing downstream
     would say so.
     """
@@ -754,7 +757,8 @@ def _movement(refined: Sequence[Any], given: Sequence[Any],
         "scene_radius": given_radius,
         "scene_radius_refined": refined_radius,
         # Positive = how much BA had grown the model before the Sim(3) put
-        # it back. 15-24% is the expected range; see trap 1.
+        # it back. 15-26% across seven runs, and not bounded by that;
+        # see trap 1.
         "ba_scale_inflation": 1.0 / transform[0] - 1.0,
         "radius_drift": abs(refined_radius - given_radius) / given_radius if given_radius else 0.0,
         "centre_shift": {

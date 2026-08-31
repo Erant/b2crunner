@@ -143,7 +143,7 @@ In the scratch project this is one command:
 standalone against any pair of `images.txt` files). Both in
 `~/Projects/colmaptest`.
 
-## Trap 1 — BA inflates the model by 15-24%, silently
+## Trap 1 — BA inflates the model by 15-26%, silently
 
 The one that will cost a day if it is not known in advance.
 `bundle_adjuster` fixes the gauge with `TWO_CAMS_FROM_WORLD`: the first
@@ -155,6 +155,17 @@ is free to grow around it. Observed across four runs of this pipeline:
     +21.6%   foreground only
     +19.3%   foreground, script rerun
     +23.5%   foreground, script rerun
+
+and three more from the step that replaced the script, on the same data:
+
+    +21.7%   foreground, CPU
+    +23.2%   foreground, CPU, rerun
+    +26.4%   foreground, CUDA, inside the built image
+
+The last one is outside the range the first four suggested, which is worth
+knowing: this is not a quantity to bound from a handful of samples. What
+matters is that it is removed exactly rather than kept small — the Sim(3)
+brought that +26.4% back to 0.006% of radius drift like every other run.
 
 Nothing warns you. The reconstruction stays self-consistent, reprojection
 error looks fine, and `model_analyzer` is happy. What you get is a splat
@@ -301,13 +312,27 @@ the scratch script does not say:
 - **CUDA is on in the image, unlike the experiment's build.** The 4.2.0
   build measured here was `-DCUDA_ENABLED=OFF` because the workstation's
   nvcc rejects gcc 15. In `docker/Dockerfile`'s `colmap-builder` stage it
-  is on, which is what puts ALIKED and LightGlue on the ONNX **CUDA**
-  execution provider instead of the CPU one — the provider is chosen from
-  a compile-time flag, not a runtime one. That turns COLMAP's own
-  `FETCH_ONNX` into a hazard: with CUDA enabled it fetches the **cuda12**
-  ONNX Runtime, which will not load against this image's CUDA 13, so the
-  build overrides it to the cuda13 build of the same release. A CPU
-  COLMAP still works and `pipeline/doctor.py` WARNs about it.
+  is on (Ubuntu 24.04's gcc 13, which CUDA 13's nvcc accepts), which is
+  what puts ALIKED and LightGlue on the ONNX **CUDA** execution provider
+  instead of the CPU one — the provider is chosen from a compile-time flag,
+  not a runtime one. That turns COLMAP's own `FETCH_ONNX` into a hazard:
+  with CUDA enabled it fetches the **cuda12** ONNX Runtime, which will not
+  load against this image's CUDA 13, so the build overrides it to the
+  cuda13 build of the same release. A CPU COLMAP still works and
+  `pipeline/doctor.py` WARNs about it.
+
+  What that buys, measured on the built stage against this same 81-frame
+  dataset, CPU against the CUDA provider on an RTX 4070 Ti:
+
+  | stage                       | CPU    | CUDA   |       |
+  |-----------------------------|--------|--------|-------|
+  | ALIKED extraction           | 32.6 s | 2.8 s  | 11.6x |
+  | exhaustive LightGlue match  | 176 s  | 24.3 s | 7.3x  |
+  | features + matching         | 209 s  | 27 s   | 7.7x  |
+
+  (The CPU column also confirms this document's own "~3 min" estimate for
+  the matching: 2.941 min.) The bundle adjustment behind it is Ceres on the
+  CPU in both columns and is not affected.
 - **The ONNX weights are prefetched.** `pipeline/models.py`'s
   `colmap_onnx` entry pulls ALIKED-N32 and LightGlue (~65 MB) at pod start
   into `$B2C_MODELS_DIR/colmap/`, and the step passes explicit
@@ -342,8 +367,34 @@ Both draws passed every check. Against the scratch script's own
 9.5 and 9.8 mm (0.25% / 0.55% of the orbit radius) — the same solve, drawn
 three times.
 
-**Not verified:** the CUDA build (nothing here can compile it), the step on
-a pod, and the +0.63 PSNR on the helical deliverable. Measured on one
+The **image is verified too**, as of the same day, and by the end of it the
+whole chain had been run rather than reasoned about:
+
+- the `colmap-builder` stage builds, and its own guard (`colmap version |
+  grep -q "with CUDA"`) passes;
+- ALIKED runs through the **CUDA execution provider** on a real GPU against
+  these frames — 730-742 features per image against the ~747 this document
+  measured on CPU. This is the part that could not be inferred: ONNX
+  Runtime throws rather than falling back when a provider will not load, so
+  a cuda12 runtime against this CUDA 13 image would have raised here, not
+  run slowly;
+- `doctor` reports the binary OK in the shipped image;
+- and the **step itself ran end to end inside `b2c/pipeline:latest` on the
+  GPU**, over all 81 frames: reprojection 1.570 -> 1.529 px, +26.4% of BA
+  inflation removed to 0.006% of radius drift, mean centre shift 0.0137
+  (0.76% of radius), every check passed, 4.9 mm mean from the scratch
+  script's own output.
+
+Two things the image build cost that no amount of reading would have found:
+`openimageio-tools` (a *-dev* package's CMake config imports binaries that
+ship in a different package, so `find_package` fails outright without it)
+and `libglew2.2` in the **runtime** stage (`colmap` links libGLEW even with
+GUI_ENABLED=OFF, and the builder stage cannot show it — it has libglew-dev,
+so the binary works right up until it is copied somewhere that does not).
+`doctor`'s colmap check is what caught the second, on the first build.
+
+**Not verified:** the step inside a full pipeline run, the step on a pod,
+and the +0.63 PSNR on the helical deliverable. Measured on one
 dataset with one subject; the +0.63 should be re-measured before it is
 assumed to hold for a different capture — the machinery to do it is three
 seeds per condition at ~5 min a run on a 4070 Ti, which is cheap enough
