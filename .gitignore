@@ -40,3 +40,13 @@ cyber_6f.zip
 
 # Local scratch for the fp8 checkpoint experiments (tens of GB)
 .fp8-scratch/
+
+# Working notes and design docs kept local to this machine. Two of them —
+# the stage1-support-views pair — are referenced by tracked files
+# (pipeline/README.md, steps/elevation_views.py, both workflows), so those
+# references do not resolve in a fresh clone. Deliberate: they are drafts,
+# and the committed comments carry the conclusions they were needed for.
+/b2crunner-confidence-integration.md
+/brush-mixed-alpha-modes-integration.md
+/docs/stage1-support-views-implementation.md
+/docs/stage1-support-views-plan.md
