@@ -219,10 +219,21 @@ class TestReadiness(unittest.TestCase):
     def test_a_warm_volume_with_no_markers_is_detected(self):
         """The case a marker-only check gets wrong: weights already on the
         volume from an earlier pod, an older image, or a hand-run
-        envs/wan22/setup.sh."""
+        envs/wan22/setup.sh.
+
+        The probe itself is mocked cold-then-warm rather than left as
+        rmbg's real HF-cache probe: that probe answers from the ambient
+        HF cache, not from the volume `_OnAVolume` points at, so on a dev
+        box that already has rmbg cached this test's premise ("no markers
+        yet") would be false before the test even runs.
+        """
         with _OnAVolume():
             source = models.registry()["rmbg"]
-            self.assertFalse(models.is_ready("rmbg"))
+
+            with mock.patch.object(models, "registry",
+                                   return_value={"rmbg": source.__class__(
+                                       **{**source.__dict__, "probe": lambda: False})}):
+                self.assertFalse(models.is_ready("rmbg"))
 
             with mock.patch.object(models, "registry",
                                    return_value={"rmbg": source.__class__(
