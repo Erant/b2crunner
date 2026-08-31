@@ -754,28 +754,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libegl1 libgl1 libglvnd0 libgles2 libosmesa6 \
         libglib2.0-0 libsm6 libxext6 libxrender1 libgomp1 \
         ffmpeg \
-        # COLMAP's runtime dependencies, for the camera refinement. Taken
-        # from COLMAP's own docker/Dockerfile runtime stage, minus the qt6
-        # entries the GUI would want (GUI_ENABLED=OFF) — same ubuntu24.04
-        # as the colmap-builder stage, so these are the same package
-        # versions it linked against. Everything CUDA the ONNX provider
-        # needs (libcudart.so.13, libcublas*.so.13, libcufft, libcurand,
-        # libnvrtc, libcudnn.so.9) is already in this base image, which is
-        # the whole reason the builder overrides ONNX to the CUDA 13
-        # tarball.
-        #
-        # libglew2.2 IS needed despite GUI_ENABLED=OFF, and leaving it out
-        # was the second thing that broke this: `colmap` links libGLEW
-        # regardless of the GUI, so the binary dies with exit 127 and
-        # `error while loading shared libraries: libGLEW.so.2.2` on every
-        # invocation. It cost a full image build to find because the
-        # colmap-builder stage cannot show it — that stage has libglew-dev
-        # installed, so the binary runs fine right up until it is copied
-        # somewhere that does not. `doctor`'s colmap check is what caught
-        # it; that is the check earning its place on the first build.
-        libboost-program-options1.83.0 libmetis5 libceres4t64 \
-        libopenimageio2.4t64 libgoogle-glog0v6t64 libcurl4 libssl3t64 \
-        libomp5 libopengl0 libglew2.2 \
         # ---------------------------------------------------------------
         # Debugging surface. This image is meant to be built once and then
         # left alone for the whole verification round, so anything you
@@ -932,6 +910,44 @@ RUN chmod +x /usr/local/bin/b2c-entrypoint
 # Nothing earlier in the build needs the binaries — the step-registry smoke
 # test above imports Python modules, and `pipeline/doctor.py` checks the
 # binaries at container start, not at build time.
+# COLMAP's runtime dependencies, in a layer of their OWN and deliberately
+# not in the big apt layer at the top of this stage. That is where they
+# started, and it cost a 15-minute push to learn why it was wrong: layer
+# invalidation cascades forward within a stage, so adding one package up
+# there re-ran all six `COPY --from=python-builder /opt/venv_*` lines, the
+# body2colmap layer and the application copy behind it. The COPYs dedupe at
+# the registry (unchanged bytes, same blob digest — the note below says so
+# for brush), but the re-executed RUN layers do not: their output is not
+# byte-reproducible, so the 1.25 GB apt layer went up the wire as a new
+# blob. Down here, changing this list costs this layer and nothing else.
+#
+# ABOVE the two brush COPYs rather than below them, which is the other half
+# of the same reasoning: a bumped BRUSH_REF must not invalidate an
+# apt RUN, or every brush bump would push these ~450 MB again.
+#
+# The list is COLMAP's own docker/Dockerfile runtime stage, minus the qt6
+# entries the GUI would want (GUI_ENABLED=OFF) — same ubuntu24.04 as the
+# colmap-builder stage, so these are the same package versions it linked
+# against. Everything CUDA the ONNX provider needs (libcudart.so.13,
+# libcublas*.so.13, libcufft, libcurand, libnvrtc, libcudnn.so.9) is
+# already in this base image, which is the whole reason the builder
+# overrides ONNX to the CUDA 13 tarball.
+#
+# libglew2.2 IS needed despite GUI_ENABLED=OFF, and leaving it out was the
+# second thing that broke this stage: `colmap` links libGLEW regardless of
+# the GUI, so the binary dies with exit 127 and `error while loading shared
+# libraries: libGLEW.so.2.2` on every invocation. It cost a full image
+# build to find because the colmap-builder stage cannot show it — that
+# stage has libglew-dev installed, so the binary runs fine right up until
+# it is copied somewhere that does not. `doctor`'s colmap check is what
+# caught it; that is the check earning its place on the first build it
+# existed for.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libboost-program-options1.83.0 libmetis5 libceres4t64 \
+        libopenimageio2.4t64 libgoogle-glog0v6t64 libcurl4 libssl3t64 \
+        libomp5 libopengl0 libglew2.2 \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY --from=brush-builder /out-brush /usr/local/bin/brush
 COPY --from=brush-builder /out-brush-splat-render /usr/local/bin/brush-splat-render
 

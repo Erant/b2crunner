@@ -130,6 +130,41 @@ class TestDockerfile(unittest.TestCase):
         self.assertIn("COPY --from=colmap-builder /opt/colmap /opt/colmap", self.text)
         self.assertIn("ENV PATH=/opt/colmap/bin:${PATH}", self.text)
 
+    def test_colmap_s_apt_layer_sits_below_the_venv_copies(self):
+        """COLMAP's runtime packages must not live in the big shared apt
+        layer at the top of the runtime stage.
+
+        They did, once, and it cost a 15-minute push. Layer invalidation
+        cascades forward within a stage, so adding one package up there
+        re-runs all six `COPY --from=python-builder /opt/venv_*`, the
+        body2colmap layer and the application copy behind them. The COPYs
+        dedupe at the registry (unchanged bytes, same blob digest) but the
+        re-executed RUN layers cannot — their output is not
+        byte-reproducible — so a 1.25 GB apt layer goes up the wire again.
+
+        And it has to sit ABOVE the brush COPYs, which is the other half:
+        below them, a bumped BRUSH_REF would invalidate this apt RUN and
+        push its ~450 MB with every brush bump.
+        """
+        colmap_pkg = "libceres4t64"
+        venv_base = "COPY --from=python-builder /opt/venv_base"
+        brush_copy = "COPY --from=brush-builder /out-brush /usr/local/bin/brush"
+
+        for marker in (colmap_pkg, venv_base, brush_copy):
+            self.assertIn(marker, self.text)
+
+        self.assertGreater(
+            self.text.index(colmap_pkg), self.text.index(venv_base),
+            "COLMAP's apt packages are above the venv copies again — a change "
+            "to them now re-runs every layer behind them and re-pushes the "
+            "runtime stage's RUN layers",
+        )
+        self.assertLess(
+            self.text.index(colmap_pkg), self.text.index(brush_copy),
+            "COLMAP's apt packages moved below the brush COPYs — a BRUSH_REF "
+            "bump would now invalidate them and re-push ~450 MB",
+        )
+
     def test_the_onnx_runtime_colmap_gets_matches_the_image_s_cuda(self):
         """COLMAP's own FETCH_ONNX takes the gpu_cuda12 build when CUDA is
         on. This image is CUDA 13, and the CUDA 12 libraries are in neither
