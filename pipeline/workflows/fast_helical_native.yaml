@@ -961,25 +961,65 @@ steps:
       # circular render from scratch, pass 2 (strength 0.8) cleans up the
       # helical re-render.
       strength: 1.0
-      # Exact strings from the live ComfyUI graph (denoise.json nodes
-      # 6/7/188); $SUBJECT_DESC$ is filled in from dataset.prompt. Double-
-      # quoted with `\`-escaped line breaks, NOT YAML's folded `>-`: a
-      # folded scalar turns every line break into a space, which inside the
-      # Chinese runs silently corrupts the string. tests/test_workflows.py
-      # pins both, character for character, against every wan22_vace_denoise
-      # step in every workflow. denoise_pass2 carries the same two strings —
-      # a step param cannot reference another step's, so they are repeated.
-      prompt: "时间静止，人物完全静止。身体如雕塑般僵硬，胸口没有起伏，头部保持固定\
-        角度，面部肌肉完全不动，维持单一的中性表情。双眼一眨不眨，眼睑保持张\
-        开且稳定，目光空洞而固定，锁定远处墙面上的一个点，对镜头毫无察觉、毫\
-        无反应。镜头以匀速、固定焦距围绕主体平滑移动。 Time is frozen and only \
-        the camera moves. The gaze stays anchored to that point on the wall \
-        as the camera passes, so the eyes slide across the frame, always aimed \
-        past the lens at the wall behind it. Eyelids stay open and steady, the \
-        expression holds without a single micro-movement, and the head keeps \
-        its exact angle throughout. The frozen subject is $SUBJECT_DESC$, lit \
-        by even soft studio light against a plain seamless backdrop, photorealistic, \
-        sharp focus, identical face and clothing in every frame."
+      # The negative is the live ComfyUI graph's string (denoise.json node
+      # 7). The positive STARTED as node 188's and deliberately diverged on
+      # 2026-08-31 — the graph is reference only now, nothing here runs it.
+      # $SUBJECT_DESC$ is filled in from dataset.prompt.
+      #
+      # What diverged: the lighting. Node 188 said only "even soft studio
+      # light", which fixes the light's quality and not its place, so the
+      # model fell back on its prior for a person on a seamless backdrop
+      # under a 360 deg fixed-elevation orbit — a product turntable, key
+      # light welded to the lens. That is view-DEPENDENT shading: the
+      # highlight slides across the face frame to frame, and a splat cannot
+      # reconcile it (floaters, colour that swims under rotation). The
+      # replacement puts the key at the SUBJECT's own left, which is
+      # world-fixed because the subject is, and says the shading stays on
+      # the same skin all the way round.
+      #
+      # Two things it deliberately does NOT do. It does not reach for the
+      # Wan aesthetic-control lighting tags (侧光/逆光/顶光/边缘光): every
+      # one of those is defined relative to the CAMERA, so on an orbit they
+      # ask for exactly the turntable. Only the camera-invariant ones are
+      # tagged (人工光、柔光、低对比度) plus 环绕运镜, the arc shot. And it
+      # states the invariant affirmatively rather than negating it — the
+      # words "turntable" and "rotate" appear nowhere, because a diffusion
+      # positive prompt suppresses a named concept unreliably and sometimes
+      # summons it, and cfg 1.0 means there is no negative channel to put
+      # it in (the negative below is encoded and then ignored entirely).
+      #
+      # Double-quoted with `\`-escaped line breaks, NOT YAML's folded `>-`:
+      # a folded scalar turns every line break into a space, which inside
+      # the Chinese runs silently corrupts the string. A continuation line
+      # must not START with a space either — YAML strips it as indentation
+      # — so a break inside the English keeps its space at the line's end.
+      # tests/test_workflows.py pins both, character for character, against
+      # every wan22_vace_denoise step in every workflow. denoise_pass2
+      # carries the same two strings — a step param cannot reference
+      # another step's, so they are repeated.
+      prompt: "人工光、柔光、低对比度、环绕运镜。时间静止，人物完全静止。身体如雕塑\
+        般僵硬，胸口没有起伏，头部保持固定角度，面部肌肉完全不动，维持单一的\
+        中性表情。双眼一眨不眨，眼睑保持张开且稳定，目光空洞而固定，锁定远处\
+        墙面上的一个点，对镜头毫无察觉、毫无反应。镜头以匀速、固定焦距围绕主\
+        体平滑移动。灯光属于房间本身，位置固定：主光始终来自人物自身的左前方\
+        ，右侧是柔和的补光。人物身上的明暗、阴影与高光始终停留在同一片皮肤和\
+        衣物上，每一帧完全相同——左侧始终是受光面，右侧始终是柔和的暗面；镜头\
+        绕到人物右侧时，看到的正是那一侧的暗面。 Time is frozen and only the \
+        camera moves. The gaze stays anchored to that point on the wall as \
+        the camera passes, so the eyes slide across the frame, always aimed \
+        past the lens at the wall behind it. Eyelids stay open and steady, \
+        the expression holds without a single micro-movement, and the head \
+        keeps its exact angle throughout. The frozen subject is \
+        $SUBJECT_DESC$, on a plain seamless backdrop. Soft, low-contrast \
+        studio light: the key sits high on the subject's own left, a soft \
+        fill on their right, both fixed to the room and holding still while \
+        the camera arcs around. Every highlight and shadow stays welded to \
+        the same patch of skin and cloth from the first frame to the last, \
+        so their left remains the lit side and their right remains the \
+        soft-shadowed side for the whole circle; as the camera arcs round to \
+        their right it sees that shadowed side. Matte skin, matte cloth, \
+        photorealistic, sharp focus, identical face, clothing and lighting \
+        in every frame."
       negative_prompt: "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静\
         止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的\
         手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体\
@@ -1346,17 +1386,29 @@ steps:
       cfg: 1.0
       seed: ${globals.seed}
       strength: 0.8
-      prompt: "时间静止，人物完全静止。身体如雕塑般僵硬，胸口没有起伏，头部保持固定\
-        角度，面部肌肉完全不动，维持单一的中性表情。双眼一眨不眨，眼睑保持张\
-        开且稳定，目光空洞而固定，锁定远处墙面上的一个点，对镜头毫无察觉、毫\
-        无反应。镜头以匀速、固定焦距围绕主体平滑移动。 Time is frozen and only \
-        the camera moves. The gaze stays anchored to that point on the wall \
-        as the camera passes, so the eyes slide across the frame, always aimed \
-        past the lens at the wall behind it. Eyelids stay open and steady, the \
-        expression holds without a single micro-movement, and the head keeps \
-        its exact angle throughout. The frozen subject is $SUBJECT_DESC$, lit \
-        by even soft studio light against a plain seamless backdrop, photorealistic, \
-        sharp focus, identical face and clothing in every frame."
+      prompt: "人工光、柔光、低对比度、环绕运镜。时间静止，人物完全静止。身体如雕塑\
+        般僵硬，胸口没有起伏，头部保持固定角度，面部肌肉完全不动，维持单一的\
+        中性表情。双眼一眨不眨，眼睑保持张开且稳定，目光空洞而固定，锁定远处\
+        墙面上的一个点，对镜头毫无察觉、毫无反应。镜头以匀速、固定焦距围绕主\
+        体平滑移动。灯光属于房间本身，位置固定：主光始终来自人物自身的左前方\
+        ，右侧是柔和的补光。人物身上的明暗、阴影与高光始终停留在同一片皮肤和\
+        衣物上，每一帧完全相同——左侧始终是受光面，右侧始终是柔和的暗面；镜头\
+        绕到人物右侧时，看到的正是那一侧的暗面。 Time is frozen and only the \
+        camera moves. The gaze stays anchored to that point on the wall as \
+        the camera passes, so the eyes slide across the frame, always aimed \
+        past the lens at the wall behind it. Eyelids stay open and steady, \
+        the expression holds without a single micro-movement, and the head \
+        keeps its exact angle throughout. The frozen subject is \
+        $SUBJECT_DESC$, on a plain seamless backdrop. Soft, low-contrast \
+        studio light: the key sits high on the subject's own left, a soft \
+        fill on their right, both fixed to the room and holding still while \
+        the camera arcs around. Every highlight and shadow stays welded to \
+        the same patch of skin and cloth from the first frame to the last, \
+        so their left remains the lit side and their right remains the \
+        soft-shadowed side for the whole circle; as the camera arcs round to \
+        their right it sees that shadowed side. Matte skin, matte cloth, \
+        photorealistic, sharp focus, identical face, clothing and lighting \
+        in every frame."
       negative_prompt: "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静\
         止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的\
         手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体\

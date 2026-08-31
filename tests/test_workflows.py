@@ -27,27 +27,44 @@ DOCKER_ENVS_FILE = REPO_ROOT / "docker" / "envs.docker.yaml"
 
 VALID_DISPATCH = {"in_process", "subprocess", "service", "docker"}
 
-# The denoise prompts, character for character, as
-# ComfyUI-Body2COLMAP's workflows/api/denoise.json carries them (the
-# positive template is node 188's string, before StringReplace fills in
-# $SUBJECT_DESC$; the negative is node 7's text). Pinned here because the
-# failure mode is silent: YAML's folded `>-` scalar turns each line break
-# into a space, which inside the Chinese runs produces a prompt that still
-# loads, still runs, and is not the one the graph sends.
+# The denoise prompts, character for character, as every workflow's
+# wan22_vace_denoise steps carry them. The negative is still
+# ComfyUI-Body2COLMAP's workflows/api/denoise.json node 7; the positive
+# started as node 188's string (before StringReplace fills in
+# $SUBJECT_DESC$) and deliberately diverged on 2026-08-31, when its
+# lighting was anchored to the room instead of to the camera. See the
+# comment on denoise_pass1 in fast_helical_native.yaml for why.
+#
+# Pinned here because the failure mode is silent: YAML's folded `>-`
+# scalar turns each line break into a space, and a continuation line
+# starting with a space loses it to indentation stripping — either way
+# the prompt still loads, still runs, and is not the one intended.
 DENOISE_PROMPT = (
-    "时间静止，人物完全静止。身体如雕塑般僵硬，胸口没有起伏，头部"
-    "保持固定角度，面部肌肉完全不动，维持单一的中性表情。双眼一眨"
-    "不眨，眼睑保持张开且稳定，目光空洞而固定，锁定远处墙面上的一"
-    "个点，对镜头毫无察觉、毫无反应。镜头以匀速、固定焦距围绕主体"
-    "平滑移动。 Time is frozen and only the camera moves. The gaze "
-    "stays anchored to that point on the wall as the camera passes, "
-    "so the eyes slide across the frame, always aimed past the lens "
-    "at the wall behind it. Eyelids stay open and steady, the expression "
-    "holds without a single micro-movement, and the head keeps its "
-    "exact angle throughout. The frozen subject is $SUBJECT_DESC$, "
-    "lit by even soft studio light against a plain seamless backdrop, "
-    "photorealistic, sharp focus, identical face and clothing in "
-    "every frame."
+    "人工光、柔光、低对比度、环绕运镜。时间静止，人物完全静止。身体"
+    "如雕塑般僵硬，胸口没有起伏，头部保持固定角度，面部肌肉完全不动"
+    "，维持单一的中性表情。双眼一眨不眨，眼睑保持张开且稳定，目光空"
+    "洞而固定，锁定远处墙面上的一个点，对镜头毫无察觉、毫无反应。镜"
+    "头以匀速、固定焦距围绕主体平滑移动。灯光属于房间本身，位置固定"
+    "：主光始终来自人物自身的左前方，右侧是柔和的补光。人物身上的明"
+    "暗、阴影与高光始终停留在同一片皮肤和衣物上，每一帧完全相同——左"
+    "侧始终是受光面，右侧始终是柔和的暗面；镜头绕到人物右侧时，看到"
+    "的正是那一侧的暗面。 Time is frozen and only the camera moves. "
+    "The gaze stays anchored to that point on the wall as the "
+    "camera passes, so the eyes slide across the frame, always "
+    "aimed past the lens at the wall behind it. Eyelids stay open "
+    "and steady, the expression holds without a single "
+    "micro-movement, and the head keeps its exact angle throughout. "
+    "The frozen subject is $SUBJECT_DESC$, on a plain seamless "
+    "backdrop. Soft, low-contrast studio light: the key sits high "
+    "on the subject's own left, a soft fill on their right, both "
+    "fixed to the room and holding still while the camera arcs "
+    "around. Every highlight and shadow stays welded to the same "
+    "patch of skin and cloth from the first frame to the last, so "
+    "their left remains the lit side and their right remains the "
+    "soft-shadowed side for the whole circle; as the camera arcs "
+    "round to their right it sees that shadowed side. Matte skin, "
+    "matte cloth, photorealistic, sharp focus, identical face, "
+    "clothing and lighting in every frame."
 )
 
 DENOISE_NEGATIVE_PROMPT = (
@@ -895,9 +912,11 @@ class TestWorkflowFiles(unittest.TestCase):
                         self.assertLess(float(c), 1.0)
 
 
-    def test_denoise_prompts_match_the_graph_character_for_character(self):
+    def test_denoise_prompts_are_identical_in_every_pass(self):
         """See DENOISE_PROMPT's comment: the way this breaks is whitespace,
-        so compare the whole string rather than eyeballing the YAML.
+        so compare the whole string rather than eyeballing the YAML. (It
+        no longer checks the ComfyUI graph — the positive prompt diverged
+        from it deliberately — but all four copies must still agree.)
 
         The prompts are now a param of each wan22_vace_denoise step, not a
         workflow global — and each workflow has two denoise passes carrying
