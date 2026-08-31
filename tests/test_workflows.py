@@ -73,9 +73,10 @@ DENOISE_NEGATIVE_PROMPT = (
 # frame near the source view, not just the one exactly on it, so the render
 # no longer has to bend its path to land a camera there either.
 #: The face branch — detect_face / locate_face / crop_face / face_seg /
-#: face_mask / face_normals / face_splat, then render_face_views +
-#: composite_face + face_support_views — is common to both and gated on each
-#: file's `face_splat` global.
+#: face_mask / face_normals / face_splat, then render_face_support_views +
+#: face_support_views — is common to both and gated on each file's
+#: `face_splat` global. `render_initial_views` carries the rest of it and is
+#: NOT gated: it composites the splat itself.
 #:
 #: 2026-08-30: `face_support_views` joined it. The face renders now reach
 #: the trainings twice — composited into the drawings, and again as brush
@@ -95,6 +96,10 @@ DENOISE_NEGATIVE_PROMPT = (
 #: photograph's face instead of to a fixed lean (steps/head_fit.py), and
 #: `detect_face` moved ahead of them, ungated — the fit needs the landmarks
 #: whether or not the face splat is drawn.
+#: 2026-08-31: `render_face_views` and `composite_face` LEFT, both files.
+#: body2colmap dropped gsplat for brush-splat-render, so its own
+#: `skeleton+splat` composite mode is usable here and `render_initial_views`
+#: draws the overlay itself — see docs/revert-when-body2colmap-drops-gsplat.md.
 BOOTSTRAPS = {
     # The shipped default: the older, better-proven bootstrap — circular
     # orbit, anchor warp and injection — with the head re-fitted to the
@@ -104,8 +109,8 @@ BOOTSTRAPS = {
         "detect_face", "map_face_to_mesh", "fit_head_to_face",
         "locate_face", "crop_face", "face_seg", "face_mask",
         "face_normals", "face_splat",
-        "render_initial_views", "render_face_views", "render_face_support_views",
-        "composite_face", "face_support_views",
+        "render_initial_views", "render_face_support_views",
+        "face_support_views",
         "warp_reference_to_anchor", "reinject_anchor_initial",
     ],
     # Parked: the photo-to-splat shell, which replaces the whole bootstrap.
@@ -117,8 +122,8 @@ BOOTSTRAPS = {
         "front_matte", "front_normals", "shell_splat", "refine_pose",
         "detect_face", "locate_face", "crop_face", "face_seg", "face_mask",
         "face_normals", "face_splat",
-        "render_initial_views", "render_face_views", "render_face_support_views",
-        "composite_face", "face_support_views",
+        "render_initial_views", "render_face_support_views",
+        "face_support_views",
         "render_shell_views", "inject_shell_band",
     ],
 }
@@ -669,15 +674,19 @@ class TestWorkflowFiles(unittest.TestCase):
                         )
 
     def test_no_confidence_render_feeds_a_step_that_needs_black(self):
-        """Two steps read a splat render and both require it to be
+        """`select_support_views` requires the render it is handed to be
         premultiplied over black, refusing one that is more than 8/255
-        bright where it is fully transparent: composite_splat_views, which
-        adds premultiplied colour (out = base*(1-a) + rgb), and
-        select_support_views, which divides it back out (rgb / a) to get the
-        straight-alpha frame brush's masked mode expects. A confidence
-        render is the cull colour there — 0.5 grey by default — so turning
-        the mode on for a face view is a hard failure at runtime. Caught
-        here instead, where the wiring is visible.
+        bright where it is fully transparent: it divides the colour back out
+        (rgb / a) to get the straight-alpha frame brush's masked mode
+        expects, and that only recovers anything if the background was 0. A
+        confidence render is the cull colour there — 0.5 grey by default —
+        so turning the mode on for a face view is a hard failure at runtime.
+        Caught here instead, where the wiring is visible.
+
+        There used to be a second such step, `composite_splat_views`. The
+        compositing is `render`'s `...+splat` mode now, which passes the
+        background itself (steps/splat.py's `render_splat_layers`), so there
+        is no workflow-visible way to get it wrong there any more.
         """
         for path in _workflows():
             spec = WorkflowSpec.from_yaml(str(path))
@@ -687,8 +696,7 @@ class TestWorkflowFiles(unittest.TestCase):
                 if step.step == "render_splat":
                     for ctx in step.outputs.values():
                         producers[ctx] = step.id
-            needs_black = {"composite_splat_views": ("splat_images", "splat_masks"),
-                           "select_support_views": ("images", "masks")}
+            needs_black = {"select_support_views": ("images", "masks")}
             for step in spec.steps:
                 if step.step not in needs_black:
                     continue
@@ -756,13 +764,12 @@ class TestWorkflowFiles(unittest.TestCase):
                 selector = by_id["face_support_views"]
                 self.assertEqual(selector.step, "select_support_views")
                 self.assertEqual(selector.when, "${globals.face_splat}")
-                # It reads the CAP render, not the composite's batch. Two
-                # face renders exist for two consumers: composite_face needs
-                # the dataset's own cameras, one frame per drawing; these
-                # need views the dataset does not have. Wiring the composite's
-                # batch here is the bug this asserts against — it type-checks,
-                # runs, and supervises the training with views it already has
-                # denoised photographs of.
+                # It reads the CAP render. The face splat's other route
+                # into the run is `render_initial_views` compositing it onto
+                # the drawings along the dataset's own cameras; every one of
+                # those is a view the training already has a denoised frame
+                # for, which is why the supporting views get a render of
+                # their own rather than a cull of that batch.
                 cap = by_id["render_face_support_views"]
                 self.assertEqual(cap.step, "render_splat")
                 self.assertEqual(cap.params.get("pattern"), "cap")
@@ -773,17 +780,34 @@ class TestWorkflowFiles(unittest.TestCase):
                         f"{path.name}: face_support_views must read the cap "
                         f"render's {name}, not the composite batch's",
                     )
-                composite = by_id["composite_face"]
-                self.assertNotEqual(
-                    selector.inputs["images"], composite.inputs["splat_images"],
-                    f"{path.name}: the two face renders exist to be different "
-                    f"view sets; this is the composite's",
+                # The cap owns the outer edge, and it is TIGHTER than the
+                # angle the drawings are composited at: nothing rewrites a
+                # supporting view, while a composited frame is an input to
+                # two denoise passes that can rewrite a flared rim.
+                drawing = by_id["render_initial_views"]
+                # The splat's FIRST route into the run: the drawing render
+                # composites it itself, through body2colmap's own
+                # `skeleton+splat` mode. The read is optional because the
+                # branch that builds the .ply is gated and this step is not
+                # — with `face_splat: false` there is nothing to resolve.
+                self.assertTrue(
+                    drawing.params["render_mode"].endswith("+splat"),
+                    f"{path.name}: render_initial_views must draw the face splat "
+                    f"itself, got render_mode "
+                    f"{drawing.params['render_mode']!r}",
                 )
-                # The cap owns the outer edge, so the role filter and the
-                # view-angle cull — both of which read composite_face's
-                # verdict on ITS frames — are off.
-                self.assertEqual(selector.params.get("role"), "")
-                self.assertNotIn("view_roles", selector.inputs)
+                self.assertEqual(
+                    drawing.inputs.get("splat_path"),
+                    by_id["face_splat"].outputs["splat_path"] + "?",
+                    f"{path.name}: render_initial_views must read the face "
+                    f"splat's .ply, and read it optionally",
+                )
+                self.assertLess(
+                    float(cap.params["cap_radius_deg"]),
+                    float(drawing.params["splat_max_angle_deg"]),
+                    f"{path.name}: the supporting views must be sampled from a "
+                    f"tighter band than the drawings are composited over",
+                )
                 # The inner edge of the band is the denoising path, so the
                 # step has to be handed the cameras the training's own
                 # frames were rendered and denoised along — and a pivot to
@@ -799,10 +823,11 @@ class TestWorkflowFiles(unittest.TestCase):
                 )
                 self.assertEqual(
                     selector.inputs.get("splat_center"),
-                    composite.inputs["splat_center"],
+                    "scene.face_splat_stats.world_center",
                     f"{path.name}: face_support_views must measure about the "
-                    f"same pivot composite_face used — for a head on a full-body "
-                    f"orbit the splat's centre and the orbit target differ",
+                    f"splat's own centre, which is the pivot render_initial_views "
+                    f"culls about too — for a head on a full-body orbit the "
+                    f"splat's centre and the orbit target differ",
                 )
                 ids = [s.id for s in spec.steps]
                 for step in trainings:

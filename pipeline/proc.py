@@ -31,6 +31,13 @@ investigation. It lives here rather than in either step because the two
 binaries are the same Rust project, fail the same way, and want the same
 environment recorded.
 
+**Only one of the two callers still runs its own process.** `steps/brush.py`
+uses `stream_command` whole. `steps/splat.py` no longer does: the render
+goes through body2colmap's `SplatRenderer`, which owns the subprocess, so
+what that step needs from here is the *sink* rather than the driver —
+hence `OutputRelay`, which `stream_command` also uses, and `save_crashlog`,
+which it hangs off the renderer's `on_fault`.
+
 Stdlib-only, like everything else a step module is allowed to import at
 module scope (see tests/test_import_discipline.py).
 """
@@ -74,6 +81,64 @@ class ProcessFailed(RuntimeError):
     """Non-zero exit, carrying the tail of the output for the traceback."""
 
 
+class OutputRelay:
+    """A throttled line sink: what `stream_command` does with each line.
+
+    Split out from it because one caller does not own its own subprocess.
+    `steps/splat.py` drives `brush-splat-render` through body2colmap's
+    `SplatRenderer`, which runs the binary itself and hands each line to an
+    `on_output` callback — so the relay has to be usable without the Popen
+    around it. `stream_command` still owns both halves for the callers that
+    do run their own process.
+
+    Call it with a line; call `flush()` at the end so a trailing run of
+    suppressed progress lines is still accounted for. `tail` is the last
+    `_ERROR_TAIL_LINES` lines, for an error message.
+    """
+
+    def __init__(self, logger: logging.Logger, throttle: bool = True):
+        self._logger = logger
+        self._throttle = throttle
+        self._tokens = _BUCKET_CAPACITY
+        self._last_refill = time.monotonic()
+        self._skipped = 0
+        self._tail: deque = deque(maxlen=_ERROR_TAIL_LINES)
+
+    def __call__(self, line: str) -> None:
+        line = line.rstrip()
+        if not line:
+            return
+        self._tail.append(line + "\n")
+
+        if not self._throttle:
+            self._logger.info("%s", line)
+            return
+
+        now = time.monotonic()
+        self._tokens = min(
+            _BUCKET_CAPACITY,
+            self._tokens + (now - self._last_refill) * _BUCKET_REFILL_PER_SEC,
+        )
+        self._last_refill = now
+
+        if self._tokens >= 1.0:
+            self._tokens -= 1.0
+            self.flush()
+            self._logger.info("%s", line)
+        else:
+            self._skipped += 1
+
+    def flush(self) -> None:
+        """Report any suppressed progress lines that have accumulated."""
+        if self._skipped:
+            self._logger.info("... (%d progress lines skipped)", self._skipped)
+            self._skipped = 0
+
+    @property
+    def tail(self) -> List[str]:
+        return list(self._tail)
+
+
 def stream_command(
     cmd: Sequence[str],
     log_name: str,
@@ -107,10 +172,7 @@ def stream_command(
             f"{cmd[0]!r} not found on PATH.{(' ' + not_found_hint) if not_found_hint else ''}"
         ) from None
 
-    tail: deque = deque(maxlen=_ERROR_TAIL_LINES)
-    tokens = _BUCKET_CAPACITY
-    last_refill = time.monotonic()
-    skipped = 0
+    relay = OutputRelay(logger, throttle=throttle)
     started = time.monotonic()
 
     # `with process` rather than a bare wait(): Popen's context manager
@@ -120,32 +182,12 @@ def stream_command(
     assert process.stdout is not None
     with process:
         for raw in process.stdout:
-            line = raw.rstrip()
-            if not line:
-                continue
-            tail.append(raw)
-
-            if not throttle:
-                logger.info("%s", line)
-                continue
-
-            now = time.monotonic()
-            tokens = min(_BUCKET_CAPACITY, tokens + (now - last_refill) * _BUCKET_REFILL_PER_SEC)
-            last_refill = now
-
-            if tokens >= 1.0:
-                tokens -= 1.0
-                if skipped:
-                    logger.info("... (%d progress lines skipped)", skipped)
-                    skipped = 0
-                logger.info("%s", line)
-            else:
-                skipped += 1
+            relay(raw)
 
     returncode = process.returncode
     elapsed = time.monotonic() - started
-    if skipped:
-        logger.info("... (%d progress lines skipped)", skipped)
+    relay.flush()
+    tail = relay.tail
 
     if returncode != 0:
         raise ProcessFailed(
@@ -155,7 +197,7 @@ def stream_command(
         )
 
     logger.info("%s finished in %.1fs", log_name, elapsed)
-    return list(tail)
+    return tail
 
 
 def describe_path(path: Optional[Path]) -> str:

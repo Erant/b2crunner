@@ -52,30 +52,58 @@ The decision is made once, in 3-D, from what the training views actually
 constrained — where the old pair guessed it per pixel per frame from
 accumulated opacity. docs/spatial-reinforcement.md is the before/after.
 
-**Keep it off for any render that feeds `composite_splat_views`** (the
-face-view renders in fast_helical_shell.yaml). That step composites
-premultiplied colour and enforces premultiplied-over-black, so it refuses a
-confidence render outright — loudly, which is the intended failure.
+**Keep it off for any render that feeds `select_support_views`** (the
+face-view cap renders in both bootstrap workflows). That step
+un-premultiplies its input and enforces premultiplied-over-black, so it
+refuses a confidence render outright — loudly, which is the intended
+failure. The `+splat` compositing in steps/render.py has the same
+requirement and no way to violate it: `render_splat_layers` below passes
+the background itself.
 
-**A non-zero exit is not automatically a failed render**, exactly as in
-steps/brush.py — same binary's other half, same known shutdown SIGSEGV.
-If every expected frame is on disk and non-empty, the render is treated as
-successful and the failure logged at WARNING; a missing frame still raises.
-Because `_rasterize` renders into a fresh temp directory each call, there
-is no stale-artefact question to answer here the way brush's reused
-`export_dir` forces one.
+**Rasterisation is body2colmap's, and used not to be.** This module
+carried a parallel implementation of `SplatRenderer.render_many` — its own
+`Popen`, its own cameras.json writer, its own judgement of what a non-zero
+exit meant — for three reasons, all of which are now gone:
 
-**And a crash saves more than its exit code.** Everything a render is
-holding — the cameras.json naming the views, the frames written so far —
-lives in that temp directory and goes away with it, which is how one
-brush-splat-render crash on a pod ended up with nothing to diagnose. Any
-non-zero exit, and any clean exit that quietly wrote no frames, now copies
-the camera list, a per-frame manifest, the argv, the output tail and the
-Vulkan/driver environment into `paths.crash_dir()` first.
+  * `24fe424` stopped the library wrapping gsplat. It shells out to the
+    same `brush-splat-render` binary this module was shelling out to.
+  * `d0e3ada` gave it the same exit-code tolerance: a render is judged by
+    the files it produced, so the known shutdown SIGSEGV — which lands
+    after every frame is on disk — is a warning and not a failure. Its
+    message is better than the one that was here, naming the missing files
+    and decoding the signal number.
+  * The three seams `_rasterize` now uses were added for this: `on_fault`,
+    `on_output` and `ply_path`. See below.
 
-Everything *except* rasterisation still belongs to body2colmap
-(`SplatScene`, `OrbitPath`, the `path`/`utils` helpers); `SplatRenderer`
-(the gsplat wrapper) is no longer used here at all.
+**What is left here is the three things that are genuinely this project's.**
+
+*Where a crash report goes.* Everything the binary is handed lives in a
+temp directory `render_many` deletes on the way out, exception or not —
+which is how one brush-splat-render crash on a pod ended up with nothing
+to diagnose. `on_fault` is called while that directory still exists;
+`_save_render_crashlog` copies the camera list, a per-frame manifest, the
+argv, the output and the Vulkan/driver environment into
+`paths.crash_dir()` before it goes. It fires for a render that lost frames
+*and* for one that wrote everything and then died anyway, because the
+second is only probably the known crash.
+
+*Where the log goes.* `on_output` gets each line as the binary writes it,
+and it is handed a `proc.OutputRelay` — the same throttled sink
+`stream_command` uses for `brush`, so an 81-frame render reports progress
+into the pipeline log instead of going quiet until it is done.
+
+*What a frame is called.* The renderer names its files `f00000.png`;
+everything else in a run calls them `frame_00001_.png`. The translation is
+this module's, and the crash report reads in the run's terms because of it.
+
+`ply_path` is the fourth seam and needs no policy: a trained splat is
+hundreds of megabytes and this step usually follows the training that
+wrote it, so an existing .ply is rendered where it lies rather than
+serialized back out of `SplatScene`.
+
+`render_splat_layers` below is what steps/render.py's `...+splat` modes
+call to get their overlay, and goes through `_rasterize` so it inherits
+all of the above.
 
 **Verification status.** The camera-path half — which is where all the
 subtle behaviour lives — is verified locally against `cyber_6f`'s real
@@ -85,7 +113,9 @@ PLY load/save is verified by round-trip. `brush-splat-render` itself is
 verified against gsplat as described above, but that verification ran
 outside this pipeline (a manual comparison against local data); running
 *through* this step, end to end, on this box's GPU is still pending — see
-docs/docker-build-notes.md.
+docs/docker-build-notes.md. The crash and argv paths are covered against a
+stub binary (tests/test_render_exit.py, tests/test_splat.py), which is the
+only way to test a crash on purpose.
 
 **Focal-length inheritance** is the one piece here that is easy to get
 wrong and silent when wrong. The resolution order is: the step's own
@@ -100,12 +130,8 @@ about rather than silently honoured.
 
 from __future__ import annotations
 
-import json
 import logging
-import shutil
-import tempfile
 import time
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -113,11 +139,10 @@ import cv2
 import numpy as np
 
 from ..proc import (
-    ProcessFailed,
+    OutputRelay,
     crashlog_note,
     describe_path,
     save_crashlog,
-    stream_command,
 )
 from ..registry import register_step
 from ..step import REQUIRED, Param, Step
@@ -131,6 +156,10 @@ _FULL_FRAME_SENSOR_WIDTH_MM = 36.0
 # and the ones just before it — and a full 100-frame orbit at 720x1280 is
 # not something to copy onto the volume every time a render fails.
 _CRASH_FRAMES_KEPT = 4
+
+# The rasteriser, resolved on PATH unless a step names one explicitly.
+# The image builds it to /usr/local/bin (see docker/Dockerfile).
+_RENDER_BINARY = "brush-splat-render"
 
 # Rebuilt by every render; never inherited from the source dataset's extras.
 _REBUILT_KEYS = {
@@ -287,7 +316,7 @@ class RenderSplatStep(Step):
               "that comes back is then the gate, not accumulated opacity, and the "
               "RGB is composited over `cull_color` rather than `bg_color`. Needs a "
               ".ply trained with brush's `export_evidence`, or an `evidence_dataset` "
-              "to measure against. Off for any render feeding composite_splat_views: "
+              "to measure against. Off for any render feeding select_support_views: "
               "that step requires premultiplied-over-black and refuses this output"),
         Param("cull_color", list, [0.5, 0.5, 0.5],
               "RGB in [0,1] that culled pixels resolve to in confidence mode, and "
@@ -343,7 +372,7 @@ class RenderSplatStep(Step):
               advanced=True),
         Param("splat_path", str, None,
               "A .ply to load when no splat_scene input is wired", advanced=True),
-        Param("render_path", str, "brush-splat-render",
+        Param("render_path", str, _RENDER_BINARY,
               "The rasteriser binary, on PATH or as an absolute path", advanced=True),
         # No `device`: rasterisation shells out to brush-splat-render, which
         # picks its own. The workflows used to pass one and it was read by
@@ -395,8 +424,11 @@ class RenderSplatStep(Step):
         # halo, just dimmer.
         #
         # All of the above is the NON-confidence contract, and it is still
-        # live: the face-view renders that feed composite_splat_views depend
-        # on it, and that step refuses anything else. In confidence mode
+        # live: the face-view cap renders that feed select_support_views
+        # depend on it, and that step refuses anything else — as does the
+        # `+splat` compositing in steps/render.py, which is why
+        # `render_splat_layers` below passes the background itself rather
+        # than taking one. In confidence mode
         # `bg_color` is not passed to the binary at all — `cull_color` is
         # both the background and the reject colour, and there is no halo to
         # avoid because partial coverage fades toward the same value the
@@ -458,27 +490,20 @@ class RenderSplatStep(Step):
         return result
 
 
-@dataclass(frozen=True)
-class _Confidence:
-    """The `--confidence` half of a `brush-splat-render` call, as one value.
+def _confidence_options(params: Dict[str, Any]):
+    """`params` read as a `ConfidenceOptions`, or None when the mode is off.
 
-    Grouped rather than spread across seven more `_rasterize` keywords
-    because they are meaningless individually: `confidence: false` makes
-    every one of them dead, which is exactly what `None` says here.
+    body2colmap's dataclass, not a local mirror of it: the flags it builds
+    (`--confidence`, `--cull-color`, the two gates, the sidecar and dataset
+    switches) are the binary's, and there is no version of them that is
+    this project's to define. The validation below is the one thing that is
+    ours, because it is about the params a workflow can set.
     """
-
-    cull_color: Tuple[float, ...]
-    gate_lo: float
-    gate_hi: float
-    sidecar: bool
-    dataset: Optional[str]
-    extra_args: Tuple[str, ...]
-
-
-def _confidence_options(params: Dict[str, Any]) -> Optional[_Confidence]:
-    """`params` read as a `_Confidence`, or None when the mode is off."""
     if not params["confidence"]:
         return None
+
+    from body2colmap.splat_renderer import ConfidenceOptions
+
     gate_lo = float(params["gate_lo"])
     gate_hi = float(params["gate_hi"])
     if gate_lo > gate_hi:
@@ -487,7 +512,7 @@ def _confidence_options(params: Dict[str, Any]) -> Optional[_Confidence]:
             f"The gate is a smoothstep from lo to hi, so an inverted pair does "
             f"not mean 'keep less' — it is undefined."
         )
-    return _Confidence(
+    return ConfidenceOptions(
         cull_color=tuple(float(c) for c in params["cull_color"]),
         gate_lo=gate_lo,
         gate_hi=gate_hi,
@@ -497,43 +522,40 @@ def _confidence_options(params: Dict[str, Any]) -> Optional[_Confidence]:
     )
 
 
-def _keep_sidecars(output_dir: Path, image_names: List[str]) -> None:
-    """Copy `<stem>.conf.png` out of the render's temp directory.
+def _keep_sidecars(maps, image_names: List[str]) -> None:
+    """Write the render's per-pixel confidence maps out under `logs/`.
 
     They are diagnostics, not frames: nothing downstream reads them, and
-    `_rasterize` deletes the directory they were written into on the way
-    out — the same way a crash used to take its own evidence with it. Under
-    `logs/` for the reason `paths.crash_dir()` gives: whatever gets copied
-    off a pod to read the run log brings them along.
+    body2colmap hands them back in memory (`last_confidence_maps`) rather
+    than on disk, because the directory the binary wrote them into is gone
+    by the time `render_many` returns. Under `logs/` for the reason
+    `paths.crash_dir()` gives: whatever gets copied off a pod to read the
+    run log brings them along.
     """
     from ..paths import log_dir
 
+    if not maps:
+        logger.warning(
+            "render_splat: confidence_sidecar is on but brush-splat-render "
+            "produced no confidence maps"
+        )
+        return
     try:
         dest = log_dir() / "confidence" / time.strftime("%Y%m%d-%H%M%S")
         dest.mkdir(parents=True, exist_ok=True)
-        kept = 0
-        for name in image_names:
-            sidecar = output_dir / f"{Path(name).stem}.conf.png"
-            if sidecar.exists():
-                shutil.copy2(sidecar, dest / sidecar.name)
-                kept += 1
+        for name, image in zip(image_names, maps):
+            cv2.imwrite(str(dest / f"{Path(name).stem}.conf.png"), image)
     except OSError as exc:
         logger.warning("render_splat: could not keep the confidence sidecars: %s", exc)
         return
-    if kept:
-        logger.info("render_splat: kept %d confidence sidecars in %s", kept, dest)
-    else:
-        logger.warning(
-            "render_splat: confidence_sidecar is on but brush-splat-render wrote "
-            "no .conf.png beside the frames in %s", output_dir,
-        )
+    logger.info("render_splat: kept %d confidence sidecars in %s", len(maps), dest)
 
 
 def _rasterize(
     *, scene, splat_path, cameras, image_names, width, height, bg_color, render_path,
-    confidence: Optional[_Confidence] = None,
+    confidence=None,
 ) -> Tuple[List[np.ndarray], List[np.ndarray]]:
-    """Render `cameras` against `scene` via the `brush-splat-render` CLI.
+    """Render `cameras` against `scene` via body2colmap's `SplatRenderer`.
 
     Returns (images, masks): BGR uint8 images and float32 [0,1] foreground
     masks, one per camera, in `cameras` order.
@@ -544,239 +566,202 @@ def _rasterize(
     opacity. It is still "the splat's per-pixel mask" as far as everything
     downstream is concerned — foreground is still 1 — which is why the
     read-back below is unchanged.
+
+    **This used to be a parallel implementation of `render_many`** — its own
+    Popen, its own cameras.json writer, its own exit-code judgement — kept
+    because the library's version raised on any non-zero exit, told nobody
+    what the binary was saying while it ran, and deleted a crashed run's
+    directory before anything could be salvaged from it. All three are gone:
+    `d0e3ada` judges a render by the files it produced, and the three seams
+    used below carry the rest. What is left here is the three things that
+    are genuinely this project's — where the log goes, where a crash report
+    goes, and what a frame is called.
+
+    `image_names` no longer names the files on disk (body2colmap picks
+    those); it survives as the count and the order, and as the names the
+    caller knows these frames by.
     """
-    with tempfile.TemporaryDirectory(prefix="b2c_render_splat_") as tmp:
-        tmp_dir = Path(tmp)
+    from body2colmap.splat_renderer import SplatRenderer
 
-        # Reuse an existing PLY on disk rather than re-serializing through
-        # SplatScene when we already have one (the common case: this step
-        # usually follows `brush` training, which writes a PLY directly).
-        ply_path = Path(splat_path) if splat_path and Path(splat_path).exists() else None
-        if ply_path is None:
-            ply_path = tmp_dir / "scene.ply"
-            scene.to_ply(str(ply_path))
+    logger_relay = OutputRelay(logging.getLogger("proc.brush-splat-render"))
+    # An existing .ply is rendered where it lies. The common case: this step
+    # follows a brush training, which wrote one, and a trained splat is
+    # large enough that serialising the scene back out to render it is a
+    # real cost rather than a tidy one.
+    ply_path = Path(splat_path) if splat_path and Path(splat_path).exists() else None
 
-        cameras_path = tmp_dir / "cameras.json"
-        _write_cameras_json(cameras, image_names, width, height, cameras_path)
+    renderer = SplatRenderer(
+        scene,
+        (width, height),
+        binary=render_path,
+        confidence=confidence,
+        ply_path=None if ply_path is None else str(ply_path),
+        on_output=logger_relay,
+        on_fault=lambda fault: _save_render_crashlog(fault, image_names),
+    )
+    try:
+        logger.info("$ %s", render_path)
+        frames = renderer.render_many(cameras, bg_color=bg_color)
+        logger_relay.flush()
 
-        output_dir = tmp_dir / "renders"
-        cmd = [
-            render_path,
-            "--splat", str(ply_path),
-            "--cameras", str(cameras_path),
-            "--output-dir", str(output_dir),
-        ]
-        if confidence is None:
-            cmd += ["--background", ",".join(f"{c:.6f}" for c in bg_color)]
-        else:
-            # --background is ignored by the binary in this mode, so it is
-            # not passed at all: an argv that carries a background nothing
-            # reads is the kind of thing that gets tuned for a run and then
-            # blamed for the result.
-            cmd += [
-                "--confidence",
-                "--cull-color", ",".join(f"{c:.6f}" for c in confidence.cull_color),
-                "--gate-lo", str(confidence.gate_lo),
-                "--gate-hi", str(confidence.gate_hi),
-            ]
-            if confidence.sidecar:
-                cmd.append("--confidence-sidecar")
-            if confidence.dataset:
-                # Only for a .ply that predates brush's export_evidence. The
-                # dataset options have to match what training saw — the
-                # alpha mode decides whether ground truth is premultiplied
-                # at load, so getting it wrong measures evidence against
-                # pixels training never saw. Matching now means passing NO
-                # --alpha-mode: steps/brush.py stopped forcing one so that a
-                # run can mix masked and transparent views, and brush reads
-                # the mode per view from the dataset's own layout. An export
-                # of RGBA frames with no masks/ sidecar — which is what
-                # colmap_export writes — still loads as transparent, exactly
-                # as the forced flag used to make it.
-                cmd += ["--dataset", str(confidence.dataset)]
-            cmd += list(confidence.extra_args)
-        _run_render(
-            cmd,
-            output_dir=output_dir,
-            cameras_path=cameras_path,
-            image_names=list(image_names),
-        )
         if confidence is not None and confidence.sidecar:
-            _keep_sidecars(output_dir, list(image_names))
+            _keep_sidecars(renderer.last_confidence_maps, image_names)
 
         images: List[np.ndarray] = []
         masks: List[np.ndarray] = []
-        for name in image_names:
-            png_path = output_dir / name
-            rgba = cv2.imread(str(png_path), cv2.IMREAD_UNCHANGED)
-            if rgba is None:
-                raise RuntimeError(
-                    f"render_splat: brush-splat-render did not produce {png_path}\n"
-                    f"Command: {' '.join(cmd)}"
-                )
-            images.append(rgba[..., :3])
+        for rgba in frames:
+            # body2colmap returns RGBA; this pipeline's convention is BGR
+            # plus a separate float mask (see steps/render.py's docstring).
+            images.append(np.ascontiguousarray(rgba[..., 2::-1]))
             masks.append(rgba[..., 3].astype(np.float32) / 255.0)
+        return images, masks
+    finally:
+        logger_relay.flush()
+        renderer.close()
 
-    return images, masks
 
+def render_splat_layers(
+    *, scene, splat_path, cameras, width: int, height: int,
+    render_path: str = _RENDER_BINARY, min_alpha: float = 0.004,
+) -> List[np.ndarray]:
+    """Render `scene` from `cameras` as straight-alpha RGBA overlay layers.
 
-def _write_cameras_json(cameras, image_names, width: int, height: int, path: Path) -> None:
-    """Write brush-splat-render's cameras.json — see
-    ~/Projects/brush/docs/splat-render.md for the schema. `camera.rotation`
-    is already in the exact row-major, OpenGL-convention c2w form the
-    binary expects; the OpenGL->OpenCV axis conversion happens Rust-side.
+    The other half of `steps/render.py`'s `...+splat` render modes. That
+    step draws the mesh through body2colmap's `Renderer.render_composite`
+    and hands it the splat as a pre-rendered `splat_layer` — pyrender
+    cannot rasterise Gaussians, and the binary that can renders a whole
+    camera list per invocation, so the layers are batched here and passed
+    down one frame at a time.
+
+    **Straight alpha, not premultiplied.** `Renderer._composite_splat`
+    blends `layer*a + base*(1-a)`, so the colour it is handed has to be the
+    surface's own. The binary renders on black, which is premultiplied, so
+    the division back out happens here — the same recovery
+    `select_support_views` makes, for the same reason, and the same one
+    body2colmap's `SplatRenderer.render_many(bg_color=None)` makes
+    internally.
+
+    **Why `_rasterize` and not `SplatRenderer.render_many(bg_color=None)`
+    directly, which returns exactly this.** `_rasterize` *is* that call
+    now; what it adds is this project's crash report, its log relay and its
+    frame naming. Going straight to the library would mean a render started
+    by a `+splat` mode is the one render in the pipeline that leaves
+    nothing behind when it dies. See this module's docstring.
+
+    Args:
+        scene: A `SplatScene`, used only if `splat_path` is not on disk.
+        splat_path: An existing .ply, reused rather than re-serialized.
+        cameras: The cameras to render, in order.
+        width: Render width in pixels; must match the cameras'.
+        height: Render height in pixels.
+        render_path: The rasteriser binary.
+        min_alpha: Alpha at or below which a pixel is treated as fully
+            transparent — the colour there is not recoverable by dividing,
+            and a splat render's long tail of near-zero alpha would
+            otherwise tint the whole frame by a level or two. The default
+            is `select_support_views`' own.
+
+    Returns:
+        One RGBA uint8 array per camera, in `cameras` order.
     """
-    payload = {
-        "width": width,
-        "height": height,
-        "cameras": [
-            {
-                "name": name,
-                "fx": float(camera.fx),
-                "fy": float(camera.fy),
-                "cx": float(camera.cx),
-                "cy": float(camera.cy),
-                "position": [float(v) for v in camera.position],
-                "rotation": [[float(v) for v in row] for row in camera.rotation],
-            }
-            for camera, name in zip(cameras, image_names)
-        ],
-    }
-    path.write_text(json.dumps(payload))
+    from .anchor_stub import _unpremultiply
+
+    image_names = [f"layer_{i + 1:05d}_.png" for i in range(len(cameras))]
+    images, masks = _rasterize(
+        scene=scene,
+        splat_path=splat_path,
+        cameras=cameras,
+        image_names=image_names,
+        width=width,
+        height=height,
+        bg_color=(0.0, 0.0, 0.0),
+        render_path=render_path,
+        confidence=None,
+    )
+
+    layers: List[np.ndarray] = []
+    for bgr, alpha in zip(images, masks):
+        alpha = np.where(alpha < min_alpha, 0.0, alpha).astype(np.float32)
+        rgb = _unpremultiply(bgr[..., ::-1], alpha, min_alpha)
+        layers.append(np.dstack(
+            [rgb, np.clip(alpha * 255.0, 0, 255).astype(np.uint8)]
+        ))
+    return layers
 
 
-def _run_render(
-    cmd: List[str],
-    *,
-    output_dir: Path,
-    cameras_path: Path,
-    image_names: List[str],
-) -> None:
-    """Run the rasteriser, judging a failed exit against the frames it wrote.
+def _save_render_crashlog(fault, image_names: List[str]) -> None:
+    """What a crashed render is worth keeping, for `proc.save_crashlog`.
 
-    Same shape as steps/brush.py's `_run_brush`, for the same reason: this
-    is the other half of the same Rust binary, and it has been seen failing
-    on a pod in what looks like brush's known shutdown SIGSEGV — a crash
-    *after* the work is on disk. The artefact is the better witness than
-    the exit code, so a non-zero exit that nonetheless left every expected
-    frame behind is logged at WARNING and treated as a successful render;
-    one with a frame missing still raises.
+    Wired as body2colmap's `SplatRenderer(on_fault=...)`, which is called
+    while the invocation's temp directory still exists and will not once
+    this returns. That is the whole reason the hook is there: everything the
+    binary was handed lives in that directory, so a crash on a pod left
+    nothing behind but an exit code, and the pod does not outlive the
+    investigation. Kept: the cameras.json naming the views it was rendering,
+    a per-frame manifest of what did and did not get written, and the last
+    few frames that did land (the crash's neighbourhood; a full orbit at
+    720x1280 is not something to copy onto the volume every time a render
+    fails).
 
-    Where brush has to prove the .ply is *this* run's (its `export_dir` is
-    reused across runs, so a stale export could stand in for a crashed
-    one), there is no equivalent check to make here: `_rasterize` renders
-    into a fresh `TemporaryDirectory` every call, so anything in
-    `output_dir` was written by the process that just exited.
-
-    Either way — and also on the reverse case, a clean exit that silently
-    produced nothing — the diagnostics are copied out to `crash_dir()`
-    before the temp directory that holds them is deleted.
+    Called for a render that lost frames *and* for one that wrote everything
+    and then died anyway — `fault.complete` separates them, and both are
+    worth a report, because the second is only *probably* the known shutdown
+    crash. The names in the manifest are this step's own
+    (`frame_00001_.png`), not the renderer's `f00000.png`, so the report
+    reads in the terms the rest of the run uses.
     """
-    try:
-        # Same live relay as the brush training step — see pipeline/proc.py.
-        stream_command(
-            cmd,
-            log_name="brush-splat-render",
-            not_found_hint=(
-                "It is built into the image at /usr/local/bin/brush-splat-render, "
-                "alongside `brush`, from the same Erant/brush clone."
-            ),
-        )
-    except ProcessFailed as exc:
-        missing = _missing_renders(output_dir, image_names)
-        saved = _save_render_crashlog(
-            cmd=cmd, cameras_path=cameras_path, output_dir=output_dir,
-            image_names=image_names, missing=missing, failure=str(exc),
-        )
-        if missing:
-            logger.error(
-                "brush-splat-render failed with %d of %d frames missing (first: %s). "
-                "Diagnostics %s.",
-                len(missing), len(image_names), missing[0], crashlog_note(saved),
-            )
-            raise
+    written = set(fault.written)
+    manifest = "\n".join(
+        f"{name}  {path.stat().st_size} bytes" if path in written else f"{name}  missing"
+        for name, path in zip(image_names, fault.expected)
+    )
+    # The renderer names its files f00000.png; everything else in this run
+    # calls them frame_00001_.png. Translate, so the report reads in the
+    # terms the log and the dataset use rather than in the binary's.
+    by_path = dict(zip(fault.expected, image_names))
+    first_missing = (None if fault.complete
+                     else by_path.get(fault.missing[0], fault.missing[0].name))
+
+    if fault.complete:
         logger.warning(
-            "brush-splat-render exited non-zero but all %d frames are complete — "
-            "treating the render as successful. This is the known shutdown crash "
-            "if the output below ends after the last frame; anything else here is "
-            "a real failure that happened to leave a usable set of renders, so the "
-            "diagnostics are kept either way — %s. Suppressed failure follows.\n%s",
-            len(image_names), crashlog_note(saved), exc,
+            "brush-splat-render %s but wrote all %d frames — treating the render "
+            "as successful. This is the known shutdown crash if the output ends "
+            "after the last frame; anything else is a real failure that happened "
+            "to leave a usable set of renders, so the diagnostics are kept either "
+            "way — %s.",
+            fault.status, len(image_names),
+            crashlog_note(_render_crashlog(fault, manifest, first_missing)),
         )
         return
 
-    # A clean exit with frames missing is the failure that used to surface
-    # several lines later as `cv2.imread` returning None, by which point the
-    # temp directory holding the evidence was already gone.
-    missing = _missing_renders(output_dir, image_names)
-    if missing:
-        saved = _save_render_crashlog(
-            cmd=cmd, cameras_path=cameras_path, output_dir=output_dir,
-            image_names=image_names, missing=missing,
-            failure="brush-splat-render exited 0 without writing every frame.",
-        )
-        raise RuntimeError(
-            f"brush-splat-render exited 0 but wrote {len(image_names) - len(missing)} "
-            f"of {len(image_names)} frames (first missing: {missing[0]}).\n"
-            f"Diagnostics {crashlog_note(saved)}."
-        )
-
-
-def _missing_renders(output_dir: Path, image_names: List[str]) -> List[str]:
-    """The expected frames that are absent or empty, in render order.
-
-    Zero-byte counts as missing for the same reason it does for brush's
-    .ply: that is a crash caught mid-write, not a frame.
-    """
-    missing = []
-    for name in image_names:
-        path = output_dir / name
-        if not path.exists() or path.stat().st_size == 0:
-            missing.append(name)
-    return missing
-
-
-def _save_render_crashlog(
-    *,
-    cmd: List[str],
-    cameras_path: Path,
-    output_dir: Path,
-    image_names: List[str],
-    missing: List[str],
-    failure: str,
-) -> Optional[Path]:
-    """What a crashed render is worth keeping, for `proc.save_crashlog`.
-
-    Everything this step hands the binary lives in a `TemporaryDirectory`
-    that is deleted on the way out of `_rasterize`, exception or not — so a
-    crash on a pod left nothing behind but an exit code, and the pod itself
-    does not outlive the investigation. Kept: the cameras.json naming the
-    views it was rendering, a per-frame manifest of what did and did not
-    get written, and the last few frames that did land (the crash's
-    neighbourhood; a full orbit at 720x1280 is not something to copy onto
-    the volume every time a render fails).
-    """
-    written = [name for name in image_names if name not in set(missing)]
-    manifest = "\n".join(
-        f"{name}  {(output_dir / name).stat().st_size} bytes"
-        if (output_dir / name).exists() else f"{name}  missing"
-        for name in image_names
+    logger.error(
+        "brush-splat-render %s with %d of %d frames missing (first: %s). "
+        "Diagnostics %s.",
+        fault.status, len(fault.missing), len(fault.expected), first_missing,
+        crashlog_note(_render_crashlog(fault, manifest, first_missing)),
     )
+
+
+def _render_crashlog(fault, manifest: str, first_missing) -> Optional[Path]:
+    """The report itself. Split only to keep the two log lines readable."""
     return save_crashlog(
         "brush-splat-render",
-        cmd=cmd,
-        failure=failure,
+        cmd=fault.cmd,
+        failure=fault.failure,
         summary=[
-            f"frames:  {len(written)} of {len(image_names)} written"
-            + (f", first missing {missing[0]}" if missing else " (all present)"),
-            f"splat:   {_describe_splat_arg(cmd)}",
+            f"frames:  {len(fault.written)} of {len(fault.expected)} written"
+            + (" (all present)" if fault.complete
+               else f", first missing {first_missing}"),
+            f"splat:   {_describe_splat_arg(fault.cmd)}",
+            f"exit:    {fault.status}",
         ],
-        sections=[("frames", manifest)],
+        sections=[("frames", manifest),
+                  ("output", fault.output)],
         copy=[
             # The views it was attempting to render — the thing whose
             # absence made the pod crash undiagnosable.
-            ("", [cameras_path]),
-            ("frames", [output_dir / name for name in written[-_CRASH_FRAMES_KEPT:]]),
+            ("", [fault.cameras_path]),
+            ("frames", fault.written[-_CRASH_FRAMES_KEPT:]),
         ],
     )
 

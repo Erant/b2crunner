@@ -73,8 +73,13 @@ pipeline *ends up*, which is what matters; matching its intermediate grey
 would reintroduce the same halo, just dimmer.
 
 (The same premultiplication assumption is relied on, and enforced, by
-`composite_splat_views` in `steps/anchor_stub.py`, which refuses a render
-that is more than 8/255 bright where it is fully transparent.)
+`select_support_views` in `steps/anchor_stub.py`, which refuses a render
+that is more than 8/255 bright where it is fully transparent. The `+splat`
+compositing in `steps/render.py` relies on it too, but passes the
+background itself, so it has nothing to refuse. Note that since 2026-08-31
+`bg_color` is composited in Python by body2colmap rather than passed to the
+binary, which always runs on black — the value a transparent pixel ends at
+is unchanged, to within the 1/255 of one extra 8-bit round trip.)
 
 ### 2. `mask_splat`
 
@@ -219,12 +224,14 @@ consequences that are wired into the workflows:
   `mode: passthrough`, which keeps only the half that is still needed —
   replacing the per-pixel alpha with the per-frame all-1.0 VACE batch
   (section 3 above is unchanged, and so is the ordering it forces).
-- **Keep confidence OFF for the face-view renders** that feed
-  `composite_splat_views` in `fast_helical_shell.yaml`. That step adds
-  premultiplied colour and enforces premultiplied-over-black
+- **Keep confidence OFF for the face-view cap renders** that feed
+  `select_support_views` in both bootstrap workflows. That step divides the
+  colour back out by alpha and enforces premultiplied-over-black
   (`_check_premultiplied` in `steps/anchor_stub.py`), so it refuses a
   confidence render outright. `tests/test_workflows.py` catches the
-  wiring before a run does.
+  wiring before a run does. (Until 2026-08-31 `composite_splat_views` was
+  the other step with this requirement; the compositing is
+  `render`'s `...+splat` mode now, which passes its own background.)
 
 Evidence source, in order: the `.ply`'s own `ev_*` block, then
 `evidence_dataset` (measure it now — point it at

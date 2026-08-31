@@ -26,24 +26,24 @@ in the original ComfyUI-Body2COLMAP repo:
   built for. See that class's docstring for the two radii and why the
   default only substitutes, never trusts.
 
-- CompositeSplatViews is the fourth, and the only one that does not
-  replace a frame: it alpha-composites a splat render ON TOP of the mesh
-  drawing, keeping the drawing everywhere the splat is transparent. That is
-  what puts a real face on a skeleton rig, and it is why it survives much
-  further off the source view than a substitution does — a face-only splat
-  read cleanly out to about 30 degrees and still holds at 45, against the
-  15 the body shell's substitution band is set to. The cull is set wider
-  still, at 60: see its docstring for what is being bought out there and
-  what it costs. See its docstring for
-  the black-background requirement, which is load-bearing.
+- CompositeSplatViews used to be the fourth: it alpha-composited a splat
+  render ON TOP of the mesh drawing, which is what puts a real face on a
+  skeleton rig. It is gone, and its job is body2colmap's again. That step
+  only ever existed because body2colmap's own `skeleton+splat` mode
+  rasterised through gsplat, which this project will not carry; now that
+  the library rasterises through `brush-splat-render` too, the mesh
+  `render` step draws the composite itself — a `...+splat` render_mode, a
+  `splat_path` input and `splat_max_angle_deg`, blended by
+  `Renderer._composite_splat`. See docs/revert-when-body2colmap-drops-gsplat.md
+  for what came out and steps/render.py for what replaced it.
 
-- SelectSupportViews is the fifth, and does not touch a frame at all: it
-  picks the frames of a splat render that a composite kept, un-premultiplies
-  them, and hands them to `brush` as *supporting views* — training evidence
-  that counts only where its mask says to. It is the face splat's second
-  route into the training, the first being composited into the drawings
-  before the diffusion passes get their hands on it. See steps/brush.py's
-  `support_*` inputs.
+- SelectSupportViews is the fourth, and does not touch a frame at all: it
+  picks the frames of a splat render taken as a `cap` around the source
+  view, un-premultiplies them, and hands them to `brush` as *supporting
+  views* — training evidence that counts only where its mask says to. It is
+  the face splat's second route into the training, the first being
+  composited into the drawings by `render` before the diffusion passes get
+  their hands on it. See steps/brush.py's `support_*` inputs.
 
 The alpha convention is what the first three write. This is the mechanism behind
 cyber_6f's initial/ alpha convention (pipeline/steps/wan22_vace_denoise.py's
@@ -129,7 +129,7 @@ destroy it, which is the general form of the bug above.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 import cv2
 import numpy as np
@@ -535,218 +535,6 @@ def _angle_between_deg(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.degrees(np.arccos(min(max(cosine, -1.0), 1.0))))
 
 
-@register_step("composite_splat_views")
-class CompositeSplatViewsStep(Step):
-    """Alpha-composite a splat render over every frame close enough to see it.
-
-    inputs: {"images": List[np.ndarray] — the mesh render, one per frame,
-             "splat_images": List[np.ndarray] — `render_splat` over the SAME
-             cameras, in the same order (`pattern: ""` is what gives that),
-             "splat_masks": List[np.ndarray] float32 [0,1] — that render's
-             per-pixel alpha, which `render_splat` publishes as its `masks`,
-             "cameras": List[Camera],
-             "splat_center": Optional[Sequence[float]] — the splat's own
-             centre in world coordinates, which is the pivot the view angle
-             is measured about. `pointmap_splat` publishes it as
-             `splat_stats.world_center`. Falls back to `orbit_target`,
-             "orbit_target": Optional[np.ndarray] (3,),
-             "anchor_position": Optional[np.ndarray] (3,) — where the photo
-             was taken from. Omit it for the world origin, which is where it
-             is: `sam3d_to_world` does not recentre, so the SAM-3D-Body
-             camera IS the world origin,
-             "masks": Optional[List[np.ndarray]] — passed through with the
-             splat's coverage unioned in,
-             "splat_cameras": Optional[List[Camera]] — wire it and the two
-             batches are checked to be the same views rather than assumed}
-    outputs: {"images": List[np.ndarray],
-              "masks": List[np.ndarray] — only when `masks` was wired in,
-              "view_roles": List[dict] — per frame: index, angle, role}
-
-    This is the b2crunner side of body2colmap's `skeleton+splat` composite
-    mode (`c65a7f7`). The geometry and the compositing rule are that
-    commit's, and the cull angle started as its 45 before this project
-    widened it (see **Why the cull**); what differs is where the layer comes
-    from. body2colmap rasterises it with gsplat inside
-    `OrbitPipeline.render_splat_layer`, and this project deliberately has no
-    gsplat — `render_splat` shells out to `brush-splat-render` instead, which
-    is what removed its last runtime CUDA toolchain (see pyproject.toml).
-    So the layer is rendered by a separate step and composited here.
-    **See docs/revert-when-body2colmap-drops-gsplat.md**: when body2colmap
-    moves to the brush renderer, this step and its wiring come out in favour
-    of the render mode.
-
-    **The splat render must be on a BLACK background.** `brush-splat-render`
-    writes `rgb = colour*alpha + bg*(1-alpha)`, so with `bg = 0` its output
-    is premultiplied by alpha and the composite is exactly
-
-        out = base * (1 - alpha) + splat_rgb
-
-    On any other background the same expression blends toward that
-    background a second time and the splat comes back washed out — the
-    identical trap body2colmap's commit fixed by adding straight-alpha
-    output (`bg_color=None`) to its own renderer. `render_splat`'s default
-    `bg_color` is already black; this step re-checks what it can (an opaque
-    pixel whose colour is far from the base's cannot prove much, but a
-    fully transparent pixel that is not black is proof of the bug) and
-    refuses rather than quietly producing grey ghosts.
-
-    **Why the cull.** The splat is a 2.5-D shell of the side of the subject
-    one photograph saw. Turn the camera away from that view and the open rim
-    swings into frame as a flare of grazing-incidence Gaussians. body2colmap
-    measured the boundary on a Face_Neck head splat: reads cleanly to about
-    30 degrees, the rim starts flaring by 45, and by 60 the shell is mostly
-    edge. Those are properties of a 2.5-D shell and hold here.
-
-    **Why 60 anyway.** The default is the far end of that measurement rather
-    than the middle of it, which is a deliberate trade and not a reading of
-    it. What sits between 45 and 60 is the part of the orbit furthest from
-    the photograph that the splat saw anything of at all, and out there the
-    alternative is a skeleton drawing with no face on it at all. What makes
-    the trade affordable is what happens next to these frames: they are
-    inputs to two denoise passes, which are free to rewrite a flared rim,
-    and a rim that reads as a jaw edge is a better prompt than nothing.
-    `select_support_views` — evidence that no diffusion pass stands in front
-    of — makes the opposite trade and culls at 30. Pull this back to 45 for
-    body2colmap's measured clean band.
-
-    **The pivot is the splat's centre, not the orbit target.** A head sits
-    well above a full-body orbit target, so a camera 30 degrees up from the
-    equator views the *body* at 30 degrees and the *head* at rather less.
-    body2colmap's `splat_view_angle_deg` measures from the splat's own bbox
-    centre for exactly this reason, and this follows it.
-    """
-
-    PARAMS = (
-        Param("max_angle_deg", float, 60.0,
-              "Composite the splat on every frame whose view of it is within "
-              "this angle of the photograph's. Past it the layer is dropped "
-              "entirely rather than faded: what appears out there is the "
-              "shell's open rim, and a half-transparent rim is still a rim. "
-              "60 runs to the far end of body2colmap's measured band, where the "
-              "shell is mostly edge, to reach the views the photograph is "
-              "furthest from; 45 is that measurement's clean limit, and what a "
-              "frame nobody denoises afterwards should be held to (see "
-              "select_support_views' own, tighter cull). 0 disables the "
-              "compositing", minimum=0.0, maximum=180.0),
-        Param("min_alpha", float, 0.004,
-              "Treat alpha below this as fully transparent. Splat renders "
-              "have a long tail of near-zero alpha that would otherwise tint "
-              "the whole frame by a level or two", minimum=0.0, maximum=1.0,
-              advanced=True),
-    )
-
-    def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
-        images: List[np.ndarray] = list(inputs["images"])
-        splat_images: List[np.ndarray] = list(inputs["splat_images"])
-        splat_masks: List[np.ndarray] = list(inputs["splat_masks"])
-        cameras = inputs["cameras"]
-        max_angle = params["max_angle_deg"]
-
-        if not (len(splat_images) == len(splat_masks) == len(images)):
-            raise ValueError(
-                f"composite_splat_views: {len(splat_images)} splat renders and "
-                f"{len(splat_masks)} alphas against {len(images)} frames. The "
-                f"batches are matched by index, which holds because "
-                f"render_splat with `pattern: \"\"` reuses the source dataset's "
-                f"cameras verbatim and in order — a pattern on that step "
-                f"breaks this."
-            )
-
-        # The same cheap proof of index alignment inject_shell_views makes.
-        splat_cameras = inputs.get("splat_cameras")
-        if splat_cameras is not None and cameras:
-            drift = max(
-                float(np.linalg.norm(np.asarray(a.position, dtype=np.float64)
-                                     - np.asarray(b.position, dtype=np.float64)))
-                for a, b in zip(cameras, splat_cameras)
-            )
-            if drift > 1e-4:
-                raise ValueError(
-                    f"composite_splat_views: the splat render's cameras are "
-                    f"not the frame batch's (worst position drift "
-                    f"{drift:.6f}). Render it with `pattern: \"\"` and the "
-                    f"dataset wired, so it reuses these cameras verbatim."
-                )
-
-        masks = inputs.get("masks")
-        masks = None if masks is None else [np.asarray(m).copy() for m in masks]
-
-        if max_angle <= 0.0:
-            logger.info("composite_splat_views: max_angle_deg is 0, nothing "
-                        "composited")
-            return _composite_result(images, masks, [
-                {"index": i, "angle_from_anchor_deg": None, "role": "base"}
-                for i in range(len(images))
-            ])
-
-        pivot = _composite_pivot(inputs)
-        supplied = inputs.get("anchor_position")
-        anchor = (np.zeros(3) if supplied is None
-                  else np.asarray(supplied, dtype=np.float64).reshape(3))
-        source_dir = pivot - anchor
-        if float(np.linalg.norm(source_dir)) < 1e-9:
-            raise ValueError(
-                "composite_splat_views: the camera the photo was taken from "
-                "sits on the splat's centre, so there is no source view "
-                "direction to measure against."
-            )
-
-        view_roles = []
-        for index, camera in enumerate(cameras):
-            direction = pivot - np.asarray(camera.position, dtype=np.float64)
-            angle = _angle_between_deg(direction, source_dir)
-            if angle > max_angle:
-                view_roles.append({"index": index,
-                                   "angle_from_anchor_deg": round(angle, 3),
-                                   "role": "base"})
-                continue
-
-            layer = splat_images[index]
-            alpha = np.asarray(splat_masks[index], dtype=np.float32)
-            if tuple(layer.shape) != tuple(images[index].shape):
-                raise ValueError(
-                    f"composite_splat_views: splat render {index} has shape "
-                    f"{tuple(layer.shape)} against the frame's "
-                    f"{tuple(images[index].shape)}. Render the splat at the "
-                    f"same resolution as the orbit."
-                )
-            _check_premultiplied(layer, alpha, index, params["min_alpha"])
-
-            alpha = np.where(alpha < params["min_alpha"], 0.0, alpha)[..., None]
-            images[index] = np.clip(
-                images[index].astype(np.float32) * (1.0 - alpha)
-                + layer.astype(np.float32),
-                0, 255,
-            ).astype(np.uint8)
-            if masks is not None:
-                # The splat is real subject coverage, exactly as the mesh
-                # silhouette is, so a mask derived from the result has to
-                # include it — body2colmap's `_composite_splat` unions alpha
-                # for the same reason, and excludes the skeleton, which is
-                # an annotation rather than geometry.
-                masks[index] = np.maximum(masks[index], alpha[..., 0])
-
-            view_roles.append({"index": index,
-                               "angle_from_anchor_deg": round(angle, 3),
-                               "role": "composited"})
-
-        composited = sum(1 for role in view_roles if role["role"] == "composited")
-        logger.info(
-            "composite_splat_views: %d/%d frames within %.1f deg of the source "
-            "view take the splat layer",
-            composited, len(images), max_angle,
-        )
-        if composited == 0:
-            logger.warning(
-                "composite_splat_views: no frame is within %.1f deg of the "
-                "source view, so the splat was rendered and then discarded. "
-                "Either anchor_position and the cameras did not come from the "
-                "same render, or the radius is smaller than the path's "
-                "angular step.", max_angle,
-            )
-        return _composite_result(images, masks, view_roles)
-
-
 @register_step("select_support_views")
 class SelectSupportViewsStep(Step):
     """Turn a splat render into supporting views for a brush training.
@@ -755,10 +543,6 @@ class SelectSupportViewsStep(Step):
              background, i.e. premultiplied colour,
              "masks": List[np.ndarray] float32 [0,1] — that render's alpha,
              "cameras": List[Camera] — the cameras it was rendered from,
-             "view_roles": Optional[List[dict]] — `composite_splat_views`'
-             own per-frame verdict; frames whose role is not `role` are
-             dropped, and its `angle_from_anchor_deg` is what the outer
-             edge of the band is measured on,
              "path_cameras": Optional[List[Camera]] — the cameras of the
              batch this training is fitted to, i.e. the denoising path.
              Any view within `min_path_angle_deg` of it is dropped,
@@ -791,14 +575,14 @@ class SelectSupportViewsStep(Step):
 
     **Which render.** Its own: `render_splat` with `pattern: cap`, a disc
     of views sampled around the photograph's own view of the splat
-    (steps/splat.py's `cap_directions`). NOT the batch
-    `composite_splat_views` composited — that one rides the dataset's
-    cameras because its frames have to land on those exact drawings, and
-    every one of them is a view the training already has a denoised frame
-    for. The cap's radius is the outer edge of the band, and it belongs
-    there rather than here: culling views after rendering them keeps the
-    ones nearest the photograph, which are the ones worth least, while a
-    sampler spends all 36 renders where supervision is actually wanted.
+    (steps/splat.py's `cap_directions`). NOT the mesh `render`'s own
+    cameras — every one of those is a view the training already has a
+    denoised frame for, and the `+splat` overlay is composited onto those
+    drawings there rather than handed here. The cap's radius is the outer
+    edge of the band, and it belongs there rather than here: culling views
+    after rendering them keeps the ones nearest the photograph, which are
+    the ones worth least, while a sampler spends all 36 renders where
+    supervision is actually wanted.
 
     **The inner edge is the denoising path** (`min_path_angle_deg`, against
     `path_cameras`) — a band swept along that path, not a hole punched
@@ -820,14 +604,15 @@ class SelectSupportViewsStep(Step):
     rather than failing, and it is why the supporting views get a `cap`
     render of their own.
 
-    **`view_roles` and `max_angle_deg` are the other way to draw the outer
-    edge**, for a render that was not sampled as a cap: they cull on the
-    angle `composite_splat_views` measured, and are off in the shipped
-    wiring (`role: ""`, `max_angle_deg: 180`) because the cap already drew
-    it. Keep them for a batch that shares the composite's cameras — the
-    roles are indexed against ITS frames, so they must never be wired
-    against a different view set. An edge with nothing to measure against
-    is skipped, with a line in the log saying so.
+    **There is only one way to draw the outer edge, and it is the cap.**
+    There used to be a second — a `view_roles` input carrying
+    `composite_splat_views`' per-frame verdict, and a `max_angle_deg` that
+    culled on the angle that step had measured. Both were off in the
+    shipped wiring, because the cap already drew the edge, and both went
+    with the step: the compositing is `render`'s `...+splat` mode now
+    (see steps/render.py), which publishes no roles because nothing needs
+    them. A render this is pointed at that was *not* sampled as a cap
+    therefore gets no outer edge at all.
 
     **Un-premultiplying** is what makes the render straight-alpha, which is
     what brush's masked mode expects: it does not premultiply masked ground
@@ -839,12 +624,6 @@ class SelectSupportViewsStep(Step):
     """
 
     PARAMS = (
-        Param("role", str, "composited",
-              "Keep the frames `composite_splat_views` gave this role, when a "
-              "`view_roles` input is wired in. `composited` is the band within its "
-              "cull angle of the source view — the frames the splat can speak for. "
-              "Empty keeps every frame",
-              choices=("composited", "base", "")),
         Param("min_path_angle_deg", float, 5.0,
               "Drop the frames within this angle of the DENOISING PATH — the "
               "cameras of the batch brush is training on, wired in as "
@@ -854,15 +633,6 @@ class SelectSupportViewsStep(Step):
               "nearest path camera, so on a circular orbit it is the elevation "
               "difference and on a helix it follows the sweep. 0 keeps the frames "
               "on the path", minimum=0.0, maximum=180.0),
-        Param("max_angle_deg", float, 30.0,
-              "Drop the frames whose view of the splat is FURTHER than this from "
-              "the photograph's, when a `view_roles` input is wired in. Tighter "
-              "than composite_splat_views' cull on purpose: a composited frame is "
-              "an input to diffusion, which can rewrite the shell's rim, but a "
-              "supporting view is fitted straight into the splat, where the rim "
-              "would be reconstructed instead. 30 is where body2colmap measured a "
-              "Face_Neck shell still reading cleanly. 180 leaves the outer edge to "
-              "the `role` filter alone", minimum=0.0, maximum=180.0),
         Param("unpremultiply", bool, True,
               "Divide the colour back out by alpha, turning a render made on black "
               "into the straight-alpha frame brush's masked mode expects. Off leaves "
@@ -871,7 +641,7 @@ class SelectSupportViewsStep(Step):
         Param("min_alpha", float, 0.004,
               "Alpha at or below this is treated as fully transparent: the colour "
               "there is not recoverable by dividing and the mask weights it at zero "
-              "anyway. Same default as composite_splat_views' own",
+              "anyway. The same default the compositing uses",
               minimum=0.0, maximum=1.0, advanced=True),
     )
 
@@ -879,11 +649,8 @@ class SelectSupportViewsStep(Step):
         images: List[np.ndarray] = list(inputs["images"])
         masks: List[np.ndarray] = list(inputs["masks"])
         cameras = list(inputs["cameras"])
-        view_roles = inputs.get("view_roles")
         path_cameras = inputs.get("path_cameras")
-        role = params["role"]
         min_path_angle = params["min_path_angle_deg"]
-        max_angle = params["max_angle_deg"]
         min_alpha = params["min_alpha"]
 
         if not (len(images) == len(masks) == len(cameras)):
@@ -893,34 +660,10 @@ class SelectSupportViewsStep(Step):
                 f"have to arrive together."
             )
 
+        # The outer edge is the cap's own radius, drawn by the sampler that
+        # rendered these views rather than by a cull here — see the
+        # docstring's "Which render".
         keep = list(range(len(images)))
-
-        # The outer edge, and the composite's own verdict on which frames
-        # its splat can speak for. Both read from view_roles rather than
-        # re-derived: the pivot, the source view and the sphere metric are
-        # measured once, in composite_splat_views.
-        far: List[int] = []
-        if view_roles is not None:
-            if len(view_roles) != len(images):
-                raise ValueError(
-                    f"select_support_views: {len(view_roles)} view roles against "
-                    f"{len(images)} frames. Wire the `view_roles` of the "
-                    f"composite_splat_views that took THIS render."
-                )
-            if role:
-                keep = [i for i in keep if view_roles[i].get("role") == role]
-            angles = {i: _angle_of(view_roles[i], "angle_from_anchor_deg")
-                      for i in keep}
-            far = [i for i in keep
-                   if angles[i] is not None and angles[i] > max_angle]
-            dropped = set(far)
-            keep = [i for i in keep if i not in dropped]
-        elif max_angle < 180.0:
-            logger.info(
-                "select_support_views: max_angle_deg is %.1f but no view_roles were "
-                "wired in, so there is no view angle to measure and no outer edge.",
-                max_angle,
-            )
 
         # The inner edge: the band swept along the denoising path.
         on_path: List[int] = []
@@ -947,9 +690,11 @@ class SelectSupportViewsStep(Step):
         for index in keep:
             alpha = np.asarray(masks[index], dtype=np.float32)
             layer = images[index]
-            # The same requirement composite_splat_views has, for a
-            # different reason: dividing by alpha only recovers the
-            # straight colour if the render was premultiplied over black.
+            # The same requirement steps/render.py's `+splat` compositing
+            # has, for a different reason: dividing by alpha only recovers
+            # the straight colour if the render was premultiplied over
+            # black. There the background is passed by the code, so it
+            # cannot be got wrong; here it comes off a workflow's wiring.
             _check_premultiplied(
                 layer, alpha, index, min_alpha, where="select_support_views",
                 because="Un-premultiplying (rgb / a) only recovers the straight "
@@ -963,26 +708,23 @@ class SelectSupportViewsStep(Step):
             out_cameras.append(cameras[index])
 
         logger.info(
-            "select_support_views: %d/%d frames kept%s as supporting views%s%s",
+            "select_support_views: %d/%d frames kept as supporting views%s",
             len(keep), len(images),
-            f" (role={role})" if view_roles is not None and role else "",
             f", {len(on_path)} dropped for sitting within {min_path_angle:.1f} deg "
             f"of the denoising path" if on_path else "",
-            f", {len(far)} dropped beyond {max_angle:.1f} deg" if far else "",
         )
         if not keep:
             # Not an error: brush takes no supporting views and trains
             # exactly as it did before. Worth saying out loud, because the
             # run then silently loses the thing this wiring exists for.
             logger.warning(
-                "select_support_views: nothing is left after the band (role %r, "
-                "at least %.1f deg off the denoising path, within %.1f deg of the "
-                "photograph's view), so the training will get no supporting views. "
-                "The usual cause is a render taken along the denoising path's own "
-                "cameras — `render_splat` with `pattern: \"\"` — every frame of "
-                "which is ON the path; the supporting views want a `cap` render "
-                "of their own.",
-                role, min_path_angle, max_angle,
+                "select_support_views: nothing is left after the band (at least "
+                "%.1f deg off the denoising path), so the training will get no "
+                "supporting views. The usual cause is a render taken along the "
+                "denoising path's own cameras — `render_splat` with "
+                "`pattern: \"\"` — every frame of which is ON the path; the "
+                "supporting views want a `cap` render of their own.",
+                min_path_angle,
             )
         return {"images": out_images, "masks": out_masks, "cameras": out_cameras}
 
@@ -1015,18 +757,6 @@ def _nearest_path_angle_deg(direction: np.ndarray,
     return float(np.degrees(np.arccos(cosines.max())))
 
 
-def _angle_of(entry: Dict[str, Any], key: str) -> Optional[float]:
-    """One of a view role's angles, or None when it has none.
-
-    `composite_splat_views` publishes None on every frame when its own
-    compositing is switched off (`max_angle_deg: 0`). There is then nothing
-    to measure an edge against, and the frame is kept rather than guessed
-    at.
-    """
-    angle = entry.get(key)
-    return None if angle is None else float(angle)
-
-
 def _unpremultiply(layer: np.ndarray, alpha: np.ndarray, min_alpha: float) -> np.ndarray:
     """`colour*a` back to `colour`, black where there is no colour to recover.
 
@@ -1042,24 +772,18 @@ def _unpremultiply(layer: np.ndarray, alpha: np.ndarray, min_alpha: float) -> np
     return np.where(safe[..., None], straight, 0.0).astype(np.uint8)
 
 
-def _composite_result(images, masks, view_roles) -> Dict[str, Any]:
-    """Only publish `masks` when one was wired in — a step that returns an
-    output a workflow did not ask for is harmless, but one that invents an
-    empty mask batch downstream steps then threshold is not."""
-    result: Dict[str, Any] = {"images": images, "view_roles": view_roles}
-    if masks is not None:
-        result["masks"] = masks
-    return result
-
-
 def _composite_pivot(inputs: Dict[str, Any],
-                     where: str = "composite_splat_views") -> np.ndarray:
+                     where: str = "select_support_views") -> np.ndarray:
     """Where to measure the view angle about: the splat's centre if known.
 
-    See CompositeSplatViewsStep's docstring — for a head on a full-body
-    orbit the splat's centre and the orbit target are not interchangeable.
-    Shared with select_support_views, which measures its distance to the
-    denoising path about the same point for the same reason.
+    For a head on a full-body orbit the splat's centre and the orbit target
+    are not interchangeable: a camera 30 degrees up from the equator views
+    the *body* at 30 degrees and the *head* at rather less. body2colmap's
+    `OrbitPipeline.splat_view_angle_deg` measures from the splat's own bbox
+    centre for that reason, `steps/render.py` reads it straight off the
+    scene (`SplatScene.get_bbox_center()`) when it culls the `+splat`
+    overlay, and select_support_views measures its distance to the denoising
+    path about the same point.
     """
     center = inputs.get("splat_center")
     if center is None:
@@ -1075,21 +799,21 @@ def _composite_pivot(inputs: Dict[str, Any],
 
 
 def _check_premultiplied(layer: np.ndarray, alpha: np.ndarray, index: int,
-                         min_alpha: float, where: str = "composite_splat_views",
-                         because: str = "This step composites premultiplied "
-                                        "colour (out = base*(1-a) + rgb), which only "
-                                        "holds for") -> None:
+                         min_alpha: float, *, where: str, because: str) -> None:
     """Refuse a splat render that was not made on a black background.
 
     Only one direction of this is provable from the images alone: where
     alpha is zero the render must be black, because `colour*0 + bg*1` is
     the background and nothing else. A non-black value there is proof the
-    caller passed a `bg_color`, and the composite that follows would blend
-    toward it twice.
+    caller passed a `bg_color`, and what follows would blend toward it
+    twice.
 
-    `where`/`because` only name the caller in the message: both steps that
-    read a splat render depend on it being premultiplied over black, for
-    reasons that differ in the second sentence and not in the check.
+    `where`/`because` only name the caller in the message. There used to be
+    two callers with two different second sentences; the compositing one is
+    now `steps/render.py`'s `+splat` modes, which need no check at all —
+    `render_splat_layers` passes the background itself, so a render it did
+    not make on black cannot exist. This one survives because
+    select_support_views takes a render a *workflow* wired to it.
     """
     transparent = alpha < min_alpha
     if not transparent.any():

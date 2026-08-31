@@ -1,20 +1,22 @@
 """select_support_views — the face splat's second route into a training.
 
-The composite puts the face-splat renders on the skeleton drawings, where
-two diffusion passes then rewrite them. This step hands the SAME renders to
-brush as supporting views: training evidence that counts only where the
+`render` composites the face splat onto the skeleton drawings, where two
+diffusion passes then rewrite it. This step hands a SEPARATE render of the
+same splat — a 30-degree cap of views the denoising path does not cover —
+to brush as supporting views: training evidence that counts only where the
 splat's own alpha says to, and is ignored everywhere else. See
 steps/anchor_stub.py's class docstring and steps/brush.py's support_*
 inputs.
 
-Three things carry the weight here and are what these check. The frames
-kept are a band, narrower than the composite's: the inner edge is
-`min_path_angle_deg`, measured to the nearest camera on the DENOISING PATH,
-because every frame on that path is a denoised view of its own and a
-supporting view sitting on it competes with one; the outer edge is
-`max_angle_deg`, because a supporting view is fitted straight into the
-splat with no diffusion pass in front of it, so the shell's open rim out
-there would be reconstructed rather than rewritten. And the colour is
+Two things carry the weight here and are what these check. The frames kept
+are a band whose inner edge is `min_path_angle_deg`, measured to the
+nearest camera on the DENOISING PATH, because every frame on that path is a
+denoised view of its own and a supporting view sitting on it competes with
+one. (The OUTER edge is the cap's own radius, drawn by the sampler that
+rendered these views — `render_splat` with `pattern: cap` — rather than
+culled here. It used to be a `max_angle_deg` reading `composite_splat_views`'
+per-frame verdict; that step is gone, see
+docs/revert-when-body2colmap-drops-gsplat.md.) And the colour is
 un-premultiplied, because brush's masked mode does not premultiply ground
 truth and a `colour*a` frame would ask the model to be dark and
 half-transparent along the silhouette rather than opaque and the right
@@ -55,13 +57,6 @@ def _render(alpha_value: float, colour: int = 200):
     return image.astype(np.uint8), alpha
 
 
-def _roles(*roles, angle=20.0):
-    """View roles inside the outer edge, unless a test says otherwise."""
-    return [{"index": i, "angle_from_anchor_deg": angle, "role": role}
-            for i, role in enumerate(roles)]
-
-
-
 def _run(inputs, **params):
     step = get_step_class("select_support_views")()
     return step.run(inputs, get_step_class("select_support_views").resolve_params(params))
@@ -76,40 +71,12 @@ def _batch(count=3, alpha_value=1.0):
     return {"images": images, "masks": masks, "cameras": _cameras(count)}
 
 
-class TestRoleSelection(unittest.TestCase):
-    def test_only_the_composited_frames_are_kept(self):
-        """The cull angle is measured once, by the composite. Re-deriving it
-        here would be a second copy of it, free to drift."""
-        out = _run({**_batch(3), "view_roles": _roles("base", "composited", "base")})
-        self.assertEqual(len(out["images"]), 1)
-        self.assertEqual(len(out["masks"]), 1)
-        self.assertEqual(len(out["cameras"]), 1)
-
-    def test_the_kept_camera_is_the_kept_frame_s(self):
-        batch = _batch(3)
-        out = _run({**batch, "view_roles": _roles("base", "composited", "base")})
-        self.assertIs(out["cameras"][0], batch["cameras"][1])
-
-    def test_without_roles_every_frame_is_kept(self):
-        """Right for a splat that is not a 2.5-D shell, and the reason the
-        input is optional rather than required."""
+class TestTheBatch(unittest.TestCase):
+    def test_every_frame_is_kept_when_nothing_bands_them(self):
+        """With no denoising path wired there is no edge to apply, which is
+        right for a splat that is not a 2.5-D shell fed by a denoised orbit
+        — and the reason `path_cameras` is optional rather than required."""
         self.assertEqual(len(_run(_batch(3))["images"]), 3)
-
-    def test_an_empty_role_keeps_every_frame(self):
-        out = _run({**_batch(3), "view_roles": _roles("base", "composited", "base")},
-                   role="")
-        self.assertEqual(len(out["images"]), 3)
-
-    def test_no_match_is_empty_rather_than_an_error(self):
-        """brush then trains with no supporting views, exactly as before —
-        a warning, not a failed run an hour in."""
-        out = _run({**_batch(2), "view_roles": _roles("base", "base")})
-        self.assertEqual(out["images"], [])
-        self.assertEqual(out["cameras"], [])
-
-    def test_mismatched_roles_are_refused(self):
-        with self.assertRaises(ValueError):
-            _run({**_batch(3), "view_roles": _roles("composited", "composited")})
 
     def test_mismatched_batch_lengths_are_refused(self):
         batch = _batch(3)
@@ -119,17 +86,18 @@ class TestRoleSelection(unittest.TestCase):
 
 
 class TestTheBand(unittest.TestCase):
-    """Two edges, each measured against the thing it is avoiding.
+    """The inner edge: the DENOISING PATH.
 
-    The inner one is the DENOISING PATH, and it is a band swept along it
-    rather than a hole punched at the source view. The denoised batch
-    covers a whole orbit — for `pattern: circular`, one elevation and 360
-    degrees of azimuth — and every frame on it is a denoised view in its
-    own right, so a supporting view sitting on the path competes with one
-    wherever along it it sits. The outer one is the view angle off the
-    photograph: past it the 2.5-D shell shows its open rim, and unlike a
-    composited frame — which two denoise passes get to rewrite — a
-    supporting view goes straight into the geometry brush fits.
+    A band swept along it rather than a hole punched at the source view.
+    The denoised batch covers a whole orbit — for `pattern: circular`, one
+    elevation and 360 degrees of azimuth — and every frame on it is a
+    denoised view in its own right, so a supporting view sitting on the
+    path competes with one wherever along it it sits.
+
+    The outer edge is not here: it is the cap's own radius, drawn by the
+    sampler that rendered these views. What used to draw it on this side
+    read `composite_splat_views`' per-frame verdict, and went with that
+    step.
     """
 
     PIVOT = (0.0, 0.0, 0.0)
@@ -154,20 +122,17 @@ class TestTheBand(unittest.TestCase):
                 for i in range(count)]
 
     def _views(self, *frames, path=True, **params):
-        """`frames` are (elevation, azimuth, view angle) triples."""
+        """`frames` are (elevation, azimuth) pairs on the sphere."""
         batch = _batch(len(frames))
-        batch["cameras"] = [self._camera_at(e, a) for e, a, _ in frames]
-        roles = [{"index": i, "angle_from_anchor_deg": angle,
-                  "role": "composited"}
-                 for i, (_, _, angle) in enumerate(frames)]
-        inputs = {**batch, "view_roles": roles, "splat_center": self.PIVOT}
+        batch["cameras"] = [self._camera_at(e, a) for e, a in frames]
+        inputs = {**batch, "splat_center": self.PIVOT}
         if path:
             inputs["path_cameras"] = self._ring()
         return _run(inputs, **params)
 
     def _elevations(self, *elevations, **params):
-        """Frames well inside the outer edge, varying only in elevation."""
-        return self._views(*((e, 40.0 * i, 20.0)
+        """Frames varying only in elevation, spread out in azimuth."""
+        return self._views(*((e, 40.0 * i)
                              for i, e in enumerate(elevations)), **params)
 
     # -- the inner edge: the denoising path ------------------------------
@@ -179,7 +144,7 @@ class TestTheBand(unittest.TestCase):
         from the photograph and nowhere near it — but the denoise ran on
         that azimuth too, at this elevation, so it is not ours to
         supervise."""
-        out = self._views((1.0, 140.0, 140.0), max_angle_deg=180.0)
+        out = self._views((1.0, 140.0))
         self.assertEqual(out["images"], [])
 
     def test_a_view_off_the_path_is_kept(self):
@@ -208,8 +173,7 @@ class TestTheBand(unittest.TestCase):
         path = self._ring()
         batch = _batch(len(path))
         batch["cameras"] = list(path)
-        out = _run({**batch, "path_cameras": path, "splat_center": self.PIVOT,
-                    "view_roles": _roles(*["composited"] * len(path))})
+        out = _run({**batch, "path_cameras": path, "splat_center": self.PIVOT})
         self.assertEqual(out["images"], [])
 
     def test_a_helical_path_is_measured_the_same_way(self):
@@ -222,8 +186,7 @@ class TestTheBand(unittest.TestCase):
         batch = _batch(1)
         batch["cameras"] = [self._camera_at(-2.0, 80.0)]
         near_helix = _run({**batch, "path_cameras": helix,
-                           "splat_center": self.PIVOT,
-                           "view_roles": _roles("composited")})
+                           "splat_center": self.PIVOT})
         self.assertEqual(near_helix["images"], [])
 
     def test_without_path_cameras_the_inner_edge_cannot_apply(self):
@@ -236,83 +199,20 @@ class TestTheBand(unittest.TestCase):
         batch = _batch(1)
         batch["cameras"] = [self._camera_at(20.0, 0.0)]
         with self.assertRaises(ValueError) as caught:
-            _run({**batch, "path_cameras": self._ring(),
-                  "view_roles": _roles("composited")})
+            _run({**batch, "path_cameras": self._ring()})
         self.assertIn("select_support_views", str(caught.exception))
 
     def test_the_orbit_target_will_do_as_a_pivot(self):
         batch = _batch(1)
         batch["cameras"] = [self._camera_at(20.0, 0.0)]
         out = _run({**batch, "path_cameras": self._ring(),
-                    "orbit_target": np.zeros(3),
-                    "view_roles": _roles("composited")})
+                    "orbit_target": np.zeros(3)})
         self.assertEqual(len(out["images"]), 1)
 
-    # -- the outer edge: the shell's rim ---------------------------------
-    def test_views_inside_the_outer_edge_are_kept(self):
-        out = self._views((20.0, 0.0, 29.0), (20.0, 40.0, 12.0))
-        self.assertEqual(len(out["images"]), 2)
-
-    def test_views_past_the_outer_edge_are_dropped(self):
-        """The composite keeps compositing out to 60; this does not follow
-        it out there."""
-        out = self._views((20.0, 0.0, 31.0), (20.0, 40.0, 59.0))
-        self.assertEqual(out["images"], [])
-
-    def test_the_outer_default_is_thirty_degrees(self):
-        out = self._views((20.0, 0.0, 29.0), (20.0, 40.0, 31.0))
+    def test_a_view_off_the_path_survives_a_batch_with_views_on_it(self):
+        """The band is a per-frame verdict, not a batch-level one."""
+        out = self._views((1.0, 0.0), (15.0, 40.0), (-2.0, 80.0))
         self.assertEqual(len(out["images"]), 1)
-
-    def test_the_outer_edge_can_be_opened(self):
-        out = self._views((20.0, 0.0, 29.0), (20.0, 40.0, 31.0),
-                          max_angle_deg=45.0)
-        self.assertEqual(len(out["images"]), 2)
-
-    def test_180_leaves_the_outer_edge_to_the_role_filter(self):
-        out = self._views((20.0, 0.0, 31.0), (20.0, 40.0, 59.0),
-                          max_angle_deg=180.0)
-        self.assertEqual(len(out["images"]), 2)
-
-    def test_the_outer_edge_is_independent_of_the_composite_s_cull(self):
-        """The composite paints the face on out to 60 degrees and hands
-        every one of those frames here with the role `composited`."""
-        out = self._views((20.0, 0.0, 20.0), (20.0, 40.0, 55.0))
-        self.assertEqual(len(out["images"]), 1)
-
-    def test_without_roles_the_outer_edge_cannot_apply(self):
-        batch = _batch(2)
-        batch["cameras"] = [self._camera_at(20.0, 0.0), self._camera_at(20.0, 40.0)]
-        out = _run({**batch, "path_cameras": self._ring(),
-                    "splat_center": self.PIVOT})
-        self.assertEqual(len(out["images"]), 2)
-
-    # -- the two together ------------------------------------------------
-    def test_both_edges_apply_at_once(self):
-        out = self._views((1.0, 0.0, 10.0), (15.0, 40.0, 15.0),
-                          (15.0, 80.0, 40.0))
-        self.assertEqual(len(out["images"]), 1)
-
-    def test_it_applies_with_no_role_filter(self):
-        """`role: ""` drops the composite's verdict, not this step's band."""
-        out = self._views((1.0, 0.0, 10.0), (20.0, 40.0, 20.0),
-                          (20.0, 80.0, 40.0), role="")
-        self.assertEqual(len(out["images"]), 1)
-
-    def test_an_unmeasured_angle_keeps_its_frame(self):
-        """composite_splat_views publishes None for every frame when its
-        own compositing is off; there is then no outer edge to apply."""
-        batch = _batch(1)
-        batch["cameras"] = [self._camera_at(20.0, 0.0)]
-        roles = [{"index": 0, "angle_from_anchor_deg": None, "role": "composited"}]
-        out = _run({**batch, "view_roles": roles, "path_cameras": self._ring(),
-                    "splat_center": self.PIVOT})
-        self.assertEqual(len(out["images"]), 1)
-
-    def test_mismatched_roles_are_refused_without_a_role_filter(self):
-        with self.assertRaises(ValueError):
-            _run({**_batch(3), "view_roles": _roles("composited", "composited")},
-                 role="")
-
 
 
 class TestUnpremultiply(unittest.TestCase):
@@ -347,7 +247,8 @@ class TestUnpremultiply(unittest.TestCase):
     def test_a_render_on_a_non_black_background_is_refused(self):
         """Dividing by alpha only recovers the straight colour if the
         render was premultiplied over black — the same requirement
-        composite_splat_views has, for a different reason."""
+        steps/render.py's `+splat` compositing has, for a different
+        reason."""
         image, alpha = _render(1.0)
         image[image.sum(axis=2) == 0] = 60
         with self.assertRaises(ValueError) as caught:
@@ -363,7 +264,7 @@ class TestTheseGoStraightIntoBrush(unittest.TestCase):
         import tempfile
         from pathlib import Path
 
-        out = _run({**_batch(2), "view_roles": _roles("composited", "composited")})
+        out = _run({**_batch(2)})
         seen = {}
 
         step_class = get_step_class("brush")

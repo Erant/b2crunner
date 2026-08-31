@@ -14,13 +14,18 @@ requests>=2.31.0
 #   pip install mediapipe
 #
 # The Gaussian-splat steps (load_splat / save_splat / render_splat) need
-# `plyfile` for PLY I/O — that's it. render_splat's rasterisation shells out
-# to the brush-splat-render binary (see pipeline/steps/splat.py), not
-# body2colmap's gsplat-based SplatRenderer, so body2colmap's "splat" extra
-# (which bundles gsplat alongside plyfile, and needs a CUDA toolchain to
-# build) is no longer needed here at all:
+# `plyfile` for PLY I/O — that's it. Rasterisation shells out to the
+# brush-splat-render binary (see pipeline/steps/splat.py). body2colmap's
+# "splat" extra used to bundle gsplat alongside plyfile and needed a CUDA
+# toolchain to build; as of its 24fe424 that extra is plyfile alone,
+# because its own SplatRenderer shells out to the same binary. Installing
+# plyfile directly is still what this project does:
 #
 #   pip install plyfile
+#
+# NOTE the pinned body2colmap commit in docker/Dockerfile: steps/render.py's
+# `...+splat` render modes pass a `splat_layer` into
+# `Renderer.render_composite`, which only exists from 24fe424 on.
 #
 # `pointmap_splat` needs `scipy` — ndimage for the mask morphology, and
 # sparse/cg for the normal integration. Not listed as a hard requirement

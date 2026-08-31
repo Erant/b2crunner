@@ -161,10 +161,10 @@ pipeline/
 │                                → sapiens2_lite → face_pointmap_splat)
 │                                builds a Gaussian head from a crop of the
 │                                sheet's front half → render draws an
-│                                anchored circular orbit of outline+skeleton
-│                                frames → render_splat + composite_splat_views
-│                                put that face on every drawing within 45° of
-│                                the source view → generate_firstlast +
+│                                anchored circular orbit of
+│                                outline+skeleton+splat frames, putting that
+│                                face on every drawing within 60° of the
+│                                source view → generate_firstlast +
 │                                inject_anchor warp the photo onto the anchor
 │                                frame. Since 2026-08-29 the face splat has
 │                                replaced detect_face_landmarks; nothing else
@@ -642,22 +642,37 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   filled). Fed by `sapiens2_seg` (a Face_Neck mask, `parts` configurable) and
   `crop_to_box`. Synthetic tests only; the gate is
   `tests/test_face_splat.py::TestCropIsANoOpOnTheRays`.
-- `composite_splat_views` (`anchor_stub.py`) — alpha-composites that face
-  onto the skeleton drawings on every frame within 60° of the source view,
-  which is roughly two thirds of the orbit against the shell band's 15. This
-  is b2crunner's stand-in for body2colmap's `skeleton+splat` render mode,
-  whose geometry it takes: that mode rasterises through gsplat, which this
-  project dropped. The cull angle is that mode's constant widened — 45 is
-  where body2colmap measured a Face_Neck shell still reading cleanly, 60 is
-  where it is mostly open rim, and running to 60 buys the views least like
-  the photograph (the ones `select_support_views` now supervises) at the
-  price of that rim. **See `docs/revert-when-body2colmap-drops-gsplat.md`
-  — this step comes back out when body2colmap moves to the brush renderer.**
+- The `...+splat` render modes (`render.py`) — alpha-composite that face
+  onto the skeleton drawings on every frame within `splat_max_angle_deg` of
+  the source view, which at the shipped 60° is roughly two thirds of the
+  orbit against the shell band's 15. This is body2colmap's own
+  `skeleton+splat` mode: the layer goes into the `render_composite` call
+  this step already made, and `Renderer._composite_splat` blends it. The
+  cull angle is that mode's constant widened, and passed explicitly for
+  that reason — 45 is where body2colmap measured a Face_Neck shell still
+  reading cleanly, 60 is where it is mostly open rim, and running to 60
+  buys the views least like the photograph (the ones
+  `select_support_views` supervises) at the price of that rim.
+
+  **Until 2026-08-31 this was a pair of b2crunner steps** —
+  `render_face_views` (a `render_splat`) plus `composite_splat_views` in
+  `anchor_stub.py` — because body2colmap's mode rasterised through gsplat,
+  which this project dropped to get rid of its runtime CUDA toolchain. The
+  library now shells out to the same `brush-splat-render` binary, so the
+  detour is gone; see `docs/revert-when-body2colmap-drops-gsplat.md` for
+  what it was and what came out. The rasterisation is the library's too, as
+  of the same day: `steps/splat.py`'s `_rasterize` drives
+  `SplatRenderer.render_many` rather than carrying a parallel copy of it,
+  and `render_splat_layers` is a thin wrapper over that. What stayed on this
+  side is the crash report (`on_fault`), the throttled log relay
+  (`on_output`) and the frame naming — the three things that are this
+  project's rather than the renderer's. body2colmap grew those three seams
+  plus `ply_path` for it; see its `body2colmap/CLAUDE.md`.
 - `select_support_views` (`anchor_stub.py`) — the face splat's second route
   into a training, and the consumer of `brush`'s `support_*` inputs. It
   takes `render_face_support_views`' **cap** render (36 views sampled
   around the photograph's own view of the splat — a different view set
-  from the one `composite_splat_views` composited), drops the ones that
+  from the drawings' own cameras), drops the ones that
   land on the training's denoising path, un-premultiplies the rest back to
   straight alpha, and hands them to the **stage-2** brush training as
   **masked** views — evidence that counts where the splat's own coverage
@@ -666,7 +681,7 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   this copy does not.
 
   Two renders, because the two consumers want different views. The
-  composite needs the dataset's own cameras, one frame per drawing. The
+  composite runs on the dataset's own cameras, one layer per drawing. The
   supporting views want the opposite: a view on the denoising path already
   has a denoised frame carrying the photograph, so a render of it
   supervises with a resampled copy of what the training has. The **outer**
@@ -681,10 +696,11 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   helix it follows the sweep. Of a 30° cap of 36 against an 81-camera
   ring, 29 survive.
 
-  `role`/`max_angle_deg` are the other way to draw the outer edge — they
-  cull on `composite_splat_views`' measured angle — and are off in the
-  shipped wiring (`role: ""`, `max_angle_deg: 180`) since the cap draws
-  it. They are only valid for a batch that shares the composite's cameras.
+  There used to be a second way to draw the outer edge here — a
+  `view_roles` input carrying `composite_splat_views`' per-frame verdict,
+  and a `max_angle_deg` culling on the angle that step had measured. Both
+  were already off in the shipped wiring because the cap drew the edge,
+  and both left with that step on 2026-08-31.
 
   The **final** training takes no supporting views at all: by then the
   dataset is the helical re-render, denoised a second time and upscaled,
@@ -763,8 +779,9 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   gate `smoothstep(gate_lo, gate_hi, C)` rather than accumulated opacity.
   Downstream nothing changes — foreground is still 1 — but a transparent
   pixel is grey, not black, so the mode must stay OFF for any render that
-  feeds `composite_splat_views` (which enforces premultiplied-over-black
-  and refuses it). `confidence_sidecar` keeps the raw per-pixel confidence
+  feeds `select_support_views` (which enforces premultiplied-over-black and
+  refuses it; the `+splat` compositing passes its own background and cannot
+  be got wrong this way). `confidence_sidecar` keeps the raw per-pixel confidence
   under the log dir for tuning; `conf_args` passes `--conf-*` flags
   through verbatim. Argv-level tests only (`tests/test_splat.py`,
   `tests/test_workflows.py`) — the gating itself is the renderer's, and

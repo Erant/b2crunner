@@ -19,8 +19,10 @@ dependencies = [
 # because render_splat now shells out to the brush-splat-render binary
 # instead (see requirements.txt and docs/docker-build-notes.md's "gsplat:
 # dropped"), which removed this project's last need for a CUDA toolchain at
-# runtime. Still an extra rather than a hard dependency because the
-# non-splat half of the pipeline works without it.
+# runtime. body2colmap followed on 2026-08-30 (its 24fe424), so nothing in
+# the dependency tree pulls gsplat in any more. Still an extra rather than
+# a hard dependency because the non-splat half of the pipeline works
+# without it.
 splat = [
     "plyfile>=0.8.0",
 ]

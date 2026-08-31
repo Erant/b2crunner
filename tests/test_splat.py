@@ -21,8 +21,6 @@ import unittest
 from pathlib import Path
 
 import numpy as np
-import cv2
-from unittest import mock
 
 from pipeline.dataset import Dataset
 from pipeline.registry import get_step_class
@@ -31,7 +29,12 @@ from pipeline.steps.splat import (
     _resolve_pointcloud as _resolve_pointcloud_raw,
 )
 from pipeline.steps.splat import _confidence_options
-from tests.helpers import redirect_crash_dir, require_stage, run_step
+from tests.helpers import (
+    redirect_crash_dir,
+    require_stage,
+    run_step,
+    stub_render_binary,
+)
 
 import pipeline.steps  # noqa: F401
 
@@ -710,50 +713,42 @@ class TestRenderSplatPointcloud(unittest.TestCase):
 
 
 class TestCamerasJson(unittest.TestCase):
-    """_write_cameras_json's schema against brush-splat-render's expected
-    input (~/Projects/brush/docs/splat-render.md): row-major rotation,
+    """The cameras.json schema against brush-splat-render's expected input
+    (~/Projects/brush/docs/splat-render.md): row-major rotation,
     body2colmap.Camera's OpenGL-convention c2w passed straight through with
     no conversion (that happens Rust-side).
+
+    The writer is body2colmap's now rather than this project's, but the
+    contract still binds every render here, so it is read off the file a
+    stub binary was actually handed. A Python-side axis flip would cancel
+    against the binary's own and produce a vertically mirrored render that
+    looks almost right, which is the failure this exists to catch.
     """
 
     def test_schema_matches_camera_fields(self):
-        from body2colmap.camera import Camera
+        payload = _drive_render(cameras=2)["cameras_json"]
 
-        from pipeline.steps.splat import _write_cameras_json
-
-        camera = Camera(
-            focal_length=(1213.917, 1213.917),
-            image_size=(720, 1280),
-            principal_point=(360.0, 640.0),
-            position=np.array([1.0, 2.0, 3.0], dtype=np.float32),
-            rotation=np.array(
-                [[1, 0, 0], [0, 0, -1], [0, 1, 0]], dtype=np.float32
-            ),
-        )
-
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "cameras.json"
-            _write_cameras_json([camera], ["frame_00001_.png"], 720, 1280, path)
-            payload = json.loads(path.read_text())
-
-        self.assertEqual(payload["width"], 720)
-        self.assertEqual(payload["height"], 1280)
-        self.assertEqual(len(payload["cameras"]), 1)
+        self.assertEqual(payload["width"], 4)
+        self.assertEqual(payload["height"], 4)
+        self.assertEqual(len(payload["cameras"]), 2)
 
         entry = payload["cameras"][0]
-        self.assertEqual(entry["name"], "frame_00001_.png")
-        self.assertEqual(entry["fx"], 1213.917)
-        self.assertEqual(entry["fy"], 1213.917)
-        self.assertEqual(entry["cx"], 360.0)
-        self.assertEqual(entry["cy"], 640.0)
-        self.assertEqual(entry["position"], [1.0, 2.0, 3.0])
-        # rotation[row][col], columns are local axes — unchanged from
-        # camera.rotation, no axis flip on the Python side.
-        self.assertEqual(entry["rotation"], camera.rotation.tolist())
+        self.assertEqual(entry["fx"], 4.0)
+        self.assertEqual(entry["fy"], 4.0)
+        self.assertEqual(entry["cx"], 2.0)
+        self.assertEqual(entry["cy"], 2.0)
+        self.assertEqual(entry["position"], [0.0, 0.0, 1.0])
+        # rotation[row][col], columns are local axes — identity in, identity
+        # out, no axis flip on the Python side.
+        self.assertEqual(entry["rotation"],
+                         [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
 
-
-if __name__ == "__main__":
-    unittest.main()
+    def test_the_cameras_are_in_render_order(self):
+        """The frames come back indexed against this list, so an order the
+        writer invented would pair every frame with the wrong camera."""
+        payload = _drive_render(cameras=3)["cameras_json"]
+        self.assertEqual([e["position"][2] for e in payload["cameras"]],
+                         [1.0, 2.0, 3.0])
 
 
 class TestRenderSplatBackground(unittest.TestCase):
@@ -769,9 +764,6 @@ class TestRenderSplatBackground(unittest.TestCase):
     effect only shows up several steps downstream.
     """
 
-    def _captured_argv(self, bg_color):
-        return _captured_render_argv(bg_color=bg_color)
-
     def test_the_shipped_default_is_black(self):
         """The default the step applies, read from the step rather than
         restated here — a test that hardcodes (0,0,0) on both sides passes
@@ -781,12 +773,30 @@ class TestRenderSplatBackground(unittest.TestCase):
         default = _render_splat_default_bg()
         self.assertEqual(tuple(default), (0.0, 0.0, 0.0))
 
-        argv = self._captured_argv(default)
-        self.assertEqual(argv[argv.index("--background") + 1], "0.000000,0.000000,0.000000")
+    def test_the_background_is_applied_here_rather_than_by_the_binary(self):
+        """Where this is enforced moved with the rasterisation. The binary is
+        always invoked with `--background 0,0,0` — body2colmap's decision, so
+        its RGB comes back premultiplied and both alpha conventions derive
+        from one intermediate — and `bg_color` is composited under it in
+        Python. So the property to check is the OUTPUT, not the argv."""
+        run = _drive_render(bg_color=(0.25, 0.5, 1.0))
+        self.assertEqual(run["argv"][run["argv"].index("--background") + 1], "0,0,0")
 
-    def test_an_explicit_background_still_wins(self):
-        argv = self._captured_argv((0.25, 0.5, 1.0))
-        self.assertEqual(argv[argv.index("--background") + 1], "0.250000,0.500000,1.000000")
+        # The stub renders fully opaque, so a correct implementation
+        # composites nothing: `rgb + bg*(1-a)` with a=1 leaves rgb alone.
+        np.testing.assert_array_equal(run["masks"][0], 1.0)
+        np.testing.assert_array_equal(run["images"][0], 100)
+
+    def test_a_render_comes_back_as_bgr_plus_a_float_mask(self):
+        """This pipeline's convention, and body2colmap's is RGBA — the
+        conversion is `_rasterize`'s and is easy to drop silently, since a
+        grey test frame looks identical either way."""
+        run = _drive_render()
+        image, mask = run["images"][0], run["masks"][0]
+        self.assertEqual(image.shape, (4, 4, 3))
+        self.assertEqual(image.dtype, np.uint8)
+        self.assertEqual(mask.shape, (4, 4))
+        self.assertEqual(mask.dtype, np.float32)
 
 
 def _render_splat_default_bg():
@@ -803,56 +813,65 @@ def _render_splat_default_bg():
     return tuple(get_step_class("render_splat").declared_params()["bg_color"].default)
 
 
-def _captured_render_argv(*, bg_color=(0.0, 0.0, 0.0), confidence=None,
-                          sidecars=()):
-    """Build the brush-splat-render argv without running the binary.
+def _drive_render(*, bg_color=(0.0, 0.0, 0.0), confidence=None, cameras=1):
+    """Run `_rasterize` against a stub binary and report what happened.
 
-    `sidecars` names the extra files the stand-in writes beside the frames,
-    which is how the confidence sidecars can be checked without a renderer.
+    The argv used to be captured by patching `_run_render`, an internal of
+    this module. That function is gone: since 2026-08-31 `_rasterize` drives
+    body2colmap's `SplatRenderer`, which builds the argv and runs the binary
+    itself. So the observation point moved out to the binary — which is the
+    better one anyway, being what the real renderer would be handed.
+
+    Returns a dict of `argv`, `cameras_json`, `images` and `masks`.
     """
     from body2colmap.camera import Camera
 
     from pipeline.steps import splat as splat_module
 
-    seen = {}
-
-    def fake_render(cmd, **kwargs):
-        seen["cmd"] = cmd
-        out = Path(cmd[cmd.index("--output-dir") + 1])
-        out.mkdir(parents=True, exist_ok=True)
-        cv2.imwrite(str(out / "frame_00001_.png"), np.zeros((4, 4, 4), np.uint8))
-        for name in sidecars:
-            cv2.imwrite(str(out / name), np.zeros((4, 4), np.uint8))
-
-    camera = Camera(
-        focal_length=(4.0, 4.0),
-        image_size=(4, 4),
-        principal_point=(2.0, 2.0),
-        position=np.array([0.0, 0.0, 1.0], dtype=np.float32),
-        rotation=np.eye(3, dtype=np.float32),
-    )
+    camera_list = [
+        Camera(
+            focal_length=(4.0, 4.0),
+            image_size=(4, 4),
+            principal_point=(2.0, 2.0),
+            position=np.array([0.0, 0.0, float(i + 1)], dtype=np.float32),
+            rotation=np.eye(3, dtype=np.float32),
+        )
+        for i in range(cameras)
+    ]
     scene = _synthetic_scene()
 
     with tempfile.TemporaryDirectory() as tmp:
-        ply = Path(tmp) / "s.ply"
+        root = Path(tmp)
+        ply = root / "s.ply"
         run_step("save_splat", {"splat_scene": scene}, {"filepath": str(ply)})
-        with mock.patch.object(splat_module, "_run_render", fake_render):
-            splat_module._rasterize(
-                scene=scene,
-                splat_path=str(ply),
-                cameras=[camera],
-                image_names=["frame_00001_.png"],
-                width=4,
-                height=4,
-                bg_color=bg_color,
-                render_path="brush-splat-render",
-                confidence=confidence,
-            )
-    return seen["cmd"]
+        record = root / "record"
+        binary = stub_render_binary(root, record=record)
+
+        images, masks = splat_module._rasterize(
+            scene=scene,
+            splat_path=str(ply),
+            cameras=camera_list,
+            image_names=[f"frame_{i + 1:05d}_.png" for i in range(cameras)],
+            width=4,
+            height=4,
+            bg_color=bg_color,
+            render_path=binary,
+            confidence=confidence,
+        )
+        return {
+            "argv": json.loads((record / "argv.json").read_text()),
+            "cameras_json": json.loads((record / "cameras.json").read_text()),
+            "images": images,
+            "masks": masks,
+        }
+
+
+def _captured_render_argv(**kwargs):
+    return _drive_render(**kwargs)["argv"]
 
 
 def _confidence(**overrides):
-    """The `_Confidence` render_splat would build for these params.
+    """The `ConfidenceOptions` render_splat would build for these params.
 
     Through `resolve_params` and the step's own reader, so the declared
     defaults are the ones under test rather than values restated here.
@@ -875,8 +894,8 @@ class TestRenderSplatConfidence(unittest.TestCase):
     """
 
     def test_off_by_default_and_the_old_argv_is_untouched(self):
-        """Every render that is not opted in — the face views that feed
-        composite_splat_views above all — must still get exactly the
+        """Every render that is not opted in — the face cap views that feed
+        select_support_views above all — must still get exactly the
         premultiplied-over-black call it got before."""
         self.assertIs(_confidence_options(_rs_params({})), None)
 
@@ -885,18 +904,16 @@ class TestRenderSplatConfidence(unittest.TestCase):
         self.assertNotIn("--confidence", argv)
         self.assertNotIn("--cull-color", argv)
 
-    def test_the_gate_flags_replace_the_background(self):
-        """`--background` is ignored by the binary in this mode, so it is
-        not passed at all: an argv carrying a background nothing reads is
-        the kind of thing that gets tuned for a run and then blamed for the
-        result."""
+    def test_the_gate_flags_carry_the_cull_colour(self):
+        """`--cull-color` is the whole background of a gated render: the
+        binary resolves culled pixels and the ground it composites over to
+        one colour. `--background` is on the argv and ignored by the binary
+        in this mode — body2colmap passes it unconditionally so its
+        non-gated path has one contract, which is its call to make."""
         argv = _captured_render_argv(confidence=_confidence())
 
         self.assertIn("--confidence", argv)
-        self.assertNotIn("--background", argv)
-        self.assertEqual(
-            argv[argv.index("--cull-color") + 1], "0.500000,0.500000,0.500000"
-        )
+        self.assertEqual(argv[argv.index("--cull-color") + 1], "0.5,0.5,0.5")
         self.assertEqual(argv[argv.index("--gate-lo") + 1], "0.45")
         self.assertEqual(argv[argv.index("--gate-hi") + 1], "0.65")
 
@@ -946,58 +963,38 @@ class TestRenderSplatConfidence(unittest.TestCase):
         self.assertEqual(argv[-2:], ["--conf-tau", "0.12"])
 
     def test_the_sidecars_survive_the_temp_directory(self):
-        """They are written into the render's TemporaryDirectory, which is
-        deleted on the way out — the same way a crash used to take its own
-        evidence with it. Off by default, and kept under the log dir when
-        on."""
+        """The binary writes them into a temp directory body2colmap deletes
+        on the way out, handing them back only in memory
+        (`last_confidence_maps`). This step writes them under the log dir,
+        for the reason crash directories go there: whatever gets copied off
+        a pod to read the run log brings them along. And they are named the
+        way the rest of the run names its frames, not `f00000.conf.png`."""
         # redirect_crash_dir sets B2C_LOG_DIR, which is the whole of what
         # this needs: the sidecars land under the log dir for the reason
         # crash directories do, so redirecting one redirects both and the
         # suite writes nothing into the developer's real volume.
         logs = redirect_crash_dir(self).parent
 
-        argv = _captured_render_argv(
-            confidence=_confidence(confidence_sidecar=True),
-            sidecars=["frame_00001_.conf.png"],
-        )
-        self.assertIn("--confidence-sidecar", argv)
+        run = _drive_render(confidence=_confidence(confidence_sidecar=True),
+                            cameras=2)
+        self.assertIn("--confidence-sidecar", run["argv"])
 
         kept = sorted((logs / "confidence").rglob("*.conf.png"))
-        self.assertEqual([p.name for p in kept], ["frame_00001_.conf.png"])
+        self.assertEqual([p.name for p in kept],
+                         ["frame_00001_.conf.png", "frame_00002_.conf.png"])
 
     def test_no_sidecar_flag_by_default(self):
         argv = _captured_render_argv(confidence=_confidence())
         self.assertNotIn("--confidence-sidecar", argv)
 
     def test_a_sidecar_is_not_mistaken_for_a_frame(self):
-        """The frames come back by name, so a .conf.png beside them must not
-        turn into an 82nd view."""
-        from body2colmap.camera import Camera
+        """A `.conf.png` beside each frame must not turn into extra views."""
+        redirect_crash_dir(self)
+        run = _drive_render(confidence=_confidence(confidence_sidecar=True),
+                            cameras=2)
+        self.assertEqual(len(run["images"]), 2)
+        self.assertEqual(len(run["masks"]), 2)
 
-        from pipeline.steps import splat as splat_module
 
-        def fake_render(cmd, **kwargs):
-            out = Path(cmd[cmd.index("--output-dir") + 1])
-            out.mkdir(parents=True, exist_ok=True)
-            cv2.imwrite(str(out / "frame_00001_.png"), np.zeros((4, 4, 4), np.uint8))
-            cv2.imwrite(str(out / "frame_00001_.conf.png"), np.zeros((4, 4), np.uint8))
-
-        camera = Camera(
-            focal_length=(4.0, 4.0), image_size=(4, 4), principal_point=(2.0, 2.0),
-            position=np.array([0.0, 0.0, 1.0], dtype=np.float32),
-            rotation=np.eye(3, dtype=np.float32),
-        )
-        scene = _synthetic_scene()
-        with tempfile.TemporaryDirectory() as tmp:
-            ply = Path(tmp) / "s.ply"
-            run_step("save_splat", {"splat_scene": scene}, {"filepath": str(ply)})
-            with mock.patch.object(splat_module, "_run_render", fake_render):
-                images, masks = splat_module._rasterize(
-                    scene=scene, splat_path=str(ply), cameras=[camera],
-                    image_names=["frame_00001_.png"], width=4, height=4,
-                    bg_color=(0.0, 0.0, 0.0), render_path="brush-splat-render",
-                    confidence=_confidence(confidence_sidecar=True),
-                )
-        self.assertEqual(len(images), 1)
-        self.assertEqual(len(masks), 1)
-
+if __name__ == "__main__":
+    unittest.main()

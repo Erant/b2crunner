@@ -11,8 +11,11 @@ the one everything else rests on:
     coordinates. Get this wrong and the face floats off the skull, which no
     later step can detect or repair.
   * The crop bookkeeping itself (padding, aspect, clamping at an edge).
-  * The composite: what it blends, what it culls, and the two ways it is
-    asked to refuse rather than produce something quietly wrong.
+  * The composite's CULL: which frames are close enough to the photograph's
+    view to take the splat layer at all, and what that angle is measured
+    about. The blend itself is body2colmap's again as of 2026-08-31 (see
+    docs/revert-when-body2colmap-drops-gsplat.md), so what is tested here
+    is only the part `render` still owns.
 
 Same discipline as the shell's tests — synthetic geometry with a known
 answer, and the 1B forward pass stubbed out.
@@ -30,6 +33,7 @@ import pipeline.steps  # noqa: F401  — registers the face branch
 from pipeline.registry import get_step_class
 from pipeline.step import Param, ParamError, with_defaults
 from pipeline.steps import pointmap_splat as ps
+from pipeline.steps import render
 from pipeline.steps import sapiens2
 from tests.test_pointmap_splat import (
     CX, CY, FOCAL, HEIGHT, WIDTH, _StubbedStep, _read_ply, _sphere,
@@ -312,19 +316,23 @@ class _Camera:
         self.position = np.asarray(position, dtype=np.float64)
 
 
-class TestCompositeSplatViews(unittest.TestCase):
-    """The blend, the cull, and the two refusals."""
+class TestSplatLayerCull(unittest.TestCase):
+    """Which frames get the splat overlay, and what it is measured about.
 
-    CENTRE = (0.0, 0.0, -2.0)      # the "head", 2 m down -Z from the camera
+    The blend and the refusals are gone from this project: the compositing
+    is `Renderer.render_composite(splat_layer=...)`'s now, and the
+    black-background requirement went with it, because
+    `steps/splat.py`'s `render_splat_layers` passes the background itself.
+    What stays on this side is the cull — `render` builds its own cameras
+    and never touches `OrbitPipeline`, so `splat_view_angle_deg` is not
+    reachable from it. See docs/revert-when-body2colmap-drops-gsplat.md.
+    """
 
-    def _frames(self, n=3, value=40):
-        return [np.full((8, 6, 3), value, np.uint8) for _ in range(n)]
+    CENTRE = np.array([0.0, 0.0, -2.0])   # the "head", 2 m down -Z
+    SOURCE = np.zeros(3)                  # where the photograph was taken
 
     def _cameras(self, angles_deg):
-        """Cameras on a circle about CENTRE, `angles_deg` off the source view.
-
-        The source view is the world origin looking at CENTRE, i.e. along -Z.
-        """
+        """Cameras on a circle about CENTRE, `angles_deg` off the source view."""
         out = []
         for angle in angles_deg:
             rad = np.radians(angle)
@@ -334,61 +342,32 @@ class TestCompositeSplatViews(unittest.TestCase):
                                 self.CENTRE[2] + radius * np.cos(rad))))
         return out
 
-    def _run(self, angles, layers, alphas, **params):
-        step = get_step_class("composite_splat_views")()
-        return step.run(
-            {
-                "images": self._frames(len(angles)),
-                "splat_images": layers,
-                "splat_masks": alphas,
-                "cameras": self._cameras(angles),
-                "splat_center": self.CENTRE,
-            },
-            step.resolve_params(params),
+    def _angles(self, angles_deg, center=None):
+        return render._splat_view_angles_deg(
+            self._cameras(angles_deg),
+            self.CENTRE if center is None else np.asarray(center, dtype=np.float64),
+            self.SOURCE,
         )
 
-    def test_an_opaque_layer_replaces_and_a_transparent_one_does_not(self):
-        angles = [0.0, 0.0]
-        layers = [np.full((8, 6, 3), 200, np.uint8), np.zeros((8, 6, 3), np.uint8)]
-        alphas = [np.ones((8, 6), np.float32), np.zeros((8, 6), np.float32)]
-        result = self._run(angles, layers, alphas)
-
-        np.testing.assert_array_equal(result["images"][0], layers[0])
-        np.testing.assert_array_equal(result["images"][1][:, :, 0], 40)
-
-    def test_half_alpha_blends_premultiplied_colour(self):
-        """The composite is out = base*(1-a) + rgb, because a splat rendered
-        on black is already premultiplied. 200 rendered at alpha 0.5 arrives
-        as 100, over a base of 40: 40*0.5 + 100 = 120."""
-        layers = [np.full((8, 6, 3), 100, np.uint8)]
-        alphas = [np.full((8, 6), 0.5, np.float32)]
-        result = self._run([0.0], layers, alphas)
-        np.testing.assert_array_equal(result["images"][0], 120)
-
-    def test_a_frame_past_the_cull_keeps_the_drawing(self):
-        angles = [0.0, 30.0, 60.0]
-        layers = [np.full((8, 6, 3), 200, np.uint8)] * 3
-        alphas = [np.ones((8, 6), np.float32)] * 3
-        result = self._run(angles, layers, alphas, max_angle_deg=45.0)
-
-        roles = [role["role"] for role in result["view_roles"]]
-        self.assertEqual(roles, ["composited", "composited", "base"])
-        np.testing.assert_array_equal(result["images"][2][:, :, 0], 40)
+    def test_the_angle_is_the_camera_s_own_offset_from_the_source_view(self):
+        measured = self._angles([0.0, 30.0, 60.0, 120.0])
+        np.testing.assert_allclose(measured, [0.0, 30.0, 60.0, 120.0], atol=1e-6)
 
     def test_the_default_band_runs_to_sixty_degrees(self):
         """Pinned because it is a deliberate widening of body2colmap's
         measured 45: out past it the shell is mostly open rim, and what
         makes that affordable is that these frames are inputs to two
-        denoise passes that can rewrite a rim. select_support_views, whose
-        frames nothing rewrites, culls at 30 out of its own param and does
-        not follow this number."""
-        angles = [50.0, 70.0]
-        layers = [np.full((8, 6, 3), 200, np.uint8)] * 2
-        alphas = [np.ones((8, 6), np.float32)] * 2
-        result = self._run(angles, layers, alphas)
-
-        roles = [role["role"] for role in result["view_roles"]]
-        self.assertEqual(roles, ["composited", "base"])
+        denoise passes that can rewrite a rim. A revert that adopted the
+        render mode without passing this would inherit body2colmap's own
+        45; the shipped workflows pass 60 explicitly for the same reason.
+        select_support_views, whose frames nothing rewrites, bands at 30 out
+        of its cap's radius and does not follow this number."""
+        default = get_step_class("render")().resolve_params(
+            {"n_frames": 1})["splat_max_angle_deg"]
+        self.assertEqual(default, 60.0)
+        measured = self._angles([50.0, 70.0])
+        self.assertLessEqual(measured[0], default)
+        self.assertGreater(measured[1], default)
 
     def test_the_pivot_is_the_splat_not_the_orbit_target(self):
         """A camera aimed at a body's centre is not aimed at the head, so
@@ -396,67 +375,20 @@ class TestCompositeSplatViews(unittest.TestCase):
         frames. The head here is 1 m above the orbit target, and this camera
         sits exactly on the line from the source view through the target:
         0.0 degrees off about the target, 13.8 about the head."""
-        step = get_step_class("composite_splat_views")()
-        common = {
-            "images": self._frames(1),
-            "splat_images": [np.full((8, 6, 3), 200, np.uint8)],
-            "splat_masks": [np.ones((8, 6), np.float32)],
-            "cameras": [_Camera((0.0, -0.32918, -0.65836))],
-            "orbit_target": np.array([0.0, -1.0, -2.0]),
-        }
-        params = step.resolve_params({"max_angle_deg": 10.0})
+        camera = [_Camera((0.0, -0.32918, -0.65836))]
+        orbit_target = np.array([0.0, -1.0, -2.0])
 
-        about_target = step.run(dict(common), params)
-        self.assertEqual(about_target["view_roles"][0]["role"], "composited")
+        about_target = render._splat_view_angles_deg(camera, orbit_target, self.SOURCE)
+        self.assertAlmostEqual(about_target[0], 0.0, places=3)
 
-        about_splat = step.run(dict(common, splat_center=self.CENTRE), params)
-        self.assertEqual(about_splat["view_roles"][0]["role"], "base")
+        about_splat = render._splat_view_angles_deg(camera, self.CENTRE, self.SOURCE)
+        self.assertGreater(about_splat[0], 10.0)
 
-    def test_a_render_on_a_non_black_background_is_refused(self):
-        """The failure this prevents is silent: the composite would blend
-        toward the background a second time and every face would come back
-        washed out."""
-        layers = [np.full((8, 6, 3), 127, np.uint8)]
-        alphas = [np.zeros((8, 6), np.float32)]
+    def test_a_source_view_on_the_splat_is_refused(self):
         with self.assertRaises(ValueError) as caught:
-            self._run([0.0], layers, alphas)
-        self.assertIn("non-black", str(caught.exception))
-
-    def test_misaligned_camera_batches_are_refused(self):
-        step = get_step_class("composite_splat_views")()
-        with self.assertRaises(ValueError) as caught:
-            step.run(
-                {
-                    "images": self._frames(2),
-                    "splat_images": [np.zeros((8, 6, 3), np.uint8)] * 2,
-                    "splat_masks": [np.zeros((8, 6), np.float32)] * 2,
-                    "cameras": self._cameras([0.0, 10.0]),
-                    "splat_cameras": self._cameras([0.0, 40.0]),
-                    "splat_center": self.CENTRE,
-                },
-                step.resolve_params({}),
-            )
-        self.assertIn("cameras", str(caught.exception))
-
-    def test_the_splat_is_unioned_into_the_mask_when_one_is_wired(self):
-        step = get_step_class("composite_splat_views")()
-        result = step.run(
-            {
-                "images": self._frames(1),
-                "masks": [np.zeros((8, 6), np.float32)],
-                "splat_images": [np.full((8, 6, 3), 200, np.uint8)],
-                "splat_masks": [np.full((8, 6), 0.75, np.float32)],
-                "cameras": self._cameras([0.0]),
-                "splat_center": self.CENTRE,
-            },
-            step.resolve_params({}),
-        )
-        np.testing.assert_allclose(result["masks"][0], 0.75)
-
-    def test_no_mask_is_invented_when_none_was_wired(self):
-        result = self._run([0.0], [np.zeros((8, 6, 3), np.uint8)],
-                           [np.zeros((8, 6), np.float32)])
-        self.assertNotIn("masks", result)
+            render._splat_view_angles_deg(self._cameras([0.0]), self.CENTRE,
+                                          self.CENTRE)
+        self.assertIn("source view direction", str(caught.exception))
 
 
 if __name__ == "__main__":

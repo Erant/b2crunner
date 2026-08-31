@@ -1,8 +1,69 @@
 # Revert list — when body2colmap switches to the brush renderer
 
-**Status: pending. Nothing here has been done yet.** This file exists so
-the decision behind the face-splat compositing is recoverable, and so the
-work of undoing it is a checklist rather than an archaeology exercise.
+**Status: DONE, 2026-08-31.** body2colmap `24fe424` ("Replace gsplat with
+the brush splat renderer") landed on its main, and everything below has
+been carried out. The file is kept as the record of what the detour was and
+why, because the *reason* the b2crunner steps existed is not visible in the
+diff that removed them.
+
+What the revert actually did, against the checklist below:
+
+- `CompositeSplatViewsStep` and `_composite_result` are gone.
+  `_composite_pivot` and `_check_premultiplied` **stayed** — item 1 below
+  is wrong about those two, because `select_support_views` (which did not
+  exist when this file was written) shares both.
+- `pipeline/steps/render.py` gained `splat_scene`/`splat_path` and
+  `anchor_position` inputs, a `splat_max_angle_deg` param, and three
+  `*+skeleton+splat` render modes. It renders the layer for the frames that
+  survive the cull and passes it to the `render_composite` call it already
+  made.
+- The rasterisation moved to body2colmap's `SplatRenderer` as well — but
+  not on the first pass, and the way it got there is the useful part of
+  this record. It was held back because the library raised on any non-zero
+  exit and kept nothing when a render died, so `steps/splat.py` carried a
+  parallel `_rasterize`/`_run_render`/`_write_cameras_json` driving the
+  same binary. body2colmap's `d0e3ada`, later the same day, took the exit
+  code half away. What was left was one behaviour — a crashed run's temp
+  directory is deleted before anyone can copy anything out of it — holding
+  up ~250 lines of duplicate.
+
+  **The fix went into body2colmap rather than being worked around here**,
+  as three seams:
+
+  - `on_fault`: called with a `RenderFault` while the run directory still
+    exists, for a caller that wants to save a crash report. Fires for a
+    lost-frame run *and* for one that wrote everything and then died.
+  - `on_output`: each line as the binary writes it, so `proc.OutputRelay`
+    (extracted from `stream_command` for this) can throttle it into the
+    pipeline log. `render_many` drives the binary with `Popen` and a line
+    loop now instead of `subprocess.run`.
+  - `ply_path`: render an existing `.ply` rather than serializing the
+    scene back out. A trained splat is hundreds of megabytes and this step
+    usually follows the training that wrote it.
+
+  `_rasterize` is now a wrapper over `render_many` holding the three
+  things that are genuinely this project's — where a crash report goes,
+  where the log goes, and what a frame is called (`frame_00001_.png`, not
+  the renderer's `f00000.png`). `_run_render`, `_write_cameras_json`,
+  `_missing_renders` and the local `_Confidence` mirror of
+  `ConfidenceOptions` are gone.
+
+  Two behaviour changes worth knowing, both body2colmap's call: the binary
+  is now always invoked with `--background 0,0,0` and `bg_color` is
+  composited in Python (so `--background` appears even in confidence mode,
+  where it is ignored), and that adds one extra 8-bit round trip, worth at
+  most 1/255 on a non-black background. `render_shell_views` is the only
+  shipped render with one.
+
+- `select_support_views` lost its `view_roles` input and the `role` /
+  `max_angle_deg` params with it: they read the composite step's per-frame
+  verdict, nothing else can produce one, and both workflows already had
+  them switched off because the cap render draws that edge.
+- The cull angle was passed **explicitly** as 60 in both workflows, so it
+  did not silently inherit body2colmap's 45 — see the last section.
+- `docker/Dockerfile`'s body2colmap pull-forward pin moved from `a3a498d`
+  to `24fe424`, with an assert on `render_composite`'s `splat_layer`
+  parameter so an older library fails the build rather than the run.
 
 ## What was decided, and why
 
@@ -32,7 +93,7 @@ is temporary.
 this whole detour collapses into two render-mode strings and everything
 below comes back out.
 
-## The precondition
+## The precondition (met)
 
 Do not start until body2colmap can rasterise a splat overlay without
 gsplat — i.e. `OrbitPipeline.attach_splat_overlay` /
@@ -48,7 +109,7 @@ into `Renderer.render_composite`, which is already that method's public
 signature, and the overlay's anchoring has to come from somewhere. It does
 not need `body2colmap.splat_anchor`: see below.
 
-## What comes out
+## What came out
 
 Everything in this list is b2crunner-side. Nothing in body2colmap needs
 reverting — this project only ever added to it.

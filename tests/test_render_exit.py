@@ -1,199 +1,211 @@
-"""brush-splat-render's non-zero exits are judged against the frames, and
-every crash leaves something behind to read.
+"""Every brush-splat-render crash leaves something behind to read.
 
-The training half of this binary has a known shutdown SIGSEGV (exit -11)
-that lands *after* the work is on disk — see tests/test_brush_exit.py — and
-the rasteriser has now been seen failing on a pod in what may well be the
-same thing. So it gets the same guard: a failed exit with every frame
+The rasterisation itself is body2colmap's since 2026-08-31 — `_rasterize`
+drives its `SplatRenderer` rather than running the binary itself — and so
+is the judgement that used to live here: a non-zero exit with every frame
 written is a finished render, and only a missing frame is a real failure.
+That is `render_many`'s now, and `tests/test_splat_renderer.py` in that
+repo covers it. **What is still this project's is the crash report**, and
+it is the half that matters most, because it is the reason a real pod crash
+could not be diagnosed at all.
 
-The second half of these is the reason that pod crash could not be
-diagnosed at all. The render's cameras.json and its part-written frames
-live in a `TemporaryDirectory` that is deleted on the way out of
-`_rasterize`, exception or not, so the crash left an exit code and nothing
-else. They are now copied to `paths.crash_dir()` first.
+Everything the binary is handed lives in a temp directory `render_many`
+deletes on the way out, exception or not, so that crash left an exit code
+and nothing else. body2colmap now calls `on_fault` while the directory is
+still there; `_save_render_crashlog` is what this project hangs off it, and
+copies the cameras.json, a per-frame manifest and the last frames written
+into `paths.crash_dir()` before it goes.
+
+Driven against a stub binary, because the cases worth testing are crashes.
 """
 
 from __future__ import annotations
 
 import logging
 import os
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-from pipeline.proc import ProcessFailed
-from pipeline.steps.splat import _run_render
+import numpy as np
 
-from tests.helpers import crash_dirs, redirect_crash_dir
-
-NAMES = ["frame_00001_.png", "frame_00002_.png", "frame_00003_.png"]
+from tests.helpers import crash_dirs, redirect_crash_dir, stub_render_binary
 
 
-def _fake_render(output_dir: Path, *, writes, exit_code: int = 0,
-                 segfault: bool = False, body: str = "png"):
-    """argv for a process that writes `writes` into `output_dir`, then exits.
+def _cameras(count):
+    from body2colmap.camera import Camera
 
-    `segfault=True` reproduces the case the guard exists for: every frame
-    is on disk and the process then dies on SIGSEGV, which Popen reports as
-    returncode -11 rather than as any exit status.
-    """
-    script = f"import os; d={str(output_dir)!r}; os.makedirs(d, exist_ok=True);"
-    for name in writes:
-        script += f"open(os.path.join(d, {name!r}), 'w').write({body!r});"
-    if segfault:
-        script += "import signal; os.kill(os.getpid(), signal.SIGSEGV)"
-    else:
-        script += f"import sys; sys.exit({exit_code})"
-    return [sys.executable, "-c", script]
+    return [
+        Camera(focal_length=(4.0, 4.0), image_size=(4, 4),
+               principal_point=(2.0, 2.0),
+               position=np.array([0.0, 0.0, float(i + 1)], dtype=np.float32),
+               rotation=np.eye(3, dtype=np.float32))
+        for i in range(count)
+    ]
+
+
+class _Scene:
+    """Enough of a SplatScene for the renderer; never serialized, because
+    `_rasterize` passes the .ply below as `ply_path`."""
+
+    sh_degree = 0
+
+    def to_ply(self, path):
+        raise AssertionError("an existing .ply must be rendered where it lies")
+
+    def __len__(self):
+        return 1
 
 
 class _RenderCase(unittest.TestCase):
+    FRAMES = 3
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="b2c_render_test_")
         self.addCleanup(self.tmp.cleanup)
-        root = Path(self.tmp.name)
+        self.root = Path(self.tmp.name)
         self.crashes = redirect_crash_dir(self)
+        self.ply = self.root / "scene.ply"
+        self.ply.write_bytes(b"a splat, as far as the stub is concerned")
 
-        self.output_dir = root / "renders"
-        self.cameras = root / "cameras.json"
-        self.cameras.write_text('{"width": 4, "height": 4, "cameras": []}')
+    def render(self, *, frames="all", damage="", segfault=False, count=None):
+        from pipeline.steps import splat as splat_module
 
-    def run_render(self, cmd):
-        _run_render(
-            cmd,
-            output_dir=self.output_dir,
-            cameras_path=self.cameras,
-            image_names=list(NAMES),
+        count = self.FRAMES if count is None else count
+        binary = stub_render_binary(self.root, frames=frames, damage=damage,
+                                    segfault=segfault)
+        return splat_module._rasterize(
+            scene=_Scene(),
+            splat_path=str(self.ply),
+            cameras=_cameras(count),
+            image_names=[f"frame_{i + 1:05d}_.png" for i in range(count)],
+            width=4,
+            height=4,
+            bg_color=(0.0, 0.0, 0.0),
+            render_path=binary,
+            confidence=None,
         )
 
     def crash_dirs(self):
         return crash_dirs(self.crashes)
 
 
-class TestRenderExitCode(_RenderCase):
-    def test_a_failed_exit_with_every_frame_written_is_accepted(self):
+class TestTheVerdictStillHolds(_RenderCase):
+    """body2colmap's judgement, checked from this side because it is what
+    the pipeline depends on — not a second implementation of it."""
+
+    def test_a_clean_render_returns_its_frames(self):
+        images, masks = self.render()
+        self.assertEqual(len(images), self.FRAMES)
+        self.assertEqual(len(masks), self.FRAMES)
+        self.assertEqual(self.crash_dirs(), [], "nothing went wrong")
+
+    def test_a_crash_after_every_frame_was_written_is_accepted(self):
         with self.assertLogs("pipeline.steps.splat", level=logging.WARNING) as caught:
-            self.run_render(_fake_render(self.output_dir, writes=NAMES, exit_code=1))
+            images, _ = self.render(segfault=True)
+        self.assertEqual(len(images), self.FRAMES)
         self.assertIn("treating the render as successful", "\n".join(caught.output))
 
-    def test_a_clean_exit_says_nothing(self):
-        with self.assertNoLogs("pipeline.steps.splat", level=logging.WARNING):
-            self.run_render(_fake_render(self.output_dir, writes=NAMES))
-
-    def test_the_real_shape_of_the_failure_rendered_then_segfaulted(self):
-        with self.assertLogs("pipeline.steps.splat", level=logging.WARNING) as caught:
-            self.run_render(_fake_render(self.output_dir, writes=NAMES, segfault=True))
-        self.assertIn("-11", "\n".join(caught.output))
-
-    def test_a_failed_exit_with_a_missing_frame_still_raises(self):
-        with self.assertRaises(ProcessFailed):
-            self.run_render(_fake_render(self.output_dir, writes=NAMES[:2], exit_code=1))
+    def test_a_crash_that_lost_a_frame_still_raises(self):
+        with self.assertRaises(RuntimeError):
+            self.render(frames="short", segfault=True)
 
     def test_an_empty_frame_counts_as_missing(self):
         """A zero-byte PNG is a crash caught mid-write, not a frame."""
-        with self.assertRaises(ProcessFailed):
-            self.run_render(
-                _fake_render(self.output_dir, writes=NAMES, exit_code=1, body="")
+        with self.assertRaises(RuntimeError):
+            self.render(damage="empty", segfault=True)
+
+    def test_a_truncated_frame_is_caught_too(self):
+        """It is non-empty, so only the decode catches it."""
+        with self.assertRaises(RuntimeError):
+            self.render(damage="truncate", segfault=True)
+
+    def test_a_missing_binary_is_a_hard_failure_with_nothing_to_save(self):
+        from pipeline.steps import splat as splat_module
+
+        with self.assertRaises(RuntimeError):
+            splat_module._rasterize(
+                scene=_Scene(), splat_path=str(self.ply), cameras=_cameras(1),
+                image_names=["frame_00001_.png"], width=4, height=4,
+                bg_color=(0.0, 0.0, 0.0),
+                render_path="b2c-no-such-binary-exists", confidence=None,
             )
-
-    def test_a_clean_exit_that_wrote_nothing_is_still_a_failure(self):
-        """And it fails here, where the evidence still exists, rather than
-        several lines later as cv2.imread returning None on a temp
-        directory that has since been deleted."""
-        with self.assertRaises(RuntimeError) as caught:
-            self.run_render(_fake_render(self.output_dir, writes=[]))
-        self.assertNotIsInstance(caught.exception, ProcessFailed)
-        self.assertIn("frame_00001_.png", str(caught.exception))
-
-    def test_a_missing_binary_is_still_a_hard_failure(self):
-        """Not a ProcessFailed at all — argv[0] never started, so there is
-        no exit code to weigh against any frame."""
-        with self.assertRaises(RuntimeError) as caught:
-            self.run_render(["b2c-no-such-binary-exists"])
-        self.assertNotIsInstance(caught.exception, ProcessFailed)
-        self.assertEqual(self.crash_dirs(), [], "nothing ran, so there is nothing to save")
+        self.assertEqual(self.crash_dirs(), [],
+                         "nothing ran, so there is nothing to save")
 
 
 class TestRenderCrashlog(_RenderCase):
     """What a crash leaves behind once the temp directory is gone."""
 
-    def _crash_after(self, cmd, expect_raises=True):
+    def _crash(self, *, expect_raises=True, **kwargs):
         if expect_raises:
             with self.assertRaises(Exception):
-                self.run_render(cmd)
+                self.render(**kwargs)
         else:
             with self.assertLogs("pipeline.steps.splat", level=logging.WARNING):
-                self.run_render(cmd)
+                self.render(**kwargs)
         dirs = self.crash_dirs()
         self.assertEqual(len(dirs), 1, f"expected one crash directory, got {dirs}")
         return dirs[0]
 
-    def test_a_hard_failure_saves_the_views_it_was_rendering(self):
-        crash = self._crash_after(
-            _fake_render(self.output_dir, writes=NAMES[:1], exit_code=1)
-        )
-        self.assertEqual(
-            (crash / "cameras.json").read_text(), self.cameras.read_text()
-        )
+    def test_it_saves_the_views_it_was_rendering(self):
+        """The thing whose absence made the pod crash undiagnosable, and the
+        only reason the fault hook exists at all."""
+        crash = self._crash(frames="short", segfault=True)
+        payload = (crash / "cameras.json").read_text()
+        self.assertIn('"cameras"', payload)
+        self.assertIn('"fx": 4.0', payload)
 
-    def test_the_report_names_the_exit_code_the_argv_and_every_frame(self):
-        crash = self._crash_after(
-            _fake_render(self.output_dir, writes=NAMES[:1], exit_code=3)
-        )
+    def test_the_report_names_the_signal_the_argv_and_every_frame(self):
+        crash = self._crash(frames="short", segfault=True)
         report = (crash / "report.txt").read_text()
-        self.assertIn("exit code 3", report)
-        self.assertIn(sys.executable, report)
-        self.assertIn("1 of 3 written, first missing frame_00002_.png", report)
-        for name in NAMES:
-            self.assertIn(name, report)
-        self.assertIn("frame_00002_.png  missing", report)
+
+        # Decoded, not left as "exit -11" for the reader to look up.
+        self.assertIn("SIGSEGV", report)
+        self.assertIn("stub-brush-splat-render.py", report)
+        self.assertIn("2 of 3 written, first missing frame_00003_.png", report)
+        # The manifest is in THIS project's frame names, not the renderer's
+        # f00000.png, so the report reads in the run's own terms.
+        for i in range(1, 4):
+            self.assertIn(f"frame_{i:05d}_.png", report)
+        self.assertIn("frame_00003_.png  missing", report)
+        # What the binary was saying on its way down.
+        self.assertIn("stub wrote 2 of 3 frames", report)
         # The environment that decides whether this binary can reach a GPU
         # at all, recorded while the pod still exists to be asked.
         self.assertIn("NVIDIA_DRIVER_CAPABILITIES=", report)
 
     def test_the_frames_that_did_land_are_copied_out(self):
-        crash = self._crash_after(
-            _fake_render(self.output_dir, writes=NAMES[:2], exit_code=1)
-        )
+        crash = self._crash(frames="short", segfault=True)
         kept = sorted(p.name for p in (crash / "frames").iterdir())
-        self.assertEqual(kept, NAMES[:2])
+        self.assertEqual(len(kept), 2)
 
     def test_only_the_last_few_frames_are_kept(self):
         """A full orbit's renders are not something to copy onto the volume
         every time; the frames around the crash are what gets read."""
         from pipeline.steps import splat as splat_module
 
-        many = [f"frame_{i + 1:05d}_.png" for i in range(12)]
-        cmd = _fake_render(self.output_dir, writes=many[:10], exit_code=1)
-        with self.assertRaises(ProcessFailed):
-            _run_render(
-                cmd, output_dir=self.output_dir, cameras_path=self.cameras,
-                image_names=many,
-            )
-        crash = self.crash_dirs()[0]
+        crash = self._crash(count=12, frames="short", segfault=True)
         kept = sorted(p.name for p in (crash / "frames").iterdir())
-        self.assertEqual(kept, many[10 - splat_module._CRASH_FRAMES_KEPT:10])
+        self.assertEqual(len(kept), splat_module._CRASH_FRAMES_KEPT)
 
     def test_a_tolerated_crash_is_still_saved(self):
-        """The guard says the render is usable; it does not say the crash
-        is uninteresting. This is the case the pod round needs read."""
-        crash = self._crash_after(
-            _fake_render(self.output_dir, writes=NAMES, segfault=True),
-            expect_raises=False,
-        )
-        self.assertIn("3 of 3 written (all present)", (crash / "report.txt").read_text())
+        """The guard says the render is usable; it does not say the crash is
+        uninteresting. This is the case the pod round needs read."""
+        crash = self._crash(segfault=True, expect_raises=False)
+        self.assertIn("3 of 3 written (all present)",
+                      (crash / "report.txt").read_text())
 
     def test_a_crashlog_that_cannot_be_written_does_not_mask_the_failure(self):
-        """It runs on the failure path, so it must never replace the
-        failure it was describing."""
+        """It runs on the failure path, so it must never replace the failure
+        it was describing."""
         logs = self.crashes.parent
         logs.mkdir(parents=True, exist_ok=True)
         (logs / "in-the-way").write_text("not a directory")
         os.environ["B2C_LOG_DIR"] = str(logs / "in-the-way")
-        with self.assertRaises(ProcessFailed):
-            self.run_render(_fake_render(self.output_dir, writes=[], exit_code=1))
+        with self.assertRaises(RuntimeError) as caught:
+            self.render(frames="short", segfault=True)
+        self.assertIn("frame", str(caught.exception).lower())
 
 
 if __name__ == "__main__":

@@ -117,3 +117,72 @@ def redirect_crash_dir(case: unittest.TestCase) -> Path:
 def crash_dirs(crashes: Path) -> list:
     """Every crash directory saved so far, oldest first."""
     return sorted(crashes.iterdir()) if crashes.exists() else []
+
+
+def stub_render_binary(
+    directory,
+    *,
+    frames: str = "all",
+    damage: str = "",
+    segfault: bool = False,
+    record=None,
+):
+    """An executable stand-in for `brush-splat-render`, as a path.
+
+    The rasterisation is body2colmap's since 2026-08-31 — `_rasterize`
+    drives its `SplatRenderer` rather than shelling out itself — so the
+    seam this project can still observe is the binary, not an internal
+    function. That is also the better place to watch from: what reaches the
+    argv and the cameras.json is what the real renderer would see.
+
+    Args:
+        directory: Where to write the script.
+        frames: ``"all"``, or ``"short"`` to leave the last one unwritten.
+        damage: ``"empty"`` writes a zero-byte last frame, ``"truncate"``
+            an undecodable one. Both are crashes caught mid-write, and the
+            two are checked differently (size, then decode).
+        segfault: Die by SIGSEGV once the writing is done — the known
+            shutdown crash, which lands after the work is on disk.
+        record: A directory to copy the argv (as `argv.json`) and the
+            cameras.json into, for a test that wants to read them.
+    """
+    import sys
+
+    script = Path(directory) / "stub-brush-splat-render.py"
+    script.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, shutil, signal, sys\n"
+        "from pathlib import Path\n"
+        "import numpy as np, cv2\n"
+        "args = sys.argv[1:]\n"
+        "get = lambda n: args[args.index(n) + 1]\n"
+        "cams = json.loads(Path(get('--cameras')).read_text())\n"
+        "out = Path(get('--output-dir')); out.mkdir(parents=True, exist_ok=True)\n"
+        f"record = {str(record)!r}\n"
+        "if record:\n"
+        "    Path(record).mkdir(parents=True, exist_ok=True)\n"
+        "    Path(record, 'argv.json').write_text(json.dumps(sys.argv[1:]))\n"
+        "    shutil.copy2(get('--cameras'), Path(record, 'cameras.json'))\n"
+        "n = len(cams['cameras'])\n"
+        f"write = n - 1 if {frames!r} == 'short' else n\n"
+        "sidecar = '--confidence-sidecar' in args\n"
+        "for i in range(write):\n"
+        "    img = np.zeros((cams['height'], cams['width'], 4), np.uint8)\n"
+        "    img[..., :3] = 100\n"
+        "    img[..., 3] = 255\n"
+        "    p = out / ('f%05d.png' % i)\n"
+        f"    damage = {damage!r}\n"
+        "    if damage and i == write - 1:\n"
+        "        blob = cv2.imencode('.png', img)[1].tobytes()\n"
+        "        p.write_bytes(b'' if damage == 'empty' else blob[:len(blob)//3])\n"
+        "    else:\n"
+        "        cv2.imwrite(str(p), img)\n"
+        "    if sidecar:\n"
+        "        cv2.imwrite(str(out / ('f%05d.conf.png' % i)),\n"
+        "                    np.zeros((cams['height'], cams['width']), np.uint8))\n"
+        "sys.stderr.write('stub wrote %d of %d frames\\n' % (write, n))\n"
+        f"if {segfault!r}:\n"
+        "    os.kill(os.getpid(), signal.SIGSEGV)\n"
+    )
+    script.chmod(0o755)
+    return str(script)

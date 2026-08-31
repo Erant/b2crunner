@@ -25,10 +25,13 @@
 # front_matte -> front_normals -> shell_splat -> refine_pose ->
 # [detect_face -> locate_face -> crop_face -> face_seg -> face_mask ->
 # face_normals -> face_splat] ->
-# render_initial_views -> render_face_views -> composite_face ->
+# render_initial_views -> render_face_support_views -> face_support_views ->
 # render_shell_views -> inject_shell_band. The bracketed five, plus
-# render_face_views and composite_face, are gated on the `face_splat`
-# global.
+# render_face_support_views and face_support_views, are gated on the
+# `face_splat` global. render_initial_views is not: it draws the face splat
+# itself now (`render_mode: outline+skeleton+splat`) and reads the .ply
+# optionally, so the branch being off leaves it with nothing to composite
+# rather than nothing to resolve.
 # This is the part fast_helical_full is handed ready-made: a dataset whose
 # extras carry orbit_target / focal_length_mm / framing_bounds, whose frames
 # near the source view are photoreal (VACE mask 0.0, "keep it") among
@@ -97,13 +100,15 @@
 #      the canonical face model carries none; a splat of the actual face
 #      carries both identity and gaze, which is what these frames are for.
 #
-# The compositing is a b2crunner step rather than body2colmap's own
-# `skeleton+splat` render mode, because that mode rasterises through gsplat
-# and this project deliberately has none (see pyproject.toml — dropping it
-# removed the last runtime CUDA toolchain). The geometry and the blend are
-# body2colmap's; the cull started as its 45 degrees and runs at 60 here. See
-# docs/revert-when-body2colmap-drops-gsplat.md: this is the part to take
-# back out when that library moves to the brush renderer.
+# The compositing is body2colmap's own `skeleton+splat` render mode, as
+# `outline+skeleton+splat` on render_initial_views. It used to be a pair of
+# b2crunner steps (`render_face_views` + `composite_face`), because that
+# mode rasterised through gsplat and this project deliberately has none
+# (see pyproject.toml — dropping it removed the last runtime CUDA
+# toolchain); the library now rasterises through brush-splat-render too, so
+# as of 2026-08-31 the detour is gone and the 60-degree cull is passed
+# explicitly rather than inheriting body2colmap's 45. See
+# docs/revert-when-body2colmap-drops-gsplat.md for what came out.
 #
 # **`fix_head_angle` is gone from this file as part of that**, not by
 # oversight: it and `refine_pose_to_splat` cannot both run (see
@@ -580,6 +585,19 @@ steps:
     dispatch: in_process
     inputs:
       mesh_output: scene
+      # The face splat, drawn on top of the drawing by the `+splat` render
+      # mode. Read OPTIONALLY (`?`): the branch that builds it is gated on
+      # the `face_splat` global, and with the branch off nothing writes
+      # this path — render.py then logs a line and composites nothing.
+      #
+      # No `anchor_position` is wired, and this render is NOT anchored
+      # (`override_cam_from_mesh: false` below), so the step falls back to
+      # the world origin — where the SAM-3D-Body camera is — and says so in
+      # the log. That is what composite_splat_views did here before, and it
+      # is the weak point of the face branch in THIS file rather than
+      # something the merge introduced: an unanchored render auto-orients
+      # the mesh and the splat does not follow.
+      splat_path: scene.face_splat_path?
     params:
       pattern: helical
       n_frames: 81
@@ -594,7 +612,28 @@ steps:
       amplitude_deg: 10.0
       lead_in_deg: 10.0
       lead_out_deg: 10.0
-      render_mode: outline+skeleton
+      render_mode: outline+skeleton+splat
+      # Every frame whose view of the head is within this of the
+      # photograph's takes the layer; past it the 2.5-D shell's open rim is
+      # what would appear, so it is dropped entirely. body2colmap measured
+      # that boundary (c65a7f7) at 45 for a clean read; 60 is the far end
+      # of the same measurement, passed explicitly rather than left to the
+      # step's default, taken on purpose to reach the views least like the
+      # photograph with the shell's rim as the price.
+      #
+      # The angle is measured about the SPLAT's centre, not the orbit
+      # target: a head sits well above a full-body target, so the two
+      # differ by several degrees in elevation. render.py reads that centre
+      # off the .ply's own bounding box, which is the same quantity
+      # pointmap_splat publishes as splat_stats.world_center.
+      #
+      # The composite happens BEFORE inject_shell_band on purpose. Inside
+      # the shell's +-15 band the shell already carries the real face from
+      # the same photograph and overwrites these frames wholesale, so there
+      # is never a frame carrying two slightly disagreeing faces. Outside
+      # it, the face rides on the outline+skeleton drawing, which is the
+      # point of the whole branch.
+      splat_max_angle_deg: 60.0
       # No bg_color: this mode grounds on a fixed #7F7F7F that the param
       # cannot change, and the one other thing render.py spent it on was
       # image_warp's border colour, which an unanchored render does not
@@ -613,37 +652,6 @@ steps:
       forward_azimuth_deg: dataset.extras.forward_azimuth_deg
       framing_bounds: dataset.extras.framing_bounds
       initial_rotation: dataset.extras.initial_rotation
-
-  # The face splat, along the same 81 cameras. `pattern: ""` is what makes
-  # these the mesh render's own cameras rather than a fresh path — the
-  # property composite_face depends on, and which it re-checks from the
-  # cameras themselves.
-  #
-  # **bg_color is black and that is load-bearing**, unlike
-  # render_shell_views below, which renders on the drawings' own grey
-  # because its frames are substituted whole. This one is COMPOSITED, and
-  # brush-splat-render writes `rgb = colour*alpha + bg*(1-alpha)`. Only at
-  # bg 0 is that output premultiplied by alpha, which is what makes
-  # `out = base*(1-a) + rgb` the correct blend. On any other background the
-  # composite blends toward it twice and the face comes back washed out.
-  # composite_splat_views refuses a non-black render rather than producing
-  # grey ghosts.
-  - id: render_face_views
-    step: render_splat
-    dispatch: in_process
-    when: ${globals.face_splat}
-    inputs:
-      splat_path: scene.face_splat_path
-      dataset: dataset
-    params:
-      pattern: ""
-      width: ${globals.resolution.0}
-      height: ${globals.resolution.1}
-      bg_color: [0.0, 0.0, 0.0]
-    outputs:
-      images: scene.face_views.images
-      masks: scene.face_views.masks
-      cameras: scene.face_views.cameras
 
   # The SECOND face render, and a different set of views for a different
   # consumer. The one above rides the dataset's own cameras because its
@@ -688,44 +696,10 @@ steps:
       masks: scene.face_support_render.masks
       cameras: scene.face_support_render.cameras
 
-  # Put the face on the skeleton. Every frame whose view of the head is
-  # within 60 degrees of the photograph's takes the layer; past that the
-  # 2.5-D shell's open rim is what would appear, so it is dropped entirely.
-  # body2colmap measured that boundary (c65a7f7) at 45 for a clean read;
-  # 60 is the far end of the same measurement, taken on purpose to reach
-  # the views least like the photograph, with the shell's rim as the price.
-  # See composite_splat_views' docstring.
-  #
-  # The angle is measured about the SPLAT's centre, not the orbit target: a
-  # head sits well above a full-body target, so the two differ by several
-  # degrees in elevation. pointmap_splat publishes that centre as
-  # splat_stats.world_center for exactly this.
-  #
-  # This runs BEFORE inject_shell_band on purpose. Inside the shell's +-15
-  # band the shell already carries the real face from the same photograph
-  # and overwrites these frames wholesale, so there is never a frame
-  # carrying two slightly disagreeing faces. Outside it, the face rides on
-  # the outline+skeleton drawing, which is the point of the whole branch.
-  - id: composite_face
-    step: composite_splat_views
-    dispatch: in_process
-    when: ${globals.face_splat}
-    inputs:
-      images: dataset.images
-      masks: dataset.masks
-      splat_images: scene.face_views.images
-      splat_masks: scene.face_views.masks
-      splat_cameras: scene.face_views.cameras
-      cameras: dataset.cameras
-      splat_center: scene.face_splat_stats.world_center
-    outputs:
-      images: dataset.images
-      masks: dataset.masks
-      view_roles: scene.face_view_roles
-
-  # The face splat's SECOND route into the training. The composite above
-  # puts it on the drawings, where two diffusion passes then have their way
-  # with it; this hands the same renders to `brush` as supporting views —
+  # The face splat's SECOND route into the training. render_initial_views
+  # above puts it on the drawings, where two diffusion passes then have
+  # their way with it; this hands a render of it to `brush` as supporting
+  # views —
   # training evidence weighted by the splat's own coverage and ignored
   # everywhere else — so the deliverable is pulled back toward the face in
   # the photograph rather than the one the denoiser invented. See
@@ -733,10 +707,12 @@ steps:
   # mode: outside a Face_Neck matte lies the rest of the subject, not empty
   # space, and a transparent view would ask the training to carve it away.
   #
-  # These are render_face_support_views' cap, not the composite's batch:
-  # 36 views sampled within 30 degrees of the photograph's own view of the
-  # splat. That cap radius is the band's OUTER edge, drawn where the views
-  # are made rather than culled off a batch afterwards. What is left for
+  # These are render_face_support_views' cap, not the drawing batch's own
+  # cameras: 36 views sampled within 30 degrees of the photograph's own
+  # view of the splat. That cap radius is the band's OUTER edge, drawn
+  # where the views are made rather than culled off a batch afterwards, and
+  # it is TIGHTER than the 60 render_initial_views composites at because
+  # nothing rewrites a supporting view. What is left for
   # this step is the inner edge — min_path_angle_deg, 5 degrees to the
   # nearest camera on the denoising path, which here is the helical orbit
   # render_initial_views laid out. See fast_helical_native.yaml's copy of
@@ -763,20 +739,13 @@ steps:
       # samples that land within 5 degrees of it — the innermost ring of
       # the disc, whose views the denoised batch already covers.
       path_cameras: dataset.cameras
-      # The pivot that distance is measured about, and composite_face's
-      # own: a head sits well above a full-body orbit target, so measuring
-      # about the target would call a camera closer to the path than it is
-      # to the head's view of it.
+      # The pivot that distance is measured about, and the same one
+      # render_initial_views culls about (it reads the splat's own bbox
+      # centre off the .ply, which is exactly this): a head sits well above
+      # a full-body orbit target, so measuring about the target would call
+      # a camera closer to the path than it is to the head's view of it.
       splat_center: scene.face_splat_stats.world_center
-    params:
-      # No `view_roles` is wired and none is wanted: composite_face's
-      # verdict is about ITS 81 frames, and these are 36 other cameras
-      # entirely. The outer edge belongs to the cap that sampled them
-      # (cap_radius_deg, 30 deg), so both of the edges that read roles are
-      # off here — what is left for this step is the path cull above and
-      # the un-premultiplying.
-      role: ""
-      max_angle_deg: 180.0
+    params: {}
     outputs:
       images: scene.support_views.images
       masks: scene.support_views.masks

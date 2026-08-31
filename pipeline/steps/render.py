@@ -60,14 +60,17 @@ contract between steps.)
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
 from ..registry import register_step
 from ..step import REQUIRED, Param, Step
+
+logger = logging.getLogger(__name__)
 
 # Must run before pyrender is ever imported anywhere in this process —
 # pyrender/OpenGL check PYOPENGL_PLATFORM at import time, not render time.
@@ -142,6 +145,158 @@ def _outline_grey(strength: float) -> float:
     return (value + 0.5) / 255.0
 
 
+# ---------------------------------------------------------------- the splat
+# body2colmap's `skeleton+splat` composite, as it reaches this step. The
+# blend itself is `Renderer._composite_splat` and the rasterisation is
+# `steps/splat.py`'s `render_splat_layers`; what is left here is the cull —
+# which frames get a layer at all — because it is the one piece
+# `OrbitPipeline` owns that this step cannot borrow. That class is where
+# `attach_splat_overlay` / `splat_view_angle_deg` live, and this step does
+# not use it (see the module docstring: it builds its own cameras and calls
+# `Renderer` directly). The geometry below is `splat_view_angle_deg`'s,
+# measured about the same pivot.
+
+
+def _splat_view_angles_deg(cameras, center: np.ndarray,
+                           source_position: np.ndarray) -> List[float]:
+    """Per camera, the angle between its view of the splat and the photo's.
+
+    **The pivot is the splat's own centre, not the orbit target.** A head
+    sits well above a full-body orbit target, so a camera 30 degrees up from
+    the equator views the *body* at 30 degrees and the *head* at rather
+    less. body2colmap's `OrbitPipeline.splat_view_angle_deg` measures from
+    the splat's bbox centre for exactly this reason, and this follows it —
+    `SplatScene.get_bbox_center()` is the same quantity `pointmap_splat`
+    publishes as `splat_stats.world_center`.
+    """
+    source_dir = center - source_position
+    norm = float(np.linalg.norm(source_dir))
+    if norm < 1e-9:
+        raise ValueError(
+            "render: the camera the photo was taken from sits on the splat's "
+            "centre, so there is no source view direction to measure against."
+        )
+    source_dir = source_dir / norm
+
+    angles = []
+    for camera in cameras:
+        offset = center - np.asarray(camera.position, dtype=np.float64).reshape(3)
+        length = float(np.linalg.norm(offset))
+        if length < 1e-9:
+            angles.append(0.0)
+            continue
+        cos = float(np.clip(np.dot(offset / length, source_dir), -1.0, 1.0))
+        angles.append(float(np.degrees(np.arccos(cos))))
+    return angles
+
+
+def _resolve_splat_layers(
+    inputs: Dict[str, Any], params: Dict[str, Any], *, cameras,
+    width: int, height: int, override_cam_from_mesh: bool,
+    anchor_frame_index: Optional[int],
+) -> List[Optional[np.ndarray]]:
+    """The `...+splat` modes' overlay layer, one entry per frame.
+
+    A straight-alpha RGBA layer on every frame within `splat_max_angle_deg`
+    of the photograph's own view of the splat, and None on the rest — the
+    shape `Renderer.render_composite(splat_layer=...)` takes, and the same
+    one `OrbitPipeline.render_splat_layers` builds for it. The culled frames
+    are never rendered rather than rendered and dropped: the binary loads
+    the ply and initialises wgpu once per invocation and then loops the
+    camera list, so a shorter list is genuinely cheaper.
+
+    **Why the cull.** The splat this draws is a 2.5-D shell of the side of
+    the subject one photograph saw. Turn the camera away from that view and
+    the open rim swings into frame as a flare of grazing-incidence
+    Gaussians. body2colmap measured the boundary on a Face_Neck head splat:
+    reads cleanly to about 30 degrees, the rim starts flaring by 45, and by
+    60 the shell is mostly edge.
+    """
+    splat_scene = inputs.get("splat_scene")
+    splat_path = inputs.get("splat_path")
+    if splat_scene is None and not splat_path:
+        # Not an error, and not a warning either. The branch that builds a
+        # face splat is gated on a workflow global and its output is read
+        # optionally (`scene.face_splat_path?`), so a run with that branch
+        # switched off reaches here with the mode set and nothing to draw.
+        logger.info(
+            "render: render_mode is %r but no splat_scene/splat_path was wired "
+            "in, so nothing is composited onto the drawing.",
+            params["render_mode"],
+        )
+        return [None] * len(cameras)
+
+    from body2colmap.splat_scene import SplatScene
+
+    from .splat import render_splat_layers
+
+    if splat_scene is None:
+        splat_scene = SplatScene.from_ply(str(splat_path))
+
+    # Where the photograph was taken from, which is what the view angle is
+    # measured against. In override mode that is a camera on this very
+    # path — the whole point of `override_cam_from_mesh` is landing one
+    # there — so nothing has to be wired. Off it, `auto_orient` above has
+    # rotated the mesh out of the frame the splat was built in, and the
+    # answer is not recoverable here; body2colmap's `attach_splat_overlay`
+    # refuses that combination outright for the same reason.
+    supplied = inputs.get("anchor_position")
+    if supplied is not None:
+        source_position = np.asarray(supplied, dtype=np.float64).reshape(3)
+    elif override_cam_from_mesh and anchor_frame_index is not None:
+        source_position = np.asarray(
+            cameras[anchor_frame_index].position, dtype=np.float64
+        ).reshape(3)
+    else:
+        # The world origin, which is where the SAM-3D-Body camera is:
+        # `sam3d_to_world` does not recentre. Only a fallback, and it comes
+        # with a warning because off the override path `auto_orient` has
+        # rotated the mesh out of the frame the splat was built in —
+        # body2colmap's `attach_splat_overlay` refuses that combination
+        # outright rather than fall back. Wire `anchor_position` (or render
+        # with `override_cam_from_mesh`) to be sure of the answer.
+        source_position = np.zeros(3, dtype=np.float64)
+        logger.warning(
+            "render: no anchor_position was wired and this is not an "
+            "override_cam_from_mesh render, so the splat's source view is "
+            "assumed to be the world origin. The mesh has been auto-oriented "
+            "and the splat has not, so the two may disagree."
+        )
+
+    # `get_bbox_center()` is the quantity `pointmap_splat` publishes as
+    # `splat_stats.world_center`, read off the splat itself so there is no
+    # second copy of it to drift.
+    center = np.asarray(splat_scene.get_bbox_center(), dtype=np.float64).reshape(3)
+    angles = _splat_view_angles_deg(cameras, center, source_position)
+
+    max_angle = params["splat_max_angle_deg"]
+    kept = [i for i, angle in enumerate(angles) if angle <= max_angle]
+    logger.info(
+        "render: %d/%d frames are within %.1f deg of the source view and take "
+        "the splat layer", len(kept), len(cameras), max_angle,
+    )
+    if not kept:
+        logger.warning(
+            "render: no frame is within %.1f deg of the source view, so the "
+            "splat is not drawn at all. Either the anchor and the cameras did "
+            "not come from the same path, or the angle is smaller than the "
+            "path's angular step.", max_angle,
+        )
+        return [None] * len(cameras)
+
+    rendered = render_splat_layers(
+        scene=splat_scene,
+        splat_path=splat_path,
+        cameras=[cameras[i] for i in kept],
+        width=width,
+        height=height,
+    )
+    layers: List[Optional[np.ndarray]] = [None] * len(cameras)
+    for index, layer in zip(kept, rendered):
+        layers[index] = layer
+    return layers
+
+
 @register_step("render")
 class RenderStep(Step):
     """Render a camera-path orbit of a SAM-3D-Body mesh/skeleton.
@@ -149,14 +304,26 @@ class RenderStep(Step):
     inputs: {"mesh_output": dict — sam3d_body.py's raw run() output
              (vertices, faces, cam_t, keypoints_3d, focal_length, ...),
              "face_landmarks": Optional[dict] — steps/face_landmarks.py's
-             output, drawn on the skeleton render modes}
+             output, drawn on the skeleton render modes,
+             "splat_scene": Optional[SplatScene] — the `...+splat` modes'
+             overlay, already in this mesh's world frame,
+             "splat_path": Optional[str] — a .ply to load one from instead.
+             `pointmap_splat` publishes both; either will do,
+             "anchor_position": Optional[np.ndarray] (3,) — where the
+             photograph the splat was built from was taken. Only needed
+             for a splat mode without override_cam_from_mesh, which
+             already knows}
 
     See body2colmap.path.OrbitPath / body2colmap.renderer.Renderer for the
     exact semantics of each param below — this step is a thin pass-through.
 
     outputs: {"images": List[np.ndarray] (BGR uint8), "masks":
              List[np.ndarray] (float32 [0,1], foreground=1 — see module
-             docstring), "cameras": List[Camera],
+             docstring; under a `+splat` mode the splat's own coverage is
+             unioned in, because it is real subject surface exactly as the
+             mesh silhouette is, and `Renderer._composite_splat` unions it
+             for that reason. The skeleton stays out: it is an annotation,
+             not geometry), "cameras": List[Camera],
              "image_names": List[str], "points_3d": (positions, colors),
              "resolution": (width, height), "orbit_target" (np.ndarray(3,)),
              "forward_azimuth_deg" (float), "focal_length_mm" (float),
@@ -182,7 +349,8 @@ class RenderStep(Step):
               "width/height knob on this step to drift from it."),
         Param("render_mode", str, "depth+skeleton", "What each frame draws",
               choices=("mesh", "depth", "skeleton", "mesh+skeleton", "depth+skeleton",
-                       "outline+skeleton")),
+                       "outline+skeleton", "mesh+skeleton+splat",
+                       "depth+skeleton+splat", "outline+skeleton+splat")),
         Param("outline_strength", float, _DEFAULT_OUTLINE_STRENGTH,
               "outline+skeleton mode only: how dark the flat silhouette fill "
               "is, as a percentage. 0 matches the fixed #7F7F7F background "
@@ -196,6 +364,19 @@ class RenderStep(Step):
               "overlay is composited on top afterwards and stays sharp. "
               "Ignored by every other render_mode",
               minimum=0, advanced=True),
+        Param("splat_max_angle_deg", float, 60.0,
+              "The `+splat` modes only: composite the splat on every frame whose "
+              "view of it is within this angle of the photograph's. Past it the "
+              "layer is dropped entirely rather than faded — what appears out "
+              "there is the 2.5-D shell's open rim, and a half-transparent rim "
+              "is still a rim. 60 runs to the far end of body2colmap's measured "
+              "band, where the shell is mostly edge, to reach the views the "
+              "photograph is furthest from; that is affordable because these "
+              "frames are inputs to two denoise passes which can rewrite a "
+              "flared rim. 45 is the measurement's clean limit and what a frame "
+              "nobody denoises afterwards should be held to (see "
+              "select_support_views' own, tighter cull). 0 disables the "
+              "compositing", minimum=0.0, maximum=180.0),
         Param("framing", str, "full", "How much of the body fills the frame",
               choices=("full", "torso", "bust", "head")),
         Param("eye_style", str, "shape",
@@ -306,6 +487,12 @@ class RenderStep(Step):
         if min(width, height) < 1:
             raise ValueError(f"resolution must be positive, got {width}x{height}")
         render_mode = params["render_mode"]
+        # `...+splat` is body2colmap's own composite-mode spelling: the same
+        # base and skeleton layers, with a Gaussian-splat overlay drawn last.
+        # Split off here so the layer dispatch below stays the three base
+        # modes it already was.
+        want_splat = render_mode.endswith("+splat")
+        base_render_mode = render_mode[: -len("+splat")] if want_splat else render_mode
         fill_ratio = params["fill_ratio"]
 
         if override_cam_from_mesh and pattern not in ("circular", "helical"):
@@ -507,15 +694,36 @@ class RenderStep(Step):
             face_mode = None
         face_max_angle = params["face_max_angle"]
 
+        # The splat overlay, rendered for the whole camera list up front:
+        # `brush-splat-render` loads the ply and initialises wgpu once per
+        # invocation, so a per-frame call would pay that startup 81 times.
+        # This is what `Renderer.render_composite`'s `splat_layer` expects,
+        # frame by frame — see steps/splat.py's `render_splat_layers` for the
+        # one reason the rasterisation goes through this project's
+        # `_rasterize` rather than body2colmap's own `SplatRenderer`: a
+        # crashed render keeps its evidence.
+        splat_layers: List[Optional[np.ndarray]] = [None] * len(cameras)
+        if want_splat and params["splat_max_angle_deg"] > 0.0:
+            splat_layers = _resolve_splat_layers(
+                inputs, params,
+                cameras=cameras,
+                width=width,
+                height=height,
+                override_cam_from_mesh=override_cam_from_mesh,
+                anchor_frame_index=anchor_frame_index,
+            )
+        elif want_splat:
+            logger.info("render: splat_max_angle_deg is 0, nothing composited")
+
         renderer = Renderer(scene=scene, render_size=(width, height))
 
         rendered_images = []
-        for camera in cameras:
-            if render_mode == "mesh":
+        for index, camera in enumerate(cameras):
+            if base_render_mode == "mesh":
                 img = renderer.render_mesh(camera=camera, mesh_color=mesh_color, bg_color=bg_color)
-            elif render_mode == "depth":
+            elif base_render_mode == "depth":
                 img = renderer.render_depth(camera=camera, colormap=depth_cmap)
-            elif render_mode == "skeleton":
+            elif base_render_mode == "skeleton":
                 img = renderer.render_skeleton(
                     camera=camera,
                     target_format=skeleton_format,
@@ -527,7 +735,8 @@ class RenderStep(Step):
                     face_max_angle=face_max_angle,
                     **eye_opts,
                 )
-            elif render_mode in ("mesh+skeleton", "depth+skeleton", "outline+skeleton"):
+            elif base_render_mode in ("mesh+skeleton", "depth+skeleton",
+                                      "outline+skeleton"):
                 composite_modes: Dict[str, Any] = {
                     "skeleton": {
                         "target_format": skeleton_format,
@@ -535,9 +744,9 @@ class RenderStep(Step):
                         "bone_radius": bone_radius,
                     }
                 }
-                if render_mode == "mesh+skeleton":
+                if base_render_mode == "mesh+skeleton":
                     composite_modes["mesh"] = {"color": mesh_color, "bg_color": bg_color}
-                elif render_mode == "depth+skeleton":
+                elif base_render_mode == "depth+skeleton":
                     composite_modes["depth"] = {"colormap": depth_cmap}
                 else:  # outline+skeleton — skeleton overlay unchanged, flat grey base
                     composite_modes["outline"] = {
@@ -552,7 +761,11 @@ class RenderStep(Step):
                         "face_max_angle": face_max_angle,
                         **eye_opts,
                     }
-                img = renderer.render_composite(camera=camera, modes=composite_modes)
+                img = renderer.render_composite(
+                    camera=camera,
+                    modes=composite_modes,
+                    splat_layer=splat_layers[index],
+                )
             else:
                 raise ValueError(f"Unknown render_mode: {render_mode}")
             rendered_images.append(img)
