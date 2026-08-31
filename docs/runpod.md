@@ -60,6 +60,7 @@ anything. Look for:
 ✓ OK    vulkan           deviceName = NVIDIA ...        <- brush can run
 ✓ OK    egl              NVIDIA ... /PCIe/SSE2          <- render can run
 ✓ OK    brush binaries   all 5 fork-specific flags present
+✓ OK    colmap           COLMAP 4.2.0 ... with CUDA     <- the pose refinement
 ✓ OK    step venvs       3 configured
 ✓ OK    attention        _sage_qk_int8_pv_fp16_triton   <- the denoise kernel
 ✓ OK    huggingface      accessible / accessible        <- both gated repos
@@ -67,7 +68,10 @@ anything. Look for:
 
 A `FAIL` on `vulkan` almost always means `NVIDIA_DRIVER_CAPABILITIES` was
 not set on the template. A `WARN` on `huggingface` means the token is
-missing or has not accepted a licence — every model step will 401.
+missing or has not accepted a licence — every model step will 401. A `WARN`
+on `colmap` saying `built WITHOUT CUDA` is not a correctness problem: the
+refinement still runs, on the ONNX CPU provider, at roughly three minutes
+per training instead of seconds.
 
 `attention` names the kernel `wan22_vace_denoise` will actually ask
 diffusers for on this GPU, and what it found to back it (SageAttention,
@@ -279,16 +283,20 @@ downloading; `--no-wait-for-models` does it for a single CLI run.
 | `wan22_vace_denoise` | `linoyts/Wan2.2-VACE-Fun-14B-diffusers` + `lightx2v/Wan2.2-Lightning` LoRAs | `from_pretrained` / `hf_hub_download` | `$HF_HOME` |
 | `seedvr2` | `seedvr2_ema_3b_fp8_e4m3fn` + `ema_vae_fp16` | its vendored downloader | `$B2C_MODELS_DIR` = `/data/models/SEEDVR2` |
 | `detect_face_landmarks` | MediaPipe `.task` / `.tflite` | Google Storage URL | `$B2C_MODELS_DIR/mediapipe` |
+| `refine_cameras` | COLMAP `aliked-n32.onnx` + `aliked-lightglue.onnx` (~65 MB) | COLMAP's GitHub release | `$B2C_MODELS_DIR/colmap` |
 | `brush`, `render`, `render_splat`, `colmap_export`, … | nothing | — | — |
 
-The last two rows are the ones that needed fixing. Both bypass
+The three rows before the last are the ones that needed fixing. All bypass
 `huggingface_hub` and so ignore `HF_HOME`: seedvr2 hands its vendored
 downloader an explicit `model_dir` which defaulted to the *relative* path
 `models/SEEDVR2`, resolving against the worker subprocess's working
 directory — several GB of DiT and VAE weights inside the container, on the
 20 GB container disk, re-downloaded from scratch after every pod restart.
-MediaPipe's did the same into `~/.cache`. Both now default under
-`$B2C_MODELS_DIR`.
+MediaPipe's did the same into `~/.cache`, and COLMAP's own model cache is
+`$HOME/.cache/colmap` for the same reason — which is why `refine_cameras`
+prefetches the two ONNX graphs itself and passes COLMAP explicit
+`--...model_path` flags rather than letting it fetch them. All three now
+default under `$B2C_MODELS_DIR`.
 
 `doctor` reports both caches and their current size, so you can see what a
 pod has already pulled:

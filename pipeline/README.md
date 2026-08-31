@@ -127,6 +127,13 @@ pipeline/
 │   ├── colmap_export.py real, verified against cyber_6f's recorded
 │                      colmap/ export (cameras.txt and points3D.txt
 │                      byte-identical, images.txt to 2.4e-7)
+│   ├── refine_cameras.py refine_cameras — bundle-adjusts the generated
+│                      orbit against the frames before each brush
+│                      training. Drives upstream COLMAP; verified end to
+│                      end against the dataset docs/camera-pose-
+│                      refinement.md measured (+21.7% BA inflation undone,
+│                      centre movement within 7% of the recorded run),
+│                      never yet run on a pod
 │   ├── anchor_stub.py   generate_firstlast / inject_anchor /
 │                      inject_shell_views / select_support_views /
 │                      merge_support_views — real, verified locally (pure
@@ -812,6 +819,38 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   instead of two branches racing for it, and with both branches off it
   publishes three empty lists and the training runs as it did before either
   existed. The face branch writes `scene.face_support_views.*` accordingly.
+- `refine_cameras` (`refine_cameras.py`) — bundle-adjusts the dataset's own
+  camera poses against its frames, and the *only* step here that shells out
+  to upstream COLMAP. Worth **+0.63 PSNR / +0.0045 SSIM** on held-out views
+  (30k iters, three seeds per condition against a baseline whose seed spread
+  is ±0.003), because these poses were generated rather than measured: an
+  exactly ideal orbit, camera height std exactly 0, describing frames a
+  diffusion pass has since had its own opinion about.
+
+  Foreground-masked ALIKED + LightGlue, triangulate against the given poses,
+  three rounds of (bundle adjust → retriangulate) with every intrinsic
+  frozen, then a Sim(3) from the refined camera centres back onto the given
+  ones. That last part is not optional: `bundle_adjuster` pins the gauge
+  with one cam1↔cam2 baseline, so the model comes back **15-24% larger**
+  with nothing anywhere saying so — a splat a fifth off scale in a frame its
+  `points3D.txt` init no longer matches. The checks are assertions, and a
+  failed one publishes the given poses unchanged rather than a plausible
+  wrong answer.
+
+  It runs **twice** per workflow, once before each `brush`, because
+  `rerender_splat` replaces the dataset with a second generated path that
+  the first solve says nothing about. The stage-2 instance sits ahead of
+  `pointmap_elevation_views` as well, which is the placement with a reason
+  beyond "before the training": that step puts a Gaussian shell on each
+  frame's own camera ray, so a pose corrected after it leaves the supporting
+  views arguing with the frames. Supporting views are never *in* a solve —
+  they are renders made from the poses being corrected.
+
+  Needs a `colmap` binary (`docker/Dockerfile`'s `colmap-builder` stage,
+  CUDA on so ALIKED and LightGlue use the ONNX CUDA provider) and ~65 MB of
+  ONNX weights that `pipeline/models.py` prefetches. `pipeline/doctor.py`
+  checks both. Full write-up, traps and measurements:
+  `docs/camera-pose-refinement.md`.
 - `refine_pose_to_splat` (`pose_refine.py`) — re-poses a SAM-3D-Body fit so
   its mesh agrees with that shell in novel views, which is what stops the
   skeleton overlay drifting off the subject a few degrees either side of the

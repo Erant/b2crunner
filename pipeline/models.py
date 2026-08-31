@@ -191,6 +191,36 @@ def _probe_mediapipe() -> bool:
     )
 
 
+def _fetch_colmap_onnx() -> str:
+    """ALIKED + LightGlue, the two ONNX graphs `refine_cameras` runs on.
+
+    COLMAP fetches these itself on first use into `$HOME/.cache/colmap/`,
+    which on a pod is the container's writable layer: they come down again
+    after every restart, and a run with no network cannot start at all.
+    Same call, same cache location the step will use — see that module's
+    `ensure_onnx_model`.
+
+    Only the pair the shipped workflows select. A run that overrode
+    `feature_type`/`matcher_type` to something else would fetch its own
+    model at that point, which is the one place a mid-run download is still
+    possible and is also a deliberate override.
+    """
+    from .steps.refine_cameras import ensure_onnx_model, onnx_options_for
+
+    paths = [ensure_onnx_model(option)
+             for option in onnx_options_for("ALIKED_N32", "ALIKED_LIGHTGLUE")]
+    return str(paths[0].parent)
+
+
+def _probe_colmap_onnx() -> bool:
+    from .steps.refine_cameras import ONNX_MODELS, _model_path, onnx_options_for
+
+    return all(
+        _model_path(ONNX_MODELS[option][0]).exists()
+        for option in onnx_options_for("ALIKED_N32", "ALIKED_LIGHTGLUE")
+    )
+
+
 def _fetch_moge() -> str:
     """The single `model.pt` MoGe-2's `from_pretrained` pulls for sam3d_body.
 
@@ -387,6 +417,13 @@ def _registry() -> List[ModelSource]:
         ModelSource(
             "seedvr2", "SeedVR2 3B fp8 DiT + VAE (upscale)", ("seedvr2",),
             _fetch_seedvr2, _probe_seedvr2, approx_gb=6.0,
+        ),
+        ModelSource(
+            # ~65 MB for the pair. Small enough that the prefetch barely
+            # notices it and large enough that a pod with no network could
+            # not start the step without it.
+            "colmap_onnx", "COLMAP ALIKED-N32 + LightGlue (camera refinement)",
+            ("refine_cameras",), _fetch_colmap_onnx, _probe_colmap_onnx, approx_gb=0.07,
         ),
         ModelSource(
             "mediapipe", "MediaPipe face landmarker + detector",

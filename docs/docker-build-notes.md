@@ -798,6 +798,54 @@ gsplat is CUDA, not Vulkan, so a scratch venv on this box produced the
 oracle images the new renderer was validated against, per
 `~/Projects/brush/docs/splat-render.md`.
 
+## The colmap-builder stage (added 2026-08-31), and what to check
+
+New stage, for `refine_cameras` (`docs/camera-pose-refinement.md`). Upstream
+COLMAP, pinned at 4.2.0's `921c0006`, `-DCUDA_ENABLED=ON`. It has not been
+built. Three things to check the first time it is:
+
+1.  **It should fail loudly, not quietly, if CUDA is off.** The last RUN in
+    the stage is `colmap version | grep -q "with CUDA"`. That string is
+    generated from `COLMAP_CUDA_ENABLED` at compile time
+    (`src/colmap/util/version.cc`), so it is the binary's own account of
+    itself. If that RUN fails, cmake did not find a usable CUDA toolkit and
+    the configure log above it says why.
+
+2.  **The ONNX Runtime override is the load-bearing part.** COLMAP's
+    `FETCH_ONNX` fetches the **gpu_cuda12** build whenever CUDA is on
+    (`cmake/FindDependencies.cmake`), and this image is CUDA 13 throughout:
+    that provider links `libcudart.so.12` / `libcublas.so.12`, none of which
+    are in the runtime base or in torch's bundled `nvidia-*` wheels. It
+    would not degrade — ONNX Runtime throws when a provider will not load
+    and only the CoreML path has a CPU fallback — so the failure would be a
+    crash inside the step, on the pod, at the first feature extraction.
+    `FETCHCONTENT_SOURCE_DIR_ONNXRUNTIME` points cmake at an extracted
+    gpu_cuda13 tarball instead. If ONNX_VERSION here ever drifts from
+    `FindDependencies.cmake`'s, that is a compile error against the headers,
+    which is the good kind.
+
+    Confirmed from the tarball itself, not inferred:
+    `libonnxruntime_providers_cuda.so` from the cuda13 build needs
+    `libcudart.so.13`, `libcublas.so.13`, `libcublasLt.so.13`,
+    `libnvrtc.so.13`, `libcufft.so.12`, `libcurand.so.10`, `libcudnn.so.9`
+    — every one of which the `13.0.2-cudnn-runtime` base already carries.
+
+3.  **The install prefix moves as a unit.** COLMAP installs its bundled
+    `libonnxruntime.so*` beside the binary and the binary finds it through
+    an `$ORIGIN/../lib` RPATH. The workstation build hit exactly this and
+    lost: a `colmap` whose loader cannot find that library dies with
+    `error while loading shared libraries: libonnxruntime.so.1` on every
+    invocation, `colmap version` included. So `/opt/colmap` is copied whole
+    and reached through PATH, not symlinked binary-by-binary.
+
+    `doctor` catches all three at container start — it reports the version
+    banner, WARNs on a non-CUDA build, and FAILs on a binary that will not
+    start or is missing a command the step drives.
+
+It is also the slowest stage after python-builder: COLMAP's defaults build
+PoseLib and faiss from FetchContent as well, and none of that is cached
+across a `COLMAP_REF` bump.
+
 ## Still unverified after all of the above
 
 #### UPDATE (2026-08-23, later the same day): the first two are now closed

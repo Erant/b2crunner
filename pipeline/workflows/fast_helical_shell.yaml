@@ -344,6 +344,25 @@ settings:
       being inside select_support_views' 5-degree band around the denoising
       path, where the views are dropped as competing with a denoised frame.
 
+  - name: refine_cameras
+    label: Refine camera poses (COLMAP)
+    type: bool
+    default: true
+    help: >-
+      Bundle-adjust the generated orbit against the frames themselves before
+      each brush training, with the gauge restored afterwards so the splat keeps
+      its scale. Worth +0.63 PSNR / +0.0045 SSIM on held-out views, measured over
+      three seeds per condition against a baseline whose own seed spread is
+      +-0.003 (docs/camera-pose-refinement.md). It runs twice — once on the
+      denoised bootstrap batch, once on the re-rendered helical one — because
+      both paths are generated rather than measured, and each run costs a
+      COLMAP feature/match/triangulate/BA pass over the training frames (about
+      three minutes on CPU at 81 frames, less with the CUDA build in the pod
+      image). Off gives the poses exactly as the renderer wrote them, which is
+      what every run before 2026-08-31 used. Note what it never sees: the
+      supporting views, which are renders made FROM these poses and so have no
+      independent evidence to offer about them.
+
 outputs:
   # What stage 6 can produce, and the switch each one is. `name:` is the
   # workflow global the `when:` on its export steps reads, so the switch is
@@ -1133,6 +1152,62 @@ steps:
     outputs:
       normal_maps: scene.normal_maps
 
+  # ------------------------------------------- refining the cameras (stage 2)
+  # Bundle-adjust the orbit BEFORE anything reads it. The poses this dataset
+  # holds were generated, not measured — an exactly ideal circle, camera
+  # height std exactly 0 — and the frames have since been through a
+  # diffusion pass that had its own opinion about where the subject was.
+  # Refining against the frames themselves is worth +0.63 PSNR / +0.0045
+  # SSIM on held-out views (docs/camera-pose-refinement.md; three seeds per
+  # condition, baseline seed spread +-0.003).
+  #
+  # WHERE IT SITS is the whole of the wiring, and there are three consumers
+  # below that all have to see the corrected poses:
+  #
+  #   stage1_view_splats   places a Gaussian shell per frame ON THAT FRAME'S
+  #                        OWN CAMERA RAY and renders it from a camera
+  #                        derived from that pose. A wrong pose there is not
+  #                        a wrong pixel, it is a shell in the wrong place,
+  #                        and the supporting views it publishes then argue
+  #                        with the training frames rather than supporting
+  #                        them. This is why the step is here rather than
+  #                        anywhere later.
+  #   train_splat          the stage-2 fit itself.
+  #   export_colmap_intermediate  the debug dataset, which has to describe
+  #                        what was trained on.
+  #
+  # WHAT IT IS REFINED AGAINST is denoise_pass1's frames and RMBG's mattes —
+  # the training views, and only those. The supporting views are never in
+  # this solve: the face cap and the stage-1 shells are RENDERS, produced
+  # from the very poses being corrected, so they carry no independent
+  # evidence about where a camera was and would only vote for the answer
+  # already in hand. (They also do not exist yet at this point in the file,
+  # which is the same fact from the other side.)
+  #
+  # Frozen intrinsics, foreground-only features, and a Sim(3) putting the
+  # gauge back afterwards, all of which are the step's own defaults — see
+  # its module docstring for the three traps that make each one
+  # non-negotiable. The checks are assertions: a solve that fails one is
+  # refused and the given poses are published unchanged, which is exactly
+  # the pipeline's behaviour before this step existed.
+  - id: refine_cameras
+    step: refine_cameras
+    dispatch: in_process
+    when: ${globals.refine_cameras}
+    inputs:
+      cameras: dataset.cameras
+      image_names: dataset.image_names
+      images: dataset.images
+      # foreground_masks' RMBG mattes, above. Not the VACE control masks
+      # this field carried before that step — those are per-frame all-1.0
+      # flags, and masking a solve to "everything" is the unmasked variant
+      # under a different name.
+      masks: dataset.masks
+    params: {}
+    outputs:
+      cameras: dataset.cameras
+      stats: scene.camera_refinement
+
   # ------------------------------------- the stage-1 shells' supporting views
   # The face splat's lever, applied to the denoised body. Every Nth frame of
   # denoise_pass1's output gets a Gaussian shell built from Sapiens2's
@@ -1612,6 +1687,48 @@ steps:
       batch_size: 4
     outputs:
       normal_maps: scene.export_normal_maps
+
+  # ------------------------------------------- refining the cameras (stage 6)
+  # The same refinement again, and it is needed again for the same reason:
+  # rerender_splat replaced the dataset wholesale with a NEW generated path
+  # — a longer helical orbit, 81 fresh poses solved from a pattern rather
+  # than measured — so the corrections made back in stage 2 do not describe
+  # these cameras at all. The frames have also been through a second
+  # diffusion pass and an upscale since, which is more of the disagreement
+  # this exists to absorb, not less.
+  #
+  # Placed here, after export_masks and export_normals, so both stage-6
+  # consumers below read the same corrected poses: the COLMAP dataset a run
+  # hands back and the deliverable .ply trained from it. It reads
+  # export_masks' mattes, which is why it cannot sit any earlier than this —
+  # dataset.masks between mask_splat_fringes and here is the all-1.0 VACE
+  # batch, and a solve masked to "everything" is the unmasked variant under
+  # a different name.
+  #
+  # It does NOT cover export_colmap_preupscale (stage 4b), which is the one
+  # deliverable that necessarily sees the given poses. That export exists to
+  # measure what SeedVR2 does to splat quality by comparison with colmap/,
+  # and refining it would have to be its own solve against its own frames —
+  # a second three-minute run for a debug artefact that is off by default.
+  # Worth knowing when comparing the two, which is why it is written down
+  # rather than left to be discovered.
+  #
+  # Same defaults as the stage-2 instance. `train_final_splat` is gated on
+  # export_ply and this is not: export_colmap wants the corrected poses too,
+  # and the two switches are independent.
+  - id: refine_cameras_final
+    step: refine_cameras
+    dispatch: in_process
+    when: ${globals.refine_cameras}
+    inputs:
+      cameras: dataset.cameras
+      image_names: dataset.image_names
+      images: dataset.images
+      masks: dataset.masks
+    params: {}
+    outputs:
+      cameras: dataset.cameras
+      stats: scene.camera_refinement_final
 
   # Deliverable 1: a COLMAP dataset. `layout: brush` puts the frames in
   # images/ and the normals in normals/ beside the three .txt files —

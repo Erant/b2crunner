@@ -865,6 +865,89 @@ class TestWorkflowFiles(unittest.TestCase):
                             f"merge_support_views does not write",
                         )
 
+    def test_the_cameras_are_refined_before_anything_reads_them(self):
+        """Camera refinement lands ahead of every consumer of a pose.
+
+        Three orderings, and each one is a silent failure rather than a
+        loud one if it slips.
+
+        `pointmap_elevation_views` is the sharp one: it places a Gaussian
+        shell on each frame's own camera ray and renders it from a camera
+        derived from that pose, so a refinement running after it leaves the
+        supporting views built on poses the training no longer uses — they
+        argue with the frames instead of supporting them, and nothing
+        raises.
+
+        Both `brush` trainings come next: each one is roughly an hour of
+        GPU fitted to whatever poses reach it, and the second trains on a
+        dataset `rerender_splat` replaced wholesale, so one refinement
+        cannot cover both.
+
+        And the refinement never reads a supporting view. Those are renders
+        made FROM the poses being corrected; feeding them back in would
+        vote for the answer already in hand.
+        """
+        refine_inputs = ("cameras", "image_names", "images", "masks")
+        for path in _workflows():
+            spec = WorkflowSpec.from_yaml(str(path))
+            ids = [s.id for s in spec.steps]
+            refiners = [s for s in spec.steps if s.step == "refine_cameras"]
+            trainings = [s for s in spec.steps if s.step == "brush"]
+            if not trainings:
+                continue
+            with self.subTest(workflow=path.name):
+                self.assertEqual(
+                    len(refiners), len(trainings),
+                    f"{path.name}: {len(trainings)} brush training(s) but "
+                    f"{len(refiners)} refinement(s) — each training fits a "
+                    f"different dataset, so each needs its own solve",
+                )
+                for step in refiners:
+                    self.assertEqual(step.outputs.get("cameras"), "dataset.cameras")
+                    for name in refine_inputs:
+                        wired = step.inputs.get(name, "")
+                        self.assertTrue(
+                            wired.startswith("dataset."),
+                            f"{path.name}: '{step.id}' must refine against the "
+                            f"dataset's own training views, not '{wired}'",
+                        )
+                    self.assertNotIn(
+                        "support", " ".join(step.inputs.values()),
+                        f"{path.name}: '{step.id}' must not read a supporting "
+                        f"view — they are renders made from the poses it is "
+                        f"correcting",
+                    )
+
+                # Every step that reads dataset.cameras for geometry has a
+                # refinement in front of it.
+                for consumer in [s for s in spec.steps
+                                 if s.step in ("brush", "pointmap_elevation_views")]:
+                    earlier = [s for s in refiners
+                               if ids.index(s.id) < ids.index(consumer.id)]
+                    self.assertTrue(
+                        earlier,
+                        f"{path.name}: '{consumer.id}' reads camera poses with "
+                        f"no refinement ahead of it",
+                    )
+
+                # ...and each refinement reads the mattes computed for the
+                # frames it is about, not a stale batch. The failure this
+                # rules out is masking a solve to the all-1.0 VACE control
+                # batch, which is the unmasked variant under another name.
+                producers = {}
+                for step in spec.steps:
+                    for field, ctx in step.outputs.items():
+                        producers[ctx] = step
+                for step in refiners:
+                    source = producers.get(step.inputs["masks"])
+                    self.assertIsNotNone(source)
+                    self.assertEqual(
+                        source.step, "rmbg",
+                        f"{path.name}: '{step.id}' masks its features with "
+                        f"'{source.id}' ({source.step}), which is not a "
+                        f"foreground matte",
+                    )
+
     def test_a_warped_anchor_is_bordered_in_grey_not_white(self):
         """generate_firstlast's border colour has no literal in the YAML —
         it arrives as `image_warp["bg_color"]`, which render.py copies from

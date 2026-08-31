@@ -362,6 +362,88 @@ def check_brush_binaries() -> Check:
     return Check("brush binaries", status, "", lines)
 
 
+def check_colmap() -> Check:
+    """`colmap` present, CUDA-built, and carrying the four commands used.
+
+    Gates `refine_cameras` (pipeline/steps/refine_cameras.py). Three things
+    go wrong here and only the first is loud on its own:
+
+      * no binary at all — the step raises immediately, which is fine, but
+        finding that out at container start is better than at the point in
+        the run where an hour of denoising is already spent;
+      * a binary built **without** CUDA, which is not an error anywhere. The
+        ONNX execution provider silently drops to CPU
+        (`SelectONNXExecutionProvider`), ALIKED and LightGlue run there, and
+        the only symptom is a three-minute step where a much shorter one was
+        expected. That is exactly the kind of thing this file exists to say
+        out loud, so it is a WARN rather than a FAIL — the refinement is
+        still correct, just slow;
+      * a binary too old for the commands the step drives. `colmap -h`
+        lists them, so the diff is cheap.
+
+    `colmap version` prints, e.g., `COLMAP 4.2.0.dev0 (Commit 921c0006 on
+    2026-08-11 with CUDA)` — the build info is generated from
+    COLMAP_CUDA_ENABLED at compile time (src/colmap/util/version.cc), so it
+    is the binary's own account of itself rather than an inference from the
+    image.
+    """
+    required_commands = ("feature_extractor", "exhaustive_matcher",
+                         "point_triangulator", "bundle_adjuster",
+                         "model_converter", "model_analyzer")
+
+    path = shutil.which("colmap")
+    if not path:
+        return Check(
+            "colmap", WARN,
+            "not on PATH — the camera refinement cannot run",
+            ["Built into docker/Dockerfile's colmap-builder stage. With it "
+             "missing, set `refine_cameras: false` or the run fails at that "
+             "step."],
+        )
+
+    lines, status = [path], OK
+    try:
+        version = _run([path, "version"], timeout=30)
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        return Check("colmap", FAIL, f"{path} — could not run `colmap version` ({exc})")
+
+    output = version.stdout + version.stderr
+    banner = output.strip().splitlines()
+    lines.append(banner[0] if banner else "(no version banner)")
+    if version.returncode != 0:
+        # A binary that will not start at all. The one seen in practice is
+        # a build installed without its bundled libonnxruntime on the
+        # loader path — hence docker/Dockerfile installing COLMAP under
+        # /opt/colmap with an $ORIGIN/../lib RPATH rather than scattering
+        # its libraries into /usr/local.
+        return Check("colmap", FAIL,
+                     f"{path} exits {version.returncode} on `colmap version`", lines)
+    if "with CUDA" not in output:
+        status = WARN
+        lines.append(
+            "  built WITHOUT CUDA — ALIKED and LightGlue fall back to the ONNX "
+            "CPU provider. Correct, but ~3 min per refinement at 81 frames "
+            "instead of seconds; rebuild with -DCUDA_ENABLED=ON."
+        )
+
+    try:
+        listing = _run([path, "-h"], timeout=30)
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        lines.append(f"  could not list commands ({exc})")
+        return Check("colmap", FAIL, "", lines)
+
+    help_text = listing.stdout + listing.stderr
+    missing = [name for name in required_commands if name not in help_text]
+    if missing:
+        status = FAIL
+        lines.append(f"  MISSING COMMANDS {', '.join(missing)} — this binary "
+                     f"cannot drive the refinement")
+    else:
+        lines.append(f"  all {len(required_commands)} commands the refinement drives are present")
+
+    return Check("colmap", status, "", lines)
+
+
 def check_step_venvs(envs: Dict[str, Dict[str, Any]]) -> Check:
     """Each subprocess-dispatch env's interpreter exists and can import torch."""
     if not envs:
@@ -722,6 +804,7 @@ def run_checks(envs: Optional[Dict[str, Dict[str, Any]]] = None) -> List[Check]:
         ("vulkan", check_vulkan),
         ("egl", check_egl),
         ("brush binaries", check_brush_binaries),
+        ("colmap", check_colmap),
         ("step venvs", lambda: check_step_venvs(envs or {})),
         ("attention", lambda: check_attention(envs or {})),
         ("huggingface", check_huggingface),

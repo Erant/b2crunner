@@ -164,17 +164,22 @@ class TestRequiredForSteps(unittest.TestCase):
             # landmark hull is what does it (see FaceLandmarkMaskStep). Two
             # small .task/.tflite files against ~19 GB of Sapiens2; it costs
             # a fresh pod nothing worth measuring.
+            #
+            # 2026-08-31: colmap_onnx joined it — ALIKED-N32 and LightGlue,
+            # ~65 MB, for the camera refinement. COLMAP would otherwise
+            # fetch them itself into ~/.cache/colmap, i.e. the container's
+            # writable layer, once per pod restart.
             "fast_helical_native": {"rmbg", "sapiens2", "sapiens2_pointmap",
                                     "sapiens2_seg", "sam3dbody", "moge2",
                                     "mediapipe", "wan22", "wan22_fp8",
-                                    "wan22_lora", "seedvr2"},
+                                    "wan22_lora", "seedvr2", "colmap_onnx"},
             # The parked shell bootstrap needs the same set: it runs the
             # pointmap head twice (a body shell and a face) and re-poses the
             # fit, which reads sam3dbody's checkpoint again.
             "fast_helical_shell": {"rmbg", "sapiens2", "sapiens2_pointmap",
                                    "sapiens2_seg", "sam3dbody", "moge2",
                                    "mediapipe", "wan22", "wan22_fp8",
-                                   "wan22_lora", "seedvr2"},
+                                   "wan22_lora", "seedvr2", "colmap_onnx"},
         }
         for workflow, expected in cases.items():
             with self.subTest(workflow=workflow):
@@ -210,7 +215,11 @@ class TestRequiredForSteps(unittest.TestCase):
         self.assertEqual(
             set(models.required_for_steps(s.step for s in spec.enabled_steps())),
             {"rmbg", "sapiens2", "sapiens2_pointmap", "sapiens2_seg", "sam3dbody",
-             "moge2", "mediapipe", "wan22", "wan22_fp8", "wan22_lora", "seedvr2"},
+             "moge2", "mediapipe", "wan22", "wan22_fp8", "wan22_lora", "seedvr2",
+             # Still here with both exports off: the stage-2 refinement runs
+             # ahead of the training that drives the helical re-render, which
+             # is not one of the deliverables these switches gate.
+             "colmap_onnx"},
         )
 
 

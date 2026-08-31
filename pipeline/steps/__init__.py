@@ -20,6 +20,7 @@ from . import mask_splat  # noqa: F401
 from . import pointmap_splat  # noqa: F401
 from . import pose_refine  # noqa: F401
 from . import reference_sheet  # noqa: F401
+from . import refine_cameras  # noqa: F401
 from . import render  # noqa: F401
 from . import rmbg  # noqa: F401
 from . import sam3d_body  # noqa: F401

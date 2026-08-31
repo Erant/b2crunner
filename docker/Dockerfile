@@ -23,8 +23,12 @@
 # detectron2 test plan, the RTX 4070 Ti specifics, and what to do when a
 # layer fails. Nothing in this file has been built yet.
 #
-# Three stages:
+# Four stages:
 #   brush-builder   Rust toolchain -> the brush binary, nothing else.
+#   colmap-builder  CUDA *devel* base -> the `colmap` binary, for the camera
+#                   refinement (pipeline/steps/refine_cameras.py). CUDA is
+#                   on so ALIKED and LightGlue run on the ONNX CUDA
+#                   execution provider rather than the CPU one.
 #   python-builder  CUDA *devel* base. Compiles detectron2's CUDA kernels,
 #                   which is the only reason nvcc is needed at all.
 #   runtime         CUDA *runtime* base. Receives the finished venvs and
@@ -161,7 +165,171 @@ RUN cargo build --release -p brush-app -p brush-splat-render \
 
 
 # =============================================================================
-# Stage 2: python-builder (CUDA devel — nvcc lives here and only here)
+# Stage 2: colmap
+# =============================================================================
+# Upstream COLMAP — https://github.com/colmap/colmap, no fork and no patches.
+# It is here for exactly one step, `refine_cameras`
+# (pipeline/steps/refine_cameras.py), which bundle-adjusts the generated
+# orbit against the frames before each brush training: +0.63 PSNR / +0.0045
+# SSIM on held-out views (docs/camera-pose-refinement.md).
+#
+# WHY CUDA IS ON, since nothing in this pipeline runs COLMAP's SIFT or its
+# dense MVS. The refinement's cost is ALIKED feature extraction and LightGlue
+# matching, both of which are ONNX graphs, and COLMAP picks their execution
+# provider from a compile-time flag: `SelectONNXExecutionProvider` returns
+# CUDA when COLMAP_CUDA_ENABLED is defined and CPU otherwise
+# (src/colmap/feature/onnx_utils.cc). A CPU build is not an error — it is
+# ~3 min per refinement at 81 frames, twice per run — it is just the slow
+# path, and `pipeline/doctor.py`'s colmap check WARNs when it sees one.
+#
+# AND WHY THE ONNX RUNTIME IS OVERRIDDEN, which is the sharp edge of turning
+# CUDA on. COLMAP's FETCH_ONNX (on by default) downloads a prebuilt ONNX
+# Runtime, and with CUDA enabled it takes the **gpu_cuda12** tarball —
+# cmake/FindDependencies.cmake says so in as many words. That build's
+# provider links libcudart.so.12 / libcublas.so.12 / libcudnn.so.9, and this
+# image is CUDA **13** end to end: the CUDA 12 libraries are not in the
+# runtime base, are not in torch's bundled nvidia-* wheels, and there is no
+# fallback to catch it. ORT throws when the provider will not load and only
+# the CoreML path has a CPU fallback (onnx_utils.cc's InitializeSession), so
+# the failure would be a hard crash inside the step, on the pod, at the
+# point where the first BA round starts.
+#
+# Microsoft ship a gpu_cuda13 tarball of the same release. FetchContent
+# honours FETCHCONTENT_SOURCE_DIR_<NAME> to mean "this is already
+# downloaded, use it", so pointing that at an extracted gpu_cuda13 keeps
+# every other line of COLMAP's ONNX handling — including the install() rules
+# that put libonnxruntime.so* and libonnxruntime_providers_cuda.so* into the
+# install prefix — and changes only which CUDA major version they were
+# built against. ONNX_VERSION must stay in step with FindDependencies.cmake's
+# (1.27.1 at COLMAP_REF below); a mismatch is a compile error against the
+# headers, not a silent one.
+FROM nvidia/cuda:13.0.2-cudnn-devel-ubuntu24.04 AS colmap-builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# COLMAP's own docker/Dockerfile's build list, minus the parts this image
+# has no use for: no qt6/glew (GUI_ENABLED=OFF), no gtest/gmock
+# (TESTS_ENABLED=OFF), and no libmkl-full-dev — that is ~2 GB of builder to
+# hand Ceres a faster dense solver for a problem with 81 cameras, so Ceres
+# gets the BLAS libceres-dev already depends on.
+#
+# libcurl4-openssl-dev + libssl-dev are NOT optional here even though the
+# ONNX weights are fetched by pipeline/models.py rather than by COLMAP:
+# DOWNLOAD_ENABLED is what compiles `MaybeDownloadAndCacheFile`, which is
+# also the function that passes a local path straight through. With it off,
+# the `--AlikedExtraction.n32_model_path` the step hands over would be a
+# path COLMAP cannot even accept.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git ca-certificates cmake ninja-build build-essential \
+        libboost-program-options-dev libboost-graph-dev libboost-system-dev \
+        libeigen3-dev libopenimageio-dev libmetis-dev \
+        libgoogle-glog-dev libsqlite3-dev libcgal-dev libceres-dev \
+        libcurl4-openssl-dev libssl-dev curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# COLMAP's own Dockerfile does this: its openimageio CMake config requires
+# the OpenCV include directory to exist even though nothing here uses
+# openimageio's OpenCV half.
+RUN mkdir -p /usr/include/opencv4
+
+# The ONNX Runtime, CUDA 13 build. Pinned by digest for the same reason
+# COLMAP pins its own: a silently different tarball is a runtime crash, not
+# a build failure. The digest below is the one published with v1.27.1's
+# onnxruntime-linux-x64-gpu_cuda13 asset.
+ARG ONNX_VERSION=1.27.1
+ARG ONNX_SHA256=33ef9d3136914455fc5232acff80703245b464c7cb5b1666edbdf98d0caf257c
+RUN curl -fsSL -o /tmp/onnxruntime.tgz \
+        "https://github.com/microsoft/onnxruntime/releases/download/v${ONNX_VERSION}/onnxruntime-linux-x64-gpu_cuda13-${ONNX_VERSION}.tgz" \
+    && echo "${ONNX_SHA256}  /tmp/onnxruntime.tgz" | sha256sum -c - \
+    && mkdir -p /opt/onnxruntime-src \
+    && tar -xzf /tmp/onnxruntime.tgz --strip-components=1 -C /opt/onnxruntime-src \
+    && rm /tmp/onnxruntime.tgz
+
+# Pinned by SHA, and fetched BY that SHA rather than by branch. This is the
+# same cache hazard BRUSH_REF above describes — `git clone --branch X` bakes
+# no remote state into the RUN text, so Docker serves an old cached layer
+# however far the branch has moved — but it needs no separate check here:
+# `git fetch --depth 1 origin <sha>` either gets that commit or fails, and
+# the SHA is in the RUN text, so moving the pin invalidates the layer.
+# (It is also a one-commit fetch rather than COLMAP's full history.)
+#
+# 921c0006 is the 4.2.0 release commit, and it is the exact tree
+# docs/camera-pose-refinement.md's +0.63 PSNR was measured on — the
+# workstation build there reports `COLMAP 4.2.0.dev0 (Commit 921c0006 ...)`.
+# Moving it means re-checking the option names steps/refine_cameras.py
+# passes; COLMAP renamed several of them in the 3.x -> 4.x window
+# (SiftExtraction.* -> FeatureExtraction.*), and an unknown --Option is a
+# hard error from the option manager rather than something ignored.
+ARG COLMAP_REF=921c0006cbe80e16e600b6f04c3c746c2c412907
+RUN mkdir -p /src/colmap && cd /src/colmap \
+    && git init -q \
+    && git remote add origin https://github.com/colmap/colmap.git \
+    && git fetch -q --depth 1 origin ${COLMAP_REF} \
+    && git checkout -q FETCH_HEAD
+
+# Installed under /opt/colmap rather than /usr/local, with an
+# $ORIGIN/../lib RPATH. Not tidiness — this is the failure the workstation
+# build hit: COLMAP installs its bundled libonnxruntime.so beside the
+# binary, and a binary whose loader cannot find it dies with
+#   error while loading shared libraries: libonnxruntime.so.1
+# at every invocation, `colmap version` included. Scattering the libraries
+# into /usr/local/lib would work too, after an ldconfig, at the cost of
+# putting an ONNX Runtime on the global loader path for every venv in the
+# image. The RPATH keeps it to this binary.
+#
+# Three directories in it because GNUInstallDirs picks the leaf — lib,
+# lib64 or lib/x86_64-linux-gnu — from the distro and the install prefix,
+# and COLMAP's own ONNX handling patches for lib-vs-lib64 explicitly, so it
+# is not a constant. Naming all three costs nothing and removes a way for
+# this to break on a base-image bump.
+#
+# ~340 MB of it is the ONNX Runtime (256 MB CUDA provider plus three
+# hardlink-less copies of the 27 MB core, which is what COLMAP's
+# install(FILES) rules make of its .so symlink chain). Comparable to the
+# brush binaries and worth knowing before wondering where the image grew.
+#
+# CMAKE_CUDA_ARCHITECTURES has to be explicit: there is no GPU during a
+# docker build, so COLMAP's default cannot be detected. The list mirrors
+# python-builder's TORCH_CUDA_ARCH_LIST (Ada, datacenter Blackwell,
+# consumer Blackwell). It only governs COLMAP's *own* CUDA kernels — SIFT
+# and dense MVS, neither of which this pipeline runs — so it is nearly free
+# here; what CUDA_ENABLED actually buys is the ONNX provider above.
+#
+# This is the slowest stage in the file after python-builder: COLMAP's
+# defaults consume PoseLib and faiss through FetchContent, so they are
+# downloaded and compiled here too. Left at their defaults deliberately —
+# this is the configuration COLMAP itself builds and tests, and the
+# refinement is not the place to find out what turning a dependency off
+# breaks. Nothing else in this stage is cached across builds, so a moved
+# COLMAP_REF pays for all of it.
+#
+# nvcc/gcc: Ubuntu 24.04 is gcc 13 and CUDA 13's nvcc accepts up to 14, so
+# CUDA compiles here. That is the one thing the workstation build in
+# docs/camera-pose-refinement.md could not do — its host gcc is 15, which
+# is why the measurement was taken on a CPU-only COLMAP.
+ARG COLMAP_CUDA_ARCHITECTURES="89;100;120"
+RUN cmake -S /src/colmap -B /build -GNinja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/opt/colmap \
+        -DCMAKE_INSTALL_RPATH='$ORIGIN/../lib:$ORIGIN/../lib64:$ORIGIN/../lib/x86_64-linux-gnu' \
+        -DCUDA_ENABLED=ON \
+        -DCMAKE_CUDA_ARCHITECTURES=${COLMAP_CUDA_ARCHITECTURES} \
+        -DGUI_ENABLED=OFF \
+        -DTESTS_ENABLED=OFF \
+        -DFETCHCONTENT_SOURCE_DIR_ONNXRUNTIME=/opt/onnxruntime-src \
+    && cmake --build /build --target install \
+    && rm -rf /build /src/colmap
+
+# Fail the build rather than ship a CPU-only COLMAP by accident. The banner
+# is generated from COLMAP_CUDA_ENABLED at compile time
+# (src/colmap/util/version.cc), so this is the binary's own account of
+# itself — and it doubles as a check that it starts at all, i.e. that the
+# RPATH above found the ONNX Runtime.
+RUN /opt/colmap/bin/colmap version | tee /dev/stderr | grep -q "with CUDA"
+
+
+# =============================================================================
+# Stage 3: python-builder (CUDA devel — nvcc lives here and only here)
 # =============================================================================
 FROM nvidia/cuda:13.0.2-cudnn-devel-ubuntu24.04 AS python-builder
 
@@ -500,7 +668,7 @@ RUN find /opt/venv_* -type d -name '__pycache__' -prune -exec rm -rf {} + \
 
 
 # =============================================================================
-# Stage 3: runtime (CUDA runtime — no nvcc, no compilers, no Rust)
+# Stage 4: runtime (CUDA runtime — no nvcc, no compilers, no Rust)
 # =============================================================================
 # The torch wheels bundle their own CUDA libraries (the nvidia-* packages
 # in venv_base), so almost nothing is needed from the base image itself;
@@ -570,6 +738,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libegl1 libgl1 libglvnd0 libgles2 libosmesa6 \
         libglib2.0-0 libsm6 libxext6 libxrender1 libgomp1 \
         ffmpeg \
+        # COLMAP's runtime dependencies, for the camera refinement. Taken
+        # from COLMAP's own docker/Dockerfile runtime stage, minus the qt6
+        # and glew entries the GUI would want (GUI_ENABLED=OFF) — same
+        # ubuntu24.04 as the colmap-builder stage, so these are the same
+        # package versions it linked against. Everything CUDA the ONNX
+        # provider needs (libcudart.so.13, libcublas*.so.13, libcufft,
+        # libcurand, libnvrtc, libcudnn.so.9) is already in this base
+        # image, which is the whole reason the builder overrides ONNX to
+        # the CUDA 13 tarball.
+        libboost-program-options1.83.0 libmetis5 libceres4t64 \
+        libopenimageio2.4t64 libgoogle-glog0v6t64 libcurl4 libssl3t64 \
+        libomp5 libopengl0 \
         # ---------------------------------------------------------------
         # Debugging surface. This image is meant to be built once and then
         # left alone for the whole verification round, so anything you
@@ -729,6 +909,18 @@ RUN chmod +x /usr/local/bin/b2c-entrypoint
 COPY --from=brush-builder /out-brush /usr/local/bin/brush
 COPY --from=brush-builder /out-brush-splat-render /usr/local/bin/brush-splat-render
 
+# COLMAP, whole prefix, for the same reasons and in the same place: it is
+# ~400 MB of filesystem layer that has nothing behind it to invalidate.
+#
+# The prefix moves as a unit rather than the binary alone — /opt/colmap/bin/
+# colmap finds its bundled ONNX Runtime through an $ORIGIN/../lib RPATH (see
+# the colmap-builder stage), so splitting the two apart is exactly the
+# failure that RPATH exists to prevent. It is reached through PATH, set in
+# the ENV block below; a symlink would be a RUN layer here, and a RUN
+# between these COPYs and the end of the stage is what the note above says
+# not to add.
+COPY --from=colmap-builder /opt/colmap /opt/colmap
+
 # Build provenance. Deliberately the LAST thing in the file: a LABEL makes a
 # layer, and every layer after it would be invalidated by a new SHA. Here, a
 # rebuild at a different commit redoes this metadata layer and nothing else.
@@ -787,6 +979,14 @@ COPY --from=brush-builder /out-brush-splat-render /usr/local/bin/brush-splat-ren
 # own environment variables is the more reliable path, since that is
 # applied at creation time. See docs/docker-build-notes.md.
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics,display
+
+# COLMAP, which lives under its own prefix so its bundled ONNX Runtime
+# stays off the global loader path (see the colmap-builder stage and the
+# COPY above). This ENV is what puts it on PATH, where
+# pipeline/steps/refine_cameras.py's default `colmap_path` and
+# pipeline/doctor.py's colmap check both look for it. Here rather than as a
+# symlink because an ENV makes no filesystem layer.
+ENV PATH=/opt/colmap/bin:${PATH}
 
 # Python block-buffers stdout whenever it is a pipe, which it always is
 # under `docker logs` and under RunPod's log pane. Without this a step that

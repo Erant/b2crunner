@@ -109,6 +109,48 @@ class TestDockerfile(unittest.TestCase):
                     f"{tool} is not installed in the runtime stage",
                 )
 
+    def test_colmap_is_built_with_cuda_and_reachable(self):
+        """The camera refinement's binary, and the two ways it goes wrong.
+
+        CUDA off is the silent one: COLMAP compiles and runs, its ONNX
+        execution provider drops to CPU (`SelectONNXExecutionProvider`), and
+        the only symptom is a refinement that takes minutes instead of
+        seconds. There is nothing at runtime to fail on, so the build asserts
+        it instead — and this asserts that the build asserts it.
+
+        Reachability is the other: the binary is installed under its own
+        prefix so its bundled ONNX Runtime stays off the global loader path,
+        which means the prefix has to be copied whole (the RPATH is
+        $ORIGIN/../lib) and put on PATH. steps/refine_cameras.py's default
+        `colmap_path` is the bare name `colmap`.
+        """
+        self.assertIn("AS colmap-builder", self.text)
+        self.assertIn("-DCUDA_ENABLED=ON", self.text)
+        self.assertIn('grep -q "with CUDA"', self.text)
+        self.assertIn("COPY --from=colmap-builder /opt/colmap /opt/colmap", self.text)
+        self.assertIn("ENV PATH=/opt/colmap/bin:${PATH}", self.text)
+
+    def test_the_onnx_runtime_colmap_gets_matches_the_image_s_cuda(self):
+        """COLMAP's own FETCH_ONNX takes the gpu_cuda12 build when CUDA is
+        on. This image is CUDA 13, and the CUDA 12 libraries are in neither
+        the base image nor torch's bundled nvidia-* wheels — ORT throws when
+        the provider will not load, with no CPU fallback outside CoreML, so
+        the mismatch would be a crash inside the step on the pod. The
+        override has to name cuda13, and the base images have to agree with
+        it.
+        """
+        self.assertIn("gpu_cuda13", self.text)
+        self.assertIn("FETCHCONTENT_SOURCE_DIR_ONNXRUNTIME", self.text)
+
+        bases = re.findall(r"^FROM nvidia/cuda:(\S+?)-", self.text, re.M)
+        self.assertTrue(bases, "no nvidia/cuda base images found")
+        for base in bases:
+            self.assertTrue(
+                base.startswith("13."),
+                f"a CUDA {base} base image alongside a gpu_cuda13 ONNX Runtime: "
+                f"the provider links libcudart.so.13 and will not load",
+            )
+
     def test_every_env_in_the_registry_has_a_venv_built_and_copied(self):
         """envs.docker.yaml naming a venv the Dockerfile never creates would
         break that step only when a workflow first reached it."""
