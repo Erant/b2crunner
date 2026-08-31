@@ -61,10 +61,10 @@ DENOISE_NEGATIVE_PROMPT = (
 
 
 # The from-a-sheet workflows, and the bootstrap prologue each one runs before
-# it picks up fast_helical_full.yaml's steps verbatim. Pinned here rather than
-# derived, because "the prologue changed shape" is exactly the edit that
-# should make somebody look: this list is how the pipeline is allowed to
-# manufacture the dataset fast_helical_full expects.
+# it picks up the shared tail verbatim (see denoise_pass1 on). Pinned here
+# rather than derived, because "the prologue changed shape" is exactly the
+# edit that should make somebody look: this list is how the pipeline is
+# allowed to manufacture the dataset that tail expects.
 #
 # 2026-08-29: it changed shape. `fix_head_angle` left (it cannot run beside
 # `refine_pose_to_splat`), the matte/normals/shell/re-pose steps arrived, and
@@ -311,17 +311,15 @@ class TestWorkflowFiles(unittest.TestCase):
                         self.fail(f"{path.name}: step '{step.id}': {exc}")
 
     def test_run_upscale_gates_the_upscale_stage(self):
-        """fast_helical.yaml used to be fast_helical_full.yaml minus the
+        """fast_helical.yaml used to be a separate workflow minus the
         upscale; it is now the `run_upscale` global gating `upscale` and
         `rescale_cameras` on this one file. Off -> both drop out of
         enabled_steps(); on (the default) -> both run."""
-        for name in ("fast_helical_full", "fast_helical_native"):
-            spec = WorkflowSpec.from_yaml(str(WORKFLOW_DIR / f"{name}.yaml"))
-            gated = {"upscale", "rescale_cameras"}
-            with self.subTest(workflow=name):
-                self.assertTrue(gated <= {s.id for s in spec.enabled_steps()})
-                spec.globals["run_upscale"] = False
-                self.assertFalse(gated & {s.id for s in spec.enabled_steps()})
+        spec = WorkflowSpec.from_yaml(str(WORKFLOW_DIR / "fast_helical_native.yaml"))
+        gated = {"upscale", "rescale_cameras"}
+        self.assertTrue(gated <= {s.id for s in spec.enabled_steps()})
+        spec.globals["run_upscale"] = False
+        self.assertFalse(gated & {s.id for s in spec.enabled_steps()})
 
     def test_pre_upscale_colmap_is_off_by_default_and_gated_together(self):
         """The debug stage-4b export (masks + normals + colmap) is three
@@ -329,16 +327,14 @@ class TestWorkflowFiles(unittest.TestCase):
         unless it is set."""
         preupscale = {"export_masks_preupscale", "export_normals_preupscale",
                       "export_colmap_preupscale"}
-        for name in ("fast_helical_full", "fast_helical_native"):
-            spec = WorkflowSpec.from_yaml(str(WORKFLOW_DIR / f"{name}.yaml"))
-            with self.subTest(workflow=name):
-                self.assertFalse(spec.globals["export_colmap_preupscale"])
-                self.assertFalse(preupscale & {s.id for s in spec.enabled_steps()})
-                for step in spec.steps:
-                    if step.id in preupscale:
-                        self.assertEqual(step.when, "${globals.export_colmap_preupscale}")
-                spec.globals["export_colmap_preupscale"] = True
-                self.assertTrue(preupscale <= {s.id for s in spec.enabled_steps()})
+        spec = WorkflowSpec.from_yaml(str(WORKFLOW_DIR / "fast_helical_native.yaml"))
+        self.assertFalse(spec.globals["export_colmap_preupscale"])
+        self.assertFalse(preupscale & {s.id for s in spec.enabled_steps()})
+        for step in spec.steps:
+            if step.id in preupscale:
+                self.assertEqual(step.when, "${globals.export_colmap_preupscale}")
+        spec.globals["export_colmap_preupscale"] = True
+        self.assertTrue(preupscale <= {s.id for s in spec.enabled_steps()})
 
     def test_the_intermediate_colmap_is_off_by_default_and_exports_brush_s_own_input(self):
         """The debug export of what the FIRST brush training is handed. One
@@ -377,37 +373,36 @@ class TestWorkflowFiles(unittest.TestCase):
                         f"exporting what was trained on",
                     )
 
-    def test_native_mirrors_full_from_denoise_pass1_on(self):
-        """Each from-a-sheet workflow is a bootstrap prologue followed by a
-        verbatim copy of fast_helical_full.yaml's steps. There is no include
-        mechanism, so the thing worth checking is that the copies have not
-        drifted — and there are two of them now, which doubles the chance of
-        one being edited and the others not.
+    def test_shell_mirrors_native_from_denoise_pass1_on(self):
+        """fast_helical_shell.yaml is a bootstrap prologue followed by a
+        verbatim copy of fast_helical_native.yaml's tail. There is no
+        include mechanism, so the thing worth checking is that the copy has
+        not drifted.
 
         Everything but `output_root` (deliberately per-file) is compared:
         step id, class, dispatch, env, inputs, outputs, when, keep_loaded,
         and the raw params block. A bootstrap file may declare globals of
-        its own; what it may not do is disagree about one of full's.
+        its own; what it may not do is disagree about one of native's.
         """
-        full = WorkflowSpec.from_yaml(str(WORKFLOW_DIR / "fast_helical_full.yaml"))
-        for name, bootstrap in BOOTSTRAPS.items():
-            with self.subTest(workflow=name):
-                self._assert_mirrors_full(full, name, bootstrap)
+        native = WorkflowSpec.from_yaml(str(WORKFLOW_DIR / "fast_helical_native.yaml"))
+        native_tail = native.steps[len(BOOTSTRAPS["fast_helical_native"]):]
+        self._assert_mirrors_native(native, native_tail, "fast_helical_shell",
+                                     BOOTSTRAPS["fast_helical_shell"])
 
-    def _assert_mirrors_full(self, full, name, bootstrap):
-        native = WorkflowSpec.from_yaml(str(WORKFLOW_DIR / f"{name}.yaml"))
-        native_ids = [s.id for s in native.steps]
+    def _assert_mirrors_native(self, native, native_tail, name, bootstrap):
+        shell = WorkflowSpec.from_yaml(str(WORKFLOW_DIR / f"{name}.yaml"))
+        shell_ids = [s.id for s in shell.steps]
         self.assertEqual(
-            native_ids[: len(bootstrap)], bootstrap,
+            shell_ids[: len(bootstrap)], bootstrap,
             f"{name}'s bootstrap prologue has changed shape",
         )
-        tail = native.steps[len(bootstrap):]
+        tail = shell.steps[len(bootstrap):]
         self.assertEqual(
-            [s.id for s in tail], [s.id for s in full.steps],
-            f"{name}'s tail has drifted from fast_helical_full's steps",
+            [s.id for s in tail], [s.id for s in native_tail],
+            f"{name}'s tail has drifted from fast_helical_native's steps",
         )
         for step in tail:
-            twin = next(s for s in full.steps if s.id == step.id)
+            twin = next(s for s in native_tail if s.id == step.id)
             with self.subTest(step=step.id):
                 self.assertEqual(step.step, twin.step)
                 self.assertEqual(step.dispatch, twin.dispatch)
@@ -416,29 +411,15 @@ class TestWorkflowFiles(unittest.TestCase):
                 self.assertEqual(step.outputs, twin.outputs)
                 self.assertEqual(step.when, twin.when)
                 self.assertEqual(step.keep_loaded, twin.keep_loaded)
-                if step.id == "rerender_splat":
-                    # native threads a `framing` global through both its mesh
-                    # render and this step; the other two files have no mesh
-                    # render, so their rerender_splat frames at the default.
-                    self.assertEqual(
-                        step.params.get("framing"), "${globals.framing}",
-                        f"{name}'s rerender_splat should read the framing global",
-                    )
-                    self.assertNotIn("framing", twin.params)
-                    self.assertEqual(
-                        {k: v for k, v in step.params.items() if k != "framing"},
-                        twin.params,
-                    )
-                else:
-                    self.assertEqual(step.params, twin.params)
+                self.assertEqual(step.params, twin.params)
 
-        for key, value in full.globals.items():
+        for key, value in native.globals.items():
             if key == "output_root":
                 continue
             with self.subTest(glob=key):
                 self.assertEqual(
-                    native.globals.get(key), value,
-                    f"global '{key}' differs between {name} and fast_helical_full",
+                    shell.globals.get(key), value,
+                    f"global '{key}' differs between {name} and fast_helical_native",
                 )
 
     def test_output_switches_and_the_steps_they_guard_agree(self):
@@ -452,12 +433,12 @@ class TestWorkflowFiles(unittest.TestCase):
         are derived from the globals, so globals that do not match the steps
         mean the UI is offering the wrong choices.
 
-        Both shipped workflows declare all of these: fast_helical_native
-        mirrors fast_helical_full after its bootstrap prologue, exports
-        included. A workflow that declared a switch with no guarded step
-        (or the reverse) is what this still guards against. `run_upscale`
-        is in the list for the same reason — it is a global whose only job
-        is to gate steps.
+        The shipped workflow declares all of these, and the parked shell
+        file mirrors it after its own bootstrap prologue, exports included.
+        A workflow that declared a switch with no guarded step (or the
+        reverse) is what this still guards against. `run_upscale` is in the
+        list for the same reason — it is a global whose only job is to gate
+        steps.
         """
         switches = ("export_colmap", "export_ply", "export_colmap_preupscale",
                     "export_colmap_intermediate", "run_upscale")
@@ -504,10 +485,9 @@ class TestWorkflowFiles(unittest.TestCase):
 
         Optional reads are skipped, because "nothing writes this" is the
         case they exist for: `train_splat` takes the face splat's
-        supporting views when the face branch built them, trains without
-        them when it did not, and reads the same path in
-        fast_helical_full.yaml, which has no bootstrap to build them at
-        all. See pipeline/workflow.py.
+        supporting views when the face branch built them, and trains
+        without them when `face_splat: false` turns the branch off. See
+        pipeline/workflow.py.
         """
         seeded = {"dataset"}
         for path in _workflows():
@@ -719,8 +699,6 @@ class TestWorkflowFiles(unittest.TestCase):
 
         Three things, all of them wiring rather than code. The stage-2
         training's reads are optional (`?`), which is what lets
-        fast_helical_full.yaml — no bootstrap, no face branch — share the
-        same tail as the two files that can build them, and what lets
         `face_splat: false` turn the whole branch off without touching the
         training. The paths on both sides have to be the same ones, or the
         training silently gets nothing: an optional read of a path nothing

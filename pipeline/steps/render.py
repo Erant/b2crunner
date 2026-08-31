@@ -806,8 +806,8 @@ class RenderStep(Step):
             # renderer reuses framing_bounds/initial_rotation to keep a
             # re-render framed identically. framing_bounds is a nested
             # {preset: (min, max)} of ndarrays, which Dataset.to_disk()'s
-            # JSON filter used to drop whole — silently, so a disk-backed
-            # workflow (fast_helical_full) lost every preset and fell back
+            # JSON filter used to drop whole — silently, so any workflow's
+            # final `Dataset.to_disk()` lost every preset and fell back
             # to the splat's own bounds. cyber_6f's recorded b2c_extras
             # shows the ComfyUI save node dropping it the same way. The
             # filter now flattens nested arrays, so it survives.

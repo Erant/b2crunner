@@ -20,7 +20,7 @@ has and hasn't been verified on real hardware.
 | Volume mount path | **`/data`** | Not the `/workspace` default. See below. |
 | Volume size | 100 GB+ | HF checkpoints alone are ~60 GB, before any run output. |
 | Container disk | 20 GB | Only the image's own writable layer; nothing the pipeline writes should land here. |
-| **RAM** | **64 GB+** | Not optional for `fast_helical_full`. Its two denoise passes use `keep_loaded: true`, which holds ~47 GB of Wan weights resident in host RAM between them so they come off the volume once instead of twice. Too little and the worker is OOM-killed mid-run, which looks like a mysterious dead worker rather than a sizing mistake. `doctor` warns. Drop `keep_loaded` from the workflow if you must run smaller. |
+| **RAM** | **64 GB+** | Not optional for `fast_helical_native`. Its two denoise passes use `keep_loaded: true`, which holds ~47 GB of Wan weights resident in host RAM between them so they come off the volume once instead of twice. Too little and the worker is OOM-killed mid-run, which looks like a mysterious dead worker rather than a sizing mistake. `doctor` warns. Drop `keep_loaded` from the workflow if you must run smaller. |
 | HTTP ports | `7860` | The web UI. RunPod proxies it at `https://<pod-id>-7860.proxy.runpod.net`. |
 | TCP ports | `22` | SSH. Optional, but it is how you get a shell if the UI won't start. |
 
@@ -91,21 +91,18 @@ the version lines behind each of those.
 Open `https://<pod-id>-7860.proxy.runpod.net`. There is **one upload box**,
 and what you put in it decides what runs — no input picker:
 
-- **A dataset `.zip`** — any archive with a `metadata.json` in it, rooted at
-  the dataset or one level above; the extractor finds it either way. One
-  run. This is the path every verification run so far has used.
 - **A single reference-sheet image** — the from-scratch path. One square
   image with the subject facing front on the left and seen from behind on
   the right, as a diffusion model generates it. Runs
   `fast_helical_native.yaml`, which splits it (front half to the
   SAM-3D-Body reconstruction and the anchor warp, back half to the denoise
   pass as its reference view), renders its own anchored views, and then
-  runs `fast_helical_full`'s stages over that dataset — same `colmap/` and
-  `ply/` deliverables, same Outputs box. Since 2026-08-29 that prologue
-  builds a photo-to-splat shell from the front half and renders the frames
-  near the source view off it, which costs ~6.5 GB more prefetch (the
-  Sapiens2 pointmap head). **Least proven path**: none of the prologue has
-  ever executed end to end.
+  runs the workflow's own six-stage tail over that dataset — same
+  `colmap/` and `ply/` deliverables, same Outputs box. Since 2026-08-29
+  that prologue builds a photo-to-splat shell from the front half and
+  renders the frames near the source view off it, which costs ~6.5 GB more
+  prefetch (the Sapiens2 pointmap head). **Least proven path**: none of the
+  prologue has ever executed end to end.
 - **A `.zip` of image/prompt pairs** — `image1.jpg` + `image1.txt`,
   `image2.png` + `image2.txt`, ... Each image becomes its own
   reference-sheet run with its text file as the prompt, and the scheduler
@@ -114,9 +111,8 @@ and what you put in it decides what runs — no input picker:
   too: each is a reference sheet and the **Subject description** box is the
   prompt for all of them.
 
-The upload's format also picks the pipeline — there is no workflow picker.
-A dataset `.zip` runs `fast_helical_full`; an image or a zip of images runs
-`fast_helical_native`. The read-only **Pipeline** field shows which.
+Both shapes run `fast_helical_native` — there is no workflow picker. The
+read-only **Pipeline** field just confirms it.
 
 The **Params** panel is generated from the workflow and the steps in it,
 not typed as YAML. **Globals** at the top holds what the whole flow shares
@@ -127,7 +123,7 @@ sets. Knobs that exist because the underlying library has them, rather than
 because this pipeline tunes them, sit behind each section's **Advanced**
 fold.
 
-The per-step sections are why `fast_helical_full`'s two brush trainings and
+The per-step sections are why `fast_helical_native`'s two brush trainings and
 two denoise passes can be configured apart: `train_splat` and
 `train_final_splat` get a section each. Only what you actually change is
 submitted, so everything you leave alone stays owned by the workflow file
@@ -182,35 +178,32 @@ The same runs are available from the CLI, which is what you want for
 anything long enough that you would rather have it survive in `tmux`:
 
 ```bash
-python -m pipeline.cli run fast_helical_full --dataset /data/my_dataset
+python -m pipeline.cli run fast_helical_native --reference-image /data/sheet.png \
+    --prompt "a woman in a red jacket"
 
 # a bare name is a workflow global (resolution is the only tunable one); a
 # dotted one is that step's own param, which is how the two brush trainings
 # and the two denoise passes are told apart
-python -m pipeline.cli run fast_helical_full --dataset /data/my_dataset \
+python -m pipeline.cli run fast_helical_native --reference-image /data/sheet.png \
     --param 'resolution=[720, 1280]' --param denoise_pass1.steps=8 \
     --param train_final_splat.total_steps=15000
 
 # what a run would actually use, defaults included
-python -m pipeline.cli params fast_helical_full --all
+python -m pipeline.cli params fast_helical_native --all
 
 # without the upscaler, to see whether that is what is degrading the output
-python -m pipeline.cli run fast_helical_full --dataset /data/my_dataset \
+python -m pipeline.cli run fast_helical_native --reference-image /data/sheet.png \
     --param run_upscale=false
 
 # the same output switches the UI's Outputs box drives
-python -m pipeline.cli run fast_helical_full --dataset /data/my_dataset \
-    --param export_ply=false --param export_colmap_preupscale=true
-
-# from a front/back reference sheet instead
 python -m pipeline.cli run fast_helical_native --reference-image /data/sheet.png \
-    --prompt "a woman in a red jacket"
+    --param export_ply=false --param export_colmap_preupscale=true
 
 # the debug COLMAP exports, which the UI's Outputs box also drives:
 # colmap_intermediate/ is the dataset the FIRST brush training is handed
 # (denoised frames + their mattes and normals), colmap_preupscale/ the same
 # idea one stage before SeedVR2
-python -m pipeline.cli run fast_helical_full --dataset /data/my_dataset \
+python -m pipeline.cli run fast_helical_native --reference-image /data/sheet.png \
     --param export_colmap_intermediate=true
 ```
 
@@ -243,9 +236,8 @@ properties, in order of how much they matter:
 
   | Workflow | Blocks on | Total |
   |---|---|---|
-  | `fast_helical_full` (`run_upscale=false`) | rmbg, sapiens2, wan22, wan22_fp8, wan22_lora | ~52.7 GB |
-  | `fast_helical_full` | rmbg, sapiens2, wan22, wan22_fp8, wan22_lora, seedvr2 | ~58.7 GB |
-  | `fast_helical_native` | rmbg, sapiens2, sam3dbody, wan22, wan22_fp8, wan22_lora, seedvr2, mediapipe | ~61.5 GB |
+  | `fast_helical_native` (`run_upscale=false`) | rmbg, sapiens2, sapiens2_pointmap, sapiens2_seg, sam3dbody, moge2, mediapipe, wan22, wan22_fp8, wan22_lora | ~72.5 GB |
+  | `fast_helical_native` | rmbg, sapiens2, sapiens2_pointmap, sapiens2_seg, sam3dbody, moge2, mediapipe, wan22, wan22_fp8, wan22_lora, seedvr2 | ~78.5 GB |
 
   `wan22` is now only 11.9 GB — the base repo's text_encoder, VAE,
   tokenizer and scheduler. The transformers come from `wan22_fp8` (35.2 GB
@@ -412,5 +404,5 @@ the splat and the COLMAP export. The UI's Results tab zips it for download;
 The image does **not** arm an auto-shutdown. `scripts/pod_bootstrap.sh` has
 one (`runpodctl stop pod` after `AUTO_SHUTDOWN_HOURS`) that predates the
 container, and it is worth copying onto the pod for an unattended run —
-`fast_helical_full.yaml` at production settings is hours of GPU time, and a
+`fast_helical_native.yaml` at production settings is hours of GPU time, and a
 step that hangs bills exactly like a step that works.

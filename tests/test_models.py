@@ -175,8 +175,6 @@ class TestRequiredForSteps(unittest.TestCase):
                                    "sapiens2_seg", "sam3dbody", "moge2",
                                    "mediapipe", "wan22", "wan22_fp8",
                                    "wan22_lora", "seedvr2"},
-            "fast_helical_full": {"rmbg", "sapiens2", "wan22", "wan22_fp8",
-                                  "wan22_lora", "seedvr2"},
         }
         for workflow, expected in cases.items():
             with self.subTest(workflow=workflow):
@@ -190,7 +188,7 @@ class TestRequiredForSteps(unittest.TestCase):
         prefetch scans enabled_steps(), so with the upscale gated off,
         blocking on the upscaler's 6 GB before the run starts would defeat
         the point of turning it off."""
-        spec = WorkflowSpec.from_yaml(resolve_workflow("fast_helical_full"))
+        spec = WorkflowSpec.from_yaml(resolve_workflow("fast_helical_native"))
         spec.globals["run_upscale"] = False
         self.assertNotIn(
             "seedvr2",
@@ -200,7 +198,7 @@ class TestRequiredForSteps(unittest.TestCase):
     def test_a_when_skipped_step_is_not_waited_on(self):
         """The prefetch reads enabled_steps(), so switching an output off
         also drops whatever only that output needed."""
-        spec = WorkflowSpec.from_yaml(resolve_workflow("fast_helical_full"))
+        spec = WorkflowSpec.from_yaml(resolve_workflow("fast_helical_native"))
         spec.globals["export_colmap"] = False
         spec.globals["export_ply"] = False
         # export_normals is the last sapiens2 use outside stage 2, so this
@@ -211,7 +209,8 @@ class TestRequiredForSteps(unittest.TestCase):
         self.assertNotIn("train_final_splat", enabled)
         self.assertEqual(
             set(models.required_for_steps(s.step for s in spec.enabled_steps())),
-            {"rmbg", "sapiens2", "wan22", "wan22_fp8", "wan22_lora", "seedvr2"},
+            {"rmbg", "sapiens2", "sapiens2_pointmap", "sapiens2_seg", "sam3dbody",
+             "moge2", "mediapipe", "wan22", "wan22_fp8", "wan22_lora", "seedvr2"},
         )
 
 

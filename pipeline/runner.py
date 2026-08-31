@@ -232,9 +232,8 @@ class WorkflowRunner:
             # off, and the consumer is a step that runs either way. The
             # shipped case is the face splat's supporting views, which
             # `train_splat` takes when the face branch built them and
-            # trains without when it did not (and which
-            # fast_helical_full.yaml, having no bootstrap at all, never
-            # has). Steps that accept one must treat None as "not given",
+            # trains without when `face_splat: false` turns the branch
+            # off. Steps that accept one must treat None as "not given",
             # which is what every optional input already means to them.
             optional = path.endswith("?")
             path = path[:-1] if optional else path
@@ -275,7 +274,7 @@ class WorkflowRunner:
     def _get_dispatcher(self, step_spec: StepSpec) -> Dispatcher:
         # keep_loaded is part of the key, not just an argument to the first
         # build: two steps sharing an env is exactly how residency happens
-        # (fast_helical_full's denoise_pass1 and denoise_pass2 are both
+        # (fast_helical_native's denoise_pass1 and denoise_pass2 are both
         # subprocess/wan22, so they share one dispatcher and therefore one
         # resident worker). Without keep_loaded in the key, a third step on
         # the same env that did *not* ask for residency would inherit — or

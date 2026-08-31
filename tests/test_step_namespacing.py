@@ -3,7 +3,7 @@
 A workflow used to have one flat `params:` block, so anything a step needed
 was hoisted to the top of the file and hand-prefixed to keep two calls of
 that step from colliding (`brush_total_steps`, `mask_filter_size`,
-`upscale_resolution`). fast_helical_full calls `brush` twice and
+`upscale_resolution`). fast_helical_native calls `brush` twice and
 `wan22_vace_denoise` twice, and under that shape the two trainings could not
 be given different settings at all.
 

@@ -26,7 +26,7 @@ exception, which is what the old behaviour was actually for.
 **keep_loaded keeps the child alive.** Off by default, and with it off
 nothing below changes: one `python -m pipeline.worker <argv>` per call,
 which is the right shape for a step invoked once. It is wrong for
-`pipeline/workflows/fast_helical_full.yaml`, which calls
+`pipeline/workflows/fast_helical_native.yaml`, which calls
 `wan22_vace_denoise` at stage 1 and again at stage 4 with brush training, a
 splat re-render, an anchor re-inject and a mask in between — the calls
 cannot be merged, and each fresh process re-reads ~47 GB of weights off the
@@ -48,7 +48,7 @@ ids to correlate and no queue to drain.
 **Resident means resident in DRAM, not in VRAM.** The child hands the card
 back after every job (Step.release_vram plus an empty_cache, before it
 reports the job done) and keeps only the host-RAM copy. It has to: the
-steps between fast_helical_full's two denoise passes include `brush`,
+steps between fast_helical_native's two denoise passes include `brush`,
 which trains a Gaussian splat on the same GPU, and a worker sitting on ~35
 GB of Wan experts would OOM it — a regression over the reloading this
 replaces, not an improvement. Skipping the network read is the win;

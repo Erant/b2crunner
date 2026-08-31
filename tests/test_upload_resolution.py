@@ -2,9 +2,9 @@
 pairs fans out into one run each.
 
 There is no input picker any more: `webui.resolve_upload` looks at what was
-uploaded and decides. These pin the three shapes it understands — a dataset
-`.zip`, a bare reference-sheet image, and a `.zip` of `image1.jpg` /
-`image1.txt` pairs — plus the lenient "images, no `.txt`" case.
+uploaded and decides. These pin the two shapes it understands — a bare
+reference-sheet image, and a `.zip` of `image1.jpg` / `image1.txt` pairs —
+plus the lenient "images, no `.txt`" case.
 
 `pipeline.webui` imports gradio, so this skips rather than fails where the
 UI's own dependency isn't installed — same rule the other UI tests use.
@@ -55,8 +55,7 @@ class UploadResolutionTests(unittest.TestCase):
             "image1.jpg": b"jpgbytes", "image1.txt": b"a woman in red\n",
             "image2.png": b"pngbytes", "image2.txt": b"  a man in blue  ",
         })
-        dataset_dir, plan = webui.resolve_upload(str(src), "")
-        self.assertIsNone(dataset_dir)
+        plan = webui.resolve_upload(str(src), "")
         self.assertEqual([prompt for _, prompt in plan], ["a woman in red", "a man in blue"])
         self.assertEqual([Path(img).name for img, _ in plan], ["image1.jpg", "image2.png"])
 
@@ -73,7 +72,7 @@ class UploadResolutionTests(unittest.TestCase):
     def test_a_zip_of_images_with_no_txt_uses_the_subject_box(self):
         src = self.tmp / "sheets.zip"
         _zip(src, {"a.jpg": b"x", "b.jpg": b"x", "readme.md": b"hi"})
-        _dir, plan = webui.resolve_upload(str(src), "fallback subject")
+        plan = webui.resolve_upload(str(src), "fallback subject")
         self.assertEqual(
             [prompt for _, prompt in plan], ["fallback subject", "fallback subject"]
         )
@@ -81,7 +80,7 @@ class UploadResolutionTests(unittest.TestCase):
     def test_an_empty_pair_txt_falls_back_to_the_subject_box(self):
         src = self.tmp / "pairs.zip"
         _zip(src, {"a.jpg": b"x", "a.txt": b"   \n"})
-        _dir, plan = webui.resolve_upload(str(src), "fallback")
+        plan = webui.resolve_upload(str(src), "fallback")
         self.assertEqual(plan[0][1], "fallback")
 
     def test_a_macosx_sidecar_and_a_nested_folder_are_handled(self):
@@ -90,11 +89,11 @@ class UploadResolutionTests(unittest.TestCase):
             "batch/image1.jpg": b"x", "batch/image1.txt": b"one",
             "__MACOSX/batch/._image1.jpg": b"junk",
         })
-        _dir, plan = webui.resolve_upload(str(src), "")
+        plan = webui.resolve_upload(str(src), "")
         self.assertEqual(len(plan), 1)
         self.assertEqual(plan[0][1], "one")
 
-    def test_a_zip_with_neither_images_nor_metadata_is_an_error(self):
+    def test_a_zip_with_no_images_is_an_error(self):
         src = self.tmp / "empty.zip"
         _zip(src, {"notes.md": b"nothing here"})
         with self.assertRaises(gr.Error):
@@ -106,26 +105,12 @@ class UploadResolutionTests(unittest.TestCase):
         with self.assertRaises(gr.Error):
             webui.resolve_upload(str(src), "")
 
-    # -- a dataset .zip ------------------------------------------------------
-
-    def test_a_zip_with_metadata_json_resolves_to_a_dataset_dir(self):
-        src = self.tmp / "ds.zip"
-        _zip(src, {
-            "initial/metadata.json": b'{"resolution": [4, 4]}',
-            "initial/frame_00001_.png": b"x",
-        })
-        dataset_dir, plan = webui.resolve_upload(str(src), "hello")
-        self.assertIsNotNone(dataset_dir)
-        self.assertEqual(Path(dataset_dir).name, "initial")
-        self.assertEqual(plan, [(None, "hello")])
-
     # -- a bare image -----------------------------------------------------
 
     def test_a_bare_image_is_one_reference_run_saved_to_the_volume(self):
         img = self.tmp / "sheet.png"
         img.write_bytes(b"pngbytes")
-        dataset_dir, plan = webui.resolve_upload(str(img), "a subject")
-        self.assertIsNone(dataset_dir)
+        plan = webui.resolve_upload(str(img), "a subject")
         self.assertEqual(len(plan), 1)
         saved, prompt = plan[0]
         self.assertEqual(prompt, "a subject")
@@ -137,40 +122,6 @@ class UploadResolutionTests(unittest.TestCase):
         bad.write_text("hi")
         with self.assertRaises(gr.Error):
             webui.resolve_upload(str(bad), "")
-
-
-class WorkflowFromUploadTests(unittest.TestCase):
-    """The upload's format picks the workflow — there is no picker."""
-
-    def setUp(self):
-        self._tmp = TemporaryDirectory()
-        self.tmp = Path(self._tmp.name)
-        self.addCleanup(self._tmp.cleanup)
-
-    def test_workflow_for_a_dataset_dir_vs_an_image_plan(self):
-        self.assertEqual(webui.workflow_for(Path("/x/initial")), webui.WORKFLOW_DATASET)
-        self.assertEqual(webui.workflow_for(None), webui.WORKFLOW_NATIVE)
-
-    def test_peek_a_dataset_zip_without_extracting_it(self):
-        src = self.tmp / "ds.zip"
-        _zip(src, {"initial/metadata.json": b"{}", "initial/x.png": b"x"})
-        self.assertEqual(webui.peek_upload_workflow(str(src)), webui.WORKFLOW_DATASET)
-
-    def test_peek_a_pairs_zip_is_the_native_path(self):
-        src = self.tmp / "pairs.zip"
-        _zip(src, {"a.jpg": b"x", "a.txt": b"p"})
-        self.assertEqual(webui.peek_upload_workflow(str(src)), webui.WORKFLOW_NATIVE)
-
-    def test_peek_a_bare_image_and_nothing_attached(self):
-        img = self.tmp / "sheet.png"
-        img.write_bytes(b"x")
-        self.assertEqual(webui.peek_upload_workflow(str(img)), webui.WORKFLOW_NATIVE)
-        self.assertEqual(webui.peek_upload_workflow(None), webui.WORKFLOW_DATASET)
-
-    def test_peek_a_macosx_metadata_sidecar_does_not_count_as_a_dataset(self):
-        src = self.tmp / "pairs.zip"
-        _zip(src, {"a.jpg": b"x", "a.txt": b"p", "__MACOSX/metadata.json": b"junk"})
-        self.assertEqual(webui.peek_upload_workflow(str(src)), webui.WORKFLOW_NATIVE)
 
 
 class OutputGlobalsTests(unittest.TestCase):

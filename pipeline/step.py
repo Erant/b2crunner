@@ -251,7 +251,7 @@ class Step(ABC):
             wan22_vace_denoise.
 
         `keep_loaded` exists to skip the *network* read, not to squat on
-        the card. fast_helical_full.yaml runs `brush` — a GPU program —
+        the card. fast_helical_native.yaml runs `brush` — a GPU program —
         between its two `wan22_vace_denoise` passes, so a resident worker
         that held ~35 GB of Wan experts in VRAM across that gap would OOM
         brush on any card in existence: strictly worse than the

@@ -1,6 +1,6 @@
 """`keep_loaded: true` keeps a subprocess step's model resident between calls.
 
-The measurement this exists for: `pipeline/workflows/fast_helical_full.yaml`
+The measurement this exists for: `pipeline/workflows/fast_helical_native.yaml`
 invokes `wan22_vace_denoise` twice — stage 1 and stage 4, with brush
 training, a splat re-render, an anchor re-inject and a mask in between, so
 the two calls cannot be merged. Under the one-process-per-call dispatch that
@@ -121,7 +121,7 @@ class TestResidency(unittest.TestCase):
         self.assertNotEqual(first["pid"], second["pid"], "the one-shot path reused a process")
 
     def test_run_params_that_do_not_affect_load_do_not_reload(self):
-        """fast_helical_full's actual difference between the passes.
+        """fast_helical_native's actual difference between the passes.
 
         denoise_pass1 and denoise_pass2 differ only in `strength` (1.0 vs
         0.8), which `Wan22VaceDenoiseStep.load()` never reads. A rule that
@@ -182,7 +182,7 @@ class TestResidency(unittest.TestCase):
 class TestVramEviction(unittest.TestCase):
     """Residency is DRAM residency. The card goes back after every job.
 
-    `brush` — a GPU program — runs between fast_helical_full's two denoise
+    `brush` — a GPU program — runs between fast_helical_native's two denoise
     passes. A resident worker that kept ~35 GB of Wan experts in VRAM
     across that gap would OOM it on any card, which is strictly worse than
     the reload-every-time behaviour keep_loaded replaces. What keep_loaded
@@ -441,7 +441,7 @@ class TestWiring(unittest.TestCase):
         """Otherwise residency is decided by YAML declaration order.
 
         Two steps sharing dispatch+env is exactly how they come to share a
-        resident worker (fast_helical_full's two denoise passes). A third
+        resident worker (fast_helical_native's two denoise passes). A third
         step on the same env that did not ask for residency must not
         inherit it, and must not deny it to the two that did.
         """
@@ -497,7 +497,7 @@ class TestWiring(unittest.TestCase):
         self.assertIs(signature["use_lora"], True)
 
     def test_a_per_call_param_does_not_move_the_signature(self):
-        """fast_helical_full's two passes differ only by `strength`, and a
+        """fast_helical_native's two passes differ only by `strength`, and a
         signature that moved with it would reload ~47 GB between them."""
         from pipeline.steps.wan22_vace_denoise import Wan22VaceDenoiseStep
 

@@ -141,18 +141,15 @@ pipeline/
 │   └── seedvr2/         requirements.txt + setup.sh (vendors
 │                      numz/ComfyUI-SeedVR2_VideoUpscaler)
 ├── workflows/
-│   ├── fast_helical_full.yaml   full native port of the ComfyUI `fast
-│   │                            helical` pipeline; every step exists and
-│   │                            the file validates, but it has never been
-│   │                            executed. `run_upscale: false` gates out
-│   │                            the SeedVR2 upscale (and the camera
-│   │                            rescale that repairs what it invalidates)
-│   │                            — the old fast_helical.yaml — for
-│   │                            isolating the upscaler when output looks
-│   │                            wrong
 │   ├── fast_helical_native.yaml a bootstrap prologue from a front/back
-│                                sheet, then fast_helical_full.yaml's steps
-│                                verbatim: split → sam3d_body →
+│                                sheet, then the full native port of the
+│                                ComfyUI `fast helical` pipeline verbatim.
+│                                `run_upscale: false` gates out the SeedVR2
+│                                upscale (and the camera rescale that
+│                                repairs what it invalidates) — the old
+│                                fast_helical.yaml — for isolating the
+│                                upscaler when output looks wrong. The
+│                                bootstrap: split → sam3d_body →
 │                                detect_face_landmarks → map_face_to_mesh →
 │                                fit_head_to_face (the mesh head re-fitted
 │                                to the photo's face, in the body model's
@@ -310,10 +307,10 @@ in-memory between steps; disk only enters the picture via a `save_dataset`/
 ### Workflow YAML
 
 ```yaml
-name: fast_helical_full
+name: fast_helical_native
 globals:                     # flow-wide knobs, referenced via ${globals.x}
   resolution: [720, 1280]    # the render size, and wan22_vace_denoise's w/h
-  output_root: output/fast_helical
+  output_root: output/fast_helical_native
   export_ply: true
 
 steps:
@@ -341,7 +338,7 @@ on, and it is the only scope `${...}` resolves against. Everything else
 belongs under the step that consumes it, where it overrides the default that
 step's class declares — so a param absent from the file is not unset, it is
 at its declared default. That split is what lets one workflow call the same
-step twice and configure the two calls apart: `fast_helical_full.yaml` trains
+step twice and configure the two calls apart: `fast_helical_native.yaml` trains
 `brush` twice (`train_splat`, `train_final_splat`) and denoises twice
 (`denoise_pass1`, `denoise_pass2`), which under the old single flat `params:`
 block meant hand-prefixed names like `brush_total_steps` and no way to tune
@@ -357,11 +354,11 @@ exists for one shape — a `when:`-gated branch feeding a step that runs
 either way — because a gated step's outputs are simply not in the Context
 when it is off, and there is otherwise no way to say "take these if they
 were built". The shipped case is the face splat's supporting views:
-`face_support_views` writes them under `${globals.face_splat}`, both brush
-trainings read them with a `?`, and `fast_helical_full.yaml` reads the same
-paths while having no bootstrap that could ever write them. Everything else
-stays required, which is what keeps a typo'd path a failure rather than a
-silently missing input.
+`face_support_views` writes them under `${globals.face_splat}`, and both
+brush trainings read them with a `?` — trained without them when
+`face_splat: false` turns the branch off. Everything else stays required,
+which is what keeps a typo'd path a failure rather than a silently missing
+input.
 
 `when:` is what makes a workflow's tail optional. It resolves like any
 param value, and a falsy result skips the step entirely — its inputs are
@@ -377,8 +374,8 @@ is an hour of GPU. `false`, `no`, `off`, `0` and the empty string are all
 falsy as *strings* too — a `when:` usually resolves through a param
 somebody typed, and `bool("false")` is `True`.
 
-See `pipeline/workflows/fast_helical_full.yaml` for a full multi-step
-example, and `fast_helical_native.yaml` for the from-an-image shape.
+See `pipeline/workflows/fast_helical_native.yaml` for a full multi-step,
+from-an-image example.
 
 ### envs.yaml
 
@@ -408,14 +405,14 @@ uv pip install -e .                              # this pipeline package, so `pi
 ## Running today
 
 ```bash
-python -m pipeline.cli run fast_helical_full \
-    --dataset path/to/existing/b2c_dataset -v
+python -m pipeline.cli run fast_helical_native \
+    --reference-image path/to/sheet.png -v
 
 # Validate a workflow references only real, registered steps (doesn't execute)
 python -c "
 from pipeline import steps
 from pipeline.workflow import WorkflowSpec
-spec = WorkflowSpec.from_yaml('pipeline/workflows/fast_helical_full.yaml')
+spec = WorkflowSpec.from_yaml('pipeline/workflows/fast_helical_native.yaml')
 print(spec.name, [s.step for s in spec.steps])
 "
 ```
@@ -705,8 +702,7 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   The **final** training takes no supporting views at all: by then the
   dataset is the helical re-render, denoised a second time and upscaled,
   and these renders are the bootstrap's. `train_splat` reads them through
-  an optional `?` path, so `face_splat: false` and
-  `fast_helical_full.yaml` (no bootstrap at all) train exactly as before.
+  an optional `?` path, so `face_splat: false` trains exactly as before.
   `tests/test_support_views.py`.
 - `refine_pose_to_splat` (`pose_refine.py`) — re-poses a SAM-3D-Body fit so
   its mesh agrees with that shell in novel views, which is what stops the
@@ -985,8 +981,9 @@ that sheet in `split_reference_sheet` and keep only the back half as
 | `outline.json` | yes | adds `filter_fov` + `rotate_views` + `replace_views` |
 
 Every stage of every ComfyUI pipeline YAML now has a native equivalent, and
-`pipeline/workflows/fast_helical_full.yaml` is the full six-stage port of
-`workflows/pipeline/fast helical.yaml`. **None of it has been executed
+`pipeline/workflows/fast_helical_native.yaml`'s tail (from `denoise_pass1`
+on) is the full six-stage port of `workflows/pipeline/fast helical.yaml`.
+**None of it has been executed
 end-to-end** — that is the next milestone. `brush` and `render`'s
 rasterisers are now individually verified on GPU (2026-08-23, a local RTX
 4070 Ti — see `docs/docker-build-notes.md`); the remaining unexecuted
@@ -1024,7 +1021,7 @@ binary call and through the actual pipeline step against all 81 of
 `cyber_6f`'s real cameras. That reframes the list below: it's no longer
 "everything needs a GPU pod", RunPod-specific provisioning questions aside.
 
-1. **Run `fast_helical_full.yaml` end to end.** Every stage now has a
+1. **Run `fast_helical_native.yaml` end to end.** Every stage now has a
    native step, each has run individually, but the full sequence never
    has. Expect to debug it stage by stage — insert `save_dataset` steps
    between stages while doing so, since there is no resume-from-stage
@@ -1042,7 +1039,7 @@ binary call and through the actual pipeline step against all 81 of
    toolkit need the same driver-library completeness this box needed", not
    a capabilities-flag question.
 3. **DONE — Wan weights: 81 GB read twice per run -> 47 GB read once.**
-   `fast_helical_full` invokes `wan22_vace_denoise` twice
+   `fast_helical_native` invokes `wan22_vace_denoise` twice
    (`denoise_pass1`, `denoise_pass2`), and the two cannot be merged: brush
    training, splat render, `inject_anchor` and `mask_splat` sit between
    them. Fixed from both ends:
@@ -1088,7 +1085,7 @@ binary call and through the actual pipeline step against all 81 of
    pulls — `text_encoder/` is 11.36 GB of the remaining 47, a ~5.7B-param
    UMT5EncoderModel in bf16 — and all it does is turn a prompt into an
    embedding. It is loaded, used for a few hundred tokens, and then sits in
-   memory for the whole run. `fast_helical_full` also sets `cfg: 1.0` (the
+   memory for the whole run. `fast_helical_native` also sets `cfg: 1.0` (the
    Lightning distill LoRA is what makes 6-step cfg-1.0 sampling work), so
    there is no classifier-free guidance and the negative prompt is encoded
    and then contributes nothing at all.

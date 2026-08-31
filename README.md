@@ -4,26 +4,25 @@ Standalone (non-ComfyUI) execution engine for the Body2COLMAP pipeline,
 extracted from `ComfyUI-Body2COLMAP/pipeline`. See [pipeline/README.md](pipeline/README.md)
 for the full design doc, module map, and current status.
 
-Every node in the ComfyUI pack now has a native counterpart. Two
-workflows ship:
+Every node in the ComfyUI pack now has a native counterpart. One workflow
+ships:
 
 | workflow | starts from | stages |
 |---|---|---|
-| `fast_helical_full` | an existing dataset | the full port of the ComfyUI `fast helical` pipeline. `--param run_upscale=false` drops the SeedVR2 upscale (the old `fast_helical` workflow) to isolate it when output looks wrong |
-| `fast_helical_native` | a front/back reference sheet | a bootstrap prologue — split the sheet, reconstruct a body, nod the craned head back, build a Gaussian splat of the subject's face from a crop of the front half and composite it onto a circular orbit of outline+skeleton renders, warp the photo onto the anchor frame — then `fast_helical_full`'s stages verbatim |
+| `fast_helical_native` | a front/back reference sheet | a bootstrap prologue — split the sheet, reconstruct a body, nod the craned head back, build a Gaussian splat of the subject's face from a crop of the front half and composite it onto a circular orbit of outline+skeleton renders, warp the photo onto the anchor frame — then the full native port of the ComfyUI `fast helical` pipeline: two denoise passes and two brush trainings around a helical re-render. `--param run_upscale=false` drops the SeedVR2 upscale (the old `fast_helical` workflow) to isolate it when output looks wrong |
 
-A third file, `fast_helical_shell.yaml`, is **parked**: it replaces that
+A second file, `fast_helical_shell.yaml`, is **parked**: it replaces that
 whole bootstrap with a photo-to-splat *shell* — a body-wide Gaussian shell
 from `pointmap_splat`, a pose refit against it, a shallow 380° helix, and a
-band of frames rendered off the shell instead of drawn. Nothing selects it
-(the web UI maps an image upload to `fast_helical_native` by name), so it
-runs only if you ask: `python -m pipeline.cli run fast_helical_shell`. It is
-kept in the tree so the face splat can be tested without it.
+band of frames rendered off the shell instead of drawn. Its tail past the
+bootstrap is a verbatim copy of `fast_helical_native`'s own — kept in sync
+by `tests/test_workflows.py`. Nothing selects it (the web UI maps an image
+upload to `fast_helical_native` by name), so it runs only if you ask:
+`python -m pipeline.cli run fast_helical_shell`. It is kept in the tree so
+the face splat can be tested without it.
 
-**Neither shipped workflow has been run end-to-end on a pod**, and `fast_helical_native` is
-the less proven of the two: its bootstrap prologue has never executed on
-real hardware. Past the prologue it is a copy of `fast_helical_full` —
-kept in sync by `tests/test_workflows.py`. The
+**`fast_helical_native` has not been run end-to-end on a pod** — its
+bootstrap prologue has never executed on real hardware. The
 [coverage section](pipeline/README.md#coverage-vs-the-comfyui-node-pack)
 tracks what is verified against what.
 
@@ -55,37 +54,33 @@ needs `scipy`, which arrives anyway as a transitive dependency of
 ## Quickstart
 
 ```bash
-# the full pipeline against an existing dataset
-python -m pipeline.cli run fast_helical_full --dataset path/to/b2c_dataset \
-    --prompt "a woman in a red jacket"
-
-# the same thing without the upscaler
-python -m pipeline.cli run fast_helical_full --dataset path/to/b2c_dataset \
-    --param run_upscale=false
-
-# just the COLMAP dataset — skips a 30,000-iteration brush training
-python -m pipeline.cli run fast_helical_full --dataset path/to/b2c_dataset \
-    --param export_ply=false
-
-# every param a workflow resolves: its globals, then each step's own
-python -m pipeline.cli params fast_helical_full
-
-# or from a front/back reference sheet (subject facing front on the left,
-# seen from behind on the right) — the workflow splits it and renders its own views
+# from a front/back reference sheet (subject facing front on the left, seen
+# from behind on the right) — the workflow splits it and renders its own views
 python -m pipeline.cli run fast_helical_native --reference-image sheet.png \
     --prompt "a woman in a red jacket"
 
+# the same thing without the upscaler
+python -m pipeline.cli run fast_helical_native --reference-image sheet.png \
+    --param run_upscale=false
+
+# just the COLMAP dataset — skips a 30,000-iteration brush training
+python -m pipeline.cli run fast_helical_native --reference-image sheet.png \
+    --param export_ply=false
+
+# every param a workflow resolves: its globals, then each step's own
+python -m pipeline.cli params fast_helical_native
+
 # the COLMAP dataset the first brush training is handed, for when the
 # helical re-render comes out wrong and the question is what it trained on
-python -m pipeline.cli run fast_helical_full --dataset path/to/b2c_dataset \
+python -m pipeline.cli run fast_helical_native --reference-image sheet.png \
     --param export_colmap_intermediate=true
 
 # what can this machine actually run? (GPU, Vulkan, EGL, venvs, HF access)
 python -m pipeline.cli doctor
 
-# the web UI: upload a dataset .zip, a reference sheet, or a .zip of
-# image/prompt pairs (one run per pair, fanned across every GPU); watch
-# progress, pull the result back as one .zip
+# the web UI: upload a reference sheet, or a .zip of image/prompt pairs (one
+# run per pair, fanned across every GPU); watch progress, pull the result
+# back as one .zip
 python -m pipeline.cli ui            # needs `pip install 'gradio>=5.0,<7.0'`
 
 python -m pipeline.cli workflows     # what's available

@@ -2,7 +2,7 @@
 
 These are the hooks that make `keep_loaded: true` safe on this step, and
 they are easy to get wrong in a way nothing catches until a pod run OOMs:
-`fast_helical_full` trains a Gaussian splat with `brush` — on the GPU —
+`fast_helical_native` trains a Gaussian splat with `brush` — on the GPU —
 between the two denoise passes, so the pipeline must be off the card by the
 time `run()` returns while its ~47 GB of weights stay in host RAM.
 

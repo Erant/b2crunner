@@ -19,7 +19,8 @@
 # tests/test_workflows.py.
 #
 # The from-a-sheet path: build the initial multi-view dataset from one
-# front/back reference sheet, then run fast_helical_full's pipeline over it.
+# front/back reference sheet, then run the shared from-a-sheet tail over it
+# (see FROM denoise_pass1 ON, below).
 #
 # BOOTSTRAP (this file only) — split_sheet -> reconstruct_body ->
 # front_matte -> front_normals -> shell_splat -> refine_pose ->
@@ -32,9 +33,9 @@
 # itself now (`render_mode: outline+skeleton+splat`) and reads the .ply
 # optionally, so the branch being off leaves it with nothing to composite
 # rather than nothing to resolve.
-# This is the part fast_helical_full is handed ready-made: a dataset whose
-# extras carry orbit_target / focal_length_mm / framing_bounds, whose frames
-# near the source view are photoreal (VACE mask 0.0, "keep it") among
+# This is what the bootstrap hands the shared tail, ready-made: a dataset
+# whose extras carry orbit_target / focal_length_mm / framing_bounds, whose
+# frames near the source view are photoreal (VACE mask 0.0, "keep it") among
 # skeleton renders (VACE mask 1.0). cyber_6f/initial is the older shape of
 # that same thing — a warped photograph injected at one anchored frame —
 # and this file no longer builds it that way; see below.
@@ -128,24 +129,23 @@
 # at 1.6). A ratio near 1.6 means the shell is stretched in depth and the
 # substituted frames will look over-rotated. See steps/pointmap_splat.py.
 #
-# FROM denoise_pass1 ON — identical to fast_helical_full.yaml, step for step,
-# id for id. The two files are maintained as copies (there is no include
-# mechanism); keep this tail in sync with fast_helical_full.yaml.
+# FROM denoise_pass1 ON — identical to fast_helical_native.yaml, step for
+# step, id for id. The two files are maintained as copies (there is no
+# include mechanism); keep this tail in sync with fast_helical_native.yaml.
 # tests/test_workflows.py checks it has not drifted.
 #
-# STATUS: never executed end-to-end, and the least proven of the two.
-# render's rasterization and generate_firstlast's warp have never run on real
-# hardware (their module docstrings); the shell half has run once, locally,
-# outside the workflow machinery (output/smoke_shell_helical/ — 81-frame
-# helix, shell, splat re-render, band substitution, ~25 s on a 4070 Ti; the
-# anchor gate passed at a best-fit shift of (1, 0) px and novel views held to
-# about +-19 deg), and no diffusion pass has ever been conditioned on a batch
-# it produced. Everything from denoise_pass1 on carries fast_helical_full's
-# own status. Treat this as the thing to debug on a GPU pod, not a working
-# recipe.
+# STATUS: never executed end-to-end. render's rasterization and
+# generate_firstlast's warp have never run on real hardware (their module
+# docstrings); the shell half has run once, locally, outside the workflow
+# machinery (output/smoke_shell_helical/ — 81-frame helix, shell, splat
+# re-render, band substitution, ~25 s on a 4070 Ti; the anchor gate passed
+# at a best-fit shift of (1, 0) px and novel views held to about +-19 deg),
+# and no diffusion pass has ever been conditioned on a batch it produced.
+# Everything from denoise_pass1 on shares fast_helical_native's status.
+# Treat this as the thing to debug on a GPU pod, not a working recipe.
 #
 # Stage 6 produces the run's deliverables under output_root, exactly as
-# fast_helical_full does:
+# fast_helical_native does:
 #
 #   colmap/              cameras.txt + images.txt + points3D.txt, images/, normals/
 #   ply/                 scene.ply — a second brush training, normal-supervised
@@ -158,7 +158,7 @@
 #
 # export_colmap / export_ply switch the first two off; export_colmap_preupscale
 # (with run_upscale on) opts into the third. The web UI's Outputs box drives
-# all of them plus the "Upscale dataset" toggle. Same as fast_helical_full.yaml.
+# all of them plus the "Upscale dataset" toggle. Same as fast_helical_native.yaml.
 #
 # The input is not a photo of the subject: it is the two-panel sheet a
 # diffusion model generates, subject facing front on the left and seen from
@@ -181,7 +181,7 @@ description: >-
   From a front/back reference sheet: split it, reconstruct a body, build a
   Gaussian shell from the front half, re-pose the body to agree with it,
   render a shallow 380-degree helix with the frames near the source view
-  taken from that shell, then run fast_helical_full's six-stage pipeline over the
+  taken from that shell, then run the shared six-stage tail over the
   result — denoise, train+re-render a splat, mask, denoise again, upscale,
   export a COLMAP dataset and/or a normal-supervised .ply.
 
@@ -226,13 +226,13 @@ globals:
   face_splat: true
 
   # Which deliverables stage 6 produces; both default on. Same switches,
-  # same `when:` gating and same web-UI meaning as the other two files.
+  # same `when:` gating and same web-UI meaning as fast_helical_native.yaml.
   export_colmap: true
   export_ply: true
 
   # Whether the SeedVR2 upscale (stage 5) runs, with `rescale_cameras`
   # behind it to repair the intrinsics it invalidates. Same toggle and
-  # default as the other two files — keep them in sync.
+  # default as fast_helical_native.yaml — keep them in sync.
   run_upscale: true
 
   # Debug: also export the COLMAP dataset that the FIRST brush training is
@@ -255,9 +255,9 @@ globals:
 
 steps:
   # ================================================================ bootstrap
-  # Build the dataset fast_helical_full expects as its input — but through
+  # Build the dataset the shared tail expects as its input — but through
   # the shell. Everything from `denoise_pass1` on is a verbatim copy of
-  # fast_helical_full.yaml.
+  # fast_helical_native.yaml's tail.
 
   # The front half feeds sam3d_body and the shell; the back half becomes
   # the VACE reference image, the one view nothing else in the batch can
@@ -723,9 +723,9 @@ steps:
   # re-render, denoised again and upscaled, while these renders are still
   # the circular bootstrap's — stale path, stale resolution. The `?` on
   # `train_splat`'s reads is an optional read (see pipeline/workflow.py),
-  # so this file, the shell file and fast_helical_full.yaml can share one
-  # tail: with the face branch off, or in a workflow that has no bootstrap
-  # at all, nothing writes that path and brush trains exactly as before.
+  # so this file and fast_helical_native.yaml can share one tail: with the
+  # face branch off (`face_splat: false`), nothing writes that path and
+  # brush trains exactly as before.
   - id: face_support_views
     step: select_support_views
     dispatch: in_process
@@ -835,9 +835,9 @@ steps:
       view_roles: scene.shell_view_roles
 
   # ================================================================
-  # From here down: a verbatim copy of fast_helical_full.yaml's steps, and
-  # therefore of fast_helical_native.yaml's tail. Keep all three in sync —
-  # tests/test_workflows.py checks they have not drifted.
+  # From here down: a verbatim copy of fast_helical_native.yaml's tail.
+  # Keep the two in sync — tests/test_workflows.py checks they have not
+  # drifted.
   # ================================================================
 
   # ---------------------------------------------------------------- stage 1
@@ -1019,12 +1019,12 @@ steps:
   # of those are steps/splat.py's declared defaults, so this block only has
   # to say what the helical path itself is.
   #
-  # `framing: ${globals.framing}` is the ONE param that intentionally
-  # differs from fast_helical_full.yaml's otherwise-identical rerender_splat
-  # (test_workflows.py's mirror check carves it out). The other two files
-  # have no mesh render, so nothing there to keep a `framing` global in step
-  # with — but here render_initial_views framed the mesh at that preset, and
-  # the splat re-render has to match it.
+  # `framing: ${globals.framing}` keeps this render in step with
+  # render_initial_views, which frames the mesh at that same preset — the
+  # splat re-render has to match it or the two disagree about how tight the
+  # body fills the frame. fast_helical_native.yaml carries the identical
+  # param for the same reason; test_workflows.py's mirror check expects the
+  # two to agree.
   - id: rerender_splat
     step: render_splat
     dispatch: in_process

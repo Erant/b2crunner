@@ -246,7 +246,7 @@ class Wan22VaceDenoiseStep(Step):
     #
     # The per-call params are deliberately ABSENT: `strength`, `steps`,
     # `cfg`, `seed`, `prompt`, `negative_prompt`, `width`, `height`,
-    # `subject_desc`. That is the whole point — fast_helical_full's two
+    # `subject_desc`. That is the whole point — fast_helical_native's two
     # passes differ only by `strength` (1.0 then 0.8), so listing it here
     # would rebuild the pipeline between them and buy nothing at all.
     LOAD_PARAMS = (
@@ -404,7 +404,7 @@ class Wan22VaceDenoiseStep(Step):
 
         Called by the resident worker after every job so `brush` — which
         runs on the GPU between this step's two passes in
-        fast_helical_full — finds an empty card. Without this override the
+        fast_helical_native — finds an empty card. Without this override the
         base-class no-op leaves the experts resident and brush OOMs; see
         Step.release_vram.
 

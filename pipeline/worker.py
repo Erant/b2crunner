@@ -17,7 +17,7 @@ it, unload, exit. One process per invocation.
 **Serve** (`--serve`, selected by `keep_loaded: true`) — the same work, but
 in a loop, one request per line of JSON on stdin, with the Step instance
 kept alive between jobs. This exists because `pipeline/workflows/
-fast_helical_full.yaml` calls `wan22_vace_denoise` twice with six other
+fast_helical_native.yaml` calls `wan22_vace_denoise` twice with six other
 steps in between, so the two calls cannot be merged; under the one-shot mode
 that is ~47 GB of weights read off a RunPod network volume *twice*. The pod
 has the DRAM to hold them; the network drive should be paid once.
@@ -209,7 +209,7 @@ def load_signature(step_class, params):
         name alone and has never compared params.
       * The alternative default — reload whenever any param differs —
         would reload on `strength: 1.0` -> `strength: 0.8` in
-        fast_helical_full.yaml, i.e. it would do nothing at all for the
+        fast_helical_native.yaml, i.e. it would do nothing at all for the
         only workflow this feature exists for. A default that silently
         no-ops the feature is worse than one that trusts an opt-in flag.
 
@@ -261,7 +261,7 @@ def release_vram(logger, step) -> None:
     """Partial eviction: VRAM back to the driver, weights left in host RAM.
 
     Called after EVERY job a resident worker serves, which is the whole
-    reason `keep_loaded` is safe to turn on. fast_helical_full.yaml puts
+    reason `keep_loaded` is safe to turn on. fast_helical_native.yaml puts
     `brush` — a GPU program — between its two `wan22_vace_denoise` passes;
     a worker that sat on ~35 GB of Wan experts across that gap would OOM
     brush on any card, i.e. would be a regression over the reload-every-

@@ -118,15 +118,12 @@ class TestResultBundle(unittest.TestCase):
 
 
 class TestOutputSelection(unittest.TestCase):
-    def test_the_shipped_workflows_offer_both(self):
-        """Both declare export_colmap / export_ply — fast_helical_native
-        mirrors fast_helical_full past its bootstrap."""
-        for name in ("fast_helical_full", "fast_helical_native"):
-            with self.subTest(workflow=name):
-                self.assertEqual(
-                    sorted(webui.workflow_outputs(name)),
-                    sorted([webui.OUTPUT_COLMAP, webui.OUTPUT_PLY]),
-                )
+    def test_the_shipped_workflow_offers_both(self):
+        """The shipped workflow declares export_colmap / export_ply."""
+        self.assertEqual(
+            sorted(webui.workflow_outputs("fast_helical_native")),
+            sorted([webui.OUTPUT_COLMAP, webui.OUTPUT_PLY]),
+        )
 
     def test_a_workflow_without_the_params_offers_nothing(self):
         """The control hides itself rather than pretending to switch
@@ -147,13 +144,29 @@ class TestOutputSelection(unittest.TestCase):
         self.assertEqual(webui.workflow_outputs(bare), [])
 
     def test_which_workflows_can_start_from_a_photo(self):
-        """The gate on the UI's photo input, pinned to the real shipped
-        files. It got this wrong once by treating `save_dataset`'s bare
-        `dataset` input as an unmet read of the frames — a checkpoint at
-        the end of a from-a-photo workflow is handed a dataset the earlier
-        steps built, not one the caller had to supply."""
+        """The gate on the UI's photo input. It got this wrong once by
+        treating `save_dataset`'s bare `dataset` input as an unmet read of
+        the frames — a checkpoint at the end of a from-a-photo workflow is
+        handed a dataset the earlier steps built, not one the caller had to
+        supply.
+
+        The real shipped file never needs one; the contrasting case is
+        synthetic, since no shipped workflow reads a dataset field cold any
+        more."""
+        import os
+        import tempfile
+
         self.assertFalse(webui.workflow_needs_a_dataset("fast_helical_native"))
-        self.assertTrue(webui.workflow_needs_a_dataset("fast_helical_full"))
+
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as handle:
+            handle.write(
+                "name: needs-dataset\nglobals: {}\nsteps:\n"
+                "  - id: a\n    step: rmbg\n    dispatch: in_process\n"
+                "    inputs:\n      image: dataset.images\n"
+            )
+            needs_dataset = handle.name
+        self.addCleanup(os.unlink, needs_dataset)
+        self.assertTrue(webui.workflow_needs_a_dataset(needs_dataset))
 
     def test_the_photo_gate_keys_off_the_fields_a_photo_cannot_fill(self):
         """`Dataset.from_reference_image` leaves exactly these empty, so
@@ -174,7 +187,7 @@ class TestOutputSelection(unittest.TestCase):
     def test_the_switches_are_not_also_editable_in_the_params_panel(self):
         """Two editable homes for one setting disagree the moment someone
         touches either."""
-        globals_shown, _steps = webui.workflow_param_panel("fast_helical_full")
+        globals_shown, _steps = webui.workflow_param_panel("fast_helical_native")
         self.assertNotIn("export_colmap", globals_shown)
         self.assertNotIn("export_ply", globals_shown)
         # resolution is the one global the panel does draw — the switches and
@@ -202,7 +215,7 @@ class TestOutputSelection(unittest.TestCase):
         already carry it. A control for it would let a run write under the
         process's cwd instead, which is how the Results tab once reported
         "the run produced neither" for a run that had completed fine."""
-        globals_shown, _steps = webui.workflow_param_panel("fast_helical_full")
+        globals_shown, _steps = webui.workflow_param_panel("fast_helical_native")
         self.assertNotIn("output_root", globals_shown)
 
 

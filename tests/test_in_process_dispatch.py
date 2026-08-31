@@ -64,7 +64,7 @@ class TestInProcessDispatcherMemoryRelease(unittest.TestCase):
         is meaningful, because the weights have actually moved to host RAM
         by the time it runs, so the driver gets the VRAM back. Same
         contract the resident subprocess worker gives, and for the same
-        reason: fast_helical_full runs brush on the GPU between two
+        reason: fast_helical_native runs brush on the GPU between two
         invocations of a kept-loaded step.
 
         What must NOT change is the instance: it is still reused, which is

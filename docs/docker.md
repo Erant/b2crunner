@@ -49,7 +49,7 @@ docker compose -f docker/docker-compose.yml up
 # or one-shot CLI runs
 docker compose -f docker/docker-compose.yml run --rm pipeline doctor
 docker compose -f docker/docker-compose.yml run --rm pipeline \
-    run fast_helical_full --dataset /data/some_dataset
+    run fast_helical_native --reference-image /data/sheet.png
 docker compose -f docker/docker-compose.yml run --rm pipeline bash
 ```
 
