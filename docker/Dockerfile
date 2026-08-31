@@ -617,11 +617,37 @@ COPY --from=python-builder /opt/vendor /opt/vendor
 # are unchanged and already present. Bump this SHA when the pipeline needs
 # a newer body2colmap; drop the layer once the python-builder install is
 # itself pinned.
+#
+# The pipeline needs 24fe424 or later, which replaced gsplat with
+# brush-splat-render: steps/render.py's `...+splat` modes pass a
+# `splat_layer` into `Renderer.render_composite`, which older commits do
+# not accept. The two asserts below are that, and the reason for it — an
+# older body2colmap fails the first, and the second names the backend: a
+# gsplat-based SplatRenderer would drag a CUDA devel base back into this
+# image, and has no BINARY_NAME at all.
+#
+# steps/splat.py's `_rasterize` drives SplatRenderer directly and needs the
+# three seams added for it — `on_fault` (hands a crashed run's temp
+# directory over before deleting it, which is what paths.crash_dir() feeds
+# on), `on_output` (each line as it arrives, for proc.OutputRelay) and
+# `ply_path`. 4bb9dd9 ("Add crash-report and progress hooks to
+# SplatRenderer", 2026-08-31) is the commit that added them.
+#
+# Failing the build is deliberate: an image built against an older commit
+# would install cleanly and then raise on the first render_splat of a real
+# run, an hour into a pod booking. The third assert below is what stops it.
 RUN /opt/venv_base/bin/pip install --force-reinstall --no-deps \
-        'body2colmap @ git+https://github.com/Erant/body2colmap.git@a3a498d878947a6d2dc5b9cd10052db67b797e08' \
+        'body2colmap @ git+https://github.com/Erant/body2colmap.git@4bb9dd9c68b4e0aeb2fab6f52b638867f7608f55' \
     && /opt/venv_base/bin/python -c "\
+import inspect; \
 import body2colmap.face as f; \
+from body2colmap.renderer import Renderer; \
+import body2colmap.splat_renderer as sr; \
 assert f.EYE_STYLES == ('shape', 'dots'), f.EYE_STYLES; \
+assert 'splat_layer' in inspect.signature(Renderer.render_composite).parameters; \
+assert sr.BINARY_NAME == 'brush-splat-render', sr.BINARY_NAME; \
+assert 'on_fault' in inspect.signature(sr.SplatRenderer.__init__).parameters, \
+    'bump the body2colmap pin: steps/splat.py needs on_fault/on_output/ply_path'; \
 print('body2colmap eye_style default:', f.DEFAULT_EYE_STYLE)"
 
 # NOT /workspace/b2c_runner, which is where this used to live. RunPod's

@@ -763,6 +763,25 @@ wgpu/Vulkan renderer `brush` uses, so it needs nothing this image doesn't
 already provide for `brush`. `pipeline/steps/splat.py`'s `RenderSplatStep`
 now shells out to it directly (same pattern as `steps/brush.py` shelling
 out to `brush`), bypassing body2colmap's `SplatRenderer`/gsplat entirely.
+
+**body2colmap followed on 2026-08-30** (its `24fe424`), replacing gsplat
+with the same binary, and then in `d0e3ada` gave its renderer the same
+exit-code tolerance `_run_render` has here — judging a render by the files
+it produced, since the shutdown SIGSEGV fires after the frames are on disk.
+That matters here for one reason: the pull-forward pin in the runtime stage
+moved off `a3a498d` (through `d0e3ada`, and now to `4bb9dd9c`, 2026-08-31),
+because `steps/render.py`'s `...+splat` render modes pass a `splat_layer`
+into `Renderer.render_composite`, which commits before `24fe424` do not
+accept. The rasterisation is the library's too now. `d0e3ada` grew three
+seams for it — `on_fault` (hands a crashed run's temp directory to the
+caller before deleting it, which is what `paths.crash_dir()` needs),
+`on_output` (each line as it arrives, so `proc.OutputRelay` can throttle it
+into the pipeline log) and `ply_path` (render an existing .ply rather than
+serializing the scene back out) — but hadn't yet been pushed; `4bb9dd9c`
+("Add crash-report and progress hooks to SplatRenderer") is the pushed
+commit that actually carries them, and is what the pin now names. And
+`steps/splat.py`'s parallel subprocess driver is gone. See
+`docs/revert-when-body2colmap-drops-gsplat.md`.
 Full design rationale, the `cameras.json` schema, and the OpenGL/OpenCV
 camera-convention derivation (verified against a real gsplat oracle: mean
 abs error 0.0008-0.0015 on RGB) live in
