@@ -241,8 +241,11 @@ class RenderSplatStep(Step):
         Param("pattern", str, "",
               "Shape of the new camera path. Empty reuses the source dataset's "
               "cameras verbatim, which is how outline.json re-renders the exact "
-              "same views for replace_views to swap back in",
-              choices=("", "circular", "sinusoidal", "helical")),
+              "same views for replace_views to swap back in. `cap` is the odd one "
+              "out and is not an orbit at all: a disc of views around the "
+              "photograph's own view of the splat, for supervising a training "
+              "off its denoising path",
+              choices=("", "circular", "sinusoidal", "helical", "cap")),
         Param("n_frames", int, None, "Views to render; required when a pattern is set",
               minimum=1),
         Param("width", int, 720, "Render width", minimum=1),
@@ -317,6 +320,11 @@ class RenderSplatStep(Step):
               "dataset's. The mesh render's cloud describes the actual subject "
               "geometry; one sampled from a trained splat inherits its noise"),
 
+        Param("cap_radius_deg", float, 30.0,
+              "Cap: angular radius of the disc of views, about the splat's centre. "
+              "30 is where body2colmap measured a Face_Neck shell still reading "
+              "cleanly — past it a 2.5-D shell is into its own open rim, and a rim "
+              "is not supervision", minimum=0.0, maximum=180.0),
         Param("elevation_deg", float, 0.0, "Circular: camera elevation"),
         Param("start_azimuth_deg", float, 0.0, "Where the orbit starts"),
         Param("overlap", int, 1,
@@ -951,20 +959,135 @@ def _resolve_cameras(
         )
 
     path_gen = OrbitPath(target=orbit_center, radius=radius)
-    cameras = _generate_path(path_gen, pattern, params, camera_template)
+    cameras = _generate_path(path_gen, pattern, params, camera_template, extras)
     logger.info(
         "render_splat: %s path, %d cameras, radius=%.3f", pattern, len(cameras), radius
     )
     return cameras, focal_length, effective_mm, None
 
 
-def _generate_path(path_gen, pattern: str, params: Dict[str, Any], camera_template):
+def _cap_directions(n_frames: int, cap_radius_deg: float,
+                   axis: np.ndarray) -> List[np.ndarray]:
+    """`n_frames` unit directions spread evenly over a disc about `axis`.
+
+    Even by AREA, not by angle: the samples are placed on a sunflower
+    spiral, whose polar angle is drawn from the cap's own area measure
+    (`cos t` uniform between the axis and the rim) and whose azimuth turns
+    by the golden angle each step. That is what "uniformly within the
+    circle" has to mean on a sphere — spacing the polar angle evenly
+    instead would pile most of the views into the middle, where the
+    photograph already is.
+
+    Deterministic, and no sample lands exactly on the axis: the first
+    sits half a step in, so the set is symmetric about the centre without
+    duplicating the source view itself.
+    """
+    if n_frames < 1:
+        raise ValueError(f"cap: n_frames must be at least 1, got {n_frames}")
+    axis = np.asarray(axis, dtype=np.float64).reshape(3)
+    norm = float(np.linalg.norm(axis))
+    if norm < 1e-9:
+        raise ValueError("cap: the cap's axis has no direction to spread about.")
+    axis = axis / norm
+
+    # Any two vectors perpendicular to the axis will do; picking the world
+    # axis the cap leans on least keeps the cross products well conditioned.
+    seed = np.eye(3)[int(np.argmin(np.abs(axis)))]
+    right = np.cross(axis, seed)
+    right /= np.linalg.norm(right)
+    up = np.cross(axis, right)
+
+    cos_radius = float(np.cos(np.radians(cap_radius_deg)))
+    golden_angle = np.pi * (3.0 - np.sqrt(5.0))
+
+    directions = []
+    for index in range(n_frames):
+        # Equal-area in the cap: cos(polar) uniform over [cos R, 1].
+        fraction = (index + 0.5) / n_frames
+        cos_polar = 1.0 - fraction * (1.0 - cos_radius)
+        sin_polar = float(np.sqrt(max(0.0, 1.0 - cos_polar * cos_polar)))
+        spin = golden_angle * index
+        directions.append(
+            axis * cos_polar
+            + (right * np.cos(spin) + up * np.sin(spin)) * sin_polar
+        )
+    return directions
+
+
+def _cap_axis(path_gen, params: Dict[str, Any],
+              extras: Dict[str, Any]) -> Tuple[np.ndarray, str]:
+    """Which way the cap points: at the photograph's view of the splat.
+
+    The whole point of the pattern is to sample around the one view that
+    was photographed, so the axis is the direction from the splat's centre
+    to the camera the photo was taken from — `anchor_position`, which
+    `render`'s override mode records in the dataset's extras. Without it
+    there is no photograph to sample around and the cap falls back to the
+    `start_azimuth_deg`/`elevation_deg` direction, the same convention the
+    orbits start on.
+    """
+    anchor = extras.get("anchor_position")
+    if anchor is not None:
+        axis = np.asarray(anchor, dtype=np.float64).reshape(3) - np.asarray(
+            path_gen.target, dtype=np.float64).reshape(3)
+        if float(np.linalg.norm(axis)) >= 1e-9:
+            return axis, "the anchor camera's view of the splat"
+        raise ValueError(
+            "render_splat: the cap's anchor camera sits on the splat's centre, "
+            "so there is no view direction to sample around."
+        )
+
+    from body2colmap import coordinates
+
+    axis = coordinates.spherical_to_cartesian(
+        1.0, params["start_azimuth_deg"], params["elevation_deg"])
+    return np.asarray(axis, dtype=np.float64), (
+        f"start_azimuth_deg={params['start_azimuth_deg']:.1f}, "
+        f"elevation_deg={params['elevation_deg']:.1f} (no anchor_position in the "
+        f"dataset's extras)")
+
+
+def _cap_path(path_gen, params: Dict[str, Any], camera_template,
+              extras: Dict[str, Any]):
+    """A disc of views around the photograph's own view of the splat.
+
+    Not an orbit. `circular`/`helical` sweep the whole subject for a
+    training set; this samples the neighbourhood of ONE view, because that
+    is the only part of the sphere a splat built from one photograph can
+    speak for. It exists for `select_support_views`: supervision has to
+    come from off the training's denoising path (a view on the path already
+    has a denoised frame of its own), and a disc around the anchor is where
+    the off-path views that the splat still saw actually are.
+    """
+    axis, source = _cap_axis(path_gen, params, extras)
+    radius_deg = params["cap_radius_deg"]
+    target = np.asarray(path_gen.target, dtype=np.float64).reshape(3)
+
+    cameras = []
+    for direction in _cap_directions(params["n_frames"], radius_deg, axis):
+        camera = path_gen._create_camera(
+            (target + direction * path_gen.radius).astype(np.float32),
+            camera_template)
+        camera.look_at(path_gen.target, path_gen.up_vector)
+        cameras.append(camera)
+
+    logger.info(
+        "render_splat: cap of %d views within %.1f deg of %s",
+        len(cameras), radius_deg, source,
+    )
+    return cameras
+
+
+def _generate_path(path_gen, pattern: str, params: Dict[str, Any], camera_template,
+                   extras: Optional[Dict[str, Any]] = None):
     if params["n_frames"] is None:
         raise ValueError(
             f"render_splat: pattern '{pattern}' builds a new camera path, so it needs "
             "an n_frames param. Leave `pattern` empty to reuse the source dataset's "
             "cameras instead."
         )
+    if pattern == "cap":
+        return _cap_path(path_gen, params, camera_template, extras or {})
     if pattern == "circular":
         return path_gen.circular(
             n_frames=params["n_frames"],

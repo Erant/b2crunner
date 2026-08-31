@@ -185,6 +185,60 @@ class TestRenderSplatCameras(unittest.TestCase):
                 self.assertGreaterEqual(len(cameras), 24)
                 self.assertIsNone(anchor)
 
+    def test_a_cap_samples_a_disc_around_the_anchor_s_view(self):
+        """The supporting-view pattern. Every camera looks at the splat's
+        centre from within cap_radius_deg of the direction the photograph
+        saw it from — a disc on the orbit sphere, not an orbit."""
+        params = {"pattern": "cap", "n_frames": 36, "cap_radius_deg": 30.0,
+                  "bounds_source": "splat"}
+        cameras, _fl, _mm, anchor = self._resolve(params)
+        self.assertEqual(len(cameras), 36)
+        self.assertIsNone(anchor)
+
+        target = self.scene.get_bounds()
+        target = (target[0] + target[1]) / 2.0
+        axis = np.asarray(self.ds.extras["anchor_position"], dtype=np.float64) - target
+        axis /= np.linalg.norm(axis)
+
+        angles = []
+        for camera in cameras:
+            offset = np.asarray(camera.position, dtype=np.float64) - target
+            offset /= np.linalg.norm(offset)
+            angles.append(np.degrees(np.arccos(np.clip(np.dot(offset, axis), -1, 1))))
+        self.assertLessEqual(max(angles), 30.0 + 1e-6)
+        # Spread through the disc rather than bunched at its centre or rim.
+        self.assertGreater(max(angles), 25.0)
+        self.assertLess(min(angles), 6.0)
+        # One radius, so the whole set shares a scale: COLMAP export writes
+        # a single camera line for all of them.
+        radii = [np.linalg.norm(np.asarray(c.position, dtype=np.float64) - target)
+                 for c in cameras]
+        self.assertAlmostEqual(max(radii), min(radii), places=5)
+
+    def test_a_cap_needs_a_frame_count(self):
+        with self.assertRaises(ValueError):
+            self._resolve({"pattern": "cap", "bounds_source": "splat"})
+
+    def test_a_cap_without_an_anchor_falls_back_to_the_start_azimuth(self):
+        """No anchor_position means no photograph to sample around; the cap
+        then points where the orbits start, rather than guessing."""
+        stripped = Dataset.from_disk(require_stage("initial"))
+        stripped.extras = {k: v for k, v in stripped.extras.items()
+                           if k != "anchor_position"}
+        params = {"pattern": "cap", "n_frames": 8, "cap_radius_deg": 20.0,
+                  "bounds_source": "splat", "start_azimuth_deg": 90.0}
+        cameras, _fl, _mm, _a = self._resolve(params, dataset=stripped)
+
+        bounds = self.scene.get_bounds()
+        target = (bounds[0] + bounds[1]) / 2.0
+        axis = np.array([1.0, 0.0, 0.0])  # azimuth 90 deg, elevation 0, Y up
+        for camera in cameras:
+            offset = np.asarray(camera.position, dtype=np.float64) - target
+            offset /= np.linalg.norm(offset)
+            self.assertLessEqual(
+                np.degrees(np.arccos(np.clip(np.dot(offset, axis), -1, 1))),
+                20.0 + 1e-6)
+
     def test_unknown_pattern_raises(self):
         with self.assertRaises(ValueError):
             self._resolve({"pattern": "spiral", "n_frames": 8})
@@ -419,6 +473,82 @@ class TestRenderSplatCameras(unittest.TestCase):
             "framing preset had no effect after a to_disk/from_disk round-trip",
         )
         self.assertAlmostEqual(torso_px, full_px, places=5)
+
+
+class TestCapDirections(unittest.TestCase):
+    """The sampling itself, away from datasets and framing.
+
+    "Uniformly within the circle" has to mean uniform by AREA on the
+    sphere: spacing the polar angle evenly instead piles most of the views
+    into the middle of the disc, which is the one place the photograph
+    already covers.
+    """
+
+    AXIS = np.array([0.0, 0.0, 1.0])
+
+    def _angles(self, n, radius_deg=30.0, axis=None):
+        from pipeline.steps.splat import _cap_directions
+
+        directions = _cap_directions(n, radius_deg,
+                                    self.AXIS if axis is None else axis)
+        axis_unit = (self.AXIS if axis is None else np.asarray(axis, float))
+        axis_unit = axis_unit / np.linalg.norm(axis_unit)
+        return np.degrees([
+            np.arccos(np.clip(float(np.dot(d, axis_unit)), -1.0, 1.0))
+            for d in directions
+        ])
+
+    def test_every_direction_is_a_unit_vector(self):
+        from pipeline.steps.splat import _cap_directions
+
+        for direction in _cap_directions(36, 30.0, self.AXIS):
+            self.assertAlmostEqual(float(np.linalg.norm(direction)), 1.0, places=9)
+
+    def test_nothing_escapes_the_radius(self):
+        self.assertLessEqual(self._angles(200).max(), 30.0 + 1e-9)
+
+    def test_the_spread_is_uniform_by_area(self):
+        """Half the samples inside the equal-area median radius, which for
+        a small cap is close to R/sqrt(2). Checked against the exact
+        median: cos t = 1 - (1 - cos R)/2."""
+        radius = 30.0
+        median = np.degrees(np.arccos(
+            1.0 - (1.0 - np.cos(np.radians(radius))) / 2.0))
+        angles = self._angles(400, radius)
+        self.assertEqual(int((angles < median).sum()), 200)
+
+    def test_it_does_not_sample_the_axis_itself(self):
+        """The source view is the one view a photograph already covers, and
+        the training already has a denoised frame there."""
+        self.assertGreater(self._angles(36).min(), 0.0)
+
+    def test_the_azimuths_spread_rather_than_stacking(self):
+        """The golden angle is what keeps consecutive samples from landing
+        on one meridian — spacing by 2*pi/n instead would put them all on a
+        handful of spokes."""
+        from pipeline.steps.splat import _cap_directions
+
+        directions = _cap_directions(36, 30.0, self.AXIS)
+        azimuths = np.degrees([np.arctan2(d[1], d[0]) for d in directions]) % 360.0
+        # Every 90-degree quadrant gets its share.
+        counts = np.histogram(azimuths, bins=4, range=(0.0, 360.0))[0]
+        self.assertTrue((counts >= 36 // 4 - 2).all(), counts)
+
+    def test_the_disc_follows_the_axis(self):
+        angles = self._angles(36, 30.0, axis=np.array([1.0, 2.0, -3.0]))
+        self.assertLessEqual(angles.max(), 30.0 + 1e-9)
+
+    def test_a_zero_axis_is_refused(self):
+        from pipeline.steps.splat import _cap_directions
+
+        with self.assertRaises(ValueError):
+            _cap_directions(4, 30.0, np.zeros(3))
+
+    def test_no_frames_is_refused(self):
+        from pipeline.steps.splat import _cap_directions
+
+        with self.assertRaises(ValueError):
+            _cap_directions(0, 30.0, self.AXIS)
 
 
 class TestRenderSplatBoundsSource(unittest.TestCase):

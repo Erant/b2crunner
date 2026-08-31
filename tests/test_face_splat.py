@@ -375,6 +375,21 @@ class TestCompositeSplatViews(unittest.TestCase):
         self.assertEqual(roles, ["composited", "composited", "base"])
         np.testing.assert_array_equal(result["images"][2][:, :, 0], 40)
 
+    def test_the_default_band_runs_to_sixty_degrees(self):
+        """Pinned because it is a deliberate widening of body2colmap's
+        measured 45: out past it the shell is mostly open rim, and what
+        makes that affordable is that these frames are inputs to two
+        denoise passes that can rewrite a rim. select_support_views, whose
+        frames nothing rewrites, culls at 30 out of its own param and does
+        not follow this number."""
+        angles = [50.0, 70.0]
+        layers = [np.full((8, 6, 3), 200, np.uint8)] * 2
+        alphas = [np.ones((8, 6), np.float32)] * 2
+        result = self._run(angles, layers, alphas)
+
+        roles = [role["role"] for role in result["view_roles"]]
+        self.assertEqual(roles, ["composited", "base"])
+
     def test_the_pivot_is_the_splat_not_the_orbit_target(self):
         """A camera aimed at a body's centre is not aimed at the head, so
         measuring the view angle about the wrong pivot culls the wrong

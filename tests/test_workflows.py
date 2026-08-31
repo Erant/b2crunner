@@ -104,8 +104,8 @@ BOOTSTRAPS = {
         "detect_face", "map_face_to_mesh", "fit_head_to_face",
         "locate_face", "crop_face", "face_seg", "face_mask",
         "face_normals", "face_splat",
-        "render_initial_views", "render_face_views", "composite_face",
-        "face_support_views",
+        "render_initial_views", "render_face_views", "render_face_support_views",
+        "composite_face", "face_support_views",
         "warp_reference_to_anchor", "reinject_anchor_initial",
     ],
     # Parked: the photo-to-splat shell, which replaces the whole bootstrap.
@@ -117,8 +117,8 @@ BOOTSTRAPS = {
         "front_matte", "front_normals", "shell_splat", "refine_pose",
         "detect_face", "locate_face", "crop_face", "face_seg", "face_mask",
         "face_normals", "face_splat",
-        "render_initial_views", "render_face_views", "composite_face",
-        "face_support_views",
+        "render_initial_views", "render_face_views", "render_face_support_views",
+        "composite_face", "face_support_views",
         "render_shell_views", "inject_shell_band",
     ],
 }
@@ -705,18 +705,22 @@ class TestWorkflowFiles(unittest.TestCase):
                             f"{step.step} refuses that",
                         )
 
-    def test_the_supporting_views_reach_both_trainings_optionally(self):
-        """The face splat's renders go into brush as supporting views, and
-        every training reads them the same way in every file.
+    def test_the_supporting_views_reach_the_stage_2_training_only(self):
+        """The face splat's renders go into ONE brush training, the same
+        way in every file.
 
-        Two halves, and both are the wiring rather than the code. The reads
-        are optional (`?`), which is what lets fast_helical_full.yaml — no
-        bootstrap, no face branch — share the same tail as the two files
-        that can build them, and what lets `face_splat: false` turn the
-        whole branch off without touching the training. And the paths on
-        both sides have to be the same ones, or the training silently gets
-        nothing: an optional read of a path nothing writes is exactly the
-        failure this feature is built out of.
+        Three things, all of them wiring rather than code. The stage-2
+        training's reads are optional (`?`), which is what lets
+        fast_helical_full.yaml — no bootstrap, no face branch — share the
+        same tail as the two files that can build them, and what lets
+        `face_splat: false` turn the whole branch off without touching the
+        training. The paths on both sides have to be the same ones, or the
+        training silently gets nothing: an optional read of a path nothing
+        writes is exactly the failure this feature is built out of. And the
+        FINAL training must read none of them — `scene.support_views.*` is
+        still populated at that point, so an optional read there would
+        quietly succeed and fit the deliverable to renders taken along the
+        bootstrap's circular orbit, two denoise passes and an upscale ago.
         """
         # brush's input name -> the output name select_support_views
         # publishes it under.
@@ -730,29 +734,80 @@ class TestWorkflowFiles(unittest.TestCase):
                 continue
             with self.subTest(workflow=path.name):
                 for step in trainings:
+                    final = step.id == "train_final_splat"
                     for name in support:
-                        self.assertTrue(
-                            step.inputs.get(name, "").endswith("?"),
-                            f"{path.name}: '{step.id}' must read '{name}' "
-                            f"optionally — the branch that writes it is gated",
-                        )
+                        wired = step.inputs.get(name, "")
+                        if final:
+                            self.assertEqual(
+                                wired, "",
+                                f"{path.name}: '{step.id}' must not read "
+                                f"'{name}' — by then the dataset is the "
+                                f"helical re-render and these are the "
+                                f"circular bootstrap's renders",
+                            )
+                        else:
+                            self.assertTrue(
+                                wired.endswith("?"),
+                                f"{path.name}: '{step.id}' must read '{name}' "
+                                f"optionally — the branch that writes it is gated",
+                            )
                 if "face_support_views" not in by_id:
                     continue
                 selector = by_id["face_support_views"]
                 self.assertEqual(selector.step, "select_support_views")
                 self.assertEqual(selector.when, "${globals.face_splat}")
-                # It reads the face render, and the composite's own verdict
-                # on which frames that render can speak for.
-                self.assertEqual(selector.inputs["images"], "scene.face_views.images")
-                self.assertEqual(selector.inputs["view_roles"], "scene.face_view_roles")
+                # It reads the CAP render, not the composite's batch. Two
+                # face renders exist for two consumers: composite_face needs
+                # the dataset's own cameras, one frame per drawing; these
+                # need views the dataset does not have. Wiring the composite's
+                # batch here is the bug this asserts against — it type-checks,
+                # runs, and supervises the training with views it already has
+                # denoised photographs of.
+                cap = by_id["render_face_support_views"]
+                self.assertEqual(cap.step, "render_splat")
+                self.assertEqual(cap.params.get("pattern"), "cap")
+                self.assertEqual(cap.params.get("bounds_source"), "splat")
+                for name in ("images", "masks", "cameras"):
+                    self.assertEqual(
+                        selector.inputs[name], cap.outputs[name],
+                        f"{path.name}: face_support_views must read the cap "
+                        f"render's {name}, not the composite batch's",
+                    )
                 composite = by_id["composite_face"]
+                self.assertNotEqual(
+                    selector.inputs["images"], composite.inputs["splat_images"],
+                    f"{path.name}: the two face renders exist to be different "
+                    f"view sets; this is the composite's",
+                )
+                # The cap owns the outer edge, so the role filter and the
+                # view-angle cull — both of which read composite_face's
+                # verdict on ITS frames — are off.
+                self.assertEqual(selector.params.get("role"), "")
+                self.assertNotIn("view_roles", selector.inputs)
+                # The inner edge of the band is the denoising path, so the
+                # step has to be handed the cameras the training's own
+                # frames were rendered and denoised along — and a pivot to
+                # measure the angle to them about. Wire neither and the
+                # edge silently does not apply, which is the failure mode
+                # worth a test: nothing raises, and the deliverable is
+                # fitted to renders of views it already has photographs of.
+                training = by_id["train_splat"]
                 self.assertEqual(
-                    composite.outputs["view_roles"], selector.inputs["view_roles"],
-                    f"{path.name}: face_support_views must cull on the roles "
-                    f"composite_face published, not a second copy of them",
+                    selector.inputs.get("path_cameras"), training.inputs["cameras"],
+                    f"{path.name}: face_support_views must measure against the "
+                    f"same cameras train_splat trains on",
+                )
+                self.assertEqual(
+                    selector.inputs.get("splat_center"),
+                    composite.inputs["splat_center"],
+                    f"{path.name}: face_support_views must measure about the "
+                    f"same pivot composite_face used — for a head on a full-body "
+                    f"orbit the splat's centre and the orbit target differ",
                 )
                 ids = [s.id for s in spec.steps]
                 for step in trainings:
+                    if step.id == "train_final_splat":
+                        continue
                     self.assertLess(
                         ids.index("face_support_views"), ids.index(step.id),
                         f"{path.name}: the supporting views must be selected "

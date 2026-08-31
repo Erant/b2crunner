@@ -595,9 +595,14 @@ steps:
       images: dataset.images
       masks: dataset.masks
       normal_maps: scene.export_normal_maps
-      support_images: scene.support_views.images?
-      support_masks: scene.support_views.masks?
-      support_cameras: scene.support_views.cameras?
+      # NO support_* here, deliberately. The face splat's renders were
+      # taken along the CIRCULAR bootstrap orbit and belong to the training
+      # that ran on it; by this point the dataset is the helical re-render,
+      # denoised a second time and upscaled, and those renders are stale in
+      # both senses — wrong path, and a resolution and a diffusion pass
+      # behind the frames beside them. Wiring `scene.support_views.*` in
+      # here would not fail, which is exactly why it is called out: the
+      # path is still populated from stage 1.
     params:
       # See train_splat's note. Same count; a run tuning the deliverable
       # splat alone changes it here.

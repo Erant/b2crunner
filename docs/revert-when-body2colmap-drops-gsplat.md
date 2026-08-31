@@ -10,8 +10,9 @@ body2colmap `c65a7f7` ("Composite a Gaussian-splat face onto the skeleton")
 added a `splat` overlay layer: `skeleton+splat` puts a real Gaussian splat
 of the subject's face on the skeleton rig, in place of the synthetic
 landmarks of `skeleton+face`. That is exactly what this project's face
-branch wants, and the geometry, the compositing rule and the measured
-45-degree cull are all taken from it.
+branch wants, and the geometry and the compositing rule are taken from it.
+The cull angle was too, until this project widened it from the measured 45
+to 60 — see below.
 
 What could **not** be taken is the rasterisation. body2colmap renders the
 overlay through `SplatRenderer`, which is gsplat, and this project
@@ -101,7 +102,20 @@ identity, and `attach_splat_overlay` would have to be handed a
 `splat_meta.json` saying so. Passing the already-anchored `SplatScene`
 straight to the renderer is what item 2 above should do.
 
-The measured constants inherited from `c65a7f7` — the 45-degree cull, the
-"reads cleanly to 30, rim flares by 45, mostly edge by 60" that justifies
-it — carry across unchanged; they are properties of a 2.5-D shell, not of
-a rasteriser.
+The measurement inherited from `c65a7f7` — "reads cleanly to 30, rim
+flares by 45, mostly edge by 60" — carries across unchanged; it is a
+property of a 2.5-D shell, not of a rasteriser. **The cull angle taken from
+it does not.** b2crunner runs `composite_splat_views` at 60, the far end of
+that band rather than its clean limit: out there the alternative is a
+drawing with no face at all, and a composited frame is an input to two
+denoise passes that can rewrite a flared rim. A revert that adopts
+body2colmap's render mode inherits its 45 unless `splat_max_angle_deg` is
+passed 60 explicitly, and that is a behaviour change to make on purpose
+rather than by omission.
+
+`select_support_views` is unaffected by that choice and stays behind after
+the revert either way — it consumes a render of its own
+(`render_face_support_views`, `pattern: cap`), not the composite. That cap
+is sampled at 30 degrees, the measurement's clean limit, because nothing
+rewrites a supporting view between the render and the geometry brush
+fits.

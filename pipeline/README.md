@@ -643,22 +643,53 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   `crop_to_box`. Synthetic tests only; the gate is
   `tests/test_face_splat.py::TestCropIsANoOpOnTheRays`.
 - `composite_splat_views` (`anchor_stub.py`) — alpha-composites that face
-  onto the skeleton drawings on every frame within 45° of the source view,
-  which is roughly half the orbit against the shell band's 15. This is
-  b2crunner's stand-in for body2colmap's `skeleton+splat` render mode, whose
-  geometry and constants it takes: that mode rasterises through gsplat, which
-  this project dropped. **See `docs/revert-when-body2colmap-drops-gsplat.md`
+  onto the skeleton drawings on every frame within 60° of the source view,
+  which is roughly two thirds of the orbit against the shell band's 15. This
+  is b2crunner's stand-in for body2colmap's `skeleton+splat` render mode,
+  whose geometry it takes: that mode rasterises through gsplat, which this
+  project dropped. The cull angle is that mode's constant widened — 45 is
+  where body2colmap measured a Face_Neck shell still reading cleanly, 60 is
+  where it is mostly open rim, and running to 60 buys the views least like
+  the photograph (the ones `select_support_views` now supervises) at the
+  price of that rim. **See `docs/revert-when-body2colmap-drops-gsplat.md`
   — this step comes back out when body2colmap moves to the brush renderer.**
 - `select_support_views` (`anchor_stub.py`) — the face splat's second route
   into a training, and the consumer of `brush`'s `support_*` inputs. It
-  takes the same face renders `composite_splat_views` just used, keeps the
-  frames that step gave the role `composited` (its cull angle, measured
-  once, not re-derived), un-premultiplies them back to straight alpha, and
-  hands them to both brush trainings as **masked** views — evidence that
-  counts where the splat's own coverage says to and is ignored everywhere
-  else. The composited copy goes through two diffusion passes and comes out
-  as the denoiser's idea of the face; this copy does not. Both trainings
-  read it through an optional `?` path, so `face_splat: false` and
+  takes `render_face_support_views`' **cap** render (36 views sampled
+  around the photograph's own view of the splat — a different view set
+  from the one `composite_splat_views` composited), drops the ones that
+  land on the training's denoising path, un-premultiplies the rest back to
+  straight alpha, and hands them to the **stage-2** brush training as
+  **masked** views — evidence that counts where the splat's own coverage
+  says to and is ignored everywhere else. The composited copy goes through
+  two diffusion passes and comes out as the denoiser's idea of the face;
+  this copy does not.
+
+  Two renders, because the two consumers want different views. The
+  composite needs the dataset's own cameras, one frame per drawing. The
+  supporting views want the opposite: a view on the denoising path already
+  has a denoised frame carrying the photograph, so a render of it
+  supervises with a resampled copy of what the training has. The **outer**
+  edge of the useful band is therefore drawn by the sampler
+  (`cap_radius_deg`, 30° — body2colmap's measurement of where a Face_Neck
+  shell still reads cleanly), and only the **inner** one is drawn here:
+  `min_path_angle_deg`, 5°, measured to the nearest camera on
+  `path_cameras`. Not a hole punched at the source view — a band swept
+  along the whole path, because every frame on it is a denoised view in
+  its own right, 140° round the orbit no less than at the anchor. On a
+  circle that comes out as the elevation difference; on the shell file's
+  helix it follows the sweep. Of a 30° cap of 36 against an 81-camera
+  ring, 29 survive.
+
+  `role`/`max_angle_deg` are the other way to draw the outer edge — they
+  cull on `composite_splat_views`' measured angle — and are off in the
+  shipped wiring (`role: ""`, `max_angle_deg: 180`) since the cap draws
+  it. They are only valid for a batch that shares the composite's cameras.
+
+  The **final** training takes no supporting views at all: by then the
+  dataset is the helical re-render, denoised a second time and upscaled,
+  and these renders are the bootstrap's. `train_splat` reads them through
+  an optional `?` path, so `face_splat: false` and
   `fast_helical_full.yaml` (no bootstrap at all) train exactly as before.
   `tests/test_support_views.py`.
 - `refine_pose_to_splat` (`pose_refine.py`) — re-poses a SAM-3D-Body fit so

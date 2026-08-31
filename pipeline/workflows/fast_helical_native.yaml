@@ -53,8 +53,9 @@
 # The compositing is a b2crunner step rather than body2colmap's own
 # `skeleton+splat` render mode, because that mode rasterises through gsplat
 # and this project deliberately has none (see pyproject.toml — dropping it
-# removed the last runtime CUDA toolchain). The geometry, the blend and the
-# 45-degree cull are all body2colmap's, from c65a7f7. See
+# removed the last runtime CUDA toolchain). The geometry and the blend are
+# body2colmap's, from c65a7f7; the cull started as its 45 degrees and runs
+# at 60 here. See
 # docs/revert-when-body2colmap-drops-gsplat.md: this is the part to take
 # back out when that library moves to the brush renderer.
 # This is the part fast_helical_full is handed ready-made: a dataset rendered
@@ -85,7 +86,7 @@
 # plus one intermediate this file writes on the way through:
 #
 #   face/face.ply        the photo-derived Gaussian head, composited onto
-#                        every drawing within 45 degrees of the source view
+#                        every drawing within 60 degrees of the source view
 #
 # export_colmap / export_ply switch the first two off; export_colmap_preupscale
 # (with run_upscale on) opts into the third. The web UI's Outputs box drives
@@ -150,7 +151,7 @@ globals:
 
   # Whether the face branch runs: a Gaussian splat of the subject's actual
   # face, composited onto the skeleton drawings wherever the camera can see
-  # it (+-45 deg). It REPLACES the MediaPipe landmark overlay this file used
+  # it (+-60 deg). It REPLACES the MediaPipe landmark overlay this file used
   # to draw — `detect_face` is gone, not disabled — so turning this off
   # leaves the skeleton frames with no face at all rather than falling back
   # to landmarks. That is a real gap and it is deliberate: a YAML input
@@ -370,7 +371,7 @@ steps:
   # different class; it has to be intersected out geometrically. MediaPipe's
   # landmarks are that geometry. On cyber2_6f the hull keeps 74% of the
   # Face_Neck matte; what it drops is the neck, which is what smeared across
-  # the shoulder at the edges of the 45-degree band.
+  # the shoulder at the edges of the composited band.
   #
   # This is landmarks for GEOMETRY ONLY. They are not wired into `render` —
   # see the note on render_initial_views' inputs. The landmark dots are not
@@ -396,7 +397,7 @@ steps:
       image: scene.front_image
     params:
       # Face_Neck (class 3) alone — masktest's measured default, and what
-      # every number behind the 45-degree cull was taken with. `head` adds
+      # every number behind the cull angle was taken with. `head` adds
       # hair, glasses and lips, which is where the rest of the identity
       # lives; nobody has measured it, and hair is where the pointmap is
       # least reliable. Worth trying on a pod, not worth defaulting to.
@@ -609,12 +610,60 @@ steps:
       masks: scene.face_views.masks
       cameras: scene.face_views.cameras
 
+  # The SECOND face render, and a different set of views for a different
+  # consumer. The one above rides the dataset's own cameras because its
+  # frames have to be composited onto those exact drawings, one for one.
+  # These are for `brush` as supporting views (face_support_views below),
+  # and views on the dataset's path are the ones worth least there: each
+  # already has a denoised frame of its own carrying the photograph, so a
+  # render of the same view supervises it with a resampled copy of what it
+  # has. What supervision is FOR is the rest of the neighbourhood.
+  #
+  # So: a `cap` — a disc of 36 views spread evenly by area within 30
+  # degrees of the photograph's own view of the splat, aimed at the SPLAT's
+  # centre rather than the body's (`bounds_source: splat`, which also
+  # dollies in so the head fills the frame at fill_ratio instead of sitting
+  # in it as a smudge). 30 degrees is body2colmap's measurement of where a
+  # Face_Neck shell still reads cleanly (c65a7f7); past it the 2.5-D shell
+  # shows its own open rim, and nothing downstream rewrites a supporting
+  # view the way two denoise passes rewrite a composited one.
+  #
+  # bg_color black for the same load-bearing reason as above: these are
+  # un-premultiplied by select_support_views, and dividing by alpha only
+  # recovers the straight colour if the render was premultiplied over
+  # black.
+  - id: render_face_support_views
+    step: render_splat
+    dispatch: in_process
+    when: ${globals.face_splat}
+    inputs:
+      splat_path: scene.face_splat_path
+      dataset: dataset
+    params:
+      pattern: cap
+      n_frames: 36
+      cap_radius_deg: 30.0
+      bounds_source: splat
+      fill_ratio: 0.8
+      width: ${globals.resolution.0}
+      height: ${globals.resolution.1}
+      bg_color: [0.0, 0.0, 0.0]
+    outputs:
+      images: scene.face_support_render.images
+      masks: scene.face_support_render.masks
+      cameras: scene.face_support_render.cameras
+
   # Put the face on the skeleton. Every frame whose view of the head is
-  # within 45 degrees of the photograph's takes the layer; past that the
+  # within 60 degrees of the photograph's takes the layer; past that the
   # 2.5-D shell's open rim is what would appear, so it is dropped entirely.
   # body2colmap measured that boundary (c65a7f7): a Face_Neck head splat
   # reads cleanly to about 30 degrees, the rim starts flaring by 45, and by
-  # 60 the shell is mostly edge.
+  # 60 the shell is mostly edge. 60 is the far end of that on purpose: out
+  # there the alternative is a drawing with no face at all, and these frames
+  # go through two denoise passes that can rewrite a flared rim. The
+  # supporting views make the opposite trade — nothing rewrites them — and
+  # get their own 30-degree render (render_face_support_views) rather than
+  # a cull of this batch.
   #
   # The angle is measured about the SPLAT's centre, not the orbit target: a
   # head sits well above a full-body target, so the two differ by several
@@ -667,25 +716,66 @@ steps:
   # splat has one Gaussian per masked pixel. Narrow the matte and the splat
   # narrows, so its renders and their alpha narrow with it.
   #
-  # `view_roles` is composite_face's own verdict, reused rather than
-  # re-derived: the frames close enough to the source view to composite are
-  # exactly the frames close enough to supervise, and one cull angle
-  # measured once beats two that can drift apart.
+  # `view_roles` is composite_face's own verdict, and this step bands on
+  # the two angles inside it — the geometry (the pivot, the source view,
+  # the sphere metric, the elevation) is computed once, up there, and read
+  # back here rather than re-derived.
   #
-  # Both trainings read `scene.support_views.*` with a trailing `?` (an
-  # optional read — see pipeline/workflow.py), so this file, the shell file
-  # and fast_helical_full.yaml can share one tail: with the face branch off,
-  # or in a workflow that has no bootstrap at all, nothing writes that path
-  # and brush trains exactly as it did before.
+  # The OUTER edge of the useful band was drawn by the sampler that made
+  # these views: a 30-degree cap, which is body2colmap's measurement of
+  # where a Face_Neck shell still reads cleanly (c65a7f7). Drawing it there
+  # rather than here is the point of rendering a second set — culling a
+  # composite batch afterwards keeps the views nearest the photograph,
+  # which are the ones worth least, and spends renders to do it.
+  #
+  # What is left for this step is the INNER edge: min_path_angle_deg, 5
+  # degrees, measured to the nearest camera on the denoising path. A band
+  # swept down the whole orbit, not a hole punched at the anchor.
+  # render_initial_views lays that path out as `pattern: circular` — one
+  # elevation, 360 degrees of azimuth, every frame of it denoised — so a
+  # supporting view sitting on it competes with a denoised frame wherever
+  # it sits; being 140 degrees round the orbit from the photograph does
+  # not make a view out of distribution, being off the path does. (On a
+  # circle this comes out as the elevation difference; on
+  # fast_helical_shell.yaml's helix it follows the sweep, which is why the
+  # measure is to the path and not to a latitude.) Of the cap's 36 views
+  # against 81 ring cameras, that drops the 7 nearest the ring.
+  #
+  # Only the STAGE-2 training reads these (`train_splat`). The final one
+  # does not, and its inputs say so: by then the dataset is the helical
+  # re-render, denoised again and upscaled, while these renders are still
+  # the circular bootstrap's — stale path, stale resolution. The `?` on
+  # `train_splat`'s reads is an optional read (see pipeline/workflow.py),
+  # so this file, the shell file and fast_helical_full.yaml can share one
+  # tail: with the face branch off, or in a workflow that has no bootstrap
+  # at all, nothing writes that path and brush trains exactly as before.
   - id: face_support_views
     step: select_support_views
     dispatch: in_process
     when: ${globals.face_splat}
     inputs:
-      images: scene.face_views.images
-      masks: scene.face_views.masks
-      cameras: scene.face_views.cameras
-      view_roles: scene.face_view_roles
+      images: scene.face_support_render.images
+      masks: scene.face_support_render.masks
+      cameras: scene.face_support_render.cameras
+      # The denoising path: the cameras the training's own frames were
+      # rendered and denoised along. `min_path_angle_deg` drops the cap
+      # samples that land within 5 degrees of it — the innermost ring of
+      # the disc, whose views the denoised batch already covers.
+      path_cameras: dataset.cameras
+      # The pivot that distance is measured about, and composite_face's
+      # own: a head sits well above a full-body orbit target, so measuring
+      # about the target would call a camera closer to the path than it is
+      # to the head's view of it.
+      splat_center: scene.face_splat_stats.world_center
+    params:
+      # No `view_roles` is wired and none is wanted: composite_face's
+      # verdict is about ITS 81 frames, and these are 36 other cameras
+      # entirely. The outer edge belongs to the cap that sampled them
+      # (cap_radius_deg, 30 deg), so both of the edges that read roles are
+      # off here — what is left for this step is the path cull above and
+      # the un-premultiplying.
+      role: ""
+      max_angle_deg: 180.0
     outputs:
       images: scene.support_views.images
       masks: scene.support_views.masks
@@ -1225,9 +1315,14 @@ steps:
       images: dataset.images
       masks: dataset.masks
       normal_maps: scene.export_normal_maps
-      support_images: scene.support_views.images?
-      support_masks: scene.support_views.masks?
-      support_cameras: scene.support_views.cameras?
+      # NO support_* here, deliberately. The face splat's renders were
+      # taken along the CIRCULAR bootstrap orbit and belong to the training
+      # that ran on it; by this point the dataset is the helical re-render,
+      # denoised a second time and upscaled, and those renders are stale in
+      # both senses — wrong path, and a resolution and a diffusion pass
+      # behind the frames beside them. Wiring `scene.support_views.*` in
+      # here would not fail, which is exactly why it is called out: the
+      # path is still populated from stage 1.
     params:
       # See train_splat's note. Same count; a run tuning the deliverable
       # splat alone changes it here.
