@@ -948,6 +948,80 @@ class TestWorkflowFiles(unittest.TestCase):
                         f"foreground matte",
                     )
 
+    def test_supporting_views_built_before_a_refinement_are_carried_across(self):
+        """A render made from a pose the refinement then moves is stale.
+
+        The face cap is the case: it is rendered in the bootstrap, out of
+        the reference photograph and through the ANCHOR camera's pose, so
+        `refine_cameras` moving that pose leaves it describing a world
+        nothing else believes in — `brush` is then handed a face off the
+        head, weighted by the face's own alpha, and nothing raises. The
+        stage-1 body shells have the opposite wiring and need none of this:
+        they are built after the refinement, from the poses it produced.
+
+        So the rule is about ORDER, not about the face: any supporting-view
+        camera path written before the refinement has to pass through a
+        `rebase_cameras` between the two. What that step does with it is
+        pinned in tests/test_rebase_cameras.py.
+        """
+        for path in _workflows():
+            spec = WorkflowSpec.from_yaml(str(path))
+            order = {step.id: i for i, step in enumerate(spec.steps)}
+            merges = [s for s in spec.steps if s.step == "merge_support_views"]
+            refiners = [s for s in spec.steps if s.step == "refine_cameras"]
+            if not merges or not refiners:
+                continue
+            # FIRST writer, deliberately: a rebased path is written twice
+            # and the question here is which step BUILT those views, not
+            # which one last touched them. Taking the last would make this
+            # pass vacuously the moment the rebase it is checking for
+            # exists.
+            producers: dict = {}
+            for step in spec.steps:
+                for ctx in step.outputs.values():
+                    producers.setdefault(ctx, step)
+            with self.subTest(workflow=path.name):
+                for merge in merges:
+                    refine = max(
+                        (s for s in refiners if order[s.id] < order[merge.id]),
+                        key=lambda s: order[s.id], default=None)
+                    self.assertIsNotNone(
+                        refine,
+                        f"{path.name}: '{merge.id}' gathers supporting views "
+                        f"with no refinement ahead of it",
+                    )
+                    for name in ("a_cameras", "b_cameras"):
+                        wired = merge.inputs.get(name, "").rstrip("?")
+                        source = producers.get(wired)
+                        if source is None or order[source.id] > order[refine.id]:
+                            continue
+                        rebased = [
+                            s for s in spec.steps
+                            if s.step == "rebase_cameras"
+                            and s.outputs.get("cameras") == wired
+                            and order[refine.id] < order[s.id] < order[merge.id]
+                        ]
+                        self.assertTrue(
+                            rebased,
+                            f"{path.name}: '{wired}' is written by "
+                            f"'{source.id}' before '{refine.id}' moves the "
+                            f"poses it was rendered from, and nothing rebases "
+                            f"it before '{merge.id}' reads it",
+                        )
+                        for step in rebased:
+                            self.assertEqual(
+                                step.inputs.get("to_cameras"), "dataset.cameras",
+                                f"{path.name}: '{step.id}' must carry the "
+                                f"views onto the REFINED poses",
+                            )
+                            self.assertEqual(
+                                step.inputs.get("from_cameras", "").rstrip("?"),
+                                refine.outputs.get("given_cameras"),
+                                f"{path.name}: '{step.id}' must measure the "
+                                f"correction against the poses "
+                                f"'{refine.id}' was handed",
+                            )
+
     def test_a_warped_anchor_is_bordered_in_grey_not_white(self):
         """generate_firstlast's border colour has no literal in the YAML —
         it arrives as `image_warp["bg_color"]`, which render.py copies from

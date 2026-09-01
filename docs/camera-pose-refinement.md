@@ -68,6 +68,33 @@ What is never in the solve, at either site, is a supporting view. The face
 cap and the stage-1 shells are renders *made from* the poses being
 corrected; they carry no independent evidence about where a camera was.
 
+## What has to be carried across the correction
+
+Not being in the solve is not the same as being unaffected by it. The face
+cap is rendered in the **bootstrap** — the face splat is unprojected from
+the reference photograph through the anchor camera's pose, and the cap is a
+render of that splat — so stage 2's refinement moves the anchor out from
+under views that already exist. The photograph does not change; the claim
+about where it was taken from does, and the world content it depicts moves
+with it. Left alone the first `brush` training gets supporting views
+putting the face a centimetre or two off the head the training frames
+agree on, weighted by the face's own alpha, with nothing raised anywhere.
+
+`rebase_cameras` (`rebase_face_support_views` in both workflows) fixes it
+between the refinement and `merge_support_views`. The transform is the
+anchor's own pose delta, `D = P_new @ P_old^-1`, which is not an
+approximation of the correction to that photograph's rays but a statement
+of it. Only the cameras are moved: a render depends on where its camera
+sits relative to the splat, so moving both by one rigid transform leaves
+every pixel identical, and the .ply's readers are all behind us by then.
+This is why `refine_cameras` publishes `given_cameras` — `dataset.cameras`
+is overwritten in place, so that is the only surviving record of the frame
+the cap was built in.
+
+The stage-1 shells need none of this: they are built *after* the
+refinement, from the poses it produced. The rule is about order, not about
+the face, and `tests/test_workflows.py` asserts it that way.
+
 ## The result
 
 brush, 30k iters, `--eval-split-every 8` (70 train / 11 eval), identical

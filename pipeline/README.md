@@ -133,7 +133,9 @@ pipeline/
 │                      end against the dataset docs/camera-pose-
 │                      refinement.md measured (+21.7% BA inflation undone,
 │                      centre movement within 7% of the recorded run),
-│                      never yet run on a pod
+│                      never yet run on a pod. Also rebase_cameras, which
+│                      carries the face cap's supporting views across that
+│                      correction (pure arithmetic, unit-tested)
 │   ├── anchor_stub.py   generate_firstlast / inject_anchor /
 │                      inject_shell_views / select_support_views /
 │                      merge_support_views — real, verified locally (pure
@@ -851,6 +853,26 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   ONNX weights that `pipeline/models.py` prefetches. `pipeline/doctor.py`
   checks both. Full write-up, traps and measurements:
   `docs/camera-pose-refinement.md`.
+- `rebase_cameras` (`refine_cameras.py`) — carries a render's cameras across
+  the correction above. The face cap is the case it exists for: the face
+  splat is unprojected from the reference photograph through the **anchor**
+  camera's pose in the bootstrap, and its supporting views are rendered
+  around it there, so the stage-2 refinement moves that camera out from
+  under views that already exist. The photograph does not change; the claim
+  about where it was taken from does, and the world content it depicts moves
+  with it — so `brush` gets a face a centimetre or two off the head every
+  training frame agrees on, weighted by the face's own alpha.
+
+  The transform is the anchor's own pose delta, `D = P_new @ P_old⁻¹`, which
+  is a statement of the correction to that photograph's rays rather than an
+  approximation of one. Only the **cameras** move: a render depends on where
+  its camera sits relative to the splat, so moving both by one rigid
+  transform leaves every pixel identical, and the .ply's readers are all
+  behind it by then. It is gated with the face branch and passes its views
+  through untouched when nothing wrote `refine_cameras`' `given_cameras`,
+  i.e. when the refinement is switched off. The stage-1 body shells need
+  none of this — they are built *after* the refinement, which is the same
+  ordering rule from the other side.
 - `refine_pose_to_splat` (`pose_refine.py`) — re-poses a SAM-3D-Body fit so
   its mesh agrees with that shell in novel views, which is what stops the
   skeleton overlay drifting off the subject a few degrees either side of the
