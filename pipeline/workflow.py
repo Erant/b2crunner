@@ -96,12 +96,13 @@ from .templating import referenced_globals
 
 
 #: The `type:` names a `settings:` entry may use, and the Python type each
-#: one means. Deliberately the same five `Param` accepts: a pipeline setting
+#: one means. Deliberately the same six `Param` accepts: a pipeline setting
 #: IS a `Param`, so it is drawn by the widget code the step panel already
 #: uses and coerced by `coerce_param`, rather than by a second mechanism
 #: that would have to be kept in step with the first.
 PARAM_TYPES: Dict[str, type] = {
     "str": str, "int": int, "float": float, "bool": bool, "list": list,
+    "dict": dict,
 }
 
 _SETTING_KEYS = frozenset({

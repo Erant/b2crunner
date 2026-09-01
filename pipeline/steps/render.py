@@ -69,6 +69,7 @@ import numpy as np
 
 from ..registry import register_step
 from ..step import REQUIRED, Param, Step
+from .backdrop import BACKGROUND_PARAMS, build_background
 
 logger = logging.getLogger(__name__)
 
@@ -446,7 +447,7 @@ class RenderStep(Step):
               minimum=0.0, maximum=180.0, advanced=True),
         Param("pointcloud_samples", int, 10000,
               "Points sampled off the mesh for points3D.txt", minimum=1, advanced=True),
-    )
+    ) + BACKGROUND_PARAMS
 
     def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
         from body2colmap.camera import Camera
@@ -715,7 +716,17 @@ class RenderStep(Step):
         elif want_splat:
             logger.info("render: splat_max_angle_deg is 0, nothing composited")
 
-        renderer = Renderer(scene=scene, render_size=(width, height))
+        # The environment behind every frame (steps/backdrop.py). Handed to
+        # the Renderer rather than composited afterwards, because
+        # `render_composite` is the only thing that knows where the base
+        # layer ends and the skeleton overlay begins — the overlay writes RGB
+        # without touching alpha, so a backdrop composited after it would
+        # blend the skeleton away everywhere outside the silhouette. The
+        # single-mode branches below have no overlay and do their own.
+        renderer = Renderer(
+            scene=scene, render_size=(width, height),
+            background=build_background(params, cameras),
+        )
 
         rendered_images = []
         for index, camera in enumerate(cameras):
@@ -768,6 +779,11 @@ class RenderStep(Step):
                 )
             else:
                 raise ValueError(f"Unknown render_mode: {render_mode}")
+            if "+" not in base_render_mode:
+                # A no-op without a backdrop, and unreachable with one for
+                # the composite modes: `render_composite` has already drawn
+                # it under their base layer, which is the only correct place.
+                img = renderer.composite_over_background(img, camera)
             rendered_images.append(img)
 
         points, colors = scene.get_point_cloud(n_samples=params["pointcloud_samples"])

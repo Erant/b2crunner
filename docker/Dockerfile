@@ -817,21 +817,32 @@ COPY --from=python-builder /opt/vendor /opt/vendor
 # `ply_path`. 4bb9dd9 ("Add crash-report and progress hooks to
 # SplatRenderer", 2026-08-31) is the commit that added them.
 #
+# 958fd3b ("Draw a world-fixed backdrop behind the render", 2026-09-01) adds
+# `body2colmap.background`, which steps/backdrop.py builds both renderers'
+# environment out of, and the `background=` seam on `Renderer` that carries
+# it under a composite's base layer. Both step defaults are a grid cube, so
+# an older commit is not a degraded run, it is an ImportError on the first
+# render.
+#
 # Failing the build is deliberate: an image built against an older commit
 # would install cleanly and then raise on the first render_splat of a real
-# run, an hour into a pod booking. The third assert below is what stops it.
+# run, an hour into a pod booking. The last two asserts below are what stop it.
 RUN /opt/venv_base/bin/pip install --force-reinstall --no-deps \
-        'body2colmap @ git+https://github.com/Erant/body2colmap.git@4bb9dd9c68b4e0aeb2fab6f52b638867f7608f55' \
+        'body2colmap @ git+https://github.com/Erant/body2colmap.git@958fd3b43e8542a64a22cde35ca5f145360d968f' \
     && /opt/venv_base/bin/python -c "\
 import inspect; \
 import body2colmap.face as f; \
 from body2colmap.renderer import Renderer; \
 import body2colmap.splat_renderer as sr; \
+from body2colmap.background import Background, TEXTURE_GENERATORS; \
 assert f.EYE_STYLES == ('shape', 'dots'), f.EYE_STYLES; \
 assert 'splat_layer' in inspect.signature(Renderer.render_composite).parameters; \
 assert sr.BINARY_NAME == 'brush-splat-render', sr.BINARY_NAME; \
 assert 'on_fault' in inspect.signature(sr.SplatRenderer.__init__).parameters, \
     'bump the body2colmap pin: steps/splat.py needs on_fault/on_output/ply_path'; \
+assert 'grid' in TEXTURE_GENERATORS, sorted(TEXTURE_GENERATORS); \
+assert 'background' in inspect.signature(Renderer.__init__).parameters, \
+    'bump the body2colmap pin: steps/backdrop.py needs Renderer(background=...)'; \
 print('body2colmap eye_style default:', f.DEFAULT_EYE_STYLE)"
 
 # NOT /workspace/b2c_runner, which is where this used to live. RunPod's

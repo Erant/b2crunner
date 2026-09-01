@@ -62,10 +62,17 @@ FALSE_STRINGS = frozenset({"", "0", "false", "no", "off", "none", "null"})
 class Param:
     """One knob a Step accepts, with everything a UI needs to draw it.
 
-    `type` is a plain Python type — `int`, `float`, `bool`, `str` or `list` —
-    used both to coerce whatever a workflow or a text box supplied and to
-    pick a widget. `default` is what the step uses when nothing overrides it;
-    `REQUIRED` means there is no sensible default and a workflow that omits
+    `type` is a plain Python type — `int`, `float`, `bool`, `str`, `list` or
+    `dict` — used both to coerce whatever a workflow or a text box supplied
+    and to pick a widget. `dict` is for a param that is passed WHOLE to
+    something that validates it itself: `background_params` hands a texture
+    generator its own keyword arguments, and body2colmap checks them against
+    the generator's signature and names the accepted ones. Declaring each of
+    those as a param here would mean a table of every generator's arguments,
+    maintained in two places and stale the moment one gains a knob.
+
+    `default` is what the step uses when nothing overrides it; `REQUIRED`
+    means there is no sensible default and a workflow that omits
     it is an error (an output directory, say). `None` is a legitimate default
     and means something different: "the step computes this at runtime" —
     `device`, which resolves to cuda-if-available inside `run()`, is the
@@ -136,6 +143,10 @@ def coerce_param(value: Any, param: "Param", where: str) -> Any:
             if isinstance(value, (list, tuple)):
                 return list(value)
             raise ValueError(f"expected a list, got {type(value).__name__}")
+        if target is dict:
+            if isinstance(value, dict):
+                return dict(value)
+            raise ValueError(f"expected a mapping, got {type(value).__name__}")
     except (TypeError, ValueError) as exc:
         raise ParamError(
             f"{where}: param '{param.name}' expects {target.__name__}, "

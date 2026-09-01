@@ -1,0 +1,547 @@
+"""The world-fixed environment behind both renderers' frames.
+
+What is actually this project's here, and therefore what is pinned: where
+the backdrop's surface is put (`orbit_frame`), how a step's params become
+one (`build_background`), and how it gets behind frames an external
+rasteriser already composited over a flat colour (`composite_bgr`). The
+textures, the ray intersection and the parallax are body2colmap's and are
+tested there.
+
+Two properties carry most of the weight. The first is that the ALPHA IS
+NEVER TOUCHED: this pipeline carries an image and its mask separately, so a
+backdrop that filled the mask in would hand every consumer downstream a
+subject the size of the frame. The second is that the face-cap render still
+comes back premultiplied over black — `select_support_views` divides that
+alpha back out, and a room behind the splat would be recovered as the
+face's own colour.
+"""
+
+from __future__ import annotations
+
+import json
+import tempfile
+import unittest
+from pathlib import Path
+
+import numpy as np
+
+from pipeline.registry import get_step_class
+from pipeline.steps.backdrop import (
+    BACKGROUND_PARAMS,
+    build_background,
+    composite_bgr,
+    orbit_frame,
+)
+from tests.helpers import stub_render_binary, run_step
+
+import pipeline.steps  # noqa: F401
+
+
+TARGET = np.array([0.1, 1.4, -2.0], dtype=np.float32)
+RADIUS = 2.5
+
+
+def _camera_template(width=8, height=8):
+    from body2colmap.camera import Camera
+
+    return Camera(focal_length=(float(width), float(width)),
+                  image_size=(width, height))
+
+
+def _path_gen():
+    from body2colmap.path import OrbitPath
+
+    return OrbitPath(target=TARGET, radius=RADIUS)
+
+
+def _rs_params(**overrides):
+    """render_splat's declared defaults with `overrides` on top."""
+    return get_step_class("render_splat").resolve_params(overrides)
+
+
+class TestOrbitFrame(unittest.TestCase):
+    """Recovering where a camera path looks, from the cameras alone.
+
+    Every path this pipeline builds aims its cameras at one point, so that
+    point is recoverable exactly. Doing it this way rather than threading
+    the target down from each branch is what makes the two steps agree, and
+    what covers `render_splat`'s reuse-the-dataset's-cameras mode, which
+    never computes an orbit at all.
+    """
+
+    def _check(self, cameras):
+        center, radius = orbit_frame(cameras)
+        np.testing.assert_allclose(center, TARGET, atol=1e-4)
+        self.assertAlmostEqual(radius, RADIUS, places=4)
+
+    def test_a_circular_orbit_gives_back_its_target_and_radius(self):
+        self._check(_path_gen().circular(n_frames=12, camera_template=_camera_template()))
+
+    def test_a_helical_orbit_does_too(self):
+        self._check(_path_gen().helical(
+            n_frames=24, n_loops=2, amplitude_deg=30.0,
+            camera_template=_camera_template()))
+
+    def test_a_cap_does_too_though_it_is_not_an_orbit(self):
+        """The face-support pattern: a narrow disc of views, not a sweep.
+
+        The rays still converge on the splat's centre, which is the only
+        property the recovery needs — an arc a few degrees wide would defeat
+        an approach that averaged positions instead.
+        """
+        from pipeline.steps.splat import _cap_path
+
+        cameras = _cap_path(
+            _path_gen(),
+            _rs_params(n_frames=16, cap_radius_deg=20.0, pattern="cap"),
+            _camera_template(),
+            {},
+        )
+        self._check(cameras)
+
+    def test_no_cameras_is_refused(self):
+        with self.assertRaises(ValueError):
+            orbit_frame([])
+
+    def test_a_camera_sitting_on_its_own_target_is_refused(self):
+        """There is no radius to size a backdrop against, and body2colmap
+        would otherwise be handed radius 0 and raise about the wrong thing."""
+        from body2colmap.camera import Camera
+
+        camera = Camera(focal_length=(8.0, 8.0), image_size=(8, 8),
+                        position=np.zeros(3, dtype=np.float32))
+        camera.look_at(np.array([0.0, 0.0, -1.0], dtype=np.float32))
+        with self.assertRaises(ValueError) as caught:
+            orbit_frame([camera, camera])
+        self.assertIn("no orbit radius", str(caught.exception))
+
+
+class TestBuildBackground(unittest.TestCase):
+    """A step's resolved params into a `Background`."""
+
+    def setUp(self):
+        self.cameras = _path_gen().circular(
+            n_frames=8, camera_template=_camera_template())
+
+    def test_an_empty_texture_is_no_backdrop_at_all(self):
+        """The off switch, and the one the face-cap render has to use."""
+        self.assertIsNone(build_background(_rs_params(background=""), self.cameras))
+        self.assertIsNone(build_background(_rs_params(background="  "), self.cameras))
+
+    def test_the_default_is_a_grid_cube_around_the_orbit(self):
+        background = build_background(_rs_params(), self.cameras)
+        self.assertEqual(background.geometry, "cube")
+        self.assertAlmostEqual(background.radius, 3.0 * RADIUS, places=4)
+        np.testing.assert_allclose(background.center, TARGET, atol=1e-4)
+
+    def test_the_alpha_channel_is_never_filled_in(self):
+        """body2colmap defaults `opaque=True` because its frames ARE the
+        deliverable. Here the alpha is the mask every downstream step reads
+        as the subject's silhouette, so this must be False for every set of
+        params a workflow can write."""
+        for params in (_rs_params(), _rs_params(background="checker"),
+                       _rs_params(background_geometry="sphere"),
+                       _rs_params(background_radius_scale=None)):
+            self.assertFalse(build_background(params, self.cameras).opaque)
+
+    def test_an_empty_radius_scale_puts_the_surface_at_infinity(self):
+        background = build_background(
+            _rs_params(background_radius_scale=None), self.cameras)
+        self.assertIsNone(background.radius)
+
+    def test_an_explicit_radius_supersedes_the_defaulted_scale(self):
+        """A workflow that writes only `background_radius` never wrote the
+        scale, so the two are not a conflict — body2colmap's own config
+        loader takes the same view, for the same reason."""
+        background = build_background(
+            _rs_params(background_radius=40.0), self.cameras)
+        self.assertAlmostEqual(background.radius, 40.0, places=4)
+
+    def test_a_radius_that_does_not_enclose_the_orbit_is_refused(self):
+        with self.assertRaises(ValueError) as caught:
+            build_background(_rs_params(background_radius=RADIUS / 2.0), self.cameras)
+        self.assertIn("enclose", str(caught.exception))
+
+    def test_a_scale_inside_the_orbit_is_refused(self):
+        with self.assertRaises(ValueError) as caught:
+            build_background(_rs_params(background_radius_scale=1.0), self.cameras)
+        self.assertIn("> 1.0", str(caught.exception))
+
+    def test_a_texture_that_is_neither_a_generator_nor_a_path_is_refused(self):
+        with self.assertRaises(ValueError):
+            build_background(_rs_params(background="gird"), self.cameras)
+
+
+class TestBackgroundParams(unittest.TestCase):
+    """The backdrop's own appearance — its colours above all.
+
+    Handed to the generator whole rather than unpacked into a param each,
+    because the four generators name their colours differently (grid's
+    base/line/floor/ceiling, checker's a/b, gradient's top/bottom, the sky's
+    zenith/horizon/ground) and each carries non-colour knobs beside them. A
+    table of that here would be a second copy of body2colmap's signatures,
+    stale the moment one gains an argument — so what is pinned is that the
+    values arrive, and that a wrong key is refused by name.
+    """
+
+    def setUp(self):
+        self.cameras = _path_gen().circular(
+            n_frames=4, camera_template=_camera_template(64, 64))
+
+    def _frame(self, **overrides):
+        """One rendered view of the environment, as int16 for differencing."""
+        background = build_background(_rs_params(**overrides), self.cameras)
+        return background.render(self.cameras[0]).astype(np.int16)
+
+    def test_recolouring_the_walls_changes_the_render(self):
+        """Measured over the whole frame rather than at a pixel: the texture
+        is resampled to suit the camera, so any single pixel may have landed
+        on a blurred grid line."""
+        def red_excess(frame):
+            return float(np.median(frame[..., 0] - frame[..., 2]))
+
+        self.assertLess(red_excess(self._frame()), 0.0)
+        self.assertGreater(
+            red_excess(self._frame(background_params={"base_color": [0.9, 0.1, 0.1]})),
+            150.0)
+
+    def test_a_generator_that_names_its_colours_differently_works_too(self):
+        """checker takes color_a/color_b, not base_color — the reason these
+        are passed through instead of mapped onto names of this project's
+        own invention."""
+        red_blue = self._frame(
+            background="checker",
+            background_params={"color_a": [1.0, 0.0, 0.0],
+                               "color_b": [0.0, 0.0, 1.0]})
+        self.assertEqual(int(red_blue[..., 1].max()), 0)
+
+    def test_a_non_colour_knob_goes_through_the_same_way(self):
+        """It is the generator's whole keyword surface, not a colour hatch.
+        Grid lines are the brightest thing in the room, so widening them
+        lifts the whole frame."""
+        self.assertGreater(
+            self._frame(background_params={"line_width": 0.4}).mean(),
+            self._frame().mean() + 30.0)
+
+    def test_a_key_the_generator_does_not_take_is_refused_by_name(self):
+        """body2colmap's own check, kept rather than duplicated: it names
+        every argument the generator does accept, which is the message
+        somebody who guessed `wall_color` actually needs."""
+        with self.assertRaises(ValueError) as caught:
+            build_background(
+                _rs_params(background_params={"wall_color": [0, 0, 0]}),
+                self.cameras)
+        message = str(caught.exception)
+        self.assertIn("wall_color", message)
+        self.assertIn("base_color", message)
+
+    def test_params_alongside_a_loaded_texture_are_refused(self):
+        """A file has no parameters to take, so they would silently do
+        nothing rather than fail."""
+        import cv2
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "equirect.png"
+            cv2.imwrite(str(path), np.zeros((32, 64, 3), np.uint8))
+            with self.assertRaises(ValueError) as caught:
+                build_background(
+                    _rs_params(background=str(path),
+                               background_geometry="sphere",
+                               background_params={"base_color": [0, 0, 0]}),
+                    self.cameras)
+        self.assertIn("not a generator", str(caught.exception))
+
+    def test_the_default_is_empty_and_leaves_the_generator_alone(self):
+        declared = get_step_class("render").declared_params()["background_params"]
+        self.assertEqual(declared.default, {})
+        self.assertIs(declared.type, dict)
+
+
+class TestCompositeBgr(unittest.TestCase):
+    """Getting a backdrop behind frames that already have a flat one.
+
+    `brush-splat-render` draws one colour and knows nothing of
+    environments, so what `render_splat` gets back is `C*a + flat*(1-a)`.
+    Recovering `C` and re-compositing cancels to a single add, and the test
+    is that it lands on the same pixels a straight composite would.
+    """
+
+    def setUp(self):
+        self.cameras = _path_gen().circular(
+            n_frames=3, camera_template=_camera_template())
+        self.background = build_background(_rs_params(), self.cameras)
+
+    def _frames(self, straight_bgr, alpha, flat):
+        """`straight_bgr` composited over `flat`, as the binary would."""
+        flat_bgr = np.array([c * 255.0 for c in reversed(flat)], dtype=np.float32)
+        images, masks = [], []
+        for _ in self.cameras:
+            a = np.full((8, 8), float(alpha), dtype=np.float32)
+            rgb = straight_bgr * a[..., None] + flat_bgr * (1.0 - a[..., None])
+            images.append(rgb.round().astype(np.uint8))
+            masks.append(a)
+        return images, masks
+
+    def _expected(self, straight_bgr, alpha, camera):
+        env = self.background.render(camera)[..., ::-1].astype(np.float32)
+        return straight_bgr * alpha + env * (1.0 - alpha)
+
+    def test_a_frame_over_black_lands_where_a_direct_composite_would(self):
+        straight = np.array([20.0, 180.0, 90.0], dtype=np.float32)
+        images, masks = self._frames(straight, 0.4, (0.0, 0.0, 0.0))
+        out = composite_bgr(images, masks, background=self.background,
+                            cameras=self.cameras, flat_color=(0.0, 0.0, 0.0))
+        for frame, camera in zip(out, self.cameras):
+            np.testing.assert_allclose(
+                frame.astype(np.float32),
+                self._expected(straight, 0.4, camera), atol=1.5)
+
+    def test_a_frame_over_the_confidence_cull_grey_does_too(self):
+        """Confidence mode never passes `bg_color` to the binary at all —
+        `cull_color` is both the background and the reject colour — so the
+        colour being displaced is the one this is told about, not the one
+        the step declares."""
+        straight = np.array([200.0, 30.0, 60.0], dtype=np.float32)
+        images, masks = self._frames(straight, 0.25, (0.5, 0.5, 0.5))
+        out = composite_bgr(images, masks, background=self.background,
+                            cameras=self.cameras, flat_color=(0.5, 0.5, 0.5))
+        for frame, camera in zip(out, self.cameras):
+            np.testing.assert_allclose(
+                frame.astype(np.float32),
+                self._expected(straight, 0.25, camera), atol=1.5)
+
+    def test_a_fully_covered_frame_is_left_exactly_alone(self):
+        straight = np.array([10.0, 20.0, 30.0], dtype=np.float32)
+        images, masks = self._frames(straight, 1.0, (0.0, 0.0, 0.0))
+        before = [frame.copy() for frame in images]
+        out = composite_bgr(images, masks, background=self.background,
+                            cameras=self.cameras, flat_color=(0.0, 0.0, 0.0))
+        for frame, original in zip(out, before):
+            np.testing.assert_array_equal(frame, original)
+
+    def test_the_masks_come_back_untouched(self):
+        """The whole reason `opaque` is False: the mask is the splat's own
+        coverage, and brush, mask_splat and colmap_export all read it as
+        the subject."""
+        images, masks = self._frames(
+            np.array([50.0, 50.0, 50.0], dtype=np.float32), 0.3, (0.0, 0.0, 0.0))
+        before = [mask.copy() for mask in masks]
+        composite_bgr(images, masks, background=self.background,
+                      cameras=self.cameras, flat_color=(0.0, 0.0, 0.0))
+        for mask, original in zip(masks, before):
+            np.testing.assert_array_equal(mask, original)
+
+
+class TestBothStepsDeclareIt(unittest.TestCase):
+    """One declaration, spliced into both renderers.
+
+    `render` draws what the first denoise pass sees and `render_splat` what
+    the second one sees. A person tunes one set of controls, and a
+    workflow's `${globals.background}` reaches both by the same name.
+    """
+
+    def test_render_and_render_splat_declare_the_same_knobs(self):
+        declared = {
+            name: get_step_class(name).declared_params()
+            for name in ("render", "render_splat")
+        }
+        for param in BACKGROUND_PARAMS:
+            for name, params in declared.items():
+                self.assertIn(param.name, params, name)
+                self.assertIs(params[param.name], param, f"{name}.{param.name}")
+
+    def test_the_default_is_a_grid_box(self):
+        params = get_step_class("render").declared_params()
+        self.assertEqual(params["background"].default, "grid")
+        self.assertEqual(params["background_geometry"].default, "cube")
+        self.assertEqual(params["background_radius_scale"].default, 3.0)
+
+
+class TestRenderStepWiring(unittest.TestCase):
+    """`render` hands the backdrop to the Renderer rather than compositing.
+
+    Which matters for one reason: `render_composite` is the only thing that
+    knows where the base layer ends and the skeleton overlay begins. The
+    overlay writes RGB without touching alpha, so a backdrop composited
+    after it would blend the skeleton away everywhere off the mesh.
+
+    Pyrender needs a GPU/headless-GL setup this test environment has not
+    got, so the Renderer is replaced by a recorder. That still pins the two
+    things that are this step's: which cameras the backdrop is measured
+    against, and that a single-mode render (no overlay, so no
+    `render_composite`) gets composited too.
+    """
+
+    def setUp(self):
+        import trimesh
+
+        from pipeline.steps import render as render_module
+
+        mesh = trimesh.creation.icosphere(subdivisions=2, radius=0.5)
+        rng = np.random.default_rng(3)
+        self.mesh_output = {
+            "vertices": np.asarray(mesh.vertices, dtype=np.float32),
+            "faces": np.asarray(mesh.faces, dtype=np.int32),
+            "cam_t": np.array([0.0, 0.0, 3.0], dtype=np.float32),
+            "keypoints_3d": (rng.normal(size=(70, 3)) * 0.3).astype(np.float32),
+            "focal_length": 1000.0,
+        }
+        self.render_module = render_module
+        self.recorder = _RecordingRenderer.install(self)
+
+    def _run(self, **params):
+        step = get_step_class("render")()
+        return step.run(
+            {"mesh_output": self.mesh_output},
+            get_step_class("render").resolve_params(
+                {"n_frames": 4, "resolution": [8, 8], **params}),
+        )
+
+    def test_the_backdrop_is_measured_against_the_cameras_it_renders(self):
+        result = self._run(render_mode="mesh")
+        background = self.recorder.background
+        self.assertIsNotNone(background)
+        center, radius = orbit_frame(result["cameras"])
+        np.testing.assert_allclose(background.center, center, atol=1e-4)
+        self.assertAlmostEqual(background.radius, 3.0 * radius, places=3)
+
+    def test_an_empty_background_leaves_the_renderer_without_one(self):
+        self._run(render_mode="mesh", background="")
+        self.assertIsNone(self.recorder.background)
+
+    def test_a_single_mode_render_is_composited_by_the_step(self):
+        """`render_composite` draws the backdrop under its own base layer,
+        but `mesh`/`depth`/`skeleton` never go through it — so the step has
+        to, and a missing call is invisible until someone looks at a frame."""
+        self._run(render_mode="mesh")
+        self.assertEqual(self.recorder.composited, 4)
+
+    def test_a_composite_mode_is_not_composited_twice(self):
+        self._run(render_mode="mesh+skeleton")
+        self.assertEqual(self.recorder.composited, 0)
+
+
+class _RecordingRenderer:
+    """A stand-in for body2colmap's `Renderer` that draws nothing."""
+
+    def __init__(self, scene, render_size, background=None):
+        self.scene = scene
+        self.width, self.height = render_size
+        self.background = background
+        self.composited = 0
+
+    @classmethod
+    def install(cls, test):
+        """Patch the Renderer `render.py` imports inside `run()`, and hand
+        the test back the one instance it will build."""
+        import body2colmap.renderer as renderer_module
+
+        made = []
+
+        def factory(scene, render_size, background=None):
+            instance = cls(scene, render_size, background=background)
+            made.append(instance)
+            return instance
+
+        original = renderer_module.Renderer
+        renderer_module.Renderer = factory
+        test.addCleanup(setattr, renderer_module, "Renderer", original)
+        return _LazyRenderer(made)
+
+    def _blank(self):
+        image = np.zeros((self.height, self.width, 4), dtype=np.uint8)
+        image[..., 3] = 255
+        return image
+
+    def render_mesh(self, **kwargs):
+        return self._blank()
+
+    def render_depth(self, **kwargs):
+        return self._blank()
+
+    def render_skeleton(self, **kwargs):
+        return self._blank()
+
+    def render_composite(self, **kwargs):
+        # The real one composites the backdrop under its base layer itself;
+        # counting it here would hide a double composite rather than catch it.
+        return self._blank()
+
+    def composite_over_background(self, image, camera):
+        self.composited += 1
+        return image
+
+
+class _LazyRenderer:
+    """The recorder the step builds, once it has built it."""
+
+    def __init__(self, made):
+        self._made = made
+
+    def __getattr__(self, name):
+        if not self._made:
+            raise AssertionError("the render step never built a Renderer")
+        return getattr(self._made[-1], name)
+
+
+class TestRenderSplatBackdrop(unittest.TestCase):
+    """The whole step, against the stub rasteriser.
+
+    The stub is told to render at half alpha, because a fully opaque frame
+    hides every background question there is — which is also why the
+    default stub could not have caught this.
+    """
+
+    def _run(self, *, alpha=128, **params):
+        from tests.test_splat import _synthetic_scene
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ply = root / "s.ply"
+            scene = _synthetic_scene()
+            run_step("save_splat", {"splat_scene": scene}, {"filepath": str(ply)})
+            binary = stub_render_binary(root, alpha=alpha)
+            return run_step(
+                "render_splat",
+                {"splat_scene": scene, "splat_path": str(ply)},
+                {"pattern": "circular", "n_frames": 3, "width": 8, "height": 8,
+                 "bounds_source": "splat", "render_path": binary, **params},
+            )
+
+    def test_the_default_puts_a_room_behind_the_splat(self):
+        """The stub renders one flat colour over black, so anything the
+        frames gain over the same run with no backdrop is the room.
+
+        Compared against that run rather than measured within a frame: at
+        8x8 the whole view can land inside one cell of the grid, so a
+        correct backdrop is a colour shift and not necessarily a texture.
+        """
+        with_room = self._run()
+        without = self._run(background="")
+        for a, b in zip(with_room["images"], without["images"]):
+            self.assertTrue((a != b).any())
+
+    def test_turning_it_off_gives_back_the_flat_frames(self):
+        """What every render feeding select_support_views needs, and what
+        every run before this change produced."""
+        result = self._run(background="")
+        for image in result["images"]:
+            np.testing.assert_array_equal(image, np.full_like(image, image[0, 0]))
+
+    def test_the_masks_are_the_same_either_way(self):
+        with_room = self._run()
+        without = self._run(background="")
+        for a, b in zip(with_room["masks"], without["masks"]):
+            np.testing.assert_array_equal(a, b)
+
+    def test_a_fully_covered_render_is_unchanged_by_it(self):
+        """Alpha 255 everywhere means there is nothing behind the splat to
+        see, so the backdrop must cost the frame nothing."""
+        with_room = self._run(alpha=255)
+        without = self._run(alpha=255, background="")
+        for a, b in zip(with_room["images"], without["images"]):
+            np.testing.assert_array_equal(a, b)
+
+
+if __name__ == "__main__":
+    unittest.main()

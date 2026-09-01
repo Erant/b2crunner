@@ -320,10 +320,11 @@ def _widget_for(param: Param, value: Any, label: str, key: str):
             allow_custom_value=param.type is not list,
             interactive=True, key=key,
         )
-    if param.type is list:
+    if param.type in (list, dict):
+        shape = "YAML list" if param.type is list else "YAML mapping"
         return gr.Textbox(
             value=yaml.safe_dump(value, default_flow_style=True).strip(),
-            label=label, info=(info + " (YAML list)") if info else "YAML list",
+            label=label, info=(info + f" ({shape})") if info else shape,
             interactive=True, key=key,
         )
     text = value if isinstance(value, str) else ""
@@ -350,11 +351,20 @@ def _widget_value(param: Param, raw: Any) -> Any:
         # `allow_custom_value` lets someone type a value that is not on the
         # list. Fall through to the type handling below so it is still
         # brought to the right shape.
-    if param.type is list:
+    if param.type in (list, dict):
         try:
             parsed = yaml.safe_load(raw) if isinstance(raw, str) else raw
         except yaml.YAMLError as exc:
             raise gr.Error(f"{param.name}: not valid YAML ({exc})")
+        if param.type is dict:
+            # An empty box is an empty mapping, not a refusal: `{}` is the
+            # declared default of every dict param there is, and yaml reads
+            # a blank string as None.
+            if parsed is None:
+                return {}
+            if not isinstance(parsed, dict):
+                raise gr.Error(f"{param.name}: expected a YAML mapping, got {raw!r}")
+            return dict(parsed)
         if not isinstance(parsed, (list, tuple)):
             raise gr.Error(f"{param.name}: expected a YAML list, got {raw!r}")
         return list(parsed)

@@ -272,6 +272,26 @@ class TestSettingWidgets(unittest.TestCase):
         self.assertEqual([c[0] for c in widget.choices][0], "720 x 1280")
         self.assertFalse(widget.allow_custom_value)
 
+    def test_a_mapping_param_draws_a_yaml_box_and_reads_back_a_dict(self):
+        """`background_params` — the generator's own colours and shape,
+        handed to it whole. It shares the list branch's YAML box, so what is
+        pinned is that it comes back a mapping rather than a list, and that
+        an empty box is an empty mapping rather than an error."""
+        import gradio as gr
+
+        from pipeline.registry import get_step_class
+
+        param = get_step_class("render").declared_params()["background_params"]
+        with gr.Blocks():
+            widget = webui._widget_for(param, {}, "Backdrop params", "k")
+        self.assertIsInstance(widget, gr.Textbox)
+        self.assertIn("YAML mapping", widget.info)
+        self.assertEqual(
+            webui._widget_value(param, "{base_color: [0.2, 0.21, 0.24]}"),
+            {"base_color": [0.2, 0.21, 0.24]},
+        )
+        self.assertEqual(webui._widget_value(param, ""), {})
+
     def test_a_setting_is_labelled_by_its_label_not_its_name(self):
         self.assertEqual(self._setting("run_upscale").title, "Upscale dataset")
         # A step param has no label and falls back to the name you would

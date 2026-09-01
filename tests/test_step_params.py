@@ -29,6 +29,7 @@ class Sample(Step):
         Param("enabled", bool, True),
         Param("mode", str, "fast", choices=("fast", "slow")),
         Param("size", list, [720, 1280]),
+        Param("options", dict, {}, "handed whole to something that checks it"),
         Param("device", str, None, "computed at runtime when empty"),
         Param("destination", str, REQUIRED, "nowhere sensible to default to"),
     )
@@ -128,6 +129,23 @@ class TestCoercion(unittest.TestCase):
     def test_a_tuple_is_accepted_for_a_list(self):
         params = Sample.resolve_params({"destination": "x", "size": (512, 512)})
         self.assertEqual(params["size"], [512, 512])
+
+    def test_a_mapping_comes_through_whole_and_copied(self):
+        """The `dict` type exists for a param that is passed straight to
+        something with its own validation — `background_params` to a texture
+        generator. Copied rather than aliased, so a step cannot mutate the
+        declaration's default out from under the next run."""
+        source = {"base_color": [0.2, 0.21, 0.24], "n_per_face": 8}
+        params = Sample.resolve_params({"destination": "x", "options": source})
+        self.assertEqual(params["options"], source)
+        self.assertIsNot(params["options"], source)
+
+    def test_a_non_mapping_names_the_param_and_the_type(self):
+        with self.assertRaises(ParamError) as ctx:
+            Sample.resolve_params({"destination": "x", "options": [1, 2]})
+        message = str(ctx.exception)
+        self.assertIn("options", message)
+        self.assertIn("dict", message)
 
 
 class TestEveryRegisteredStep(unittest.TestCase):

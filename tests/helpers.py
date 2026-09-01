@@ -125,6 +125,7 @@ def stub_render_binary(
     frames: str = "all",
     damage: str = "",
     segfault: bool = False,
+    alpha: int = 255,
     record=None,
 ):
     """An executable stand-in for `brush-splat-render`, as a path.
@@ -143,6 +144,10 @@ def stub_render_binary(
             two are checked differently (size, then decode).
         segfault: Die by SIGSEGV once the writing is done — the known
             shutdown crash, which lands after the work is on disk.
+        alpha: The frames' alpha channel, 0-255. The default is fully
+            opaque, which makes the flat background the renderer composites
+            under them invisible; a partial value is what a test of what
+            shows THROUGH a splat needs.
         record: A directory to copy the argv (as `argv.json`) and the
             cameras.json into, for a test that wants to read them.
     """
@@ -169,7 +174,7 @@ def stub_render_binary(
         "for i in range(write):\n"
         "    img = np.zeros((cams['height'], cams['width'], 4), np.uint8)\n"
         "    img[..., :3] = 100\n"
-        "    img[..., 3] = 255\n"
+        f"    img[..., 3] = {int(alpha)}\n"
         "    p = out / ('f%05d.png' % i)\n"
         f"    damage = {damage!r}\n"
         "    if damage and i == write - 1:\n"

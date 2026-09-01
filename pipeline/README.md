@@ -136,6 +136,18 @@ pipeline/
 │                      never yet run on a pod. Also rebase_cameras, which
 │                      carries the face cap's supporting views across that
 │                      correction (pure arithmetic, unit-tested)
+│   ├── backdrop.py      no step of its own — the world-fixed environment
+│                      both renderers draw their frames in front of, so an
+│                      orbit reads as the camera moving rather than the
+│                      subject spinning. Declares the `background*` params
+│                      `render` and `render_splat` share, sizes the surface
+│                      against the cameras, and composites it behind frames
+│                      an external rasteriser already flattened. Its
+│                      colours and shape are `background_params`, a mapping
+│                      handed to the chosen generator whole (the one `dict`
+│                      param in the project — see pipeline/step.py). Unit-
+│                      tested, plus a headless-EGL render locally; the
+│                      default is a grid cube at 3x the orbit radius
 │   ├── anchor_stub.py   generate_firstlast / inject_anchor /
 │                      inject_shell_views / select_support_views /
 │                      merge_support_views — real, verified locally (pure

@@ -146,6 +146,7 @@ from ..proc import (
 )
 from ..registry import register_step
 from ..step import REQUIRED, Param, Step
+from .backdrop import BACKGROUND_PARAMS, build_background, composite_bgr
 
 logger = logging.getLogger(__name__)
 
@@ -378,7 +379,7 @@ class RenderSplatStep(Step):
         # picks its own. The workflows used to pass one and it was read by
         # nothing; declaring it would put a control in the UI that does
         # nothing at all.
-    )
+    ) + BACKGROUND_PARAMS
 
     def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
         from body2colmap.splat_scene import SplatScene
@@ -434,6 +435,14 @@ class RenderSplatStep(Step):
         # avoid because partial coverage fades toward the same value the
         # gate rejects to. The history stays here rather than moving,
         # because it is the reason black and not grey is the default.
+        #
+        # A `background` displaces whichever of the two the binary drew, so
+        # with a backdrop on this colour is no longer what any pixel ends up
+        # (steps/backdrop.py un-composites it out again). It still has to be
+        # right — the un-compositing is told which colour to remove — and the
+        # renders that must have NO backdrop at all are exactly the ones this
+        # paragraph is about: the face cap and the shells, whose alpha
+        # select_support_views divides back out.
         bg_color = tuple(params["bg_color"])
         render_path = params["render_path"]
         image_names = [f"frame_{i + 1:05d}_.png" for i in range(len(cameras))]
@@ -459,6 +468,26 @@ class RenderSplatStep(Step):
             render_path=render_path,
             confidence=confidence,
         )
+
+        # The environment behind the splat (steps/backdrop.py). Composited
+        # here rather than asked of the rasteriser, which draws one flat
+        # colour and nothing else — and rather than of body2colmap, which
+        # refuses a backdrop on a .ply outright for that reason. What it
+        # needs to know is which flat colour it is displacing: `cull_color`
+        # in confidence mode, where `bg_color` never reaches the binary at
+        # all, and `bg_color` otherwise. `masks` is deliberately not touched
+        # — it is the splat's own coverage, and every consumer of it (brush's
+        # supporting views, mask_splat, colmap_export) means the subject.
+        background = build_background(params, cameras)
+        if background is not None:
+            images = composite_bgr(
+                images, masks,
+                background=background,
+                cameras=cameras,
+                flat_color=(
+                    bg_color if confidence is None else confidence.cull_color
+                ),
+            )
 
         points_3d = _resolve_pointcloud(scene, dataset, params)
 

@@ -203,6 +203,34 @@ settings:
       makes the tighter presets available — `render` falls back to `full` for
       any it cannot compute, and rerender_splat follows.
 
+  - name: background
+    label: Backdrop
+    default: grid
+    help: >-
+      The world-fixed environment every render draws the subject in front of.
+      It exists to break one failure: over a blank background a video diffusion
+      model reads an orbit as the SUBJECT turning on a turntable, and the prompt
+      is not strong enough to talk it out of that — a backdrop that sweeps past
+      as the camera moves is the cue that says otherwise. `grid` is ruled walls
+      meeting at corners over a floor and ceiling that read apart, on a cube at
+      3x the orbit radius, which is the arrangement body2colmap measured as
+      carrying that cue most strongly (958fd3b): `checker` carries more raw
+      azimuthal signal but its cells are self-similar, so it says the view
+      turned without saying how far; `blender_sky` is symmetric about the
+      vertical axis apart from its sun and carries almost none; `gradient` is
+      the control with none at all. A path to an equirectangular image, a packed
+      cubemap or a directory of six cube faces works too. EMPTY is the flat grey
+      every run before 2026-09-01 used. One setting because every render whose
+      frames reach a diffusion pass shares a batch with the others and they have
+      to agree — the face-cap render is the one that must NOT have a backdrop,
+      and says so where it sits. Nothing exports it: `rmbg` re-derives the
+      training matte from the denoised frames, so what brush fits is still the
+      subject cut out of the room. The rest of the backdrop's knobs stay on the
+      steps, including its COLOURS: `background_params` is a YAML mapping
+      handed straight to the chosen generator, so `{base_color: [0.66, 0.68,
+      0.72]}` repaints grid's walls and `{color_a: ..., color_b: ...}` does
+      checker's tiles.
+
   - name: seed
     label: Seed
     type: int
@@ -738,6 +766,29 @@ steps:
       # and `outline_strength` sets how dark the fill is — left at its
       # default, which lands the fill on #6F6F6F, just off the ground.
       render_mode: outline+skeleton+splat
+      # The room the drawings stand in. Behind the flat grey silhouette and
+      # under the skeleton overlay, both — body2colmap's `render_composite`
+      # draws it beneath the BASE layer, which is the only correct place: the
+      # skeleton writes RGB without touching alpha, so a backdrop composited
+      # after it would blend the skeleton away everywhere off the mesh.
+      #
+      # MEASURED AND LEFT ALONE (2026-09-01): the silhouette very nearly
+      # disappears against the walls. `outline_strength` above defaults to
+      # the fill that lands on #6F6F6F (111), and `grid`'s walls are
+      # [107, 112, 122] — two or three levels apart. The floor (61) and
+      # ceiling (153) read fine; it is the walls, which is most of an
+      # eye-level orbit.
+      #
+      # Two levers, and `background_params` is the better one: it moves the
+      # WALLS and so touches nothing but a backdrop-on run, e.g.
+      #   background_params: {base_color: [0.66, 0.68, 0.72]}
+      # for walls at ~168 with the fill at 111 between them and the floor.
+      # `outline_strength: 35` moves the FILL instead (to #535353), which
+      # also darkens the drawings when the backdrop is off. Neither is set
+      # here: which way to open the gap, and how far, is a quality decision
+      # for a real run to make from a rendered frame — the same reasoning
+      # the note above denoise_pass1's prompt gives.
+      background: ${globals.background}
       # Every frame whose view of the head is within this of the
       # photograph's takes the layer; past it the 2.5-D shell's open rim is
       # what would appear, so it is dropped entirely. body2colmap measured
@@ -826,6 +877,12 @@ steps:
       width: ${globals.resolution.0}
       height: ${globals.resolution.1}
       bg_color: [0.0, 0.0, 0.0]
+      # NO backdrop, and this is the same sentence as the black above rather
+      # than a second one: select_support_views divides the alpha back out of
+      # these frames to recover a straight colour, which only works if what
+      # lies behind the splat is a flat black. A room behind it would be
+      # recovered as the face's own colour and then trained on.
+      background: ""
     outputs:
       images: scene.face_support_render.images
       masks: scene.face_support_render.masks
@@ -1035,6 +1092,17 @@ steps:
       # every wan22_vace_denoise step in every workflow. denoise_pass2
       # carries the same two strings — a step param cannot reference
       # another step's, so they are repeated.
+      #
+      # UNREVIEWED against the `background` setting (2026-09-01): with a
+      # backdrop on, the control frames now show a ruled room, while both
+      # prompts still say "on a plain seamless backdrop" — and 灯光属于房间
+      # 本身 ("the light belongs to the room itself") and 远处墙面上的一个点
+      # ("a point on the distant wall") already assume a room the frames did
+      # not have. So the English phrase is the one to look at, and it is the
+      # first thing to try if the backdrop reaches the deliverable as
+      # anything other than a room. Left alone deliberately, same as the
+      # note on denoise_pass2's grey: a prompt edit is a quality decision for
+      # a real run to make, not a side effect of a render change.
       prompt: "人工光、柔光、低对比度、环绕运镜。时间静止，人物完全静止。身体如雕塑\
         般僵硬，胸口没有起伏，头部保持固定角度，面部肌肉完全不动，维持单一的\
         中性表情。双眼一眨不眨，眼睑保持张开且稳定，目光空洞而固定，锁定远处\
@@ -1459,6 +1527,13 @@ steps:
       # therefore not set here. See docs/spatial-reinforcement.md.
       confidence: true
       cull_color: [0.5, 0.5, 0.5]
+      # The same room render_initial_views put the drawings in, so the second
+      # denoise pass is not handed a subject that has just been teleported out
+      # of one. brush-splat-render draws one flat colour and knows nothing of
+      # environments, so steps/backdrop.py un-composites `cull_color` back out
+      # and re-composites over the backdrop; exact wherever the gate culled,
+      # which is everywhere the backdrop is actually visible.
+      background: ${globals.background}
     outputs:
       images: dataset.images
       masks: dataset.masks
