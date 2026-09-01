@@ -292,6 +292,62 @@ class TestSettingWidgets(unittest.TestCase):
         )
         self.assertEqual(webui._widget_value(param, ""), {})
 
+    def test_a_list_param_that_may_be_unset_draws_and_reads_back_empty(self):
+        """`background_base_color` is a colour with an OFF position — unset
+        means "leave the texture generator its own wall". Two halves: it
+        must not draw as the word `null`, and clearing the box must come
+        back as None rather than as a malformed-list error.
+
+        A list param with a real default keeps the error, which is the point
+        of keying this on the declared default: `bg_color` cleared to None
+        would hand the renderer a None where it unpacks three floats.
+        """
+        import gradio as gr
+
+        from pipeline.registry import get_step_class
+
+        declared = get_step_class("render").declared_params()
+        colour = declared["background_base_color"]
+        with gr.Blocks():
+            empty = webui._widget_for(colour, None, "background_base_color", "k")
+            filled = webui._widget_for(colour, [0.5, 0.5, 0.5], "bbc", "k2")
+        self.assertEqual(empty.value, "")
+        self.assertEqual(filled.value, "[0.5, 0.5, 0.5]")
+        self.assertIsNone(webui._widget_value(colour, ""))
+        self.assertEqual(webui._widget_value(colour, "[0.5, 0.5, 0.5]"),
+                         [0.5, 0.5, 0.5])
+        with self.assertRaises(gr.Error):
+            webui._widget_value(declared["bg_color"], "")
+
+    def test_an_empty_choice_reads_as_none_and_maps_back_to_the_empty_string(self):
+        """`background` and `pattern` both offer "" as a real choice — no
+        backdrop, no camera path. Gradio draws the raw value, so an empty
+        choice is a blank row that reads as a rendering fault; it gets a
+        label, and `_widget_value` has to bring that label back to the ""
+        the step actually takes.
+
+        The dropdown still allows a custom value, which is what keeps the
+        choice list a suggestion: `background` also accepts a path to an
+        equirectangular image or a cubemap, and nobody can enumerate those.
+        """
+        import gradio as gr
+
+        from pipeline.registry import get_step_class
+
+        param = get_step_class("render").declared_params()["background"]
+        with gr.Blocks():
+            widget = webui._widget_for(param, "", "background", "k")
+        self.assertIsInstance(widget, gr.Dropdown)
+        self.assertIn("(none)", [c[0] for c in widget.choices])
+        self.assertNotIn("", [c[0] for c in widget.choices])
+        self.assertEqual(widget.value, "(none)")
+        self.assertTrue(widget.allow_custom_value)
+        self.assertEqual(webui._widget_value(param, "(none)"), "")
+        self.assertEqual(webui._widget_value(param, "grid"), "grid")
+        self.assertEqual(
+            webui._widget_value(param, "/data/room.exr"), "/data/room.exr"
+        )
+
     def test_a_setting_is_labelled_by_its_label_not_its_name(self):
         self.assertEqual(self._setting("run_upscale").title, "Upscale dataset")
         # A step param has no label and falls back to the name you would

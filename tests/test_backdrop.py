@@ -175,13 +175,21 @@ class TestBuildBackground(unittest.TestCase):
 class TestBackgroundParams(unittest.TestCase):
     """The backdrop's own appearance — its colours above all.
 
-    Handed to the generator whole rather than unpacked into a param each,
-    because the four generators name their colours differently (grid's
+    Mostly handed to the generator whole rather than unpacked into a param
+    each, because the four generators name their colours differently (grid's
     base/line/floor/ceiling, checker's a/b, gradient's top/bottom, the sky's
     zenith/horizon/ground) and each carries non-colour knobs beside them. A
     table of that here would be a second copy of body2colmap's signatures,
     stale the moment one gains an argument — so what is pinned is that the
     values arrive, and that a wrong key is refused by name.
+
+    TWO are promoted out of the mapping and into params of their own: the
+    wall and grid's ruling, which are the pair a person tunes and the pair
+    that decide whether the silhouette reads against the room. Both fold
+    back into the same mapping in `build_background`, so what is pinned for
+    them is that they arrive by either spelling, that neither is sent when
+    unset (which is what keeps a non-grid generator runnable on its
+    defaults), and that setting one twice is refused rather than resolved.
     """
 
     def setUp(self):
@@ -204,6 +212,67 @@ class TestBackgroundParams(unittest.TestCase):
         self.assertGreater(
             red_excess(self._frame(background_params={"base_color": [0.9, 0.1, 0.1]})),
             150.0)
+
+    def test_the_promoted_wall_colour_lands_where_the_mapping_would(self):
+        """`background_base_color` is the same wall, reached without having
+        to know it is spelled `base_color` inside a YAML mapping."""
+        def red_excess(frame):
+            return float(np.median(frame[..., 0] - frame[..., 2]))
+
+        promoted = self._frame(background_base_color=[0.9, 0.1, 0.1])
+        mapped = self._frame(background_params={"base_color": [0.9, 0.1, 0.1]})
+        self.assertGreater(red_excess(promoted), 150.0)
+        np.testing.assert_array_equal(promoted, mapped)
+
+    def test_the_promoted_line_colour_repaints_the_ruling(self):
+        """The other half of the pair. Grid lines are the brightest thing in
+        the default room, so darkening them to the wall drops the frame's
+        maximum to about the wall itself."""
+        default_max = int(self._frame().max())
+        darkened = self._frame(background_line_color=[0.42, 0.44, 0.48])
+        self.assertGreater(default_max, 180)
+        # Painted the wall's own colour, the ruling stops being the brightest
+        # thing in the room: the frame's maximum drops to the wall.
+        self.assertLess(int(darkened.max()), 130)
+
+    def test_an_unset_promoted_colour_is_not_sent_at_all(self):
+        """The reason both default to None rather than to grid's own values:
+        `base_color` and `line_color` are grid-only, and a key that was
+        always sent would refuse every other generator by name. checker has
+        to build on nothing but the defaults."""
+        for texture in ("checker", "gradient", "blender_sky"):
+            with self.subTest(texture=texture):
+                background = build_background(
+                    _rs_params(background=texture), self.cameras)
+                # It built at all, which is the whole claim: passing a
+                # grid-only key here is what body2colmap refuses by name.
+                self.assertIsNotNone(background)
+                self.assertEqual(
+                    background.render(self.cameras[0]).shape[-1], 3)
+
+    def test_setting_a_promoted_colour_by_both_spellings_is_refused(self):
+        """Silently preferring one would leave the other reading as the
+        room's colour in a UI that is not describing the run."""
+        for name, key in (("background_base_color", "base_color"),
+                          ("background_line_color", "line_color")):
+            with self.subTest(param=name):
+                with self.assertRaises(ValueError) as caught:
+                    build_background(
+                        _rs_params(**{name: [0.1, 0.2, 0.3]},
+                                   background_params={key: [0.4, 0.5, 0.6]}),
+                        self.cameras)
+                message = str(caught.exception)
+                self.assertIn(key, message)
+                self.assertIn(name, message)
+
+    def test_a_promoted_colour_is_still_validated_by_body2colmap(self):
+        """Not re-checked here: `_as_rgb` already refuses a wrong length and
+        an out-of-range component, by value."""
+        for bad in ([0.5, 0.5], [1.5, 0.0, 0.0]):
+            with self.subTest(colour=bad):
+                with self.assertRaises(ValueError):
+                    build_background(
+                        _rs_params(background_base_color=bad), self.cameras)
 
     def test_a_generator_that_names_its_colours_differently_works_too(self):
         """checker takes color_a/color_b, not base_color — the reason these
@@ -252,9 +321,15 @@ class TestBackgroundParams(unittest.TestCase):
         self.assertIn("not a generator", str(caught.exception))
 
     def test_the_default_is_empty_and_leaves_the_generator_alone(self):
-        declared = get_step_class("render").declared_params()["background_params"]
-        self.assertEqual(declared.default, {})
-        self.assertIs(declared.type, dict)
+        declared = get_step_class("render").declared_params()
+        self.assertEqual(declared["background_params"].default, {})
+        self.assertIs(declared["background_params"].type, dict)
+        # The promoted pair say the same thing with None: not sent at all.
+        # They are lists so they draw as `[0.5, 0.5, 0.5]`, the shape every
+        # other colour in this pipeline is written in.
+        for name in ("background_base_color", "background_line_color"):
+            self.assertIsNone(declared[name].default, name)
+            self.assertIs(declared[name].type, list, name)
 
 
 class TestCompositeBgr(unittest.TestCase):

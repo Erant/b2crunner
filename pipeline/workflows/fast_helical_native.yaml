@@ -203,33 +203,6 @@ settings:
       makes the tighter presets available — `render` falls back to `full` for
       any it cannot compute, and rerender_splat follows.
 
-  - name: background
-    label: Backdrop
-    default: grid
-    help: >-
-      The world-fixed environment every render draws the subject in front of.
-      It exists to break one failure: over a blank background a video diffusion
-      model reads an orbit as the SUBJECT turning on a turntable, and the prompt
-      is not strong enough to talk it out of that — a backdrop that sweeps past
-      as the camera moves is the cue that says otherwise. `grid` is ruled walls
-      meeting at corners over a floor and ceiling that read apart, on a cube at
-      3x the orbit radius, which is the arrangement body2colmap measured as
-      carrying that cue most strongly (958fd3b): `checker` carries more raw
-      azimuthal signal but its cells are self-similar, so it says the view
-      turned without saying how far; `blender_sky` is symmetric about the
-      vertical axis apart from its sun and carries almost none; `gradient` is
-      the control with none at all. A path to an equirectangular image, a packed
-      cubemap or a directory of six cube faces works too. EMPTY is the flat grey
-      every run before 2026-09-01 used. One setting because every render whose
-      frames reach a diffusion pass shares a batch with the others and they have
-      to agree — the face-cap render is the one that must NOT have a backdrop,
-      and says so where it sits. Nothing exports it: `rmbg` re-derives the
-      training matte from the denoised frames, so what brush fits is still the
-      subject cut out of the room. The rest of the backdrop's knobs stay on the
-      steps, including its COLOURS: `background_params` is a YAML mapping
-      handed straight to the chosen generator, so `{base_color: [0.66, 0.68,
-      0.72]}` repaints grid's walls and `{color_a: ..., color_b: ...}` does
-      checker's tiles.
 
   - name: seed
     label: Seed
@@ -772,23 +745,31 @@ steps:
       # skeleton writes RGB without touching alpha, so a backdrop composited
       # after it would blend the skeleton away everywhere off the mesh.
       #
-      # MEASURED AND LEFT ALONE (2026-09-01): the silhouette very nearly
-      # disappears against the walls. `outline_strength` above defaults to
-      # the fill that lands on #6F6F6F (111), and `grid`'s walls are
-      # [107, 112, 122] — two or three levels apart. The floor (61) and
-      # ceiling (153) read fine; it is the walls, which is most of an
-      # eye-level orbit.
+      # Written here rather than read from a pipeline setting, and the same
+      # two lines have to be repeated on the render that feeds the SECOND
+      # denoise pass (rerender_splat below): the two passes must not be
+      # handed a subject that changed rooms between them. steps/backdrop.py
+      # records why the setting went away.
       #
-      # Two levers, and `background_params` is the better one: it moves the
-      # WALLS and so touches nothing but a backdrop-on run, e.g.
-      #   background_params: {base_color: [0.66, 0.68, 0.72]}
-      # for walls at ~168 with the fill at 111 between them and the floor.
-      # `outline_strength: 35` moves the FILL instead (to #535353), which
-      # also darkens the drawings when the backdrop is off. Neither is set
-      # here: which way to open the gap, and how far, is a quality decision
-      # for a real run to make from a rendered frame — the same reasoning
-      # the note above denoise_pass1's prompt gives.
-      background: ${globals.background}
+      # Walls at a neutral 0.5 — #7F7F7F, the grey the outline base grounds
+      # on and the value bg_color already carries. grid's own default is
+      # [0.42, 0.44, 0.48], which renders 107/112/122: blue-tinted, and
+      # within four levels of the silhouette fill (#6F6F6F, 111), so the
+      # drawing very nearly disappeared into the wall. 0.5 renders a flat
+      # 128 (measured through build_background, not assumed: 0.5*255 rounds
+      # up) — seventeen levels off the fill, and no tint to disagree with
+      # the rest of the frame. The floor (~61) and ceiling (~153) keep
+      # grid's defaults on purpose: their reading apart from the walls is
+      # what resolves which way is up under an orbit.
+      #
+      # The ruling has its own param too — `background_line_color`, left
+      # unset here, which leaves grid's [0.88, 0.89, 0.92] (224/226/234).
+      # The rest of the room is reachable through `background_params` and
+      # none of it is fixed: `floor_color` and `ceiling_color` for the two
+      # caps, `n_per_face` and `line_width` for the ruling's spacing and
+      # thickness.
+      background: grid
+      background_base_color: [0.5, 0.5, 0.5]
       # Every frame whose view of the head is within this of the
       # photograph's takes the layer; past it the 2.5-D shell's open rim is
       # what would appear, so it is dropped entirely. body2colmap measured
@@ -1093,39 +1074,65 @@ steps:
       # carries the same two strings — a step param cannot reference
       # another step's, so they are repeated.
       #
-      # UNREVIEWED against the `background` setting (2026-09-01): with a
-      # backdrop on, the control frames now show a ruled room, while both
-      # prompts still say "on a plain seamless backdrop" — and 灯光属于房间
-      # 本身 ("the light belongs to the room itself") and 远处墙面上的一个点
-      # ("a point on the distant wall") already assume a room the frames did
-      # not have. So the English phrase is the one to look at, and it is the
-      # first thing to try if the backdrop reaches the deliverable as
-      # anything other than a room. Left alone deliberately, same as the
-      # note on denoise_pass2's grey: a prompt edit is a quality decision for
-      # a real run to make, not a side effect of a render change.
-      prompt: "人工光、柔光、低对比度、环绕运镜。时间静止，人物完全静止。身体如雕塑\
-        般僵硬，胸口没有起伏，头部保持固定角度，面部肌肉完全不动，维持单一的\
-        中性表情。双眼一眨不眨，眼睑保持张开且稳定，目光空洞而固定，锁定远处\
-        墙面上的一个点，对镜头毫无察觉、毫无反应。镜头以匀速、固定焦距围绕主\
-        体平滑移动。灯光属于房间本身，位置固定：主光始终来自人物自身的左前方\
-        ，右侧是柔和的补光。人物身上的明暗、阴影与高光始终停留在同一片皮肤和\
-        衣物上，每一帧完全相同——左侧始终是受光面，右侧始终是柔和的暗面；镜头\
-        绕到人物右侧时，看到的正是那一侧的暗面。 Time is frozen and only the \
-        camera moves. The gaze stays anchored to that point on the wall as \
-        the camera passes, so the eyes slide across the frame, always aimed \
-        past the lens at the wall behind it. Eyelids stay open and steady, \
-        the expression holds without a single micro-movement, and the head \
-        keeps its exact angle throughout. The frozen subject is \
-        $SUBJECT_DESC$, on a plain seamless backdrop. Soft, low-contrast \
-        studio light: the key sits high on the subject's own left, a soft \
-        fill on their right, both fixed to the room and holding still while \
-        the camera arcs around. Every highlight and shadow stays welded to \
-        the same patch of skin and cloth from the first frame to the last, \
-        so their left remains the lit side and their right remains the \
+      # What diverged a second time (2026-09-01): the SCENE, to match the
+      # `background` setting. The prompt used to say "on a plain seamless
+      # backdrop", which contradicted control frames that now show a ruled
+      # room — while 灯光属于房间本身 ("the light belongs to the room
+      # itself") and 远处墙面上的一个点 ("a point on the distant wall")
+      # already assumed the room the frames had not had. The backdrop is
+      # what makes the lighting claim answerable: light fixed to a room only
+      # means something if the frames show the room it is fixed to.
+      #
+      # It goes in the 场景 slot of Wan's own formula (主体 + 场景 + 运动 +
+      # 美学控制 + 风格化, "对主体所处环境特征细节的描述，可通过形容词或短
+      # 句列举"), which is the slot the backdrop phrase already occupied —
+      # so the edit is a swap, not an addition: grey gridded walls, a dark
+      # floor, a lighter ceiling, corners (steps/backdrop.py's `grid`
+      # defaults, which is what the renderer actually draws). It carries
+      # two claims past the description. The room is what moves past the
+      # camera rather than turning with it — the same invariant the lighting
+      # sentence states, now said about the thing the frames show. And the
+      # room's own shading is fixed the way the subject's is: shadows land
+      # in the same place in the ROOM every frame, which is what a splat can
+      # reconcile and a shadow swinging with the lens cannot.
+      #
+      # It reaches for no new aesthetic-control tag: "room" is scene
+      # vocabulary, and the lighting tags stay the three camera-invariant
+      # ones for the reason above. UNVERIFIED on a pod — like the lighting
+      # edit before it, this is a quality change a real run has to judge.
+      prompt: "人工光、柔光、低对比度、环绕运镜。时间静止，人物完全静止。身体\
+        如雕塑般僵硬，胸口没有起伏，头部保持固定角度，面部肌肉完全不动，维持单\
+        一的中性表情。双眼一眨不眨，眼睑保持张开且稳定，目光空洞而固定，锁定远\
+        处墙面上的一个点，对镜头毫无察觉、毫无反应。人物站在一间空房间里：灰色\
+        墙面上有均匀的网格线，深色地板，浅色天花板，墙面相交处有清晰的墙角。房\
+        间本身固定不动，镜头以匀速、固定焦距围绕主体平滑移动，墙角依次从画面中\
+        掠过。灯光属于房间本身，位置固定：主光始终来自人物自身的左前方，右侧是\
+        柔和的补光。人物身上的明暗、阴影与高光始终停留在同一片皮肤和衣物上，每\
+        一帧完全相同——左侧始终是受光面，右侧始终是柔和的暗面；镜头绕到人物右侧\
+        时，看到的正是那一侧的暗面。房间里的阴影同样固定：墙面上的明暗、以及人\
+        物投在地面上的影子，始终落在房间中的同一位置，不随镜头移动。 Time is \
+        frozen and only the camera moves. The gaze stays anchored to that \
+        point on the wall as the camera passes, so the eyes slide across the \
+        frame, always aimed past the lens at the wall behind it. Eyelids stay \
+        open and steady, the expression holds without a single \
+        micro-movement, and the head keeps its exact angle throughout. The \
+        frozen subject is $SUBJECT_DESC$, standing in an empty room: grey \
+        walls ruled with an even grid, a dark floor and a lighter ceiling, \
+        meeting at clear corners. The room is fixed in place and the camera \
+        travels through it, so the walls and their corners sweep past the \
+        frame while the room itself never turns. Soft, low-contrast studio \
+        light: the key sits high on the subject's own left, a soft fill on \
+        their right, both fixed to the room and holding still while the \
+        camera arcs around. Every highlight and shadow stays welded to the \
+        same patch of skin and cloth from the first frame to the last, so \
+        their left remains the lit side and their right remains the \
         soft-shadowed side for the whole circle; as the camera arcs round to \
-        their right it sees that shadowed side. Matte skin, matte cloth, \
-        photorealistic, sharp focus, identical face, clothing and lighting \
-        in every frame."
+        their right it sees that shadowed side. The room's shadows are just \
+        as fixed: the shading on the walls and the shadow the subject casts \
+        on the floor stay in the same place in the room in every frame, and \
+        do not swing round with the camera. Matte skin, matte cloth, \
+        photorealistic, sharp focus, identical face, clothing and lighting in \
+        every frame."
       negative_prompt: "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静\
         止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的\
         手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体\
@@ -1527,13 +1534,16 @@ steps:
       # therefore not set here. See docs/spatial-reinforcement.md.
       confidence: true
       cull_color: [0.5, 0.5, 0.5]
-      # The same room render_initial_views put the drawings in, so the second
-      # denoise pass is not handed a subject that has just been teleported out
-      # of one. brush-splat-render draws one flat colour and knows nothing of
-      # environments, so steps/backdrop.py un-composites `cull_color` back out
-      # and re-composites over the backdrop; exact wherever the gate culled,
-      # which is everywhere the backdrop is actually visible.
-      background: ${globals.background}
+      # The same room render_initial_views put the drawings in — the same two
+      # values, written out again because there is no setting sharing them
+      # any more — so the second denoise pass is not handed a subject that
+      # has just been teleported out of one. brush-splat-render draws one
+      # flat colour and knows nothing of environments, so steps/backdrop.py
+      # un-composites `cull_color` back out and re-composites over the
+      # backdrop; exact wherever the gate culled, which is everywhere the
+      # backdrop is actually visible.
+      background: grid
+      background_base_color: [0.5, 0.5, 0.5]
     outputs:
       images: dataset.images
       masks: dataset.masks
@@ -1624,34 +1634,46 @@ steps:
       # is knowably wrong — but this is the pair to look at first if
       # denoise_pass2's output changed character with the gate. Left alone
       # deliberately: a prompt edit is a quality decision for a real run to
-      # make, not a side effect of the render change.
+      # make, not a side effect of the render change. (With `background` on,
+      # the grey is behind the room anyway — rerender_splat above draws the
+      # same backdrop, so these frames match what the prompt now describes.)
       steps: 6
       cfg: 1.0
       seed: ${globals.seed}
       strength: 0.8
-      prompt: "人工光、柔光、低对比度、环绕运镜。时间静止，人物完全静止。身体如雕塑\
-        般僵硬，胸口没有起伏，头部保持固定角度，面部肌肉完全不动，维持单一的\
-        中性表情。双眼一眨不眨，眼睑保持张开且稳定，目光空洞而固定，锁定远处\
-        墙面上的一个点，对镜头毫无察觉、毫无反应。镜头以匀速、固定焦距围绕主\
-        体平滑移动。灯光属于房间本身，位置固定：主光始终来自人物自身的左前方\
-        ，右侧是柔和的补光。人物身上的明暗、阴影与高光始终停留在同一片皮肤和\
-        衣物上，每一帧完全相同——左侧始终是受光面，右侧始终是柔和的暗面；镜头\
-        绕到人物右侧时，看到的正是那一侧的暗面。 Time is frozen and only the \
-        camera moves. The gaze stays anchored to that point on the wall as \
-        the camera passes, so the eyes slide across the frame, always aimed \
-        past the lens at the wall behind it. Eyelids stay open and steady, \
-        the expression holds without a single micro-movement, and the head \
-        keeps its exact angle throughout. The frozen subject is \
-        $SUBJECT_DESC$, on a plain seamless backdrop. Soft, low-contrast \
-        studio light: the key sits high on the subject's own left, a soft \
-        fill on their right, both fixed to the room and holding still while \
-        the camera arcs around. Every highlight and shadow stays welded to \
-        the same patch of skin and cloth from the first frame to the last, \
-        so their left remains the lit side and their right remains the \
+      prompt: "人工光、柔光、低对比度、环绕运镜。时间静止，人物完全静止。身体\
+        如雕塑般僵硬，胸口没有起伏，头部保持固定角度，面部肌肉完全不动，维持单\
+        一的中性表情。双眼一眨不眨，眼睑保持张开且稳定，目光空洞而固定，锁定远\
+        处墙面上的一个点，对镜头毫无察觉、毫无反应。人物站在一间空房间里：灰色\
+        墙面上有均匀的网格线，深色地板，浅色天花板，墙面相交处有清晰的墙角。房\
+        间本身固定不动，镜头以匀速、固定焦距围绕主体平滑移动，墙角依次从画面中\
+        掠过。灯光属于房间本身，位置固定：主光始终来自人物自身的左前方，右侧是\
+        柔和的补光。人物身上的明暗、阴影与高光始终停留在同一片皮肤和衣物上，每\
+        一帧完全相同——左侧始终是受光面，右侧始终是柔和的暗面；镜头绕到人物右侧\
+        时，看到的正是那一侧的暗面。房间里的阴影同样固定：墙面上的明暗、以及人\
+        物投在地面上的影子，始终落在房间中的同一位置，不随镜头移动。 Time is \
+        frozen and only the camera moves. The gaze stays anchored to that \
+        point on the wall as the camera passes, so the eyes slide across the \
+        frame, always aimed past the lens at the wall behind it. Eyelids stay \
+        open and steady, the expression holds without a single \
+        micro-movement, and the head keeps its exact angle throughout. The \
+        frozen subject is $SUBJECT_DESC$, standing in an empty room: grey \
+        walls ruled with an even grid, a dark floor and a lighter ceiling, \
+        meeting at clear corners. The room is fixed in place and the camera \
+        travels through it, so the walls and their corners sweep past the \
+        frame while the room itself never turns. Soft, low-contrast studio \
+        light: the key sits high on the subject's own left, a soft fill on \
+        their right, both fixed to the room and holding still while the \
+        camera arcs around. Every highlight and shadow stays welded to the \
+        same patch of skin and cloth from the first frame to the last, so \
+        their left remains the lit side and their right remains the \
         soft-shadowed side for the whole circle; as the camera arcs round to \
-        their right it sees that shadowed side. Matte skin, matte cloth, \
-        photorealistic, sharp focus, identical face, clothing and lighting \
-        in every frame."
+        their right it sees that shadowed side. The room's shadows are just \
+        as fixed: the shading on the walls and the shadow the subject casts \
+        on the floor stay in the same place in the room in every frame, and \
+        do not swing round with the camera. Matte skin, matte cloth, \
+        photorealistic, sharp focus, identical face, clothing and lighting in \
+        every frame."
       negative_prompt: "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静\
         止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的\
         手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体\

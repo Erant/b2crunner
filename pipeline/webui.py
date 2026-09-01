@@ -260,6 +260,12 @@ def _choice_label(value: Any) -> str:
     """
     if isinstance(value, (list, tuple)):
         return " x ".join(str(item) for item in value)
+    # The empty string is a real choice on several params — no backdrop, no
+    # camera path — and it draws as a blank, unclickable-looking row unless
+    # it is given something to read. `_choice_map` maps the label back, so
+    # the value the step sees is still "".
+    if value == "":
+        return "(none)"
     return str(value)
 
 
@@ -322,8 +328,15 @@ def _widget_for(param: Param, value: Any, label: str, key: str):
         )
     if param.type in (list, dict):
         shape = "YAML list" if param.type is list else "YAML mapping"
+        # None is "the step decides" (see Param.default) and has to draw as an
+        # EMPTY box, not as the word `null`: the box is round-tripped, and a
+        # literal "null" is neither a list nor something a person would type.
+        text = (
+            "" if value is None
+            else yaml.safe_dump(value, default_flow_style=True).strip()
+        )
         return gr.Textbox(
-            value=yaml.safe_dump(value, default_flow_style=True).strip(),
+            value=text,
             label=label, info=(info + f" ({shape})") if info else shape,
             interactive=True, key=key,
         )
@@ -365,6 +378,15 @@ def _widget_value(param: Param, raw: Any) -> Any:
             if not isinstance(parsed, dict):
                 raise gr.Error(f"{param.name}: expected a YAML mapping, got {raw!r}")
             return dict(parsed)
+        if parsed is None and param.default is None:
+            # A list param that declares None as its default has an off
+            # position — `background_base_color` empty means "leave the
+            # texture generator its own wall colour" — so clearing the box is
+            # a real answer rather than a malformed list. Only for those: on a
+            # param with a real list default, an empty box is still a mistake,
+            # and returning None there would hand the step a None where it
+            # expects three numbers.
+            return None
         if not isinstance(parsed, (list, tuple)):
             raise gr.Error(f"{param.name}: expected a YAML list, got {raw!r}")
         return list(parsed)
