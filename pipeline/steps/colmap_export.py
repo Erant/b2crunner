@@ -13,6 +13,16 @@ Two layouts, via `params["layout"]`:
             invoking the trainer, and what the `fast_helical` workflows
             use for the COLMAP dataset a run hands back.
 
+Supporting views (`support_*`) ride along in the `brush` layout, written
+exactly the way steps/brush.py writes them into its own tempdir — RGB in
+`images/` with the matte beside it in `masks/`, and their cameras appended
+to the same `images.txt`. That is the whole point of sharing brush's
+`_SupportViews`: what this exports is not "a dataset plus some extra
+pictures", it is the model brush was handed, so a supporting view landing
+in the wrong place in the trained splat is visible in the export rather
+than only in the result. `flat` has no `masks/` convention to write them
+into and refuses them.
+
 Note what neither layout does: rescale intrinsics. The cameras written
 here are whatever the dataset holds, so a dataset whose frames were
 resized without its cameras being updated exports a cameras.txt that
@@ -60,8 +70,19 @@ class ColmapExportStep(Step):
              "points_3d": Tuple[np.ndarray, np.ndarray],
              "images": Optional[List[np.ndarray]] BGR(A),
              "masks": Optional[List[np.ndarray]] float32 [0,1], foreground=1,
-             "normal_maps": Optional[List[np.ndarray]] HxWx3 float32 [-1,1]}
+             "normal_maps": Optional[List[np.ndarray]] HxWx3 float32 [-1,1],
+             "support_cameras": Optional[List[Camera]],
+             "support_images": Optional[List[np.ndarray]] BGR(A),
+             "support_masks": Optional[List[np.ndarray]] float32 [0,1],
+             "support_image_names": Optional[List[str]],
+             "support_normal_maps": Optional[List[np.ndarray]]}
     outputs: {"output_path": str}
+
+    The `support_*` inputs are steps/brush.py's, read by the same
+    `_SupportViews` and written by the same code, so wiring this step and
+    `brush` to the same context paths exports the model brush trains on
+    rather than a near-miss of it. They need `layout: brush`. Absent (the
+    default), this builds byte-identical output to before they existed.
     """
 
     PARAMS = (
@@ -75,6 +96,8 @@ class ColmapExportStep(Step):
 
     def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
         from body2colmap.exporter import ColmapExporter
+
+        from .brush import _SupportViews
 
         cameras = inputs["cameras"]
         image_names = inputs["image_names"]
@@ -95,6 +118,20 @@ class ColmapExportStep(Step):
         if layout not in LAYOUTS:
             raise ValueError(f"Unknown layout {layout!r}; expected one of {LAYOUTS}.")
 
+        # Same reader, same validation, same error messages as the training
+        # step's — including the stem-collision check against the training
+        # names, which matters here for the same reason it matters there.
+        support = _SupportViews.from_inputs(inputs, image_names)
+        if support and layout != "brush":
+            raise ValueError(
+                f"support_* views were wired in but layout is {layout!r}. A "
+                f"supporting view is an RGB frame plus a matte in a masks/ "
+                f"sidecar, and only the brush layout has a masks/ directory to "
+                f"put it in — flat would write the frames beside the .txt files "
+                f"with their mattes nowhere, which is a dataset that says the "
+                f"opposite of what it means."
+            )
+
         output_path = Path(params["output_dir"])
         output_path.mkdir(parents=True, exist_ok=True)
 
@@ -108,9 +145,15 @@ class ColmapExportStep(Step):
         images_dir = output_path / "images" if layout == "brush" else output_path
         images_dir.mkdir(parents=True, exist_ok=True)
 
-        ColmapExporter(cameras=cameras, image_names=image_names, points_3d=points_3d).export(
-            output_dir=output_path
-        )
+        support.check_intrinsics(cameras)
+        # One model covering both, exactly as steps/brush.py builds it: the
+        # supporting views are extra images.txt entries against the same
+        # cameras.txt, and differ only in how their frames are written.
+        ColmapExporter(
+            cameras=list(cameras) + support.cameras,
+            image_names=list(image_names) + support.image_names,
+            points_3d=points_3d,
+        ).export(output_dir=output_path)
 
         alpha_channel = None
         if images is not None:
@@ -146,5 +189,7 @@ class ColmapExportStep(Step):
                     out = normal_bgr
                 normal_path = normals_dir / Path(filename).with_suffix(".png").name
                 cv2.imwrite(str(normal_path), out)
+
+        support.write(output_path)
 
         return {"output_path": str(output_path.absolute())}

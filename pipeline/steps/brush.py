@@ -98,12 +98,13 @@ in a mixed one the supporting views quietly count for less, so
 `normalize_masked_loss: auto` turns it on exactly when the export
 actually carries both.
 
-One consequence for `export_colmap_intermediate`: that step exports the
-dataset without the supporting views (it is handed the same context paths
-the training views come from), so on a run that uses them it is no longer
-a complete record of what brush saw — and `render_splat`'s
-`evidence_dataset` fallback, which measures evidence against it, would
-measure against the training views alone.
+`export_colmap_intermediate` writes the same export: `colmap_export` takes
+the same `support_*` inputs, reads them with this module's `_SupportViews`
+and writes them with the same code, so wiring the two steps to the same
+context paths gives a debug dataset that is a record of what brush saw
+rather than a near-miss of it. (`render_splat`'s `evidence_dataset`
+fallback measures evidence against that dataset, and so now measures
+against the supporting views too.)
 
 Normal-map supervision: per the original node's behavior, a normal map
 that already carries an alpha channel keeps it; otherwise the RGB frame's
@@ -294,6 +295,50 @@ class _SupportViews:
             masks=list(masks),
             normal_maps=list(normal_maps) if normal_maps is not None else None,
         )
+
+    def check_intrinsics(self, train_cameras: Sequence[Any]) -> None:
+        """Warn if a supporting view's lens is not the training views'.
+
+        `ColmapExporter._export_cameras` writes ONE camera line — read off
+        `cameras[0]`, which is a training view — and stamps `CAMERA_ID 1` on
+        every image, supporting views included. A supporting view rendered
+        through a different focal length or at a different size is therefore
+        exported as though it had the training lens, and brush places it
+        wherever that lie puts it: the view lands in the wrong part of the
+        model, and nothing in the export says so.
+
+        Nothing in the shipped wiring should trip this — `render_splat`'s
+        `bounds_source: splat` dollies in rather than zooming, and
+        `pointmap_elevation_views` copies the source camera's intrinsics
+        outright, both for exactly this reason. It is here because the
+        failure is invisible in the output and cheap to name here.
+
+        A warning rather than a raise: this is a fact about the exporter,
+        not about the caller, and a run that has already spent an hour of
+        GPU should say so and finish rather than die on it.
+        """
+        if not self or not train_cameras:
+            return
+        reference = train_cameras[0]
+        expected = (float(reference.fx), float(reference.fy),
+                    float(reference.cx), float(reference.cy),
+                    int(reference.width), int(reference.height))
+        for name, camera in zip(self.image_names, self.cameras):
+            actual = (float(camera.fx), float(camera.fy),
+                      float(camera.cx), float(camera.cy),
+                      int(camera.width), int(camera.height))
+            if not np.allclose(actual[:4], expected[:4], rtol=1e-5, atol=1e-3) \
+                    or actual[4:] != expected[4:]:
+                logger.warning(
+                    "brush: supporting view %s has intrinsics "
+                    "fx/fy/cx/cy=%.3f/%.3f/%.3f/%.3f at %dx%d but the training "
+                    "views are %.3f/%.3f/%.3f/%.3f at %dx%d. COLMAP export "
+                    "writes a single camera line taken from the training views "
+                    "and stamps it on every image, so this view will be trained "
+                    "as though it had the training lens and will land in the "
+                    "wrong place.", name, *actual, *expected,
+                )
+                return
 
     def write(self, colmap_dir: Path) -> None:
         """Write the supporting frames into an already-exported COLMAP model.
@@ -524,6 +569,7 @@ class BrushStep(Step):
             # The supporting views are part of the same COLMAP model — one
             # cameras.txt/images.txt covering both — and differ only in how
             # their frames are written below.
+            support.check_intrinsics(cameras)
             ColmapExporter(
                 cameras=list(cameras) + support.cameras,
                 image_names=list(image_names) + support.image_names,

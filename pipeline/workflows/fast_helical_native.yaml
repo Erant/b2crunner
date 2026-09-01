@@ -337,9 +337,12 @@ outputs:
     default: false
     help: >-
       Debug: the dataset the FIRST brush training is handed — the denoised
-      frames plus the mattes and normals computed for them, before that splat
-      is re-rendered along the helical orbit and denoised a second time. What
-      that training actually saw, for when the re-render comes out wrong.
+      frames plus the mattes and normals computed for them, AND the supporting
+      views with a pose each in images.txt (the face cap, the stage-1 shells),
+      before that splat is re-rendered along the helical orbit and denoised a
+      second time. Everything that training saw, for when the re-render comes
+      out wrong — including a supporting view that landed somewhere other than
+      where its content belongs.
 
   - name: export_colmap_preupscale
     label: Pre-upscale COLMAP dataset (debug)
@@ -1251,12 +1254,24 @@ steps:
   # that the FIRST brush training runs on. Gated by
   # export_colmap_intermediate, off by default.
   #
-  # It is NOT everything that training is handed, and this comment used to
-  # say it was. colmap_export has no support_* inputs, so the supporting
-  # views — the face cap, and now the stage-1 shells' elevation pair — are
-  # not in it. That was already true of the face branch and is more true
-  # now; the step is what it is, and the deliverable it names is the
-  # dataset, not the evidence.
+  # It IS everything that training is handed: the supporting views — the
+  # face cap and the stage-1 shells' elevation pair — go in too, through
+  # the same `support_*` inputs and the same `_SupportViews` writer
+  # `train_splat` below uses, wired to the same context paths. So the two
+  # steps export one model between them and this one is a faithful record
+  # of it: `images.txt` carries a pose for every supporting view, and the
+  # frames land in `images/` as RGB with their mattes in `masks/`, which
+  # is the layout that means MASKED to brush.
+  #
+  # That matters because a supporting view is the one thing here whose
+  # pose has no other witness. The training frames are checked against
+  # each other by `refine_cameras`; a supporting view is a render made
+  # from a pose nothing re-measures, and it is rendered EARLIER than the
+  # frames it supervises — the face cap comes out of the bootstrap, before
+  # `denoise_pass1` and before `refine_cameras` moved the training poses
+  # under it. If the face ends up somewhere other than on the head, this
+  # export is where to look: open it in a COLMAP viewer and the supporting
+  # cameras either sit on the same arc as the training ones or they do not.
   #
   # One step, not the three stage 4b needs: the masks and normals it wants
   # are already sitting in the context, computed by the two steps above for
@@ -1276,6 +1291,13 @@ steps:
       images: dataset.images
       masks: dataset.masks
       normal_maps: scene.normal_maps
+      # The same three paths train_splat reads, and optional (`?`) for the
+      # same reason: merge_support_views runs ungated, so with both branches
+      # off it publishes three empty lists and this exports what it always
+      # did. No support_normal_maps — brush is given none either.
+      support_images: scene.support_views.images?
+      support_masks: scene.support_views.masks?
+      support_cameras: scene.support_views.cameras?
     params:
       output_dir: ${globals.output_root}/colmap_intermediate
       layout: brush

@@ -299,5 +299,115 @@ class TestTheseGoStraightIntoBrush(unittest.TestCase):
         self.assertIn("--normalize-masked-loss", seen["cmd"])
 
 
+class TestTheDebugExportRecordsThem(unittest.TestCase):
+    """`export_colmap_intermediate` has to be a record of what brush saw.
+
+    A supporting view is a render made from a pose nothing re-measures, and
+    it is produced earlier in the run than the training frames it
+    supervises — so "did it land where its content belongs" is a question
+    only this export can answer. It cannot answer it if the view is not in
+    it.
+    """
+
+    def _export(self, tmp, **extra):
+        step_class = get_step_class("colmap_export")
+        inputs = {
+            "cameras": _cameras(2),
+            "image_names": ["frame_00001_.png", "frame_00002_.png"],
+            "points_3d": (np.zeros((4, 3), dtype=np.float32),
+                          np.zeros((4, 3), dtype=np.uint8)),
+            "images": [np.zeros((8, 8, 3), dtype=np.uint8) for _ in range(2)],
+            "masks": [np.ones((8, 8), dtype=np.float32) for _ in range(2)],
+            **extra,
+        }
+        return step_class().run(
+            inputs,
+            step_class.resolve_params({"output_dir": str(tmp), "layout": "brush"}),
+        )
+
+    def test_the_supporting_views_get_a_frame_a_matte_and_a_pose(self):
+        import tempfile
+        from pathlib import Path
+
+        out = _run({**_batch(2)})
+        with tempfile.TemporaryDirectory() as tmp:
+            self._export(
+                tmp,
+                support_images=out["images"],
+                support_masks=out["masks"],
+                support_cameras=out["cameras"],
+            )
+            root = Path(tmp)
+            files = sorted(str(p.relative_to(root)) for p in root.rglob("*") if p.is_file())
+            self.assertIn("images/support_00001.png", files)
+            self.assertIn("masks/support_00001.png", files)
+            names = [line.split()[-1] for line in
+                     (root / "images.txt").read_text().splitlines()
+                     if line.strip() and not line.startswith("#")]
+            self.assertEqual(
+                names,
+                ["frame_00001_.png", "frame_00002_.png",
+                 "support_00001.png", "support_00002.png"],
+            )
+
+    def test_without_them_the_export_is_what_it_always_was(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            self._export(tmp)
+            root = Path(tmp)
+            self.assertFalse((root / "masks").exists())
+            names = [line.split()[-1] for line in
+                     (root / "images.txt").read_text().splitlines()
+                     if line.strip() and not line.startswith("#")]
+            self.assertEqual(names, ["frame_00001_.png", "frame_00002_.png"])
+
+    def test_a_flat_layout_refuses_them_rather_than_dropping_the_mattes(self):
+        import tempfile
+
+        out = _run({**_batch(1)})
+        step_class = get_step_class("colmap_export")
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(ValueError) as caught:
+                step_class().run(
+                    {
+                        "cameras": _cameras(1),
+                        "image_names": ["frame_00001_.png"],
+                        "points_3d": (np.zeros((4, 3), dtype=np.float32),
+                                      np.zeros((4, 3), dtype=np.uint8)),
+                        "support_images": out["images"],
+                        "support_masks": out["masks"],
+                        "support_cameras": out["cameras"],
+                    },
+                    step_class.resolve_params(
+                        {"output_dir": str(tmp), "layout": "flat"}),
+                )
+        self.assertIn("masks/", str(caught.exception))
+
+    def test_a_supporting_view_with_a_different_lens_is_called_out(self):
+        """ColmapExporter writes one camera line for the whole model, so a
+        supporting view rendered through a different lens is exported as
+        though it had the training one — and lands wherever that puts it."""
+        import tempfile
+
+        from body2colmap.camera import Camera
+
+        out = _run({**_batch(1)})
+        zoomed = [Camera(focal_length=(32.0, 32.0), image_size=(8, 8),
+                         principal_point=(4.0, 4.0),
+                         position=np.array([0.0, 0.0, 3.0], dtype=np.float32),
+                         rotation=np.eye(3, dtype=np.float32))]
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertLogs("pipeline.steps.brush", level="WARNING") as logs:
+                self._export(
+                    tmp,
+                    support_images=out["images"],
+                    support_masks=out["masks"],
+                    support_cameras=zoomed,
+                )
+        self.assertIn("wrong place", "\n".join(logs.output))
+
+
 if __name__ == "__main__":
     unittest.main()
