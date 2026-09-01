@@ -248,6 +248,129 @@ def _probe_moge() -> bool:
         return False
 
 
+#: torch.hub's name for the dinov3 checkout, under `$TORCH_HOME/hub`.
+DINOV3_HUB_REPO = "facebookresearch/dinov3"
+
+
+def _dinov3_repo_dir() -> Path:
+    """Where torch.hub keeps `facebookresearch/dinov3`, asked without
+    downloading: `$TORCH_HOME/hub/facebookresearch_dinov3_main`."""
+    import torch
+
+    owner, name = DINOV3_HUB_REPO.split("/")
+    return Path(torch.hub.get_dir()) / f"{owner}_{name}_main"
+
+
+def _fetch_dinov3_hub() -> str:
+    """The dinov3 SOURCE tree. sam_3d_body's backbone is a torch.hub load.
+
+    `Dinov3Backbone.__init__` (vendored, sam_3d_body/models/backbones/
+    dinov3.py) calls `torch.hub.load(DINOV3_HUB_REPO, ..., source="github")`,
+    so the gated checkpoint in the `sam3dbody` entry is only half of what
+    the step needs — the other half is 20 MB of Python cloned from GitHub
+    inside `Step.load()`. A pod with no network cannot start the step at
+    all, which is the argument the COLMAP ONNX graphs above already make.
+
+    The other reason is that `torch.hub` is not concurrency-safe against
+    itself, and this pipeline runs it concurrently. Two processes extract
+    the zipball to the SAME staging path (`$TORCH_HOME/hub/dinov3-<sha>/`)
+    and each `_remove_if_exists` it first, so two of them arriving together
+    can rmtree the other's half-written tree and then `shutil.move` what
+    survived into place. What lands is a repo directory that exists and is
+    incomplete, and an incomplete Python package does not fail loudly: a
+    directory whose `__init__.py` was removed still imports, as an empty
+    namespace package, so the step dies much later on a missing NAME —
+    `cannot import name 'ADE20K' from 'dinov3.data.datasets' (unknown
+    location)`. `pipeline/gpu_scheduler.py` gives every GPU its own
+    `pipeline.run_worker` against one shared `$TORCH_HOME`, so a multi-GPU
+    pod running two jobs is exactly where they arrive together. Being in
+    the prefetch means one process normally fetches this at pod boot,
+    before any worker starts; the lock below is what holds when that is not
+    how it goes.
+
+    `force_reload=True` because this runs only once `is_ready` has decided
+    the tree is not good, and torch's own cache test is
+    `os.path.exists(repo_dir)` — it would hand the broken tree straight
+    back. `_get_cache_or_reload` is private, but it is exactly the download
+    half of the `torch.hub.load` the step calls; every public entry point
+    (`load`, `list`, `help`) goes on to import `hubconf`, which needs
+    torchmetrics — present in venv_sam3dbody, where the step runs, and not
+    in venv_base, where the prefetch does.
+
+    `skip_validation=True` skips an unauthenticated GitHub API call that
+    only checks the ref is not from a fork. It is rate-limited per IP, and
+    a shared pod IP that has exhausted it would fail the prefetch over a
+    check whose answer is already known.
+
+    The lock is what actually closes the race rather than just narrowing
+    it. Being in the prefetch means the pod-boot process normally gets
+    here first and alone — but `ensure_models` falls back to fetching from
+    inside the worker when nothing is already fetching (and `B2C_PREFETCH=0`
+    removes the prefetch entirely), so two workers can still arrive
+    together. An exclusive `flock` makes the second one wait; it then finds
+    a whole tree and returns without re-downloading. The lock file lives
+    beside the models directory, which is the network volume both workers
+    share — the same place the readiness markers live, and for the same
+    reason.
+    """
+    import fcntl
+
+    import torch
+
+    lock_path = models_dir() / ".dinov3_hub.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "w") as lock:
+        try:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        except OSError:
+            # Best-effort: a filesystem that cannot lock (some network
+            # mounts) leaves the race exactly as it was, which is the
+            # situation before this entry existed. Failing the fetch over
+            # it would be worse than the race it guards.
+            logger.debug("could not lock %s; fetching unserialised",
+                         lock_path, exc_info=True)
+        else:
+            if _probe_dinov3_hub():
+                # Someone else fetched it while we queued on the lock.
+                return str(_dinov3_repo_dir())
+        return torch.hub._get_cache_or_reload(
+            DINOV3_HUB_REPO,
+            force_reload=True,
+            trust_repo=True,
+            verbose=False,
+            skip_validation=True,
+        )
+
+
+def _probe_dinov3_hub() -> bool:
+    """Is the source tree there, AND is it whole?
+
+    Deliberately not `repo_dir.exists()`. That is the question torch.hub
+    itself asks, and it is the one the race defeats: the tree this has to
+    catch is one that exists with files missing from it, which torch would
+    reuse forever. Since a package missing its `__init__.py` imports
+    anyway, nothing downstream notices either.
+
+    So: every directory under `dinov3/` that holds a module must hold an
+    `__init__.py` as well. That tests the shape the damage actually takes,
+    without pinning a list of filenames that upstream `main` is free to
+    change under us. Verified against a clean checkout, where every
+    module-bearing directory is a package.
+    """
+    root = _dinov3_repo_dir()
+    package = root / "dinov3"
+    if not (root / "hubconf.py").is_file() or not package.is_dir():
+        return False
+    for directory in [package, *(p for p in package.rglob("*") if p.is_dir())]:
+        holds_a_module = any(
+            child.suffix == ".py" and child.name != "__init__.py"
+            for child in directory.iterdir()
+        )
+        if holds_a_module and not (directory / "__init__.py").is_file():
+            return False
+    return True
+
+
 def _probe_seedvr2() -> bool:
     """Glob rather than import the vendored registry for the filenames.
 
@@ -389,6 +512,18 @@ def _registry() -> List[ModelSource]:
             # for the ViT-L variant (approximate; not yet measured on a pod).
             "moge2", f"{MOGE} (sam3d_body FOV / focal-length estimation)",
             ("sam3d_body",), _fetch_moge, _probe_moge, approx_gb=1.3,
+        ),
+        ModelSource(
+            # The dinov3 backbone SOURCE, not weights: 20 MB of Python that
+            # sam_3d_body pulls from GitHub through torch.hub the first time
+            # any of these three build the model. Same three steps as the
+            # checkpoint above, because all three call `load_sam_3d_body`.
+            # Prefetching it is also what keeps two workers on a multi-GPU
+            # pod from racing torch.hub into a half-extracted tree — see
+            # `_fetch_dinov3_hub`.
+            "dinov3_hub", f"{DINOV3_HUB_REPO} (sam3d_body backbone source)",
+            ("sam3d_body", "refine_pose_to_splat", "fit_head_to_face"),
+            _fetch_dinov3_hub, _probe_dinov3_hub, approx_gb=0.02,
         ),
         ModelSource(
             "wan22", f"{WAN22} (denoise: vae, text encoder, scheduler)",

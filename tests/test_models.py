@@ -145,6 +145,116 @@ class TestWan22WeightSplit(unittest.TestCase):
             self.assertFalse(models._probe_wan22_fp8())
 
 
+class TestTheDinov3SourceTree(unittest.TestCase):
+    """sam_3d_body's backbone is a `torch.hub.load` of GitHub source, and
+    torch.hub is not safe to run twice at once.
+
+    Two workers (one per GPU, see pipeline/gpu_scheduler.py) extract the
+    zipball to the same staging path and each rmtree it first, so they can
+    leave a repo directory that exists with files missing from it. An
+    incomplete Python package does not fail loudly — a directory that lost
+    its `__init__.py` still imports, as an empty namespace package — so the
+    run dies an hour later on a missing NAME:
+
+        cannot import name 'ADE20K' from 'dinov3.data.datasets'
+        (unknown location)
+
+    Prefetching it once at pod boot is the normal path; a lock is what
+    holds when `ensure_models` falls back to fetching inside the worker.
+    These tests cover the two halves that have to work on a volume already
+    carrying a damaged tree: noticing, and healing.
+    """
+
+    def _tree(self, root: Path) -> None:
+        """A miniature of the real checkout's shape: nested packages."""
+        (root / "dinov3" / "data" / "datasets").mkdir(parents=True)
+        (root / "hubconf.py").write_text("# entrypoints\n")
+        for package in (root / "dinov3", root / "dinov3" / "data",
+                        root / "dinov3" / "data" / "datasets"):
+            (package / "__init__.py").write_text("\n")
+        (root / "dinov3" / "data" / "datasets" / "ade20k.py").write_text(
+            "class ADE20K:\n    pass\n")
+
+    def _at(self, root: Path):
+        return mock.patch.object(models, "_dinov3_repo_dir", return_value=root)
+
+    def test_a_whole_tree_probes_ready(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "facebookresearch_dinov3_main"
+            self._tree(root)
+            with self._at(root):
+                self.assertTrue(models._probe_dinov3_hub())
+
+    def test_a_package_missing_its_init_does_not(self):
+        """The failure mode itself, and the reason the probe cannot be
+        `repo_dir.exists()`: that is the test torch.hub already applies,
+        and it is the one that hands the broken tree back forever."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "facebookresearch_dinov3_main"
+            self._tree(root)
+            (root / "dinov3" / "data" / "datasets" / "__init__.py").unlink()
+            with self._at(root):
+                self.assertTrue(root.exists(), "torch.hub would reuse this")
+                self.assertFalse(models._probe_dinov3_hub())
+
+    def test_nor_does_a_tree_with_no_hubconf(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "facebookresearch_dinov3_main"
+            self._tree(root)
+            (root / "hubconf.py").unlink()
+            with self._at(root):
+                self.assertFalse(models._probe_dinov3_hub())
+
+    def test_nor_does_a_missing_one(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self._at(Path(tmp) / "facebookresearch_dinov3_main"):
+                self.assertFalse(models._probe_dinov3_hub())
+
+    def test_the_fetch_forces_a_reload(self):
+        """`force_reload=True` is load-bearing, not belt-and-braces. The
+        fetch runs only once `is_ready` has decided the tree is bad, and
+        torch's own cache test is `os.path.exists(repo_dir)` — without the
+        force it would return the damaged tree unchanged and the prefetch
+        would mark it ready."""
+        torch = mock.MagicMock()
+        torch.hub._get_cache_or_reload.return_value = "/hub/facebookresearch_dinov3_main"
+        with tempfile.TemporaryDirectory() as tmp:
+            with _OnAVolume(), self._at(Path(tmp) / "nothing_here"), \
+                    mock.patch.dict("sys.modules", {"torch": torch}):
+                models._fetch_dinov3_hub()
+        _, kwargs = torch.hub._get_cache_or_reload.call_args
+        self.assertTrue(kwargs["force_reload"])
+
+    def test_a_second_fetcher_waits_and_then_does_not_re_download(self):
+        """Two workers can still arrive together — `ensure_models` fetches
+        from inside the worker when no prefetch is in flight. The lock
+        serialises them, and the loser finds a whole tree and returns
+        without a second `_get_cache_or_reload`."""
+        torch = mock.MagicMock()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "facebookresearch_dinov3_main"
+            self._tree(root)  # already whole, as the winner would leave it
+            with _OnAVolume(), self._at(root), \
+                    mock.patch.dict("sys.modules", {"torch": torch}):
+                self.assertEqual(models._fetch_dinov3_hub(), str(root))
+        torch.hub._get_cache_or_reload.assert_not_called()
+
+    def test_but_the_first_one_does_download(self):
+        torch = mock.MagicMock()
+        torch.hub._get_cache_or_reload.return_value = "/hub/x"
+        with tempfile.TemporaryDirectory() as tmp:
+            with _OnAVolume(), self._at(Path(tmp) / "nothing_here"), \
+                    mock.patch.dict("sys.modules", {"torch": torch}):
+                self.assertEqual(models._fetch_dinov3_hub(), "/hub/x")
+        torch.hub._get_cache_or_reload.assert_called_once()
+
+    def test_it_is_wired_to_every_step_that_builds_the_model(self):
+        """All three call `load_sam_3d_body`, so all three construct
+        Dinov3Backbone — the same three the checkpoint entry names."""
+        sources = models.registry()
+        self.assertEqual(sources["dinov3_hub"].steps, sources["sam3dbody"].steps)
+
+
 class TestRequiredForSteps(unittest.TestCase):
     def test_blocking_is_scoped_to_the_workflow(self):
         cases = {
@@ -169,17 +279,24 @@ class TestRequiredForSteps(unittest.TestCase):
             # ~65 MB, for the camera refinement. COLMAP would otherwise
             # fetch them itself into ~/.cache/colmap, i.e. the container's
             # writable layer, once per pod restart.
+            #
+            # 2026-08-31: dinov3_hub joined it. Not weights — the 20 MB of
+            # dinov3 SOURCE that sam_3d_body's backbone pulls from GitHub
+            # through torch.hub, which was the one thing sam3d_body still
+            # downloaded lazily inside Step.load().
             "fast_helical_native": {"rmbg", "sapiens2", "sapiens2_pointmap",
                                     "sapiens2_seg", "sam3dbody", "moge2",
-                                    "mediapipe", "wan22", "wan22_fp8",
-                                    "wan22_lora", "seedvr2", "colmap_onnx"},
+                                    "dinov3_hub", "mediapipe", "wan22",
+                                    "wan22_fp8", "wan22_lora", "seedvr2",
+                                    "colmap_onnx"},
             # The parked shell bootstrap needs the same set: it runs the
             # pointmap head twice (a body shell and a face) and re-poses the
             # fit, which reads sam3dbody's checkpoint again.
             "fast_helical_shell": {"rmbg", "sapiens2", "sapiens2_pointmap",
                                    "sapiens2_seg", "sam3dbody", "moge2",
-                                   "mediapipe", "wan22", "wan22_fp8",
-                                   "wan22_lora", "seedvr2", "colmap_onnx"},
+                                   "dinov3_hub", "mediapipe", "wan22",
+                                   "wan22_fp8", "wan22_lora", "seedvr2",
+                                   "colmap_onnx"},
         }
         for workflow, expected in cases.items():
             with self.subTest(workflow=workflow):
@@ -215,7 +332,8 @@ class TestRequiredForSteps(unittest.TestCase):
         self.assertEqual(
             set(models.required_for_steps(s.step for s in spec.enabled_steps())),
             {"rmbg", "sapiens2", "sapiens2_pointmap", "sapiens2_seg", "sam3dbody",
-             "moge2", "mediapipe", "wan22", "wan22_fp8", "wan22_lora", "seedvr2",
+             "moge2", "dinov3_hub", "mediapipe", "wan22", "wan22_fp8",
+             "wan22_lora", "seedvr2",
              # Still here with both exports off: the stage-2 refinement runs
              # ahead of the training that drives the helical re-render, which
              # is not one of the deliverables these switches gate.

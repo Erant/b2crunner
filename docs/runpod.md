@@ -278,6 +278,7 @@ downloading; `--no-wait-for-models` does it for a single CLI run.
 | `sapiens2_lite` | `facebook/sapiens2-normal-1b` | `from_pretrained` | `$HF_HOME` |
 | `sam3d_body` | `facebook/sam-3d-body-dinov3` **(gated)** + `Ruicheng/moge-2-vitl-normal` (FOV) | `snapshot_download` / `from_pretrained` | `$HF_HOME` |
 | `refine_pose_to_splat` | `facebook/sam-3d-body-dinov3` **(gated)** — the same checkpoint, replayed | `snapshot_download` | `$HF_HOME` |
+| `sam3d_body`, `refine_pose_to_splat`, `fit_head_to_face` | `facebookresearch/dinov3` SOURCE (~20 MB) — the backbone is a `torch.hub.load` of GitHub, not a checkpoint | `torch.hub` | `$TORCH_HOME/hub` = `/data/caches/torch/hub` |
 | `pointmap_splat`, `face_pointmap_splat`, `pointmap_elevation_views` | `facebook/sapiens2-pointmap-1b` | `from_pretrained` | `$HF_HOME` |
 | `sapiens2_seg` | `facebook/sapiens2-seg-1b` | `from_pretrained` | `$HF_HOME` |
 | `wan22_vace_denoise` | `linoyts/Wan2.2-VACE-Fun-14B-diffusers` + `lightx2v/Wan2.2-Lightning` LoRAs | `from_pretrained` / `hf_hub_download` | `$HF_HOME` |
@@ -285,6 +286,13 @@ downloading; `--no-wait-for-models` does it for a single CLI run.
 | `detect_face_landmarks` | MediaPipe `.task` / `.tflite` | Google Storage URL | `$B2C_MODELS_DIR/mediapipe` |
 | `refine_cameras` | COLMAP `aliked-n32.onnx` + `aliked-lightglue.onnx` (~65 MB) | COLMAP's GitHub release | `$B2C_MODELS_DIR/colmap` |
 | `brush`, `render`, `render_splat`, `colmap_export`, … | nothing | — | — |
+
+The dinov3 row is the odd one: it is code, not weights, and `torch.hub`'s
+cache test is `os.path.exists(repo_dir)` — so two workers racing it (one per GPU,
+see `pipeline/gpu_scheduler.py`) can leave a directory that exists with files
+missing, which torch then reuses forever. The prefetch's probe checks the tree
+is whole rather than merely present, and its fetch forces a reload; that is
+what heals a volume already carrying a damaged checkout.
 
 The three rows before the last are the ones that needed fixing. All bypass
 `huggingface_hub` and so ignore `HF_HOME`: seedvr2 hands its vendored
