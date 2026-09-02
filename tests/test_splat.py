@@ -218,16 +218,60 @@ class TestRenderSplatCameras(unittest.TestCase):
                  for c in cameras]
         self.assertAlmostEqual(max(radii), min(radii), places=5)
 
+    def test_a_cap_follows_the_live_anchor_camera_not_the_recorded_position(self):
+        """`refine_cameras` rewrites dataset.cameras in place and leaves
+        extras["anchor_position"] where the anchor USED to be. The cap is
+        sampled around the photograph's view, so it has to read that view
+        from the camera list — here the anchor camera is moved to the far
+        side of the splat and the disc must go with it."""
+        from body2colmap.camera import Camera
+
+        moved = Dataset.from_disk(require_stage("initial"))
+        recorded = np.asarray(moved.extras["anchor_position"], dtype=np.float64)
+        index = int(np.argmin([np.linalg.norm(np.asarray(c.position, dtype=np.float64)
+                                              - recorded) for c in moved.cameras]))
+        moved.extras["anchor_frame_index"] = index
+        bounds = self.scene.get_bounds()
+        target = (bounds[0] + bounds[1]) / 2.0
+        old = moved.cameras[index]
+        opposite = target - (recorded - target)
+        cameras = list(moved.cameras)
+        cameras[index] = Camera(
+            focal_length=(old.fx, old.fy), image_size=(old.width, old.height),
+            principal_point=(old.cx, old.cy), position=opposite.astype(np.float32),
+            rotation=np.asarray(old.rotation),
+        )
+        moved.cameras = cameras
+
+        params = {"pattern": "cap", "n_frames": 16, "cap_radius_deg": 30.0,
+                  "bounds_source": "splat"}
+        cap, _fl, _mm, _a = self._resolve(params, dataset=moved)
+
+        live_axis = opposite - target
+        live_axis /= np.linalg.norm(live_axis)
+        recorded_axis = recorded - target
+        recorded_axis /= np.linalg.norm(recorded_axis)
+        for camera in cap:
+            offset = np.asarray(camera.position, dtype=np.float64) - target
+            offset /= np.linalg.norm(offset)
+            to_live = np.degrees(np.arccos(np.clip(np.dot(offset, live_axis), -1, 1)))
+            to_recorded = np.degrees(np.arccos(np.clip(np.dot(offset, recorded_axis), -1, 1)))
+            self.assertLessEqual(to_live, 30.0 + 1e-6)       # around the LIVE anchor
+            self.assertGreaterEqual(to_recorded, 150.0 - 1e-6)  # nowhere near the recorded one
+
     def test_a_cap_needs_a_frame_count(self):
         with self.assertRaises(ValueError):
             self._resolve({"pattern": "cap", "bounds_source": "splat"})
 
     def test_a_cap_without_an_anchor_falls_back_to_the_start_azimuth(self):
-        """No anchor_position means no photograph to sample around; the cap
-        then points where the orbits start, rather than guessing."""
+        """No anchor means no photograph to sample around; the cap then
+        points where the orbits start, rather than guessing. Both anchor
+        keys go: the live camera at `anchor_frame_index` is what the cap
+        reads first (see `_cap_axis`), and `_ANCHOR_KEYS` treats the pair as
+        one fact anyway — a render that drops one drops the other."""
         stripped = Dataset.from_disk(require_stage("initial"))
         stripped.extras = {k: v for k, v in stripped.extras.items()
-                           if k != "anchor_position"}
+                           if k not in ("anchor_position", "anchor_frame_index")}
         params = {"pattern": "cap", "n_frames": 8, "cap_radius_deg": 20.0,
                   "bounds_source": "splat", "start_azimuth_deg": 90.0}
         cameras, _fl, _mm, _a = self._resolve(params, dataset=stripped)

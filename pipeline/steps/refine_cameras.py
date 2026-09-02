@@ -14,12 +14,15 @@ Do not confuse this with `steps/pose_refine.py`, which is about *body*
 pose — re-posing a SAM-3D-Body fit so its mesh agrees with the shell. This
 is about *camera* pose. The two share nothing but the word.
 
-`rebase_cameras`, the second step in this module, is the other half of
-correcting poses under a running pipeline: the correction below moves the
-frames' cameras, and anything already BUILT from one of those cameras — the
-face splat's supporting views, which are renders unprojected from the
-anchor photograph — has to be carried across with it or it goes on
-describing a world nothing else believes in. See that class's docstring.
+Anything BUILT from one of the cameras this step moves is stale once it
+has run. The face splat is the case: it is unprojected from the anchor
+photograph, and its supporting views are renders of it. Those are REBUILT
+after this step, through the refined anchor camera, by running
+`face_pointmap_splat` again with `cameras: dataset.cameras` (see that
+step's docstring on why a rebuild and not a rigid carry — the carry was
+tried here as `rebase_cameras`, 2026-08-31 to 2026-09-02, and sank the face
+50 mm into the head). The stage-1 body shells are built after this step to
+begin with. The rule is about order and tests/test_workflows.py pins it.
 
 The recipe, in six parts
 ------------------------
@@ -236,17 +239,25 @@ class RefineCamerasStep(Step):
 
     inputs: {"cameras": List[Camera], "image_names": List[str],
              "images": List[np.ndarray] BGR(A),
-             "masks": Optional[List[np.ndarray]] float32 [0,1], foreground=1}
+             "masks": Optional[List[np.ndarray]] float32 [0,1], foreground=1,
+             "anchor_frame_index": Optional[int] — which frame is the
+             photograph; default 0}
     outputs: {"cameras": List[Camera], "stats": dict,
-              "given_cameras": List[Camera] — the poses this step was
-              handed, republished untouched}
+              "anchor_position": List[float] (3,) — that frame's REFINED
+              position, for `dataset.extras.anchor_position`}
 
-    `given_cameras` is the input list, straight back out. Publishing it
-    costs nothing and is the only way anything downstream can know what
-    this step changed: `cameras` overwrites `dataset.cameras` in place, so
-    once this has run the poses the rest of the run was BUILT on are gone.
-    `rebase_cameras` below needs both halves — see its docstring for the
-    consumer that was left standing on the old ones.
+    `cameras` overwrites `dataset.cameras` in place, so once this has run
+    the poses the rest of the run was BUILT on are gone. Anything built
+    from them — the face splat and its cap — is rebuilt from the refined
+    list afterwards rather than carried across; see the module docstring.
+
+    `anchor_position` keeps the dataset's record of where the photograph
+    was taken from in step with its cameras: `render`'s override mode wrote
+    the given anchor's position into the extras, and after this step that
+    record described a pose the dataset no longer holds. Every reader that
+    matters (`render_splat`'s cap axis, `inject_anchor`'s position match)
+    should see the same anchor the camera list does. On a refusal it is the
+    given anchor's position, which is what the extras already held.
     """
 
     PARAMS = (
@@ -321,7 +332,13 @@ class RefineCamerasStep(Step):
         image_names = list(inputs["image_names"])
         images = list(inputs["images"])
         masks = inputs.get("masks")
+        anchor_index = int(inputs.get("anchor_frame_index") or 0)
         label = self.STEP_NAME or type(self).__name__
+        if cameras and not 0 <= anchor_index < len(cameras):
+            raise ValueError(
+                f"{label}: anchor_frame_index {anchor_index} is not a frame of a "
+                f"{len(cameras)}-camera path"
+            )
 
         if len(images) != len(image_names) or len(cameras) != len(image_names):
             raise ValueError(
@@ -399,7 +416,8 @@ class RefineCamerasStep(Step):
             # the ones the pipeline used before it existed. A COLMAP that is
             # *missing* raises a plain RuntimeError out of stream_command
             # instead, and is deliberately not caught — see BadSolve.
-            return self._give_up(cameras, params, label, f"COLMAP failed: {exc}")
+            return self._give_up(cameras, params, label, f"COLMAP failed: {exc}",
+                                 anchor_index=anchor_index)
 
         aligned, transform = _align_to(refined, cameras)
         stats = _movement(aligned, cameras, transform)
@@ -423,10 +441,12 @@ class RefineCamerasStep(Step):
         if failure:
             stats["accepted"] = False
             stats["failure"] = failure
-            return self._give_up(cameras, params, label, failure, stats)
+            return self._give_up(cameras, params, label, failure, stats,
+                                 anchor_index=anchor_index)
 
         stats["accepted"] = True
-        return {"cameras": aligned, "stats": stats, "given_cameras": cameras}
+        return {"cameras": aligned, "stats": stats,
+                "anchor_position": _position_of(aligned, anchor_index)}
 
     def _give_up(
         self,
@@ -435,6 +455,8 @@ class RefineCamerasStep(Step):
         label: str,
         why: str,
         stats: Optional[Dict[str, Any]] = None,
+        *,
+        anchor_index: int = 0,
     ) -> Dict[str, Any]:
         message = (
             f"{label}: refusing the refined poses and keeping the given ones — {why}"
@@ -444,11 +466,12 @@ class RefineCamerasStep(Step):
         logger.error("%s", message)
         out = dict(stats or {})
         out.update({"accepted": False, "failure": why})
-        # `given_cameras` is published on this path too, and is the same
-        # list as `cameras` here. That is what makes a refusal a no-op
-        # downstream rather than a second thing to handle: `rebase_cameras`
-        # measures a zero correction and passes its views through.
-        return {"cameras": cameras, "stats": out, "given_cameras": cameras}
+        # The given list, unchanged: a refusal is a no-op downstream, and
+        # the face splat rebuilt through `dataset.cameras` after this step
+        # then comes out where the bootstrap put it. The anchor position is
+        # the given one for the same reason.
+        return {"cameras": cameras, "stats": out,
+                "anchor_position": _position_of(cameras, anchor_index)}
 
     # ------------------------------------------------------------------
     # writing what COLMAP reads
@@ -702,214 +725,11 @@ class RefineCamerasStep(Step):
         return out
 
 
-@register_step("rebase_cameras")
-class RebaseCamerasStep(Step):
-    """Carry a render's cameras across the correction `refine_cameras` made.
-
-    inputs: {"cameras": List[Camera] — the views to move,
-             "from_cameras": Optional[List[Camera]] — the dataset's poses
-             before the refinement, i.e. its `given_cameras`,
-             "to_cameras": Optional[List[Camera]] — the same poses after it,
-             "reference_index": Optional[int] — which of the two lists'
-             frames defines the correction; the anchor frame}
-    outputs: {"cameras": List[Camera], "stats": dict}
-
-    The problem this exists for
-    ---------------------------
-    The face splat is built out of ONE frame — the reference photograph at
-    the anchor camera — and it is built by unprojecting that photograph
-    through that camera's pose. Its supporting views (`render_splat`'s cap,
-    `select_support_views`) are renders of it, and they are made in the
-    bootstrap, long before `refine_cameras` runs.
-
-    Then `refine_cameras` runs, and the anchor camera moves. The frames do
-    not: they are the same pixels, now declared to have been taken from
-    somewhere slightly else. So the world content that photograph depicts
-    moves with the pose — the face is wherever the anchor's ray bundle now
-    points — while the splat, and the cap cameras rendered around it, stay
-    on the old pose. `brush` is then handed supporting views that put the
-    face a centimetre or two off the head every training frame agrees on,
-    and weights them by the face's own alpha, which is precisely where it
-    hurts. Nothing raises; the face just lands wrong.
-
-    The fix, and why it is exactly a rigid transform
-    ------------------------------------------------
-    Write the anchor's pose as `P = [R_c2w | position]`. The splat sits at
-    `P_old @ x_cam` for camera-frame points `x_cam` read off the
-    photograph. The refinement's claim is that those same pixels were
-    taken from `P_new`, so the content they depict is at `P_new @ x_cam` —
-    the splat, moved by
-
-        D = P_new @ P_old^-1     (R = R_new @ R_old^T, t = p_new - R @ p_old)
-
-    and that is not an approximation of the correction, it *is* it.
-
-    Which is why only the CAMERAS are touched here. A render is a function
-    of the pose of the camera relative to the splat, so moving both by the
-    same `D` leaves every pixel identical — the images published by
-    `select_support_views` stay exactly what they were, and this step
-    re-expresses the cameras they were taken from in the world the refined
-    poses describe. The .ply itself is never re-read after this point
-    (`render` and `render_splat` both consume it in the bootstrap), so
-    there is nothing else to move.
-
-    Why the ANCHOR's correction and not some average of the orbit's
-    ---------------------------------------------------------------
-    Because the splat has exactly one source frame, and D above is written
-    in that frame's pose alone. Averaging over the neighbouring cameras
-    would be the right move for a shell built from several of them, and it
-    is the wrong one here: it would answer "where did the orbit go" when
-    the question is "where did THIS photograph's rays go".
-
-    The residual — that the other 80 frames moved by their own deltas and
-    so vote for a face very slightly elsewhere — is the refinement's own
-    non-rigidity, and is the size of the disagreement between frames
-    (`refine_cameras`' `centre_shift` stats), not of the correction.
-
-    What happens when there is nothing to do
-    ----------------------------------------
-    Three cases, all of them ordinary wiring rather than failures, and all
-    of them a pass-through:
-
-      * `refine_cameras` is switched off, so nothing writes its
-        `given_cameras` and `from_cameras` reads as None;
-      * it ran and REFUSED its solve, in which case it published the given
-        poses as both halves and the correction measures exactly zero;
-      * this workflow's face branch is off, so there are no cameras to
-        move (the step is gated with it, so it does not run at all).
-
-    `max_delta_deg` is the fourth: a correction larger than the whole
-    refinement is ever expected to make is more likely a mis-wire — the
-    wrong reference index, or two lists that are not the same frames — than
-    a real one, and applying it would move the face further than leaving
-    it. That publishes the cameras unchanged and says so, the same trade
-    `refine_cameras`' own `keep_given` makes.
-    """
-
-    PARAMS = (
-        Param("max_delta_deg", float, 5.0,
-              "Refuse the rebase, and publish the cameras unchanged, if the "
-              "reference camera's own correction rotated by more than this. "
-              "The refinement's measured maximum is 1.911 deg across a whole "
-              "81-frame orbit (docs/camera-pose-refinement.md), so this is a "
-              "mis-wire detector rather than a tuning knob. 0 disables it",
-              minimum=0.0, advanced=True),
-    )
-
-    def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
-        cameras = list(inputs["cameras"])
-        before = inputs.get("from_cameras")
-        after = inputs.get("to_cameras")
-        label = self.STEP_NAME or type(self).__name__
-
-        stats: Dict[str, Any] = {"applied": False, "views": len(cameras)}
-
-        if not before or not after:
-            # The refinement is switched off. Not a warning: this is the
-            # pipeline as it was before that step existed, and the views
-            # are correct against the poses that are actually in use.
-            logger.info(
-                "%s: no refinement to carry across (from_cameras=%s, "
-                "to_cameras=%s), so the %d view(s) pass through unchanged",
-                label, "absent" if not before else "present",
-                "absent" if not after else "present", len(cameras),
-            )
-            stats["reason"] = "no refinement was wired in"
-            return {"cameras": cameras, "stats": stats}
-
-        before, after = list(before), list(after)
-        if len(before) != len(after):
-            raise ValueError(
-                f"{label}: from_cameras has {len(before)} poses and "
-                f"to_cameras {len(after)}. They are the same frames before "
-                f"and after a refinement and have to arrive together."
-            )
-
-        index = inputs.get("reference_index")
-        if index is None:
-            # Where a circular path's anchor sits anyway — the same
-            # fallback pointmap_elevation_views makes for the same reason.
-            index = 0
-            logger.info(
-                "%s: no reference_index wired in; taking frame 0 as the "
-                "frame the views were built from", label,
-            )
-        index = int(index)
-        if not 0 <= index < len(before):
-            raise ValueError(
-                f"{label}: reference_index {index} is not a frame of a "
-                f"{len(before)}-camera path. It names the frame these views "
-                f"were built from — the anchor."
-            )
-
-        rotation, translation = _pose_delta(before[index], after[index])
-        moved = float(np.linalg.norm(
-            np.asarray(after[index].position, dtype=np.float64).reshape(3)
-            - np.asarray(before[index].position, dtype=np.float64).reshape(3)))
-        degrees = float(np.degrees(np.arccos(
-            np.clip((np.trace(rotation) - 1.0) / 2.0, -1.0, 1.0))))
-        stats.update({
-            "reference_index": index,
-            "rotation_deg": degrees,
-            "reference_shift": moved,
-        })
-
-        limit = params["max_delta_deg"]
-        if limit > 0.0 and degrees > limit:
-            logger.error(
-                "%s: refusing to rebase — frame %d's correction rotates by "
-                "%.3f deg, past the %.3f deg this step will carry. That is "
-                "larger than a refinement of this orbit makes, so suspect the "
-                "wiring (a reference_index naming the wrong frame, or two "
-                "camera lists that are not the same path) before believing "
-                "it. The %d view(s) are published unchanged.",
-                label, index, degrees, limit, len(cameras),
-            )
-            stats["reason"] = (
-                f"the reference camera's correction is {degrees:.3f} deg, "
-                f"past max_delta_deg={limit:.3f}"
-            )
-            return {"cameras": cameras, "stats": stats}
-
-        rebased = [_transformed(camera, rotation, translation) for camera in cameras]
-        stats["applied"] = True
-        logger.info(
-            "%s: carried frame %d's correction (%.3f deg, centre moved "
-            "%.4f) onto %d supporting view(s)",
-            label, index, degrees, moved, len(cameras),
-        )
-        return {"cameras": rebased, "stats": stats}
-
-
-def _pose_delta(before: Any, after: Any) -> Tuple[np.ndarray, np.ndarray]:
-    """The world transform that takes one camera's old pose to its new one.
-
-    `Camera.rotation` is camera-to-world (body2colmap/camera.py), so a
-    world transform is applied to a camera as `R @ rotation` and
-    `R @ position + t` — which is exactly what `_align_to` does with the
-    Sim(3) it fits, one scale factor aside.
-    """
-    r_before = np.asarray(before.rotation, dtype=np.float64)
-    r_after = np.asarray(after.rotation, dtype=np.float64)
-    p_before = np.asarray(before.position, dtype=np.float64).reshape(3)
-    p_after = np.asarray(after.position, dtype=np.float64).reshape(3)
-
-    rotation = r_after @ r_before.T
-    return rotation, p_after - rotation @ p_before
-
-
-def _transformed(camera: Any, rotation: np.ndarray, translation: np.ndarray) -> Any:
-    """One camera through a world rigid transform, intrinsics untouched."""
-    from body2colmap.camera import Camera
-
-    return Camera(
-        focal_length=(camera.fx, camera.fy),
-        image_size=(camera.width, camera.height),
-        principal_point=(camera.cx, camera.cy),
-        position=rotation @ np.asarray(camera.position, dtype=np.float64).reshape(3)
-        + translation,
-        rotation=rotation @ np.asarray(camera.rotation, dtype=np.float64),
-    )
+def _position_of(cameras: Sequence[Any], index: int) -> Optional[List[float]]:
+    """`cameras[index].position` as a plain list, or None for an empty path."""
+    if not cameras:
+        return None
+    return [float(v) for v in np.asarray(cameras[index].position, dtype=np.float64).reshape(3)]
 
 
 # --------------------------------------------------------------------------

@@ -383,14 +383,21 @@ class TestStepRun(unittest.TestCase):
     """The whole step, with only the 1B forward pass stubbed out."""
 
     def _run(self, tmp: str, scale_the_pointmap_by: float = 2.5,
-             pointmap_camera=(FOCAL, CX, CY), **params):
+             pointmap_camera=(FOCAL, CX, CY), camera=None, **params):
         z, normals, mask = _sphere()
         # The "mesh": SAM-3D-Body vertices sampled off the true surface,
         # with cam_t already folded out so vertices + cam_t is the truth.
+        # With `camera`, the truth is that same surface as seen from THAT
+        # camera, expressed in SAM-3D-Body's frame the way `mesh_in_world`
+        # undoes it — the posed route's world is body2colmap's.
         points = ps.backproject(z, FOCAL, CX, CY)
         cam_t = np.array([0.02, -0.03, 0.05])
+        surface = points[mask][::29]
+        if camera is not None:
+            rotation, position = ps.camera_pose(camera)
+            surface = ((surface * ps.FLIP) @ rotation.T + position) * ps.FLIP
         mesh_output = {
-            "vertices": points[mask][::29] - cam_t,
+            "vertices": surface - cam_t,
             "cam_t": cam_t,
             "focal_length": FOCAL,
         }
@@ -410,15 +417,15 @@ class TestStepRun(unittest.TestCase):
 
         step = _StubbedStep(pointmap.astype(np.float32))
         merged = dict({"filepath": str(Path(tmp) / "shell.ply")}, **params)
-        return step.run(
-            {
-                "image": image,
-                "mask": mask.astype(np.float32),
-                "normal_map": normals * ps.NORMAL_TO_CAMERA_FRAME,   # OpenGL in
-                "mesh_output": mesh_output,
-            },
-            ps.PointmapSplatStep.resolve_params(merged),
-        ), (z, mask)
+        inputs = {
+            "image": image,
+            "mask": mask.astype(np.float32),
+            "normal_map": normals * ps.NORMAL_TO_CAMERA_FRAME,   # OpenGL in
+            "mesh_output": mesh_output,
+        }
+        if camera is not None:
+            inputs.update({"cameras": [camera], "anchor_frame_index": 0})
+        return step.run(inputs, ps.PointmapSplatStep.resolve_params(merged)), (z, mask)
 
     def test_run_puts_every_gaussian_back_on_its_own_pixel(self):
         """The gate: the shell must reproject onto the photo it came from,
@@ -436,6 +443,60 @@ class TestStepRun(unittest.TestCase):
             self.assertLess(float(np.abs(u - np.round(u)).max()), 1e-3)
             self.assertLess(float(np.abs(v - np.round(v)).max()), 1e-3)
             self.assertTrue(mask[np.round(v).astype(int), np.round(u).astype(int)].all())
+
+    def test_run_through_a_dataset_camera_lands_on_that_cameras_pixels(self):
+        """The posed route, which exists for `face_splat_refined`: handed
+        `cameras` and an index, the shell is the photograph's pixels on THAT
+        camera's rays at the mesh's depth. So the same gate as above, read
+        through the posed camera — and the depth scale still recovered from
+        the mesh, which is the half a rigid carry of the origin's shell got
+        wrong (the 50 mm of 2026-09-02)."""
+        from body2colmap import coordinates
+        from body2colmap.camera import Camera
+
+        target = np.array([0.4, -1.1, -2.0])
+        camera = Camera(
+            focal_length=(FOCAL, FOCAL), image_size=(WIDTH, HEIGHT),
+            principal_point=(CX, CY),
+            position=target + coordinates.spherical_to_cartesian(2.2, 37.0, 9.0),
+        )
+        camera.look_at(target, coordinates.WorldCoordinates.UP_AXIS)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            result, (z_true, mask) = self._run(tmp, camera=camera)
+
+            _, _, data = _read_ply(Path(result["splat_path"]))
+            means_world = data[:, 0:3].astype(np.float64)
+            rotation, position = ps.camera_pose(camera)
+            cam = ((means_world - position) @ rotation) * ps.FLIP
+            u = FOCAL * cam[:, 0] / cam[:, 2] + CX
+            v = FOCAL * cam[:, 1] / cam[:, 2] + CY
+            self.assertLess(float(np.abs(u - np.round(u)).max()), 1e-3)
+            self.assertLess(float(np.abs(v - np.round(v)).max()), 1e-3)
+            self.assertTrue(mask[np.round(v).astype(int), np.round(u).astype(int)].all())
+            # ...and NOT on the origin camera's: the shell moved with the pose.
+            origin = means_world * ps.FLIP
+            u0 = FOCAL * origin[:, 0] / np.where(origin[:, 2] > 0, origin[:, 2], 1) + CX
+            self.assertGreater(float(np.median(np.abs(u0 - u))), 10.0)
+
+            stats = result["splat_stats"]
+            self.assertAlmostEqual(stats["depth_alignment"]["scale"], 2.5, delta=0.1)
+            self.assertAlmostEqual(stats["placement"]["depth_m"],
+                                   float(np.median(z_true[mask])), delta=0.03)
+            self.assertEqual(stats["source_camera"]["frame_index"], 0)
+            np.testing.assert_allclose(stats["source_camera"]["position"], position, atol=1e-6)
+
+    def test_run_refuses_an_anchor_index_off_the_path(self):
+        from body2colmap.camera import Camera
+
+        camera = Camera(focal_length=(FOCAL, FOCAL), image_size=(WIDTH, HEIGHT),
+                        principal_point=(CX, CY), position=np.zeros(3))
+        step = ps.PointmapSplatStep()
+        with self.assertRaises(ValueError):
+            step._source_camera({"cameras": [camera], "anchor_frame_index": 3}, "t")
+        self.assertEqual(step._source_camera({"cameras": []}, "t"), (None, None))
+        self.assertEqual(step._source_camera({}, "t"), (None, None))
+        self.assertIs(step._source_camera({"cameras": [camera]}, "t")[0], camera)
 
     def test_run_scales_the_shell_onto_the_mesh(self):
         with tempfile.TemporaryDirectory() as tmp:

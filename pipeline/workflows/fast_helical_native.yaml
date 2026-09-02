@@ -5,27 +5,33 @@
 # BOOTSTRAP (this file only) — split_sheet -> reconstruct_body ->
 # detect_face -> map_face_to_mesh -> fit_head_to_face -> [locate_face ->
 # crop_face -> face_seg -> face_mask -> face_normals -> face_splat] ->
-# render_initial_views -> render_face_support_views -> face_support_views ->
-# warp_reference_to_anchor -> reinject_anchor_initial.
-# The bracketed six, plus render_face_support_views and face_support_views,
-# are gated on the `face_splat` global. render_initial_views is not: it
+# render_initial_views -> warp_reference_to_anchor -> reinject_anchor_initial.
+# The bracketed six are gated on the `face_splat` global, as are the
+# tail's face_splat_refined -> render_face_support_views ->
+# face_support_views that follow refine_cameras. render_initial_views is not: it
 # draws the face splat itself now (`render_mode: outline+skeleton+splat`)
 # and reads the .ply optionally, so the branch being off leaves it with
 # nothing to composite rather than nothing to resolve.
 #
-# WHAT CHANGED (2026-08-31, latest): the face cap is carried across the
-# camera refinement. `refine_cameras` moves the poses the frames were
-# denoised along, and the face splat's supporting views were rendered back
-# in the bootstrap out of the reference photograph and through the ANCHOR
-# camera's pose — so the refinement left them describing where that camera
-# used to be, and the first brush training was handed a face a centimetre
-# or two off the head every training frame agreed on. One new step,
-# `rebase_face_support_views` (steps/refine_cameras.py's `rebase_cameras`),
-# applies the anchor camera's own pose delta to the cap's cameras between
-# the refinement and `merge_support_views`; the renders themselves are
-# untouched, because moving a splat and its cameras by the same rigid
-# transform leaves every pixel identical. `refine_cameras` publishes a
-# `given_cameras` output for it to measure against.
+# WHAT CHANGED (2026-09-02, latest): the face splat is REBUILT after the
+# camera refinement, and its cap is rendered there. `refine_cameras` moves
+# the anchor camera the face splat was unprojected through; from 2026-08-31
+# the cap's cameras were carried across by that camera's own pose delta
+# (`rebase_face_support_views`), and measured on run e593a8 that put the
+# cap's face 50 mm INSIDE the head — the delta is mostly a slide along the
+# anchor's own viewing ray, and a rigid carry moves the splat's depth with
+# it while that depth came from the mesh, which never moved. Now
+# `face_splat_refined` runs `face_pointmap_splat` a second time through the
+# refined anchor camera (`cameras: dataset.cameras`), re-taking the depth
+# from the mesh, and `render_face_support_views` + `face_support_views`
+# moved out of the bootstrap to follow it; render_splat's cap aims along
+# the live anchor camera rather than the recorded `anchor_position`. The
+# rebase step, `refine_cameras`' `given_cameras` output and
+# tests/test_rebase_cameras.py are gone.
+#
+# WHAT CHANGED (2026-08-31): the face cap was carried across the camera
+# refinement by the anchor camera's pose delta (`rebase_cameras`) — the
+# approach the paragraph above replaces.
 #
 # WHAT CHANGED (2026-08-31): the SHARED TAIL gained supporting
 # views of its own, off the stage-1 denoised batch. Three new steps after
@@ -860,134 +866,6 @@ steps:
       initial_rotation: dataset.extras.initial_rotation
       image_warp: scene.image_warp
 
-  # The SECOND face render, and a different set of views for a different
-  # consumer. The one above rides the dataset's own cameras because its
-  # frames have to be composited onto those exact drawings, one for one.
-  # These are for `brush` as supporting views (face_support_views below),
-  # and views on the dataset's path are the ones worth least there: each
-  # already has a denoised frame of its own carrying the photograph, so a
-  # render of the same view supervises it with a resampled copy of what it
-  # has. What supervision is FOR is the rest of the neighbourhood.
-  #
-  # So: a `cap` — a disc of 36 views spread evenly by area within 30
-  # degrees of the photograph's own view of the splat, aimed at the SPLAT's
-  # centre rather than the body's (`bounds_source: splat`, which also
-  # dollies in so the head fills the frame at fill_ratio instead of sitting
-  # in it as a smudge). 30 degrees is body2colmap's measurement of where a
-  # Face_Neck shell still reads cleanly (c65a7f7); past it the 2.5-D shell
-  # shows its own open rim, and nothing downstream rewrites a supporting
-  # view the way two denoise passes rewrite a composited one.
-  #
-  # bg_color black for the same load-bearing reason as above: these are
-  # un-premultiplied by select_support_views, and dividing by alpha only
-  # recovers the straight colour if the render was premultiplied over
-  # black.
-  - id: render_face_support_views
-    step: render_splat
-    dispatch: in_process
-    when: ${globals.face_splat}
-    inputs:
-      splat_path: scene.face_splat_path
-      dataset: dataset
-    params:
-      pattern: cap
-      n_frames: 36
-      cap_radius_deg: 30.0
-      bounds_source: splat
-      fill_ratio: 0.8
-      width: ${globals.resolution.0}
-      height: ${globals.resolution.1}
-      bg_color: [0.0, 0.0, 0.0]
-      # NO backdrop, and this is the same sentence as the black above rather
-      # than a second one: select_support_views divides the alpha back out of
-      # these frames to recover a straight colour, which only works if what
-      # lies behind the splat is a flat black. A room behind it would be
-      # recovered as the face's own colour and then trained on.
-      background: ""
-    outputs:
-      images: scene.face_support_render.images
-      masks: scene.face_support_render.masks
-      cameras: scene.face_support_render.cameras
-
-  # The face splat's SECOND route into the training. render_initial_views
-  # above puts it on the drawings, where two diffusion passes then have
-  # their way with it; this hands a render of it to `brush` as supporting
-  # views —
-  # training evidence weighted by the splat's own coverage and ignored
-  # everywhere else — so the deliverable is pulled back toward the face in
-  # the photograph rather than the one the denoiser invented. See
-  # steps/brush.py's support_* inputs for why that must be brush's MASKED
-  # mode: outside a face matte lies the rest of the subject — neck, hair,
-  # ears — not empty space, and a transparent view would ask the training to
-  # carve it away. Tighter than it used to be, and so more so: since
-  # 2026-08-30 that matte is the face alone, and the neck it no longer
-  # covers is exactly the kind of real surface a transparent view would
-  # delete.
-  #
-  # The face-only matte reaches here on its own, with nothing to wire: these
-  # masks are render_splat's coverage of scene.face_splat_path, and that
-  # splat has one Gaussian per masked pixel. Narrow the matte and the splat
-  # narrows, so its renders and their alpha narrow with it.
-  #
-  # The OUTER edge of the useful band was drawn by the sampler that made
-  # these views: a 30-degree cap, which is body2colmap's measurement of
-  # where a Face_Neck shell still reads cleanly (c65a7f7). Drawing it there
-  # rather than here is the point of rendering a second set — culling the
-  # drawing batch afterwards keeps the views nearest the photograph, which
-  # are the ones worth least, and spends renders to do it. Note this is a
-  # TIGHTER angle than the 60 render_initial_views composites at, on
-  # purpose: nothing rewrites a supporting view, while a composited frame
-  # is an input to two denoise passes that can rewrite a flared rim.
-  #
-  # What is left for this step is the INNER edge: min_path_angle_deg, 5
-  # degrees, measured to the nearest camera on the denoising path. A band
-  # swept down the whole orbit, not a hole punched at the anchor.
-  # render_initial_views lays that path out as `pattern: circular` — one
-  # elevation, 360 degrees of azimuth, every frame of it denoised — so a
-  # supporting view sitting on it competes with a denoised frame wherever
-  # it sits; being 140 degrees round the orbit from the photograph does
-  # not make a view out of distribution, being off the path does. (On a
-  # circle this comes out as the elevation difference; on
-  # fast_helical_shell.yaml's helix it follows the sweep, which is why the
-  # measure is to the path and not to a latitude.) Of the cap's 36 views
-  # against 81 ring cameras, that drops the 7 nearest the ring.
-  #
-  # Only the STAGE-2 training reads these (`train_splat`). The final one
-  # does not, and its inputs say so: by then the dataset is the helical
-  # re-render, denoised again and upscaled, while these renders are still
-  # the circular bootstrap's — stale path, stale resolution. The `?` on
-  # `train_splat`'s reads is an optional read (see pipeline/workflow.py),
-  # so this file and the shell file can share one tail: with the face
-  # branch off (`face_splat: false`), nothing writes that path and brush
-  # trains exactly as before.
-  - id: face_support_views
-    step: select_support_views
-    dispatch: in_process
-    when: ${globals.face_splat}
-    inputs:
-      images: scene.face_support_render.images
-      masks: scene.face_support_render.masks
-      cameras: scene.face_support_render.cameras
-      # The denoising path: the cameras the training's own frames were
-      # rendered and denoised along. `min_path_angle_deg` drops the cap
-      # samples that land within 5 degrees of it — the innermost ring of
-      # the disc, whose views the denoised batch already covers.
-      path_cameras: dataset.cameras
-      # The pivot that distance is measured about, and the same one
-      # render_initial_views culls about (it reads the splat's own bbox
-      # centre off the .ply, which is exactly this): a head sits well above
-      # a full-body orbit target, so measuring about the target would call
-      # a camera closer to the path than it is to the head's view of it.
-      splat_center: scene.face_splat_stats.world_center
-    params: {}
-    outputs:
-      # `face_support_views`, not `support_views`: `merge_support_views` in
-      # the shared tail is the single writer of scene.support_views.*, and
-      # it takes this branch and the stage-1 body shells as its two inputs.
-      images: scene.face_support_views.images
-      masks: scene.face_support_views.masks
-      cameras: scene.face_support_views.cameras
-
   # Put the real reference photo, warped to the anchor camera's framing,
   # onto the render at that frame — this is what makes cyber_6f/initial's
   # anchor frame byte-identical to anchor.png rather than a mesh render of
@@ -1261,64 +1139,226 @@ steps:
       # flags, and masking a solve to "everything" is the unmasked variant
       # under a different name.
       masks: dataset.masks
+      # Which frame is the photograph, so the step can republish where the
+      # refinement put it. Falls back to frame 0, the circular anchor.
+      anchor_frame_index: dataset.extras.anchor_frame_index?
     params: {}
     outputs:
       cameras: dataset.cameras
       stats: scene.camera_refinement
-      # The poses it was handed, republished untouched, so `rebase_cameras`
-      # below can measure what moved. `dataset.cameras` is overwritten in
-      # place above, so this is the only surviving record of the frame the
-      # face splat and its supporting views were built in.
-      given_cameras: scene.camera_refinement_given
+      # The dataset's record of the photograph's camera, kept in step with
+      # the cameras it just rewrote. render_initial_views wrote the GIVEN
+      # anchor's position here; leaving it would have the extras describe
+      # a pose the camera list no longer holds. Its readers — render_splat's
+      # cap axis (which prefers the live camera anyway) and inject_anchor's
+      # position match — now see the same anchor the cameras do. Only this
+      # refinement republishes it: after rerender_splat the extras' index
+      # names a frame of the circular path, not the helix, so
+      # refine_cameras_final has nothing truthful to say about it.
+      anchor_position: dataset.extras.anchor_position
 
-  # ------------------------------- and the face cap, carried across with it
-  # The one thing above that has already been BUILT on the poses the step
-  # above just moved. The face splat is unprojected from the reference
-  # photograph through the ANCHOR camera, and its supporting views were
-  # rendered around it back in the bootstrap; the refinement has since
-  # declared that photograph to have been taken from somewhere slightly
-  # else, which moves the world content it depicts and leaves the cap
-  # cameras describing the old one. Left alone, `train_splat` below is
-  # handed a face a centimetre or two off the head every training frame
-  # agrees on, weighted by the face's own alpha — exactly where it hurts,
-  # and with nothing to raise about it.
+  # --------------------------- the face splat, rebuilt on the refined poses
+  # The one thing above that was BUILT on the poses the step above just
+  # moved. The face splat is unprojected from the reference photograph
+  # through the ANCHOR camera — the origin, where render_initial_views'
+  # override mode put that frame — with its depth taken from the mesh. The
+  # refinement has since declared the photograph taken from somewhere
+  # slightly else, so the same pixels now belong on slightly different
+  # rays; the mesh has not moved, and neither has the face the denoised
+  # frames agree on, which sits on the mesh. So the splat is built AGAIN
+  # here, from the same crop, matte and normals, through the refined anchor
+  # camera (`cameras: dataset.cameras` plus the anchor's index), with its
+  # depth re-taken from the mesh through that camera. The bootstrap's copy
+  # stays on disk beside it (`face_splat`'s filepath against this one's)
+  # for the comparison; nothing reads it again — render_initial_views was
+  # its only reader and is behind us.
   #
-  # The correction is the anchor camera's own pose delta, applied to the
-  # cap's cameras. The IMAGES are untouched and do not need touching: a
-  # render depends only on where its camera sits relative to the splat, so
-  # moving the splat and its cameras by the same rigid transform leaves
-  # every pixel identical. Moving the .ply is likewise unnecessary — both
-  # of its readers (`render_initial_views`, `render_face_support_views`)
-  # are behind us. See steps/refine_cameras.py's `rebase_cameras` for why
-  # the anchor's delta is the exact transform rather than an approximation
-  # of one.
+  # Why a rebuild and not a rigid carry, which is what stood here from
+  # 2026-08-31 to 2026-09-02 (`rebase_face_support_views`, a `rebase_cameras`
+  # step since deleted): measured on run e593a8, the carry put the cap's
+  # face 50 mm behind the face in the frames and the shells — the same
+  # pixel in the anchor view, a second face inside the head from the side,
+  # a Janus in the helical render. The anchor's own pose delta was 23 mm
+  # toward the subject, 58 mm up and 1.6 degrees of pitch: at the head the
+  # vertical parts cancel and what is left is a slide along the anchor's
+  # viewing ray, the one direction a single frame's reprojection cannot
+  # constrain and so the one a bundle adjustment is freest to leave there.
+  # A rigid carry moves the splat's DEPTH by that slide, but the depth was
+  # never the camera's to move — it came from the mesh. Rebuilding through
+  # the refined camera keeps the pixels on the refined rays and puts the
+  # depth back on the mesh, which is where the 22 frames around the anchor
+  # triangulate the face (1 cm ahead of the mesh front; the carried cap was
+  # 5 cm behind it). See FacePointmapSplatStep's docstring.
   #
-  # Gated with the FACE branch, not with the refinement: with `face_splat`
-  # off there are no views to carry, while with `refine_cameras` off
-  # nothing writes `scene.camera_refinement_given`, the optional read comes
-  # back None and the step passes its views through — which is the same
-  # answer, arrived at by reading rather than by wiring.
-  #
-  # In place, on the path `face_support_views` wrote, so
-  # `merge_support_views` needs no rewiring and there is one path carrying
-  # the face's supporting cameras rather than a corrected one beside a
-  # stale one for a later reader to pick the wrong half of.
-  - id: rebase_face_support_views
-    step: rebase_cameras
+  # Gated with the FACE branch, like everything it feeds. With
+  # `refine_cameras` off, dataset.cameras still holds the given poses and
+  # the anchor is still the origin camera, so this is the bootstrap's splat
+  # again — the same answer, arrived at by reading rather than by wiring.
+  # In place on scene.face_splat_path / scene.face_splat_stats, so the two
+  # cap steps below need no rewiring and there is one path carrying the
+  # face splat rather than a refined one beside a stale one for a later
+  # reader to pick the wrong half of.
+  - id: face_splat_refined
+    step: face_pointmap_splat
     dispatch: in_process
     when: ${globals.face_splat}
     inputs:
-      cameras: scene.face_support_views.cameras
-      from_cameras: scene.camera_refinement_given?
-      to_cameras: dataset.cameras
-      # The frame the splat was built from — the one real photograph. The
-      # step falls back to frame 0 without it, which is where a circular
-      # path's anchor sits anyway.
-      reference_index: dataset.extras.anchor_frame_index?
+      image: scene.face_image
+      mask: scene.face_matte
+      normal_map: scene.face_normals
+      crop_info: scene.face_crop_info
+      mesh_output: scene
+      cameras: dataset.cameras
+      # The frame the photograph is — the one the refinement moved out from
+      # under the bootstrap's splat. The step falls back to frame 0 without
+      # it, which is where a circular path's anchor sits anyway.
+      anchor_frame_index: dataset.extras.anchor_frame_index?
+    params:
+      filepath: ${globals.output_root}/face/face_refined.ply
+    outputs:
+      splat_path: scene.face_splat_path
+      splat_stats: scene.face_splat_stats
+
+  # The SECOND face render, and a different set of views for a different
+  # consumer. render_initial_views (back in the bootstrap) rides the
+  # dataset's own cameras because its frames have to be composited onto
+  # those exact drawings, one for one.
+  # These are for `brush` as supporting views (face_support_views below),
+  # and views on the dataset's path are the ones worth least there: each
+  # already has a denoised frame of its own carrying the photograph, so a
+  # render of the same view supervises it with a resampled copy of what it
+  # has. What supervision is FOR is the rest of the neighbourhood.
+  #
+  # It renders the REFINED splat, `face_splat_refined` above, and it sits
+  # here rather than in the bootstrap (where it lived until 2026-09-02) for
+  # that reason and one more: render_splat aims the cap along the anchor
+  # camera's view of the splat, and it reads that camera LIVE from
+  # dataset.cameras[anchor_frame_index] — which `refine_cameras` has by now
+  # rewritten — rather than from the recorded `anchor_position` (which the
+  # refinement republishes too, but the camera list is the truth). Both the
+  # splat and the disc of views around it therefore describe the refined
+  # anchor.
+  #
+  # So: a `cap` — a disc of 36 views spread evenly by area within 30
+  # degrees of the photograph's own view of the splat, aimed at the SPLAT's
+  # centre rather than the body's (`bounds_source: splat`, which also
+  # dollies in so the head fills the frame at fill_ratio instead of sitting
+  # in it as a smudge). 30 degrees is body2colmap's measurement of where a
+  # Face_Neck shell still reads cleanly (c65a7f7); past it the 2.5-D shell
+  # shows its own open rim, and nothing downstream rewrites a supporting
+  # view the way two denoise passes rewrite a composited one.
+  #
+  # bg_color black for the same load-bearing reason as above: these are
+  # un-premultiplied by select_support_views, and dividing by alpha only
+  # recovers the straight colour if the render was premultiplied over
+  # black.
+  - id: render_face_support_views
+    step: render_splat
+    dispatch: in_process
+    when: ${globals.face_splat}
+    inputs:
+      splat_path: scene.face_splat_path
+      dataset: dataset
+    params:
+      pattern: cap
+      n_frames: 36
+      cap_radius_deg: 30.0
+      bounds_source: splat
+      fill_ratio: 0.8
+      width: ${globals.resolution.0}
+      height: ${globals.resolution.1}
+      bg_color: [0.0, 0.0, 0.0]
+      # NO backdrop, and this is the same sentence as the black above rather
+      # than a second one: select_support_views divides the alpha back out of
+      # these frames to recover a straight colour, which only works if what
+      # lies behind the splat is a flat black. A room behind it would be
+      # recovered as the face's own colour and then trained on.
+      background: ""
+    outputs:
+      images: scene.face_support_render.images
+      masks: scene.face_support_render.masks
+      cameras: scene.face_support_render.cameras
+
+  # The face splat's SECOND route into the training. render_initial_views
+  # back in the bootstrap puts it on the drawings, where two diffusion
+  # passes then have their way with it; this hands a render of it to
+  # `brush` as supporting
+  # views —
+  # training evidence weighted by the splat's own coverage and ignored
+  # everywhere else — so the deliverable is pulled back toward the face in
+  # the photograph rather than the one the denoiser invented. See
+  # steps/brush.py's support_* inputs for why that must be brush's MASKED
+  # mode: outside a face matte lies the rest of the subject — neck, hair,
+  # ears — not empty space, and a transparent view would ask the training to
+  # carve it away. Tighter than it used to be, and so more so: since
+  # 2026-08-30 that matte is the face alone, and the neck it no longer
+  # covers is exactly the kind of real surface a transparent view would
+  # delete.
+  #
+  # The face-only matte reaches here on its own, with nothing to wire: these
+  # masks are render_splat's coverage of scene.face_splat_path, and that
+  # splat has one Gaussian per masked pixel. Narrow the matte and the splat
+  # narrows, so its renders and their alpha narrow with it.
+  #
+  # The OUTER edge of the useful band was drawn by the sampler that made
+  # these views: a 30-degree cap, which is body2colmap's measurement of
+  # where a Face_Neck shell still reads cleanly (c65a7f7). Drawing it there
+  # rather than here is the point of rendering a second set — culling the
+  # drawing batch afterwards keeps the views nearest the photograph, which
+  # are the ones worth least, and spends renders to do it. Note this is a
+  # TIGHTER angle than the 60 render_initial_views composites at, on
+  # purpose: nothing rewrites a supporting view, while a composited frame
+  # is an input to two denoise passes that can rewrite a flared rim.
+  #
+  # What is left for this step is the INNER edge: min_path_angle_deg, 5
+  # degrees, measured to the nearest camera on the denoising path. A band
+  # swept down the whole orbit, not a hole punched at the anchor.
+  # render_initial_views lays that path out as `pattern: circular` — one
+  # elevation, 360 degrees of azimuth, every frame of it denoised — so a
+  # supporting view sitting on it competes with a denoised frame wherever
+  # it sits; being 140 degrees round the orbit from the photograph does
+  # not make a view out of distribution, being off the path does. (On a
+  # circle this comes out as the elevation difference; on
+  # fast_helical_shell.yaml's helix it follows the sweep, which is why the
+  # measure is to the path and not to a latitude.) Of the cap's 36 views
+  # against 81 ring cameras, that drops the 7 nearest the ring.
+  #
+  # Only the STAGE-2 training reads these (`train_splat`). The final one
+  # does not, and its inputs say so: by then the dataset is the helical
+  # re-render, denoised again and upscaled, while these renders are still
+  # the circular bootstrap's — stale path, stale resolution. The `?` on
+  # `train_splat`'s reads is an optional read (see pipeline/workflow.py),
+  # so this file and the shell file can share one tail: with the face
+  # branch off (`face_splat: false`), nothing writes that path and brush
+  # trains exactly as before.
+  - id: face_support_views
+    step: select_support_views
+    dispatch: in_process
+    when: ${globals.face_splat}
+    inputs:
+      images: scene.face_support_render.images
+      masks: scene.face_support_render.masks
+      cameras: scene.face_support_render.cameras
+      # The denoising path: the cameras the training's own frames were
+      # rendered and denoised along. `min_path_angle_deg` drops the cap
+      # samples that land within 5 degrees of it — the innermost ring of
+      # the disc, whose views the denoised batch already covers.
+      # The REFINED path — the one these views will be trained beside.
+      path_cameras: dataset.cameras
+      # The pivot that distance is measured about, and the same one
+      # render_initial_views culls about (it reads the splat's own bbox
+      # centre off the .ply, which is exactly this): a head sits well above
+      # a full-body orbit target, so measuring about the target would call
+      # a camera closer to the path than it is to the head's view of it.
+      splat_center: scene.face_splat_stats.world_center
     params: {}
     outputs:
+      # `face_support_views`, not `support_views`: `merge_support_views` in
+      # the shared tail is the single writer of scene.support_views.*, and
+      # it takes this branch and the stage-1 body shells as its two inputs.
+      images: scene.face_support_views.images
+      masks: scene.face_support_views.masks
       cameras: scene.face_support_views.cameras
-      stats: scene.face_support_rebase
 
   # ------------------------------------- the stage-1 shells' supporting views
   # The face splat's lever, applied to the denoised body. Every Nth frame of
@@ -1449,13 +1489,12 @@ steps:
   # That matters because a supporting view is the one thing here whose
   # pose has no other witness. The training frames are checked against
   # each other by `refine_cameras`; a supporting view is a render made
-  # from a pose nothing re-measures, and the face cap is rendered EARLIER
-  # than the frames it supervises — it comes out of the bootstrap, before
-  # `denoise_pass1` and before `refine_cameras` moves the training poses
-  # under it. `rebase_face_support_views` is what carries it across that
-  # move, and this export is where to check that it did: open it in a
-  # COLMAP viewer and the supporting cameras either sit on the same arc as
-  # the training ones or they do not.
+  # from a pose nothing re-measures, and the face cap's splat is built out
+  # of the one photograph, through the anchor camera the refinement moved
+  # — `face_splat_refined` rebuilds it through the refined one, and this
+  # export is where to check that the face landed on the head: triangulate
+  # the face in the support_* views against the frames (2026-09-02's
+  # diagnosis did exactly that, and found the carried cap 50 mm deep).
   #
   # One step, not the three stage 4b needs: the masks and normals it wants
   # are already sitting in the context, computed by the two steps above for

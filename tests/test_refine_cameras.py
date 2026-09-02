@@ -196,6 +196,22 @@ class TestChecks(unittest.TestCase):
         self.assertIs(result["cameras"], given)
         self.assertFalse(result["stats"]["accepted"])
         self.assertEqual(result["stats"]["failure"], "a bad solve")
+        # ...and the anchor it republishes is the given one, so the extras
+        # stay in step with the camera list either way.
+        np.testing.assert_allclose(result["anchor_position"], given[0].position, atol=1e-6)
+        moved = step._give_up(given, self.PARAMS, "refine_cameras", "a bad solve",
+                              anchor_index=5)
+        np.testing.assert_allclose(moved["anchor_position"], given[5].position, atol=1e-6)
+
+    def test_the_refined_anchor_is_republished_from_the_aligned_list(self):
+        """The accepted path publishes `anchor_position` from the REFINED
+        cameras — the whole point: after this step the extras' record of
+        the photograph's camera must match the pose the list holds."""
+        from pipeline.steps.refine_cameras import _position_of
+
+        given = _orbit()
+        self.assertEqual(_position_of(given, 3), [float(v) for v in given[3].position])
+        self.assertIsNone(_position_of([], 0))
 
     def test_raise_stops_the_run_instead(self):
         params = RefineCamerasStep.resolve_params({"on_check_failure": "raise"})

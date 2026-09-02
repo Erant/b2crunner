@@ -973,7 +973,10 @@ def _resolve_cameras(
         )
 
     path_gen = OrbitPath(target=orbit_center, radius=radius)
-    cameras = _generate_path(path_gen, pattern, params, camera_template, extras)
+    cameras = _generate_path(
+        path_gen, pattern, params, camera_template, extras,
+        dataset_cameras=list(dataset.cameras) if dataset is not None and dataset.cameras else None,
+    )
     logger.info(
         "render_splat: %s path, %d cameras, radius=%.3f", pattern, len(cameras), radius
     )
@@ -1029,23 +1032,38 @@ def _cap_directions(n_frames: int, cap_radius_deg: float,
 
 
 def _cap_axis(path_gen, params: Dict[str, Any],
-              extras: Dict[str, Any]) -> Tuple[np.ndarray, str]:
+              extras: Dict[str, Any],
+              dataset_cameras: Optional[List[Any]] = None) -> Tuple[np.ndarray, str]:
     """Which way the cap points: at the photograph's view of the splat.
 
     The whole point of the pattern is to sample around the one view that
     was photographed, so the axis is the direction from the splat's centre
-    to the camera the photo was taken from — `anchor_position`, which
-    `render`'s override mode records in the dataset's extras. Without it
-    there is no photograph to sample around and the cap falls back to the
-    `start_azimuth_deg`/`elevation_deg` direction, the same convention the
-    orbits start on.
+    to the camera the photo was taken from. That camera is read LIVE —
+    `dataset.cameras[anchor_frame_index]` — rather than from the
+    `anchor_position` the render recorded beside it, because the camera
+    list is the truth and the record is only as fresh as the last step
+    that wrote it: `refine_cameras` rewrites the cameras in place, and
+    although the workflows have it republish the anchor's position too,
+    a cap aimed from a record that has slipped would sample around a view
+    nobody holds. The recorded position is the fallback when the dataset
+    carries no cameras or no index (a cap over a bare splat), and without
+    either there is no photograph to sample around and the cap falls back
+    to the `start_azimuth_deg`/`elevation_deg` direction, the same
+    convention the orbits start on.
     """
-    anchor = extras.get("anchor_position")
+    target = np.asarray(path_gen.target, dtype=np.float64).reshape(3)
+    anchor, source = None, ""
+    index = extras.get("anchor_frame_index")
+    if dataset_cameras and index is not None and 0 <= int(index) < len(dataset_cameras):
+        anchor = np.asarray(dataset_cameras[int(index)].position, dtype=np.float64)
+        source = f"the anchor camera's (frame {int(index)}) view of the splat"
+    elif extras.get("anchor_position") is not None:
+        anchor = np.asarray(extras["anchor_position"], dtype=np.float64)
+        source = "the recorded anchor position's view of the splat"
     if anchor is not None:
-        axis = np.asarray(anchor, dtype=np.float64).reshape(3) - np.asarray(
-            path_gen.target, dtype=np.float64).reshape(3)
+        axis = anchor.reshape(3) - target
         if float(np.linalg.norm(axis)) >= 1e-9:
-            return axis, "the anchor camera's view of the splat"
+            return axis, source
         raise ValueError(
             "render_splat: the cap's anchor camera sits on the splat's centre, "
             "so there is no view direction to sample around."
@@ -1062,7 +1080,7 @@ def _cap_axis(path_gen, params: Dict[str, Any],
 
 
 def _cap_path(path_gen, params: Dict[str, Any], camera_template,
-              extras: Dict[str, Any]):
+              extras: Dict[str, Any], dataset_cameras: Optional[List[Any]] = None):
     """A disc of views around the photograph's own view of the splat.
 
     Not an orbit. `circular`/`helical` sweep the whole subject for a
@@ -1073,7 +1091,7 @@ def _cap_path(path_gen, params: Dict[str, Any], camera_template,
     has a denoised frame of its own), and a disc around the anchor is where
     the off-path views that the splat still saw actually are.
     """
-    axis, source = _cap_axis(path_gen, params, extras)
+    axis, source = _cap_axis(path_gen, params, extras, dataset_cameras)
     radius_deg = params["cap_radius_deg"]
     target = np.asarray(path_gen.target, dtype=np.float64).reshape(3)
 
@@ -1093,7 +1111,8 @@ def _cap_path(path_gen, params: Dict[str, Any], camera_template,
 
 
 def _generate_path(path_gen, pattern: str, params: Dict[str, Any], camera_template,
-                   extras: Optional[Dict[str, Any]] = None):
+                   extras: Optional[Dict[str, Any]] = None,
+                   dataset_cameras: Optional[List[Any]] = None):
     if params["n_frames"] is None:
         raise ValueError(
             f"render_splat: pattern '{pattern}' builds a new camera path, so it needs "
@@ -1101,7 +1120,7 @@ def _generate_path(path_gen, pattern: str, params: Dict[str, Any], camera_templa
             "cameras instead."
         )
     if pattern == "cap":
-        return _cap_path(path_gen, params, camera_template, extras or {})
+        return _cap_path(path_gen, params, camera_template, extras or {}, dataset_cameras)
     if pattern == "circular":
         return path_gen.circular(
             n_frames=params["n_frames"],

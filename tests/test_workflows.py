@@ -126,6 +126,11 @@ DENOISE_NEGATIVE_PROMPT = (
 #: body2colmap dropped gsplat for brush-splat-render, so its own
 #: `skeleton+splat` composite mode is usable here and `render_initial_views`
 #: draws the overlay itself — see docs/revert-when-body2colmap-drops-gsplat.md.
+#: 2026-09-02: `render_face_support_views` and `face_support_views` LEFT the
+#: bootstraps for the shared tail, where they follow `face_splat_refined` —
+#: the face splat built again through the REFINED anchor camera after
+#: `refine_cameras`. The bootstrap `face_splat` stays: render_initial_views
+#: still composites it onto the drawings before the denoise.
 BOOTSTRAPS = {
     # The shipped default: the older, better-proven bootstrap — circular
     # orbit, anchor warp and injection — with the head re-fitted to the
@@ -135,8 +140,7 @@ BOOTSTRAPS = {
         "detect_face", "map_face_to_mesh", "fit_head_to_face",
         "locate_face", "crop_face", "face_seg", "face_mask",
         "face_normals", "face_splat",
-        "render_initial_views", "render_face_support_views",
-        "face_support_views",
+        "render_initial_views",
         "warp_reference_to_anchor", "reinject_anchor_initial",
     ],
     # Parked: the photo-to-splat shell, which replaces the whole bootstrap.
@@ -148,8 +152,7 @@ BOOTSTRAPS = {
         "front_matte", "front_normals", "shell_splat", "refine_pose",
         "detect_face", "locate_face", "crop_face", "face_seg", "face_mask",
         "face_normals", "face_splat",
-        "render_initial_views", "render_face_support_views",
-        "face_support_views",
+        "render_initial_views",
         "render_shell_views", "inject_shell_band",
     ],
 }
@@ -957,39 +960,44 @@ class TestWorkflowFiles(unittest.TestCase):
                         f"foreground matte",
                     )
 
-    def test_supporting_views_built_before_a_refinement_are_carried_across(self):
+    def test_supporting_views_are_built_after_the_refinement_that_moves_their_poses(self):
         """A render made from a pose the refinement then moves is stale.
 
-        The face cap is the case: it is rendered in the bootstrap, out of
-        the reference photograph and through the ANCHOR camera's pose, so
-        `refine_cameras` moving that pose leaves it describing a world
+        The face cap is the case: its splat is unprojected from the
+        reference photograph through the ANCHOR camera, so `refine_cameras`
+        moving that pose leaves anything built on it describing a world
         nothing else believes in — `brush` is then handed a face off the
-        head, weighted by the face's own alpha, and nothing raises. The
-        stage-1 body shells have the opposite wiring and need none of this:
-        they are built after the refinement, from the poses it produced.
-
-        So the rule is about ORDER, not about the face: any supporting-view
-        camera path written before the refinement has to pass through a
-        `rebase_cameras` between the two. What that step does with it is
-        pinned in tests/test_rebase_cameras.py.
+        head, weighted by the face's own alpha, and nothing raises. From
+        2026-08-31 the cap's cameras were carried across by the anchor's own
+        pose delta (`rebase_cameras`); measured on 2026-09-02 that put the
+        face 50 mm inside the head, because the delta is mostly a slide
+        along the anchor's viewing ray and the splat's depth was the mesh's,
+        not the camera's, to move. So the rule is now about ORDER, with no
+        carry: every supporting-view camera path `merge_support_views` reads
+        must be WRITTEN after the last refinement ahead of it, and the splat
+        the face cap renders must itself be built after that refinement,
+        through the refined poses (`cameras: dataset.cameras`). The stage-1
+        body shells have always had this wiring.
         """
         for path in _workflows():
             spec = WorkflowSpec.from_yaml(str(path))
             order = {step.id: i for i, step in enumerate(spec.steps)}
+            by_id = {step.id: step for step in spec.steps}
             merges = [s for s in spec.steps if s.step == "merge_support_views"]
             refiners = [s for s in spec.steps if s.step == "refine_cameras"]
             if not merges or not refiners:
                 continue
-            # FIRST writer, deliberately: a rebased path is written twice
-            # and the question here is which step BUILT those views, not
-            # which one last touched them. Taking the last would make this
-            # pass vacuously the moment the rebase it is checking for
-            # exists.
+            # LAST writer: the step whose output the reader actually sees.
             producers: dict = {}
             for step in spec.steps:
                 for ctx in step.outputs.values():
-                    producers.setdefault(ctx, step)
+                    producers[ctx] = step
             with self.subTest(workflow=path.name):
+                self.assertFalse(
+                    [s for s in spec.steps if s.step == "rebase_cameras"],
+                    f"{path.name}: a rebase_cameras step is back; the carry "
+                    f"was measured wrong (2026-09-02) and the step deleted",
+                )
                 for merge in merges:
                     refine = max(
                         (s for s in refiners if order[s.id] < order[merge.id]),
@@ -1002,34 +1010,59 @@ class TestWorkflowFiles(unittest.TestCase):
                     for name in ("a_cameras", "b_cameras"):
                         wired = merge.inputs.get(name, "").rstrip("?")
                         source = producers.get(wired)
-                        if source is None or order[source.id] > order[refine.id]:
+                        if source is None:
                             continue
-                        rebased = [
-                            s for s in spec.steps
-                            if s.step == "rebase_cameras"
-                            and s.outputs.get("cameras") == wired
-                            and order[refine.id] < order[s.id] < order[merge.id]
-                        ]
-                        self.assertTrue(
-                            rebased,
+                        self.assertGreater(
+                            order[source.id], order[refine.id],
                             f"{path.name}: '{wired}' is written by "
                             f"'{source.id}' before '{refine.id}' moves the "
-                            f"poses it was rendered from, and nothing rebases "
+                            f"poses it was rendered from, and nothing rebuilds "
                             f"it before '{merge.id}' reads it",
                         )
-                        for step in rebased:
-                            self.assertEqual(
-                                step.inputs.get("to_cameras"), "dataset.cameras",
-                                f"{path.name}: '{step.id}' must carry the "
-                                f"views onto the REFINED poses",
-                            )
-                            self.assertEqual(
-                                step.inputs.get("from_cameras", "").rstrip("?"),
-                                refine.outputs.get("given_cameras"),
-                                f"{path.name}: '{step.id}' must measure the "
-                                f"correction against the poses "
-                                f"'{refine.id}' was handed",
-                            )
+                        # Walk the views back to the splat they render, and
+                        # check IT was built on the refined poses too.
+                        step = source
+                        seen = set()
+                        while step is not None and step.id not in seen:
+                            seen.add(step.id)
+                            if step.step in ("face_pointmap_splat", "pointmap_splat"):
+                                self.assertGreater(
+                                    order[step.id], order[refine.id],
+                                    f"{path.name}: '{step.id}' builds the splat "
+                                    f"'{source.id}' renders BEFORE '{refine.id}' "
+                                    f"moves the camera it is unprojected through",
+                                )
+                                self.assertEqual(
+                                    step.inputs.get("cameras"), "dataset.cameras",
+                                    f"{path.name}: '{step.id}' must unproject "
+                                    f"through the REFINED anchor camera",
+                                )
+                                break
+                            upstream = None
+                            for field in ("splat_path", "images", "cameras"):
+                                ctx = step.inputs.get(field, "").rstrip("?")
+                                if ctx in producers and producers[ctx].id != step.id:
+                                    upstream = producers[ctx]
+                                    break
+                            step = upstream
+
+    def test_the_first_refinement_keeps_the_recorded_anchor_in_step(self):
+        """`render_initial_views` records the GIVEN anchor's position in the
+        extras; `refine_cameras` moves that camera. The first refinement
+        must republish the refined position over the record, reading the
+        anchor's index from the same extras — otherwise `inject_anchor` and
+        `render_splat`'s cap fallback match against a pose nobody holds."""
+        for path in _workflows():
+            spec = WorkflowSpec.from_yaml(str(path))
+            refiners = [s for s in spec.steps if s.step == "refine_cameras"]
+            if not refiners:
+                continue
+            first = refiners[0]
+            with self.subTest(workflow=path.name):
+                self.assertEqual(first.inputs.get("anchor_frame_index"),
+                                 "dataset.extras.anchor_frame_index?")
+                self.assertEqual(first.outputs.get("anchor_position"),
+                                 "dataset.extras.anchor_position")
 
     def test_a_warped_anchor_is_bordered_in_grey_not_white(self):
         """generate_firstlast's border colour has no literal in the YAML —

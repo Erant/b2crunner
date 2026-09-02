@@ -133,9 +133,9 @@ pipeline/
 │                      end against the dataset docs/camera-pose-
 │                      refinement.md measured (+21.7% BA inflation undone,
 │                      centre movement within 7% of the recorded run),
-│                      never yet run on a pod. Also rebase_cameras, which
-│                      carries the face cap's supporting views across that
-│                      correction (pure arithmetic, unit-tested)
+│                      never yet run on a pod. What it moves is REBUILT
+│                      after it, not carried: the face splat runs again
+│                      through the refined anchor (face_splat_refined)
 │   ├── backdrop.py      no step of its own — the world-fixed environment
 │                      both renderers draw their frames in front of, so an
 │                      orbit reads as the camera moving rather than the
@@ -865,26 +865,32 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   ONNX weights that `pipeline/models.py` prefetches. `pipeline/doctor.py`
   checks both. Full write-up, traps and measurements:
   `docs/camera-pose-refinement.md`.
-- `rebase_cameras` (`refine_cameras.py`) — carries a render's cameras across
-  the correction above. The face cap is the case it exists for: the face
-  splat is unprojected from the reference photograph through the **anchor**
-  camera's pose in the bootstrap, and its supporting views are rendered
-  around it there, so the stage-2 refinement moves that camera out from
-  under views that already exist. The photograph does not change; the claim
-  about where it was taken from does, and the world content it depicts moves
-  with it — so `brush` gets a face a centimetre or two off the head every
-  training frame agrees on, weighted by the face's own alpha.
-
-  The transform is the anchor's own pose delta, `D = P_new @ P_old⁻¹`, which
-  is a statement of the correction to that photograph's rays rather than an
-  approximation of one. Only the **cameras** move: a render depends on where
-  its camera sits relative to the splat, so moving both by one rigid
-  transform leaves every pixel identical, and the .ply's readers are all
-  behind it by then. It is gated with the face branch and passes its views
-  through untouched when nothing wrote `refine_cameras`' `given_cameras`,
-  i.e. when the refinement is switched off. The stage-1 body shells need
-  none of this — they are built *after* the refinement, which is the same
-  ordering rule from the other side.
+- **What the refinement moves is rebuilt, not carried.** The face splat is
+  unprojected from the reference photograph through the **anchor** camera
+  in the bootstrap, and `refine_cameras` moves that camera. From 2026-08-31
+  to 2026-09-02 a `rebase_cameras` step carried the cap's cameras across by
+  the anchor's own pose delta, `D = P_new @ P_old⁻¹`, on the argument that
+  the photograph's content moves with its camera. Measured on run e593a8
+  that put the cap's face **50 mm inside the head** (same pixel in the
+  anchor view; a second face from the side; a Janus in the helical render):
+  the delta a bundle adjustment leaves on one camera is mostly a slide
+  along that camera's own viewing ray — the direction its frame cannot
+  constrain — and the splat's *depth* was never the camera's to move, it
+  came from the mesh, which stays put and which the surrounding frames'
+  face agrees with to a centimetre. So the workflows now run
+  `face_pointmap_splat` a second time after the refinement
+  (`face_splat_refined`, `cameras: dataset.cameras`): the photograph's
+  pixels on the refined anchor's rays, depth re-taken from the mesh through
+  that camera. `render_face_support_views` and `face_support_views` follow
+  it there, and `render_splat`'s cap aims along the live anchor camera
+  (`dataset.cameras[anchor_frame_index]`) rather than the recorded
+  `anchor_position`; `refine_cameras` now republishes that record from the
+  refined list as well (`anchor_position` output, wired to
+  `dataset.extras.anchor_position` by the first refinement), so the extras
+  and the camera list name the same anchor. The rebase step,
+  `refine_cameras`' `given_cameras` output and its tests are gone; the
+  ordering rule — every supporting view built after the last refinement
+  ahead of the merge, its splat too — is what tests/test_workflows.py pins.
 - `refine_pose_to_splat` (`pose_refine.py`) — re-poses a SAM-3D-Body fit so
   its mesh agrees with that shell in novel views, which is what stops the
   skeleton overlay drifting off the subject a few degrees either side of the

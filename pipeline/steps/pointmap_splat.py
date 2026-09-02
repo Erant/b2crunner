@@ -1153,6 +1153,54 @@ def _write_debug(directory: Path, image: np.ndarray, mask: np.ndarray,
     cv2.imwrite(str(directory / "source.png"), image)
 
 
+# -- a Camera, and the two routes between it and the pointmap frame ---------
+def camera_pose(camera: Any) -> Tuple[np.ndarray, np.ndarray]:
+    """`(R_c2w, position)` in float64, with the rotation hygiene.
+
+    `Camera.rotation` is float32 built from cross products in
+    `look_at_matrix`. Upcast once, check the handedness, and
+    re-orthonormalise: `mat_to_quat_wxyz`'s final normalise would otherwise
+    silently absorb a residual scale rather than complain about it.
+    """
+    rotation = np.asarray(camera.rotation, dtype=np.float64).reshape(3, 3)
+    determinant = float(np.linalg.det(rotation))
+    if determinant <= 0.0:
+        raise ValueError(
+            f"pointmap_splat: a camera's rotation has determinant "
+            f"{determinant:.6f}, i.e. it is not a right-handed rotation. Every "
+            f"Gaussian's orientation is carried through it, so this would "
+            f"mirror the shell rather than move it."
+        )
+    u, _, vt = np.linalg.svd(rotation)
+    return u @ vt, np.asarray(camera.position, dtype=np.float64).reshape(3)
+
+
+def mesh_in_world(mesh_output: Dict[str, Any]) -> np.ndarray:
+    """SAM-3D-Body's vertices in body2colmap's world, in float64.
+
+    `FLIP * (vertices + cam_t)` is exactly `coordinates.sam3d_to_world` —
+    its 180-degree rotation about X is this sign pattern — done in float64
+    rather than the library's float32.
+    """
+    vertices = np.asarray(mesh_output["vertices"], dtype=np.float64)
+    cam_t = np.asarray(mesh_output["cam_t"], dtype=np.float64).reshape(3)
+    return (vertices + cam_t) * FLIP
+
+
+def vertices_in_camera(mesh_world: np.ndarray, camera: Any) -> np.ndarray:
+    """The mesh in one camera's OpenCV frame — what `_build_shell` wants.
+
+    World -> camera-local (`R.T`) -> OpenCV (`FLIP`). **Two** FLIPs
+    separated by a rotation: the outer one is in `mesh_in_world` above.
+    They cancel at the identity pose, so forgetting the inner one is
+    invisible to every identity-pose test and shows up on a pod as a
+    nonsense depth scale — see tests/test_elevation_views.py, which checks
+    a mirrored mesh is caught by `silhouette.height_ratio`.
+    """
+    rotation, position = camera_pose(camera)
+    return ((mesh_world - position) @ rotation) * FLIP     # (R.T @ x).T == x @ R
+
+
 # ---------------------------------------------------------------------------
 # the step
 # ---------------------------------------------------------------------------
@@ -1175,12 +1223,41 @@ class PointmapSplatStep(Step):
     inputs:  {"image": HxWx3 BGR uint8,          the photo sam3d_body was run on
               "mask": HxW float32 [0,1],         rmbg's matte for that photo
               "normal_map": HxWx3 float32,       sapiens2_lite's normals for it
-              "mesh_output": dict}               sam3d_body's outputs (the
+              "mesh_output": dict,               sam3d_body's outputs (the
                                                  `scene` namespace: vertices,
                                                  cam_t, focal_length)
+              "cameras": Optional[List[Camera]], the dataset's poses, when the
+                                                 photograph's camera is one of
+                                                 them rather than the origin
+              "anchor_frame_index": Optional[int]} which one; default 0
     outputs: {"splat_path": str,                 what render_splat/load_splat take
               "splat_scene": SplatScene,
               "splat_stats": dict}               the diagnostics; read them
+
+    Which camera the photograph is unprojected through
+    --------------------------------------------------
+    Without `cameras`, SAM-3D-Body's own: the origin, looking down -Z,
+    which is where `render`'s override mode puts the anchor frame. With
+    them, `cameras[anchor_frame_index]` — the same photograph's rays as the
+    dataset now describes them. That exists for ONE reason: `refine_cameras`
+    moves the anchor. The pixels do not change, and neither does the mesh,
+    so the right shell after the refinement is the photograph's pixels on
+    the REFINED camera's rays at the MESH's depth — which is a rebuild, not
+    a transform. Carrying the bootstrap's shell across by the anchor's own
+    pose delta was tried (2026-08-31 to 2026-09-02) and measured wrong by
+    50 mm: the delta a bundle adjustment leaves on a single camera is mostly
+    a slide along its own viewing ray, the one direction that camera's
+    frame cannot constrain, and a rigid carry moves the shell's depth with
+    it while the depth was never the camera's to move — it came from the
+    mesh, which stayed put, and the frames triangulated around it agree
+    with the mesh, not with the slide. Read through the refined camera the
+    depth is re-taken from the mesh and lands where the frames put the
+    face; see tests/test_pointmap_splat.py's posed-run test.
+
+    The intrinsics stay the photograph's throughout (`_source_intrinsics`):
+    a dataset camera carries the RENDER's focal length, and the anchor frame
+    was made to match the photograph by warping the photograph, not by
+    changing what lens it was taken with.
     """
 
     PARAMS = (
@@ -1374,6 +1451,34 @@ class PointmapSplatStep(Step):
         focal = float(inputs["mesh_output"]["focal_length"])
         return focal, width / 2.0, height / 2.0
 
+    # -- which camera the photograph is unprojected through ----------------
+    @staticmethod
+    def _source_camera(inputs: Dict[str, Any], label: str) -> Tuple[Any, Optional[int]]:
+        """The dataset camera to build through, or `(None, None)` for the origin.
+
+        `cameras` is optional and empty means absent — with the refinement
+        switched off a workflow still wires `dataset.cameras`, and that list
+        then holds the given poses, whose anchor IS the origin camera, so
+        either route gives the same shell (up to the -0.0s `build_gaussians`'
+        docstring mentions). `anchor_frame_index` defaults to 0, where a
+        circular path's anchor sits anyway; it is the same optional read
+        `pointmap_elevation_views` makes.
+        """
+        cameras = inputs.get("cameras")
+        if cameras is None:
+            return None, None
+        cameras = list(cameras)
+        if not cameras:
+            return None, None
+        index = int(inputs.get("anchor_frame_index") or 0)
+        if not 0 <= index < len(cameras):
+            raise ValueError(
+                f"{label}: anchor_frame_index {index} is not a frame of a "
+                f"{len(cameras)}-camera path. It names the frame the photograph "
+                f"was taken from — the anchor."
+            )
+        return cameras[index], index
+
     # -- the shell, with an explicit camera ------------------------------
     def _build_shell(self, image: np.ndarray, matte: np.ndarray,
                      normal_map: np.ndarray, *, focal: float, cx: float, cy: float,
@@ -1396,7 +1501,7 @@ class PointmapSplatStep(Step):
         `vertices + cam_t`, and anywhere else it is
         `FLIP * (R.T @ (sam3d_to_world(...) - position))` — two FLIPs, which
         cancel at the identity pose and so are invisible to every
-        identity-pose test. See `elevation_views._vertices_in_camera`.
+        identity-pose test. See `vertices_in_camera` above.
 
         `pose` is `(R_c2w, position)` or None; `None` is what both
         registered steps pass and is byte-identical to what this step did
@@ -1598,15 +1703,38 @@ class PointmapSplatStep(Step):
 
         # SAM-3D-Body's camera on this image's pixel grid — the full frame's
         # here, a crop's in the face specialization. See _source_intrinsics.
+        # These are the photograph's INTRINSICS and come from the mesh fit
+        # whichever way the camera below is chosen: the pixels being
+        # unprojected are the photograph's either way.
         focal, cx, cy = self._source_intrinsics(inputs, params, width, height)
-        vertices_cam = (np.asarray(mesh_output["vertices"], dtype=np.float64)
-                        + np.asarray(mesh_output["cam_t"], dtype=np.float64).reshape(3))
+        camera, index = self._source_camera(inputs, label)
+        if camera is None:
+            # The origin: SAM-3D-Body's own camera, which is where the
+            # photograph was taken from until something says otherwise.
+            pose = None
+            vertices_cam = (np.asarray(mesh_output["vertices"], dtype=np.float64)
+                            + np.asarray(mesh_output["cam_t"], dtype=np.float64).reshape(3))
+            source = "SAM-3D-Body's camera at the origin"
+        else:
+            # A dataset camera: the photograph's rays as that camera now
+            # describes them, and the mesh's depth read through the same
+            # camera. See the class docstring on why the depth is re-read
+            # rather than carried.
+            pose = camera_pose(camera)
+            vertices_cam = vertices_in_camera(mesh_in_world(mesh_output), camera)
+            source = (f"dataset camera {index} at "
+                      f"({pose[1][0]:.4f}, {pose[1][1]:.4f}, {pose[1][2]:.4f})")
+        logger.info("%s: unprojecting through %s", label, source)
 
         shell = self._build_shell(
             image, matte, normal_map, focal=focal, cx=cx, cy=cy,
-            vertices_cam=vertices_cam, pose=None, params=params, label=label,
+            vertices_cam=vertices_cam, pose=pose, params=params, label=label,
         )
         gaussians, stats = shell.gaussians, shell.stats
+        stats["source_camera"] = (
+            {"frame_index": None, "position": [0.0, 0.0, 0.0]} if camera is None
+            else {"frame_index": index, "position": [float(v) for v in pose[1]]}
+        )
 
         path = Path(params["filepath"])
         write_ply(path, gaussians)

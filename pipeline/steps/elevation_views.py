@@ -90,7 +90,10 @@ import numpy as np
 
 from ..registry import register_step
 from ..step import REQUIRED, Param, with_defaults
-from .pointmap_splat import FLIP, PointmapSplatStep, _write_debug, write_ply
+from .pointmap_splat import (
+    FLIP, PointmapSplatStep, _write_debug, camera_pose, mesh_in_world,
+    vertices_in_camera, write_ply,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -99,55 +102,10 @@ _RENDER_BINARY = "brush-splat-render"
 
 
 # ---------------------------------------------------------------------------
-# geometry helpers — the two routes between a Camera and the pointmap frame
+# geometry helpers — the Camera <-> pointmap-frame routes (`camera_pose`,
+# `mesh_in_world`, `vertices_in_camera`) live in pointmap_splat now, where
+# the base step's posed route needs them too; what stays here is projection
 # ---------------------------------------------------------------------------
-def camera_pose(camera: Any) -> Tuple[np.ndarray, np.ndarray]:
-    """`(R_c2w, position)` in float64, with the rotation hygiene.
-
-    `Camera.rotation` is float32 built from cross products in
-    `look_at_matrix`. Upcast once, check the handedness, and
-    re-orthonormalise: `mat_to_quat_wxyz`'s final normalise would otherwise
-    silently absorb a residual scale rather than complain about it.
-    """
-    rotation = np.asarray(camera.rotation, dtype=np.float64).reshape(3, 3)
-    determinant = float(np.linalg.det(rotation))
-    if determinant <= 0.0:
-        raise ValueError(
-            f"pointmap_elevation_views: a camera's rotation has determinant "
-            f"{determinant:.6f}, i.e. it is not a right-handed rotation. Every "
-            f"Gaussian's orientation is carried through it, so this would "
-            f"mirror the shell rather than move it."
-        )
-    u, _, vt = np.linalg.svd(rotation)
-    return u @ vt, np.asarray(camera.position, dtype=np.float64).reshape(3)
-
-
-def mesh_in_world(mesh_output: Dict[str, Any]) -> np.ndarray:
-    """SAM-3D-Body's vertices in body2colmap's world, in float64.
-
-    `FLIP * (vertices + cam_t)` is exactly `coordinates.sam3d_to_world` —
-    its 180-degree rotation about X is this sign pattern — done in float64
-    rather than the library's float32.
-    """
-    vertices = np.asarray(mesh_output["vertices"], dtype=np.float64)
-    cam_t = np.asarray(mesh_output["cam_t"], dtype=np.float64).reshape(3)
-    return (vertices + cam_t) * FLIP
-
-
-def vertices_in_camera(mesh_world: np.ndarray, camera: Any) -> np.ndarray:
-    """The mesh in one camera's OpenCV frame — what `_build_shell` wants.
-
-    World -> camera-local (`R.T`) -> OpenCV (`FLIP`). **Two** FLIPs
-    separated by a rotation: the outer one is in `mesh_in_world` above.
-    They cancel at the identity pose, so forgetting the inner one is
-    invisible to every identity-pose test and shows up on a pod as a
-    nonsense depth scale — see this module's tests, which check a mirrored
-    mesh is caught by `silhouette.height_ratio`.
-    """
-    rotation, position = camera_pose(camera)
-    return ((mesh_world - position) @ rotation) * FLIP     # (R.T @ x).T == x @ R
-
-
 def project_cv(points_world: np.ndarray, camera: Any) -> Tuple[np.ndarray, np.ndarray]:
     """World points -> (pixels (N,2), OpenCV depth (N,)) through `camera`."""
     rotation, position = camera_pose(camera)

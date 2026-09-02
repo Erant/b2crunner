@@ -68,32 +68,49 @@ What is never in the solve, at either site, is a supporting view. The face
 cap and the stage-1 shells are renders *made from* the poses being
 corrected; they carry no independent evidence about where a camera was.
 
-## What has to be carried across the correction
+## What has to be rebuilt after the correction
 
 Not being in the solve is not the same as being unaffected by it. The face
-cap is rendered in the **bootstrap** — the face splat is unprojected from
-the reference photograph through the anchor camera's pose, and the cap is a
-render of that splat — so stage 2's refinement moves the anchor out from
-under views that already exist. The photograph does not change; the claim
-about where it was taken from does, and the world content it depicts moves
-with it. Left alone the first `brush` training gets supporting views
-putting the face a centimetre or two off the head the training frames
-agree on, weighted by the face's own alpha, with nothing raised anywhere.
+splat is built in the **bootstrap** — unprojected from the reference
+photograph through the anchor camera's pose, at the mesh's depth — and its
+cap is a render of that splat, so refining the anchor moves the camera out
+from under a splat that already exists.
 
-`rebase_cameras` (`rebase_face_support_views` in both workflows) fixes it
-between the refinement and `merge_support_views`. The transform is the
-anchor's own pose delta, `D = P_new @ P_old^-1`, which is not an
-approximation of the correction to that photograph's rays but a statement
-of it. Only the cameras are moved: a render depends on where its camera
-sits relative to the splat, so moving both by one rigid transform leaves
-every pixel identical, and the .ply's readers are all behind us by then.
-This is why `refine_cameras` publishes `given_cameras` — `dataset.cameras`
-is overwritten in place, so that is the only surviving record of the frame
-the cap was built in.
+From 2026-08-31 to 2026-09-02 the answer was `rebase_cameras`: carry the
+cap's cameras across by the anchor's own pose delta, `D = P_new @ P_old^-1`,
+on the argument that the photograph's content moves with its camera and a
+splat and its cameras moved by one rigid transform render identically.
+Measured on run `fast_helical_native-20260902-143945-e593a8`, that was
+wrong by 50 mm. Triangulating MediaPipe landmarks per source in the
+exported `colmap_intermediate`, the denoised frames and the stage-1 shells
+agreed with each other and with the mesh to within a centimetre, while the
+carried cap sat 50 mm *behind* them along the anchor's viewing ray — the
+same pixel in the anchor frame, a second face inside the head from the
+side, a Janus in the helical re-render. The anchor's delta was 23 mm
+toward the subject, 58 mm up and 1.6° of pitch; at the head the vertical
+parts cancel and what remains is a slide along the ray, which is the one
+direction a single frame's reprojection cannot constrain and so the one
+BA is freest to leave there. The carry moved the splat's depth by that
+slide, but the depth was never the camera's: it came from the mesh, which
+does not move.
 
-The stage-1 shells need none of this: they are built *after* the
+So the splat is **rebuilt**: `face_splat_refined` runs `face_pointmap_splat`
+again after `refine_cameras`, from the same crop, matte and normals, with
+`cameras: dataset.cameras` — the photograph's pixels on the refined anchor's
+rays, the depth re-taken from the mesh through that camera. The cap render
+and its selection follow it there, and `render_splat` aims the cap along
+the live anchor camera (`dataset.cameras[anchor_frame_index]`) rather than
+the `anchor_position` the render recorded. That record is kept truthful
+too: `refine_cameras` publishes the refined anchor's position
+(`anchor_position`, from `anchor_frame_index`), and the first refinement
+writes it over `dataset.extras.anchor_position`. `given_cameras` is no
+longer published; nothing needs the old poses.
+
+The stage-1 shells always had this wiring: they are built *after* the
 refinement, from the poses it produced. The rule is about order, not about
-the face, and `tests/test_workflows.py` asserts it that way.
+the face, and `tests/test_workflows.py` asserts it that way — and asserts
+that the splat a supporting view renders was itself built after the
+refinement, through the refined poses.
 
 ## The result
 
