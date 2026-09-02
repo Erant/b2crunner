@@ -71,6 +71,8 @@ class ColmapExportStep(Step):
              "images": Optional[List[np.ndarray]] BGR(A),
              "masks": Optional[List[np.ndarray]] float32 [0,1], foreground=1,
              "normal_maps": Optional[List[np.ndarray]] HxWx3 float32 [-1,1],
+             "weights": Optional[List[np.ndarray]] float32 [0,1] per training
+                        view, written as brush's weights/ sidecar (brush layout),
              "support_cameras": Optional[List[Camera]],
              "support_images": Optional[List[np.ndarray]] BGR(A),
              "support_masks": Optional[List[np.ndarray]] float32 [0,1],
@@ -97,7 +99,7 @@ class ColmapExportStep(Step):
     def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
         from body2colmap.exporter import ColmapExporter
 
-        from .brush import _SupportViews
+        from .brush import _SupportViews, _loss_weights, write_loss_weights
 
         cameras = inputs["cameras"]
         image_names = inputs["image_names"]
@@ -117,6 +119,15 @@ class ColmapExportStep(Step):
         layout = params["layout"]
         if layout not in LAYOUTS:
             raise ValueError(f"Unknown layout {layout!r}; expected one of {LAYOUTS}.")
+
+        weights = _loss_weights(inputs, len(image_names))
+        if weights is not None and layout != "brush":
+            raise ValueError(
+                f"weights were wired in but layout is {layout!r}. A loss-weight map "
+                f"is a weights/ sidecar, and only the brush layout has a directory "
+                f"to put it in — flat has nowhere to record it, which is a dataset "
+                f"that trains at a different weighting from the one that was run."
+            )
 
         # Same reader, same validation, same error messages as the training
         # step's — including the stem-collision check against the training
@@ -190,6 +201,7 @@ class ColmapExportStep(Step):
                 normal_path = normals_dir / Path(filename).with_suffix(".png").name
                 cv2.imwrite(str(normal_path), out)
 
+        write_loss_weights(output_path, image_names, weights)
         support.write(output_path)
 
         return {"output_path": str(output_path.absolute())}

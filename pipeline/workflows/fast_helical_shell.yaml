@@ -40,7 +40,24 @@
 # that same thing — a warped photograph injected at one anchored frame —
 # and this file no longer builds it that way; see below.
 #
-# WHAT CHANGED (2026-09-02, latest): the face splat is REBUILT after the
+# WHAT CHANGED (2026-09-02, latest): the FACE CAP WINS (docs/face-priority.md).
+# The shared tail
+# gained `face_priority` (after face_support_views) and
+# `face_priority_shells` (after stage1_support_band), both the new
+# `face_priority_weights` step: the refined face splat's coverage is
+# rendered from every training camera and every shell camera and turned
+# into a per-pixel loss weight that fades those views out over the face
+# (1 - strength = 0.1 at full coverage, within the cap's 30 degrees, fading
+# to nothing 15 degrees beyond). The training views' weights reach brush as
+# a `weights/` sidecar (train_splat and export_colmap_intermediate gained a
+# `weights` input; brush itself learned the sidecar — Erant/brush
+# docs/loss-weights.md — and honours it in the loss, the normal loss and
+# the evidence pass); the shells' weights are folded into their masks, and
+# merge_support_views reads `masks_deferring_to_face`. face_support_views'
+# `min_path_angle_deg` went 5 -> 0: with the frames silenced over the face
+# the on-path cap views are no longer redundant with them.
+#
+# WHAT CHANGED (2026-09-02, earlier): the face splat is REBUILT after the
 # camera refinement, and its cap is rendered there. `refine_cameras` moves
 # the anchor camera the face splat was unprojected through; from 2026-08-31
 # the cap's cameras were carried across by that camera's own pose delta
@@ -1459,7 +1476,17 @@ steps:
       # a full-body orbit target, so measuring about the target would call
       # a camera closer to the path than it is to the head's view of it.
       splat_center: scene.face_splat_stats.world_center
-    params: {}
+    params:
+      # 0, not the step's default 5: the default drops the cap views within
+      # 5 degrees of the denoising path because "those views have a
+      # denoised frame of their own already". Since face_priority below,
+      # that frame is silenced over the face (weight 0.1 at full coverage),
+      # so a cap view sitting on the path is no longer a resampled copy of
+      # something the training has — it is the only face evidence at that
+      # angle. The views nearest the photograph are also the cap's most
+      # trustworthy renders (least parallax from the one source), which is
+      # a second reason not to be the step that throws them away.
+      min_path_angle_deg: 0.0
     outputs:
       # `face_support_views`, not `support_views`: `merge_support_views` in
       # the shared tail is the single writer of scene.support_views.*, and
@@ -1467,6 +1494,54 @@ steps:
       images: scene.face_support_views.images
       masks: scene.face_support_views.masks
       cameras: scene.face_support_views.cameras
+
+  # ------------------------------------------------------ the face cap wins
+  # Three sources describe the face in train_splat and, until 2026-09-02,
+  # brush heard them at the same volume: the face cap above (masked
+  # supporting views carrying the photograph), the denoised frames
+  # (transparent training views carrying the denoiser's face) and, when
+  # stage1_support_views is on, the body shells (masked supporting views
+  # whose appearance is the denoised frames'). Wherever two of them cover
+  # the face the fit averages them, and the cap loses as often as it wins.
+  #
+  # This renders the refined face splat's coverage from every TRAINING
+  # camera and turns it into a per-pixel loss weight — 1 - strength (0.1)
+  # where the splat covers the frame, 1 everywhere else — that brush reads
+  # as a `weights/` sidecar and multiplies into that view's loss on top of
+  # its alpha mode. The denoised frames keep carving the silhouette (their
+  # alpha is untouched) and keep every pixel outside the face; over the
+  # face they whisper and the cap speaks. brush's evidence pass honours the
+  # same map, so rerender_splat's confidence gate does not then read the
+  # silenced disagreement as evidence against the face.
+  #
+  # Only within the cap: the attenuation is full inside cap_radius_deg (30,
+  # the same radius the cap is rendered within — past it the 2.5-D shell
+  # has nothing to say that could replace what is silenced) and fades to
+  # nothing over fade_deg beyond. The angle is measured about the splat's
+  # centre from the anchor camera, read LIVE from dataset.cameras like the
+  # cap's own axis, because refine_cameras moved it.
+  #
+  # The stage-1 shells get the same treatment in face_priority_shells
+  # below, folded into their masks rather than a sidecar, since a masked
+  # view's mask already is its per-pixel weight. Only the STAGE-2 training
+  # reads either: train_final_splat takes no supporting views, so there is
+  # nothing there for the frames to yield to.
+  - id: face_priority
+    step: face_priority_weights
+    dispatch: in_process
+    when: ${globals.face_splat}
+    inputs:
+      cameras: dataset.cameras
+      # The REFINED splat, rebuilt through the refined anchor camera by
+      # face_splat_refined: the same .ply the cap above was rendered from.
+      splat_path: scene.face_splat_path
+      anchor_cameras: dataset.cameras
+      anchor_frame_index: dataset.extras.anchor_frame_index?
+      anchor_position: dataset.extras.anchor_position?
+      splat_center: scene.face_splat_stats.world_center
+    params: {}
+    outputs:
+      weights: scene.face_priority.weights
 
   # ------------------------------------- the stage-1 shells' supporting views
   # The face splat's lever, applied to the denoised body. Every Nth frame of
@@ -1558,6 +1633,35 @@ steps:
       masks: scene.body_support_views.masks
       cameras: scene.body_support_views.cameras
 
+  # The shells yield to the face cap too (see face_priority above). A shell
+  # is a masked supporting view, so the weight goes INTO its mask — a
+  # masked view's mask is its per-pixel loss weight already — and what
+  # merge_support_views reads below is the folded mask, not the band's.
+  #
+  # Gated on the shells, not the face: with the face branch off there is no
+  # splat to yield to, the optional `?` reads come back empty, and the
+  # step passes the masks through unchanged — which is what lets this path
+  # have one writer whenever the shells exist at all.
+  - id: face_priority_shells
+    step: face_priority_weights
+    dispatch: in_process
+    when: ${globals.stage1_support_views}
+    inputs:
+      cameras: scene.body_support_views.cameras
+      masks: scene.body_support_views.masks
+      splat_path: scene.face_splat_path?
+      anchor_cameras: dataset.cameras
+      anchor_frame_index: dataset.extras.anchor_frame_index?
+      anchor_position: dataset.extras.anchor_position?
+      splat_center: scene.face_splat_stats.world_center?
+      # The pivot's fallback when the face branch is off and there is no
+      # splat centre — unused then, since nothing is rendered, but the
+      # step still resolves a pivot before it decides that.
+      orbit_target: dataset.extras.orbit_target
+    params: {}
+    outputs:
+      masks: scene.body_support_views.masks_deferring_to_face
+
   # brush takes ONE support_* triple and there are now two producers of one,
   # so this concatenates them. It runs UNGATED, which is the point: it is
   # always the writer of scene.support_views.*, so that path has exactly one
@@ -1572,7 +1676,8 @@ steps:
       a_masks: scene.face_support_views.masks?
       a_cameras: scene.face_support_views.cameras?
       b_images: scene.body_support_views.images?
-      b_masks: scene.body_support_views.masks?
+      # The masks AFTER face_priority_shells folded the face weight in.
+      b_masks: scene.body_support_views.masks_deferring_to_face?
       b_cameras: scene.body_support_views.cameras?
     params: {}
     outputs:
@@ -1629,6 +1734,10 @@ steps:
       support_images: scene.support_views.images?
       support_masks: scene.support_views.masks?
       support_cameras: scene.support_views.cameras?
+      # The training views' loss weights (face_priority), as the weights/
+      # sidecar brush reads — so this export trains at the same weighting
+      # train_splat did. Optional for the same reason as the support_* reads.
+      weights: scene.face_priority.weights?
     params:
       output_dir: ${globals.output_root}/colmap_intermediate
       layout: brush
@@ -1646,6 +1755,11 @@ steps:
       support_images: scene.support_views.images?
       support_masks: scene.support_views.masks?
       support_cameras: scene.support_views.cameras?
+      # Per-pixel loss weights for the training views, from face_priority:
+      # the denoised frames yield to the face cap over the face. Optional
+      # (`?`) so the face branch being off leaves brush training on
+      # byte-identical data to before. See steps/brush.py's `weights`.
+      weights: scene.face_priority.weights?
     params:
       # The expensive knob: brush trains twice in this pipeline (here and
       # train_final_splat) at roughly an hour of GPU each. 30000 equals

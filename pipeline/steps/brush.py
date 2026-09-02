@@ -98,6 +98,17 @@ in a mixed one the supporting views quietly count for less, so
 `normalize_masked_loss: auto` turns it on exactly when the export
 actually carries both.
 
+**Loss weights** (`weights`, optional, one per training view) are the
+third thing a view can carry and the only one that is not about its alpha:
+a float32 [0,1] map written as a greyscale `weights/<name>.png` sidecar,
+which brush multiplies into that view's loss map pixel by pixel on top of
+whatever its alpha mode does (brush's docs/loss-weights.md). A transparent
+view has no other weight channel — its alpha is a target — so this is how
+`face_priority_weights` fades the denoised frames out over the face while
+they keep carving the silhouette. Absent means 1 everywhere, and brush's
+evidence pass honours the same map, so a silenced region does not count
+as evidence against what the supporting views put there.
+
 `export_colmap_intermediate` writes the same export: `colmap_export` takes
 the same `support_*` inputs, reads them with this module's `_SupportViews`
 and writes them with the same code, so wiring the two steps to the same
@@ -383,6 +394,49 @@ class _SupportViews:
         )
 
 
+def _loss_weights(inputs: Dict[str, Any], count: int) -> Optional[List[np.ndarray]]:
+    """The `weights` input, checked against the training views.
+
+    Empty and absent both mean "no sidecars" — an optional workflow read of
+    a path nothing wrote is None, and a step that publishes weights for a
+    batch of zero views publishes []. A count that disagrees is refused: a
+    weight map is matched to a view by name, and there is no right way to
+    match five maps to four frames.
+    """
+    weights = inputs.get("weights")
+    if weights is None or len(weights) == 0:
+        return None
+    if len(weights) != count:
+        raise ValueError(
+            f"weights has {len(weights)} entries but there are {count} training "
+            f"views. A loss-weight map belongs to one view; either give every "
+            f"view one or none of them."
+        )
+    return list(weights)
+
+
+def write_loss_weights(colmap_dir: Path, image_names: Sequence[str],
+                       weights: Optional[Sequence[np.ndarray]]) -> None:
+    """Write the training views' loss weights as brush's `weights/` sidecar.
+
+    Greyscale PNGs, 255 = full weight, named the way the `masks/` sidecar is
+    so brush matches them to their frames by stem. Nothing is written when
+    there are none: the directory's absence is what "every view at weight
+    1" looks like to brush.
+    """
+    if not weights:
+        return
+    weights_dir = colmap_dir / "weights"
+    weights_dir.mkdir(exist_ok=True)
+    for weight, filename in zip(weights, image_names):
+        cv2.imwrite(str(weights_dir / _sidecar_name(filename)), mask_to_alpha_u8(weight))
+    logger.info(
+        "brush: %d training view(s) carry a weights/ sidecar (per-pixel loss "
+        "weight); brush multiplies it into each view's loss on top of its alpha "
+        "mode", len(weights),
+    )
+
+
 def _sidecar_name(filename: str) -> str:
     """The `masks/` (or `normals/`) name brush will match to `filename`.
 
@@ -424,6 +478,8 @@ class BrushStep(Step):
              "images": List[np.ndarray] BGR(A),
              "masks": Optional[List[np.ndarray]] float32 [0,1], foreground=1,
              "normal_maps": Optional[List[np.ndarray]] HxWx3 float32 [-1,1],
+             "weights": Optional[List[np.ndarray]] float32 [0,1], a per-pixel
+                        loss weight per training view (weights/ sidecar),
              "support_cameras": Optional[List[Camera]],
              "support_images": Optional[List[np.ndarray]] BGR(A),
              "support_masks": Optional[List[np.ndarray]] float32 [0,1],
@@ -522,6 +578,7 @@ class BrushStep(Step):
         images = inputs["images"]
         masks = inputs.get("masks")
         normal_maps = inputs.get("normal_maps")
+        weights = _loss_weights(inputs, len(images))
         support = _SupportViews.from_inputs(inputs, image_names)
 
         if len(images) != len(image_names):
@@ -618,6 +675,7 @@ class BrushStep(Step):
                     normal_path = normals_dir / Path(filename).with_suffix(".png").name
                     cv2.imwrite(str(normal_path), out)
 
+            write_loss_weights(colmap_dir, image_names, weights)
             support.write(colmap_dir)
 
             ply_output_name = params["export_name"]
@@ -811,7 +869,7 @@ def _describe_colmap_export(colmap_dir: Optional[Path]) -> str:
     lines = [describe_path(colmap_dir)]
     for name in _COLMAP_MODEL_FILES:
         lines.append(f"  {describe_path(colmap_dir / name)}")
-    for name in ("images", "masks", "normals"):
+    for name in ("images", "masks", "normals", "weights"):
         sub = colmap_dir / name
         if not sub.is_dir():
             lines.append(f"  {name}/ absent")

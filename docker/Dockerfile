@@ -113,8 +113,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # rather than producing an image whose brush is a surprise. Moving the pin is
 # a one-line edit; reconstructing which commit a shipped binary came from
 # meant diffing its `--help` against the branch's history.
+# 2026-09-02: `ccf38dbf` adds the `weights/` sidecar (per-pixel loss
+# weights, brush's docs/loss-weights.md) that steps/brush.py now writes for
+# the training views. An older brush would IGNORE the sidecar and train the
+# frames at full weight over the face — silently, which is why the pin must
+# move with the step. The commit is LOCAL to ~/Projects/brush until pushed;
+# the check below fails the build until it is.
 ARG BRUSH_BRANCH=normal-map-supervision
-ARG BRUSH_REF=8eed7a61f48bbfb92a7326b52b5f86692d1d40ec
+ARG BRUSH_REF=ccf38dbff4c2fda1044e42bc43b3bd03cf276482
 RUN git clone --depth 1 --branch ${BRUSH_BRANCH} \
         https://github.com/Erant/brush.git /src/brush \
     && cd /src/brush \

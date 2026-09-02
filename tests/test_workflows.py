@@ -877,6 +877,70 @@ class TestWorkflowFiles(unittest.TestCase):
                             f"merge_support_views does not write",
                         )
 
+    def test_the_frames_yield_to_the_face_cap_in_the_stage_2_training_only(self):
+        """The face cap wins: `face_priority` turns the refined face splat's
+        coverage into per-pixel loss weights for the training views, and
+        `face_priority_shells` folds the same yield into the stage-1
+        shells' masks. All wiring, and all of it silent if wrong: an
+        optional read of a path nothing writes trains at full weight, the
+        old behaviour, with nothing in the log to say so.
+        """
+        for path in _workflows():
+            spec = WorkflowSpec.from_yaml(str(path))
+            by_id = {s.id: s for s in spec.steps}
+            if "train_splat" not in by_id:
+                continue
+            with self.subTest(workflow=path.name):
+                priority = by_id["face_priority"]
+                self.assertEqual(priority.step, "face_priority_weights")
+                self.assertEqual(priority.when, "${globals.face_splat}")
+                # The training views' own cameras, and the REFINED splat —
+                # the one the cap was rendered from, rebuilt through the
+                # refined anchor camera. Weighting the frames by the
+                # bootstrap splat's coverage would put the yield where the
+                # face was before refine_cameras moved the anchor.
+                self.assertEqual(priority.inputs["cameras"], "dataset.cameras")
+                refined = by_id["face_splat_refined"]
+                self.assertEqual(priority.inputs["splat_path"],
+                                 refined.outputs["splat_path"])
+                self.assertEqual(priority.inputs["anchor_cameras"], "dataset.cameras")
+                selector = by_id["face_support_views"]
+                self.assertEqual(priority.inputs["splat_center"],
+                                 selector.inputs["splat_center"])
+                # With the frames silenced over the face, the cap views on
+                # the denoising path are no longer redundant with them.
+                self.assertEqual(selector.params.get("min_path_angle_deg"), 0.0)
+
+                weights = priority.outputs["weights"] + "?"
+                self.assertEqual(by_id["train_splat"].inputs.get("weights"), weights)
+                self.assertEqual(
+                    by_id["export_colmap_intermediate"].inputs.get("weights"), weights,
+                    "the debug export must train at the weighting train_splat did",
+                )
+                self.assertNotIn(
+                    "weights", by_id["train_final_splat"].inputs,
+                    "the final training takes no supporting views, so there is "
+                    "nothing for its frames to yield to",
+                )
+
+                shells = by_id["face_priority_shells"]
+                band = by_id["stage1_support_band"]
+                self.assertEqual(shells.step, "face_priority_weights")
+                self.assertEqual(shells.when, band.when,
+                                 "gated on the shells, not the face: with the face "
+                                 "off it passes the masks through")
+                self.assertEqual(shells.inputs["cameras"], band.outputs["cameras"])
+                self.assertEqual(shells.inputs["masks"], band.outputs["masks"])
+                self.assertEqual(shells.inputs["splat_path"],
+                                 refined.outputs["splat_path"] + "?")
+                merge = by_id["merge_support_views"]
+                self.assertEqual(merge.inputs["b_images"], band.outputs["images"] + "?")
+                self.assertEqual(
+                    merge.inputs["b_masks"], shells.outputs["masks"] + "?",
+                    "merge_support_views must read the FOLDED masks, not the band's",
+                )
+                self.assertEqual(merge.inputs["b_cameras"], band.outputs["cameras"] + "?")
+
     def test_the_cameras_are_refined_before_anything_reads_them(self):
         """Camera refinement lands ahead of every consumer of a pose.
 
