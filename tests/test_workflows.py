@@ -1207,6 +1207,85 @@ class TestWorkflowFiles(unittest.TestCase):
                         )
 
 
+    def test_the_whole_face_branch_reads_the_unresized_front_half(self):
+        """Every full-frame step in the face branch must read the SAME array.
+
+        The face splat is placed by re-expressing SAM-3D-Body's camera on
+        the crop's pixel grid, and that camera's focal length is in the
+        pixels of the image `sam3d_body` was handed. Nothing downstream can
+        notice if some of those steps are given a resized copy instead: a
+        crop of a half-size photograph is still a crop, still native
+        resolution, still self-consistent — and every Gaussian lands on a
+        ray computed from a focal belonging to the other grid, which puts
+        the whole face off the head by a scale factor.
+
+        There is a runtime guard for it now
+        (`FacePointmapSplatStep._source_intrinsics` against `image_size`),
+        but the wiring is where the mistake would be made, so it is checked
+        here too — including the pair nothing else could relate: the frame
+        `crop_to_box` cuts and the frame the box it is cutting was found in.
+        """
+        full_frame_readers = {
+            "detect_face_landmarks": "image",   # landmarks, normalized to it
+            "map_face_to_mesh": "image",        # the mesh's head, rendered on it
+            "fit_head_to_face": "image",        # landmarks projected into it
+            "crop_to_box": "image",             # the frame the crop is cut from
+        }
+        for path in _workflows():
+            spec = WorkflowSpec.from_yaml(str(path))
+            splits = [s for s in spec.steps if s.step == "split_reference_sheet"]
+            if not splits:
+                continue
+            front = splits[0].outputs["front"]
+
+            with self.subTest(workflow=path.name):
+                for step in spec.steps:
+                    key = full_frame_readers.get(step.step)
+                    if key is None:
+                        continue
+                    self.assertEqual(
+                        step.inputs.get(key), front,
+                        f"{path.name}: '{step.id}' reads "
+                        f"'{step.inputs.get(key)}' where it needs the one "
+                        f"un-resized front half ('{front}')",
+                    )
+
+                # The crop and its box have to be in the same pixels.
+                produces = {out: s for s in spec.steps
+                            for out in s.outputs.values()}
+                for step in spec.steps:
+                    if step.step != "crop_to_box":
+                        continue
+                    locator = produces.get(step.inputs["box"])
+                    self.assertIsNotNone(
+                        locator,
+                        f"{path.name}: '{step.id}' crops to a box no step "
+                        f"produces ({step.inputs['box']})",
+                    )
+                    self.assertEqual(
+                        locator.inputs.get("image"), step.inputs["image"],
+                        f"{path.name}: '{step.id}' cuts "
+                        f"'{step.inputs['image']}' with a box '{locator.id}' "
+                        f"found in '{locator.inputs.get('image')}'",
+                    )
+
+                # And the guard has something to compare against: the size
+                # sam3d_body fitted on has to reach the splat's mesh_output.
+                splats = [s for s in spec.steps
+                          if s.step == "face_pointmap_splat"]
+                if not splats:
+                    continue
+                mesh = splats[0].inputs["mesh_output"]
+                sizes = [s.outputs.get("image_size")
+                         for s in spec.steps if s.step == "sam3d_body"]
+                self.assertTrue(
+                    any(size and size.startswith(f"{mesh}.") for size in sizes),
+                    f"{path.name}: sam3d_body does not publish image_size "
+                    f"into '{mesh}', so face_pointmap_splat cannot tell the "
+                    f"photograph from a resized copy of it",
+                )
+
+
 if __name__ == "__main__":
     unittest.main()
 

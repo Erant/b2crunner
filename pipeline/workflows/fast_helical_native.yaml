@@ -427,6 +427,11 @@ steps:
       global_rots: scene.global_rots
       cam_t: scene.cam_t
       focal_length: scene.focal_length
+      # The frame that focal is measured in. The face branch below cuts a
+      # crop out of the same photograph and rebuilds this camera on the
+      # crop's pixel grid; publishing the size is what lets it refuse a
+      # frame that is a resized copy rather than the photograph itself.
+      image_size: scene.image_size
       bbox: scene.bbox
       # The MHR parameters behind the mesh. fit_head_to_face below replays
       # the body model's forward with the head's share of these as the free
@@ -524,11 +529,12 @@ steps:
   # carries none; a splat of the real face carries both identity and gaze,
   # which is the point when these frames condition a video model.
   #
-  # Why a crop. Sapiens2 resizes whatever it is given to 1024x768, so a
-  # face occupying a few percent of a full-body frame reaches the network
-  # as about 40 px of head and there is no relief left in it to integrate.
-  # Cropping first is what puts the face in front of the model at the
-  # resolution masktest measured its numbers on.
+  # Why a crop, given that at `padding` 3.5 it is no longer a close-up:
+  # framing. It puts the head against the torso near the middle of
+  # Sapiens2's field, at that network's own 768/1024 aspect, instead of
+  # wherever it sat in a full-body frame of some other shape — and it
+  # publishes the bookkeeping the splat is placed by. Tightening it does
+  # the opposite of what it looks like it should; see crop_face below.
   #
   # Why it runs AFTER fit_head_to_face: that step rewrites scene.vertices
   # and scene.keypoints_3d, and this splat's depth is scaled onto the mesh's
@@ -562,14 +568,15 @@ steps:
   # coming back; the splat replaced them.
 
 
-  # Where to CROP. Unchanged, and deliberately so: the crop stays the
-  # Face_Neck box even though the mask below no longer is. Cutting the crop
-  # to the face as well was built and measured, and it flattens the face —
-  # relief 224.5 -> 144.2 mm, the nose going from 99.2 mm proud of the
-  # face's outer edge to 22.9. Sapiens2 upsamples whatever it gets to
-  # 1024x768, so a tighter box adds no real pixels of face, only
-  # interpolation, and the pointmap head answers a softer input with a
-  # flatter face. See FaceLandmarkMaskStep's docstring for the table.
+  # Where to CROP. The crop stays the Face_Neck box even though the mask
+  # below no longer is, and every measurement since has pushed the same
+  # way: TIGHTER IS FLATTER. Cutting the crop to the face as well was built
+  # and measured, and it flattened the face — relief 224.5 -> 144.2 mm, the
+  # nose going from 99.2 mm proud of the face's outer edge to 22.9 (see
+  # FaceLandmarkMaskStep's docstring for the table). The crop's `padding`
+  # went 0.35 -> 3.5 on 2026-09-02 for the far end of that same effect: at
+  # 0.35 the crop is mostly face, which is out of anything a body model was
+  # trained to read, and the face cap came back flat.
   #
   # `box` is the tight bounding box of the largest connected component of
   # the selected classes.
@@ -589,13 +596,19 @@ steps:
     outputs:
       box: scene.face_box
 
-  # Cut it out at native resolution and record where it came from. The box
-  # is the face's own now, not a segmentation box running down the throat,
-  # so `padding` 0.35 buys margin around a FACE rather than around a face
-  # and a neck.
+  # Cut it out at native resolution and record where it came from. `padding`
+  # 3.5 (the step's default) makes this a head-against-a-torso crop rather
+  # than a close-up — see CropToBoxStep's module docstring. What survives of
+  # the crop is framing, aspect and the bookkeeping:
   # `crop_info` is what lets face_pointmap_splat re-express SAM-3D-Body's
   # camera on the crop's pixel grid, so every Gaussian still lands on the
   # ray through the full-image pixel it came from.
+  #
+  # `image` is scene.front_image, the sheet's front half at the resolution
+  # it was uploaded at — the same array reconstruct_body was fitted to and
+  # locate_face found the box in. Nothing between them resizes it, and
+  # nothing may: face_pointmap_splat checks crop_info's full_size against
+  # scene.image_size and refuses a resized copy.
   - id: crop_face
     step: crop_to_box
     dispatch: in_process

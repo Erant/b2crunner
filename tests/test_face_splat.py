@@ -187,6 +187,47 @@ class TestFaceIntrinsics(unittest.TestCase):
             self._intrinsics((70, 90, 246, 324), (176, 117))
         self.assertIn("non-uniform", str(caught.exception))
 
+    def test_a_frame_the_focal_was_not_measured_on_is_refused(self):
+        """The one thing the crop arithmetic cannot see by itself.
+
+        Hand the face branch a half-size copy of the photograph and every
+        term stays self-consistent — the box is in that copy's pixels, the
+        crop is still native, the resize factor is still 1 — while the
+        focal belongs to the original's grid, so the whole splat is scaled
+        off the head. `sam3d_body` publishes the size it fitted on for
+        exactly this comparison.
+        """
+        step = ps.FacePointmapSplatStep()
+        inputs = {
+            "mesh_output": {"focal_length": FOCAL,
+                            "image_size": (WIDTH, HEIGHT)},
+            "crop_info": {"box": (35, 45, 123, 162),
+                          "full_size": (WIDTH // 2, HEIGHT // 2),
+                          "crop_size": (88, 117)},
+        }
+        with self.assertRaises(ValueError) as caught:
+            step._source_intrinsics(inputs, {}, 88, 117)
+        self.assertIn("resized copy", str(caught.exception))
+
+    def test_the_photograph_itself_passes_that_check(self):
+        step = ps.FacePointmapSplatStep()
+        inputs = {
+            "mesh_output": {"focal_length": FOCAL,
+                            "image_size": (WIDTH, HEIGHT)},
+            "crop_info": {"box": (70, 90, 246, 324),
+                          "full_size": (WIDTH, HEIGHT),
+                          "crop_size": (176, 234)},
+        }
+        f, cx, cy = step._source_intrinsics(inputs, {}, 176, 234)
+        self.assertAlmostEqual(f, FOCAL)
+
+    def test_a_mesh_without_an_image_size_still_runs(self):
+        """A mesh assembled by hand — these tests, an older workflow — has
+        no `image_size` to compare against, and skipping the check is the
+        only behaviour that does not break it."""
+        f, _, _ = self._intrinsics((70, 90, 246, 324), (176, 234))
+        self.assertAlmostEqual(f, FOCAL)
+
     def test_the_body_step_is_the_full_frame(self):
         step = ps.BodyPointmapSplatStep()
         f, cx, cy = step._source_intrinsics(
@@ -256,6 +297,40 @@ class TestCropToBox(unittest.TestCase):
         x0, y0, x1, y1 = result["crop_info"]["box"]
         self.assertTrue(0 <= x0 < x1 <= WIDTH)
         self.assertTrue(0 <= y0 < y1 <= HEIGHT)
+
+    def test_the_default_padding_frames_a_head_against_a_torso(self):
+        """3.5, not 0.35. A crop that is mostly face is out of anything a
+        body model was trained to read, and the pointmap head answers it
+        with a flat card — the flat face cap of 2026-09-02. Padding is a
+        fraction of the larger HALF-side, so 3.5 multiplies the box's
+        larger dimension by 4.5."""
+        self.assertEqual(
+            get_step_class("crop_to_box").declared_params()["padding"].default,
+            3.5)
+        result = self._crop((150, 200, 190, 260))     # a 40x60 face box
+        x0, y0, x1, y1 = result["crop_info"]["box"]
+        self.assertGreaterEqual(y1 - y0, 4.5 * 60 - 1)
+
+    def test_a_box_bigger_than_the_frame_keeps_its_aspect(self):
+        """At padding 3.5 the padded box routinely exceeds the frame, and
+        clipping the axes independently would return a crop of some other
+        shape. Sapiens2's seg and pointmap configs squash anisotropically
+        with no letterbox, so that shape reaches the network as a stretched
+        subject — the exact distortion `aspect` exists to prevent."""
+        result = self._crop((150, 200, 190, 260), padding=20.0, aspect=0.75)
+        x0, y0, x1, y1 = result["crop_info"]["box"]
+        self.assertAlmostEqual((x1 - x0) / (y1 - y0), 0.75, delta=0.01)
+        self.assertTrue(0 <= x0 < x1 <= WIDTH)
+        self.assertTrue(0 <= y0 < y1 <= HEIGHT)
+        # And it is the LARGEST such box. A 320x440 frame is 0.727 wide,
+        # narrower than the 0.75 asked for, so the fit is width-bound: the
+        # crop takes the full width and gives up the frame's top and bottom.
+        self.assertEqual(x1 - x0, WIDTH)
+
+    def test_without_an_aspect_each_axis_is_clipped_on_its_own(self):
+        """There is no shape to keep, so an oversized box fills the frame."""
+        result = self._crop((150, 200, 190, 260), padding=20.0, aspect=0.0)
+        self.assertEqual(result["crop_info"]["box"], (0, 0, WIDTH, HEIGHT))
 
     def test_a_box_too_small_to_be_a_face_is_refused(self):
         with self.assertRaises(ValueError):

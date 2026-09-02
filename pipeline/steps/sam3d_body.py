@@ -235,6 +235,17 @@ class SAM3DBodyStep(Step):
             "global_rots": np.asarray(person["pred_global_rots"]),
             "cam_t": np.asarray(person["pred_cam_t"]),
             "focal_length": float(person["focal_length"]),
+            # The frame that focal is in. MoGe-2 denormalizes its
+            # intrinsics by this image's own width and height, and
+            # `process_one_image` reports the fit in the same pixels, so
+            # every camera derived from `focal_length` downstream is
+            # implicitly indexed to this size. `face_pointmap_splat` builds
+            # one from a CROP of the same photograph and has no other way
+            # to tell that photograph from a resized copy of it — the crop
+            # arithmetic would be self-consistent either way — so publish
+            # the size and let it check. See its `_source_intrinsics`.
+            "image_size": (int(inputs["image"].shape[1]),
+                           int(inputs["image"].shape[0])),
             "bbox": np.asarray(person["bbox"]),
             # The MHR pose parameters behind that mesh. Nothing needed them
             # until `refine_pose_to_splat`, which re-runs the body model's

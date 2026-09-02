@@ -46,11 +46,10 @@ names is one of:
   * **`pointmap_splat`** — the whole subject from the whole photograph.
     The body shell described everywhere below; unchanged.
   * **`face_pointmap_splat`** — a head, from a crop of that same
-    photograph, with a segmentation mask instead of RMBG's matte. It exists
-    because Sapiens2 resizes its input to 1024x768, so a face occupying 6%
-    of a full-body frame reaches the network as ~40 px of head and there is
-    no relief left in it to integrate. Cropping first is what puts the face
-    in front of the model at the resolution masktest measured on.
+    photograph, with a segmentation mask instead of RMBG's matte. The
+    crop frames the head against the torso and centres it in Sapiens2's
+    768x1024 (`crop_to_box`, `padding` 3.5); it is emphatically NOT a
+    close-up, which the pointmap head answers with a flat card.
 
 They differ in exactly two things: `_source_intrinsics`, which says where
 the image sits in SAM-3D-Body's camera (the full frame, or a crop of it),
@@ -1662,11 +1661,13 @@ class FacePointmapSplatStep(PointmapSplatStep):
     Gaussian lands on the wrong ray, which is the one failure this whole
     approach has no way to absorb.
 
-    Why a crop at all: Sapiens2 resizes its input to 1024x768. A face
-    occupying 6% of a 867x1552 full-body frame arrives at the network as
-    roughly 40 px of head, and no amount of normal integration recovers
-    relief that was never sampled. Cropping first is what puts the face in
-    front of the model at the resolution masktest measured everything on.
+    Why a crop at all, given that it is no longer a close-up: framing.
+    `crop_to_box` at `padding` 3.5 puts the head against the torso, near
+    the middle of Sapiens2's field and at that network's own 768/1024,
+    rather than wherever it happened to sit in a full-body frame of some
+    other shape. Tightening it further does the opposite of what it looks
+    like it should — see that module's docstring and the flat face cap of
+    2026-09-02.
 
     inputs:  the base's four, plus
              {"crop_info": dict} — `crop_to_box`'s output:
@@ -1759,6 +1760,16 @@ class FacePointmapSplatStep(PointmapSplatStep):
 
         A non-uniform resize is refused rather than averaged away: it would
         need two focals, and every camera downstream carries one.
+
+        And the frame `crop_info` indexes into is checked against the one
+        `sam3d_body` published its focal for. That is the failure this
+        arithmetic cannot see by itself: hand the face branch a resized copy
+        of the photograph the mesh was fitted to and every term above stays
+        self-consistent — the box is in that copy's pixels, the crop is
+        still native, `ratio` is still 1 — while `f_s` belongs to a
+        different pixel grid, so the whole splat is scaled off the head. The
+        check is skipped when `mesh_output` carries no `image_size`, so a
+        mesh assembled by hand (tests, an older workflow) still runs.
         """
         info = inputs["crop_info"]
         try:
@@ -1784,6 +1795,22 @@ class FacePointmapSplatStep(PointmapSplatStep):
                 f"The crop must keep the frame's aspect ratio — one camera "
                 f"carries one focal length."
             )
+
+        source = inputs["mesh_output"]
+        frame = source.get("image_size") if hasattr(source, "get") else None
+        if frame is not None:
+            frame = (int(frame[0]), int(frame[1]))
+            if frame != (int(width_full), int(height_full)):
+                raise ValueError(
+                    f"face_pointmap_splat: the crop was cut from a "
+                    f"{int(width_full)}x{int(height_full)} frame, but "
+                    f"sam3d_body fitted the mesh — and measured the focal "
+                    f"length {float(source['focal_length']):.1f} px this "
+                    f"step unprojects through — on a {frame[0]}x{frame[1]} "
+                    f"one. The face branch has been handed a resized copy "
+                    f"of the photograph instead of the photograph; feed it "
+                    f"the same image sam3d_body read."
+                )
 
         ratio = 0.5 * (ratio_x + ratio_y)
         focal = float(inputs["mesh_output"]["focal_length"]) / ratio
