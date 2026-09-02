@@ -146,6 +146,23 @@ def _outline_grey(strength: float) -> float:
     return (value + 0.5) / 255.0
 
 
+# Default (joint_radius, bone_radius) per skeleton_style, in metres.
+#
+# `dwpose` is calibrated, not guessed: DWPose fills a limb as an ellipse of
+# semi-axis `stickwidth = 4` on a canvas whose shorter side is 1024, and draws
+# every joint dot at `radius = 4` — so a dot is exactly as wide as a limb, and
+# both land at ~7 px once the canvas is resized to a 720x1280 frame. 0.005 m
+# reproduces that width at the distance the shipped workflow's auto-framing
+# puts the camera (measured against a real draw_bodypose render, not derived).
+#
+# `openpose` keeps the numbers its renders have always used, so switching
+# styles changes the convention and nothing else.
+_SKELETON_RADII = {
+    "dwpose": (0.005, 0.005),
+    "openpose": (0.006, 0.003),
+}
+
+
 # ---------------------------------------------------------------- the splat
 # body2colmap's `skeleton+splat` composite, as it reaches this step. The
 # blend itself is `Renderer._composite_splat` and the rasterisation is
@@ -348,10 +365,16 @@ class RenderStep(Step):
               "${globals.resolution} straight through, so one global fixes "
               "the frame size for every stage — there is no separate "
               "width/height knob on this step to drift from it."),
-        Param("render_mode", str, "depth+skeleton", "What each frame draws",
-              choices=("mesh", "depth", "skeleton", "mesh+skeleton", "depth+skeleton",
-                       "outline+skeleton", "mesh+skeleton+splat",
-                       "depth+skeleton+splat", "outline+skeleton+splat")),
+        Param("render_mode", str, "depth+skeleton", "What each frame draws. "
+              "`outline` and `outline+splat` are the skeleton ABLATION: the "
+              "same frame the shipped workflow denoises, minus the skeleton "
+              "overlay and nothing else — same silhouette, same backdrop, "
+              "same face splat. Run one against `outline+skeleton+splat` to "
+              "see what the skeleton is actually contributing",
+              choices=("mesh", "depth", "skeleton", "outline", "mesh+skeleton",
+                       "depth+skeleton", "outline+skeleton", "outline+splat",
+                       "mesh+skeleton+splat", "depth+skeleton+splat",
+                       "outline+skeleton+splat")),
         Param("outline_strength", float, _DEFAULT_OUTLINE_STRENGTH,
               "outline+skeleton mode only: how dark the flat silhouette fill "
               "is, as a percentage. 0 matches the fixed #7F7F7F background "
@@ -435,8 +458,26 @@ class RenderStep(Step):
               advanced=True),
         Param("skeleton_format", str, "openpose_body25_hands", "Skeleton topology",
               advanced=True),
-        Param("joint_radius", float, 0.006, "Skeleton joint size", advanced=True),
-        Param("bone_radius", float, 0.003, "Skeleton bone thickness", advanced=True),
+        Param("skeleton_style", str, "dwpose",
+              "Which drawing convention the skeleton overlay follows. "
+              "`dwpose` reproduces the pose maps Wan 2.2 VACE conditions on "
+              "(see body2colmap.skeleton): body limbs dimmed to 60% with "
+              "undimmed joint dots, hands a quarter as thick under a hue "
+              "sweep with blue keypoints, and the palette indexed off DWPose's "
+              "own limb order. `openpose` is this project's older scheme — "
+              "full-brightness limbs on a palette that agreed with DWPose "
+              "across the upper body and was one hue step out everywhere "
+              "below the hips",
+              choices=("dwpose", "openpose"), advanced=True),
+        # None, not a literal: the two styles want different sizes, and
+        # hard-coding either here would silently mis-size the other. See
+        # _SKELETON_RADII.
+        Param("joint_radius", float, None,
+              "Skeleton joint size, in metres. Unset takes the style's own "
+              "default", advanced=True),
+        Param("bone_radius", float, None,
+              "Skeleton bone thickness, in metres. Unset takes the style's "
+              "own default", advanced=True),
         Param("face_mode", str, "full",
               "Face overlay: points plus connectivity lines, points alone, or none. "
               "Only meaningful with a face_landmarks input",
@@ -648,8 +689,14 @@ class RenderStep(Step):
         depth_cmap = None if depth_colormap == "grayscale" else depth_colormap
 
         skeleton_format = params["skeleton_format"]
+        skeleton_style = params["skeleton_style"]
+        default_joint_radius, default_bone_radius = _SKELETON_RADII[skeleton_style]
         joint_radius = params["joint_radius"]
         bone_radius = params["bone_radius"]
+        if joint_radius is None:
+            joint_radius = default_joint_radius
+        if bone_radius is None:
+            bone_radius = default_bone_radius
 
         # outline+skeleton: the flat fill grey the strength percentage picks,
         # and the fixed #7F7F7F ground it always sits on (which is exactly the
@@ -738,6 +785,7 @@ class RenderStep(Step):
                 img = renderer.render_skeleton(
                     camera=camera,
                     target_format=skeleton_format,
+                    style=skeleton_style,
                     joint_radius=joint_radius,
                     bone_radius=bone_radius,
                     bg_color=bg_color,
@@ -746,26 +794,32 @@ class RenderStep(Step):
                     face_max_angle=face_max_angle,
                     **eye_opts,
                 )
-            elif base_render_mode in ("mesh+skeleton", "depth+skeleton",
+            elif base_render_mode in ("outline", "mesh+skeleton", "depth+skeleton",
                                       "outline+skeleton"):
-                composite_modes: Dict[str, Any] = {
-                    "skeleton": {
+                composite_modes: Dict[str, Any] = {}
+                # `outline` alone is the ablation: no skeleton entry, so
+                # render_composite draws the base, the backdrop under it and
+                # the splat over it, and nothing else. The face overlay goes
+                # with the skeleton — it is drawn BY render_skeleton — so it
+                # drops out on its own rather than needing to be suppressed.
+                if base_render_mode != "outline":
+                    composite_modes["skeleton"] = {
                         "target_format": skeleton_format,
+                        "style": skeleton_style,
                         "joint_radius": joint_radius,
                         "bone_radius": bone_radius,
                     }
-                }
                 if base_render_mode == "mesh+skeleton":
                     composite_modes["mesh"] = {"color": mesh_color, "bg_color": bg_color}
                 elif base_render_mode == "depth+skeleton":
                     composite_modes["depth"] = {"colormap": depth_cmap}
-                else:  # outline+skeleton — skeleton overlay unchanged, flat grey base
+                else:  # outline / outline+skeleton — flat grey base either way
                     composite_modes["outline"] = {
                         "fg_color": outline_fg_color,
                         "bg_color": outline_bg_color,
                         "blur": outline_blur,
                     }
-                if face_mode is not None:
+                if face_mode is not None and "skeleton" in composite_modes:
                     composite_modes["face"] = {
                         "face_mode": face_mode,
                         "face_landmarks": openpose_face_70,
@@ -779,10 +833,11 @@ class RenderStep(Step):
                 )
             else:
                 raise ValueError(f"Unknown render_mode: {render_mode}")
-            if "+" not in base_render_mode:
+            if base_render_mode in ("mesh", "depth", "skeleton"):
                 # A no-op without a backdrop, and unreachable with one for
-                # the composite modes: `render_composite` has already drawn
-                # it under their base layer, which is the only correct place.
+                # the composite modes — `outline` included, single-layer
+                # though it is: `render_composite` has already drawn it under
+                # their base layer, which is the only correct place.
                 img = renderer.composite_over_background(img, camera)
             rendered_images.append(img)
 

@@ -824,11 +824,19 @@ COPY --from=python-builder /opt/vendor /opt/vendor
 # an older commit is not a degraded run, it is an ImportError on the first
 # render.
 #
+# d084702 ("Draw the skeleton the way DWPose draws one", 2026-09-01) adds
+# `body2colmap.skeleton`'s get_bone_colors_dwpose / get_skeleton_bones_dwpose
+# and the `style=` seam on Renderer.render_skeleton. steps/render.py's
+# `skeleton_style` defaults to "dwpose", so an older commit is a TypeError on
+# the first skeleton render rather than a degraded one. It lives on the
+# `dwpose-skeleton-style` branch, not main — pip resolves the SHA either way,
+# but do not rebase that branch while this pin points at it.
+#
 # Failing the build is deliberate: an image built against an older commit
 # would install cleanly and then raise on the first render_splat of a real
-# run, an hour into a pod booking. The last two asserts below are what stop it.
+# run, an hour into a pod booking. The last three asserts below are what stop it.
 RUN /opt/venv_base/bin/pip install --force-reinstall --no-deps \
-        'body2colmap @ git+https://github.com/Erant/body2colmap.git@958fd3b43e8542a64a22cde35ca5f145360d968f' \
+        'body2colmap @ git+https://github.com/Erant/body2colmap.git@d084702e007a3ee4a01f3955ee6f113964be1fd7' \
     && /opt/venv_base/bin/python -c "\
 import inspect; \
 import body2colmap.face as f; \
@@ -843,6 +851,8 @@ assert 'on_fault' in inspect.signature(sr.SplatRenderer.__init__).parameters, \
 assert 'grid' in TEXTURE_GENERATORS, sorted(TEXTURE_GENERATORS); \
 assert 'background' in inspect.signature(Renderer.__init__).parameters, \
     'bump the body2colmap pin: steps/backdrop.py needs Renderer(background=...)'; \
+assert 'style' in inspect.signature(Renderer.render_skeleton).parameters, \
+    'bump the body2colmap pin: steps/render.py needs skeleton style=dwpose'; \
 print('body2colmap eye_style default:', f.DEFAULT_EYE_STYLE)"
 
 # NOT /workspace/b2c_runner, which is where this used to live. RunPod's

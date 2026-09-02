@@ -805,6 +805,33 @@ steps:
       lead_in_deg: 10.0
       lead_out_deg: 10.0
       render_mode: outline+skeleton+splat
+      # The skeleton overlay's drawing convention. `dwpose` is the step
+      # default and what these frames want: the same convention Wan 2.2
+      # VACE's own pose maps are drawn in, measured against
+      # `vace/annotators/dwpose/util.py` (and the identical code in
+      # MimicMotion and comfyui_controlnet_aux) — body limbs dimmed to 60%
+      # with undimmed joint dots, sticks and dots both ~7 px at this
+      # resolution, and hands a quarter as thick under a hue sweep with blue
+      # keypoints.
+      #
+      # The BODY topology is DWPose's exactly: its 17 limbs, no more. So no
+      # feet (DWPose detects them and draws none) and no MidHip — the torso
+      # runs neck->RHip and neck->LHip directly, two limbs crossing the
+      # chest, where BODY_25 drew a Y meeting at the pelvis. The palette is
+      # indexed off that limb order too, which is what the older style got
+      # one hue step out below the hips and across the whole head. Hands are
+      # NOT dropped: MimicMotion draws them unconditionally and
+      # controlnet_aux defaults them on, so they are well in distribution.
+      #
+      # Left unwritten here so the step's default governs;
+      # `skeleton_style: openpose` restores the older look for a comparison,
+      # and `joint_radius`/`bone_radius` follow whichever style is chosen
+      # unless they are set explicitly.
+      #
+      # For the ABLATION — is the skeleton earning its place at all? — set
+      # `render_mode: outline+splat` here. That is this exact frame with the
+      # overlay and nothing else removed: same silhouette, same room, same
+      # face splat, same masks.
       # The room the drawings stand in. Behind the flat grey silhouette and
       # under the skeleton overlay, both — body2colmap's `render_composite`
       # draws it beneath the BASE layer, which is the only correct place: the

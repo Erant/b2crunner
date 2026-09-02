@@ -504,6 +504,9 @@ class _RecordingRenderer:
         self.width, self.height = render_size
         self.background = background
         self.composited = 0
+        # Every draw call's kwargs, in order — what the step asked for, which
+        # is the only thing a test can see when nothing is rasterized.
+        self.calls = []
 
     @classmethod
     def install(cls, test):
@@ -535,11 +538,13 @@ class _RecordingRenderer:
         return self._blank()
 
     def render_skeleton(self, **kwargs):
+        self.calls.append(("render_skeleton", kwargs))
         return self._blank()
 
     def render_composite(self, **kwargs):
         # The real one composites the backdrop under its base layer itself;
         # counting it here would hide a double composite rather than catch it.
+        self.calls.append(("render_composite", kwargs))
         return self._blank()
 
     def composite_over_background(self, image, camera):
