@@ -358,10 +358,11 @@ class RefineCamerasStep(Step):
             if root.exists():
                 shutil.rmtree(root)
             root.mkdir(parents=True)
-            return self._refine(root, cameras, image_names, images, masks, params, label)
+            return self._refine(root, cameras, image_names, images, masks, params,
+                                label, anchor_index)
         with tempfile.TemporaryDirectory(prefix="b2c_refine_") as temp_dir:
             return self._refine(Path(temp_dir), cameras, image_names, images,
-                                masks, params, label)
+                                masks, params, label, anchor_index)
 
     # ------------------------------------------------------------------
     # the pipeline itself
@@ -376,6 +377,7 @@ class RefineCamerasStep(Step):
         masks: Optional[List[np.ndarray]],
         params: Dict[str, Any],
         label: str,
+        anchor_index: int,
     ) -> Dict[str, Any]:
         from ..proc import ProcessFailed
 

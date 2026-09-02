@@ -193,7 +193,8 @@ class TestChecks(unittest.TestCase):
 
         result = step._give_up(given, self.PARAMS, "refine_cameras", "a bad solve")
 
-        self.assertIs(result["cameras"], given)
+        self.assertEqual([id(c) for c in result["cameras"]],
+                         [id(c) for c in given])
         self.assertFalse(result["stats"]["accepted"])
         self.assertEqual(result["stats"]["failure"], "a bad solve")
         # ...and the anchor it republishes is the given one, so the extras
@@ -259,6 +260,73 @@ class TestOnnxModelSelection(unittest.TestCase):
 
     def test_sift_extraction_needs_no_onnx_model(self):
         self.assertEqual(onnx_options_for("SIFT", "SIFT"), [])
+
+
+class TestRunDrivesRefine(unittest.TestCase):
+    """`run` end to end with the four COLMAP calls stubbed out.
+
+    Everything else here exercises a helper directly, which is how
+    `_refine` came to read an `anchor_index` that only `run` had: the
+    body of the driver was never executed by a test, and the run died on
+    a pod with `name 'anchor_index' is not defined`. These two go through
+    `run`, so both of `_refine`'s exits are compiled *and* run.
+    """
+
+    def _run(self, step, *, anchor_index):
+        import tempfile
+        from pathlib import Path
+
+        given = _orbit()
+        names = [f"frame_{i:05d}.png" for i in range(len(given))]
+        images = [np.zeros((8, 8, 3), dtype=np.uint8)] * len(given)
+        masks = [np.full((8, 8), 255, dtype=np.uint8)] * len(given)
+        with tempfile.TemporaryDirectory() as tmp:
+            params = RefineCamerasStep.resolve_params(
+                {"work_dir": str(Path(tmp) / "scratch")})
+            return given, step.run(
+                {"cameras": given, "image_names": names, "images": images,
+                 "masks": masks, "anchor_frame_index": anchor_index},
+                params)
+
+    def test_a_colmap_failure_keeps_the_given_anchor(self):
+        from pipeline.proc import ProcessFailed
+
+        class Failing(RefineCamerasStep):
+            def _extract(self, *a, **k):
+                raise ProcessFailed("colmap exited 1")
+
+        given, result = self._run(Failing(), anchor_index=5)
+
+        self.assertEqual([id(c) for c in result["cameras"]],
+                         [id(c) for c in given])
+        self.assertFalse(result["stats"]["accepted"])
+        np.testing.assert_allclose(result["anchor_position"], given[5].position,
+                                   atol=1e-6)
+
+    def test_an_accepted_solve_publishes_the_refined_anchor(self):
+        refined = _transform(_orbit(), 1.19, 5.0, [0.1, 0.1, 0.1])
+
+        class Solving(RefineCamerasStep):
+            def _extract(self, *a, **k):
+                pass
+
+            def _match(self, *a, **k):
+                pass
+
+            def _triangulate_and_adjust(self, colmap, work, images_dir, params, label):
+                return work, 0.42
+
+            @staticmethod
+            def _read_poses(images_txt, image_names, cameras, label):
+                return refined
+
+        given, result = self._run(Solving(), anchor_index=5)
+
+        self.assertTrue(result["stats"]["accepted"])
+        # `_align_to` undoes the 1.19x, so the anchor lands back on the
+        # given orbit — read out of the ALIGNED list, not the given one.
+        np.testing.assert_allclose(result["anchor_position"], given[5].position,
+                                   atol=1e-6)
 
 
 if __name__ == "__main__":
