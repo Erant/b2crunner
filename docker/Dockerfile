@@ -117,8 +117,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # weights, brush's docs/loss-weights.md) that steps/brush.py now writes for
 # the training views. An older brush would IGNORE the sidecar and train the
 # frames at full weight over the face — silently, which is why the pin must
-# move with the step. The commit is LOCAL to ~/Projects/brush until pushed;
-# the check below fails the build until it is.
+# move with the step.
 ARG BRUSH_BRANCH=normal-map-supervision
 ARG BRUSH_REF=ccf38dbff4c2fda1044e42bc43b3bd03cf276482
 RUN git clone --depth 1 --branch ${BRUSH_BRANCH} \
