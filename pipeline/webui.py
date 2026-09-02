@@ -65,7 +65,8 @@ Outputs checkbox writes the workflow global its export steps read through
 That matters because the .ply is a full 30,000-iteration brush training — an
 hour of GPU you do not want to spend discovering you only wanted the COLMAP
 dataset. The Results tab then offers exactly those: one .zip holding the
-`dir:` of every output that actually got written, and nothing else.
+`dir:` of every output that actually got written, plus the `log.txt` the run
+wrote, and nothing else.
 """
 
 from __future__ import annotations
@@ -86,7 +87,7 @@ from . import steps  # noqa: F401  registers every Step; the UI is an entrypoint
 from .gpu_scheduler import GpuScheduler, detect_gpu_count
 from .logging_setup import timestamped_run_name
 from .models import registry
-from .paths import data_dir, output_dir, run_jobs_dir, upload_dir
+from .paths import data_dir, log_dir, output_dir, run_jobs_dir, upload_dir
 from .run_state import PREVIEW_FRAMES, RunJob, RunState
 from .step import Param
 from .workflow import (
@@ -553,7 +554,28 @@ def result_dirs(run_dir: Optional[Path], workflow: str = "") -> Dict[str, Path]:
     return found
 
 
-def build_result_zip(run_dir: Optional[Path], workflow: str = "") -> Optional[str]:
+def run_log_path(run_dir: Optional[Path], log_path: Optional[Path] = None) -> Optional[Path]:
+    """The log file that produced `run_dir`, if it is still on the volume.
+
+    `log_path` is what the run itself recorded in its `status.json`; the
+    fallback reconstructs the name `setup_logging` would have chosen, which
+    covers a run whose status file predates that field, was never written,
+    or belongs to a CLI run nobody registered with the scheduler.
+    """
+    if log_path and Path(log_path).is_file():
+        return Path(log_path)
+    if run_dir:
+        guess = log_dir() / f"{Path(run_dir).name}.log"
+        if guess.is_file():
+            return guess
+    return None
+
+
+def build_result_zip(
+    run_dir: Optional[Path],
+    workflow: str = "",
+    log_path: Optional[Path] = None,
+) -> Optional[str]:
     """One archive holding only the deliverables: colmap/ and/or ply/.
 
     Not `shutil.make_archive` over the whole run directory, which is what
@@ -563,6 +585,13 @@ def build_result_zip(run_dir: Optional[Path], workflow: str = "") -> Optional[st
     not output. Zipping all of it produced a multi-gigabyte download whose
     top level was a b2c dataset rather than anything COLMAP-shaped, and
     left the person on the other end to work out which parts mattered.
+
+    The run's log rides along as `log.txt` at the top level. It is the one
+    thing outside the deliverables worth carrying: an archive that comes
+    back wrong is debugged from the log that produced it, and that log
+    lives under B2C_LOG_DIR — a different directory on the pod, and one
+    that dies with the pod, so by the time the .zip is being looked at the
+    log is usually already unreachable.
     """
     directories = result_dirs(run_dir, workflow)
     if not directories:
@@ -577,6 +606,11 @@ def build_result_zip(run_dir: Optional[Path], workflow: str = "") -> Optional[st
             for path in sorted(directory.rglob("*")):
                 if path.is_file():
                     bundle.write(path, arcname=str(Path(name) / path.relative_to(directory)))
+        log = run_log_path(run_dir, log_path)
+        if log:
+            # DEFLATE for this member alone: a log is text, it shrinks by
+            # ~10x, and it is small enough for the CPU cost to be nothing.
+            bundle.write(log, arcname="log.txt", compress_type=zipfile.ZIP_DEFLATED)
     return str(archive)
 
 
@@ -1125,7 +1159,9 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
                 size = sum(f.stat().st_size for f in files)
                 lines.append(f"- **`{name}/`** — {len(files)} files, {size / 1e9:.2f} GB")
 
-            archive = build_result_zip(Path(directory), state.workflow)
+            archive = build_result_zip(Path(directory), state.workflow, state.log_path)
+            if run_log_path(Path(directory), state.log_path):
+                lines.append("- **`log.txt`** — the log this run wrote")
             info = (
                 f"### `{directory}`\n\nThe .zip below contains:\n\n"
                 + "\n".join(lines)

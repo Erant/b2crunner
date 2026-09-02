@@ -49,7 +49,7 @@ def _run_dir(root: Path, *, colmap: bool, ply: bool, name: str = "run-20260824-1
     return run
 
 
-class TestResultBundle(unittest.TestCase):
+class _BundleCase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
@@ -60,8 +60,16 @@ class TestResultBundle(unittest.TestCase):
         )
         (self.root / "archives").mkdir()
         self._patched.start()
+        # Same for the log directory the archive picks `log.txt` out of:
+        # without this the fallback would go looking on the real volume.
+        self._patched_logs = unittest.mock.patch.object(
+            webui, "log_dir", lambda: self.root / "logs"
+        )
+        (self.root / "logs").mkdir()
+        self._patched_logs.start()
 
     def tearDown(self):
+        self._patched_logs.stop()
         self._patched.stop()
         self.tmp.cleanup()
 
@@ -69,6 +77,8 @@ class TestResultBundle(unittest.TestCase):
         with zipfile.ZipFile(archive) as bundle:
             return sorted(bundle.namelist())
 
+
+class TestResultBundle(_BundleCase):
     def test_it_holds_the_deliverables_and_only_those(self):
         run = _run_dir(self.root, colmap=True, ply=True)
         names = self._names(webui.build_result_zip(run))
@@ -115,6 +125,66 @@ class TestResultBundle(unittest.TestCase):
     def test_no_run_at_all(self):
         self.assertIsNone(webui.build_result_zip(None))
         self.assertEqual(webui.result_dirs(None), {})
+
+
+class TestTheLogRidesAlong(_BundleCase):
+    """A download that comes back wrong is debugged from the log that
+    produced it, and that log lives under B2C_LOG_DIR — a directory the
+    person holding the .zip does not have, and one that dies with the pod.
+    """
+
+    def _log(self, run: Path, text: str = "17:01:02 +0:00:01 INFO run: hello\n") -> Path:
+        path = self.root / "logs" / f"{run.name}.log"
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def test_the_recorded_log_is_packaged_as_log_txt(self):
+        run = _run_dir(self.root, colmap=True, ply=True)
+        log = self._log(run)
+
+        archive = webui.build_result_zip(run, log_path=log)
+
+        self.assertIn("log.txt", self._names(archive))
+        with zipfile.ZipFile(archive) as bundle:
+            self.assertEqual(bundle.read("log.txt").decode(), log.read_text())
+
+    def test_it_is_found_by_name_when_the_run_recorded_none(self):
+        """A status.json written before `log_path` existed, or a CLI run
+        the scheduler never saw: the name `setup_logging` would have
+        chosen is `<run name>.log`, so look there."""
+        run = _run_dir(self.root, colmap=True, ply=False)
+        self._log(run)
+
+        self.assertIn("log.txt", self._names(webui.build_result_zip(run)))
+
+    def test_a_recorded_path_that_no_longer_exists_falls_back(self):
+        run = _run_dir(self.root, colmap=True, ply=False)
+        self._log(run)
+
+        archive = webui.build_result_zip(run, log_path=self.root / "gone.log")
+
+        self.assertIn("log.txt", self._names(archive))
+
+    def test_no_log_is_not_an_error(self):
+        """The deliverables are still the deliverables — a run whose log was
+        pruned must still be downloadable."""
+        run = _run_dir(self.root, colmap=True, ply=True)
+
+        names = self._names(webui.build_result_zip(run))
+
+        self.assertNotIn("log.txt", names)
+        self.assertIn("ply/scene.ply", names)
+
+    def test_the_log_alone_is_not_a_deliverable(self):
+        """`log.txt` rides along with an archive; it does not conjure one
+        for a run that produced nothing."""
+        run = _run_dir(self.root, colmap=False, ply=False)
+        self._log(run)
+
+        self.assertIsNone(webui.build_result_zip(run))
+
+    def test_run_log_path_without_a_run(self):
+        self.assertIsNone(webui.run_log_path(None))
 
 
 class TestOutputSelection(unittest.TestCase):
