@@ -935,7 +935,7 @@ steps:
       # thickness.
       #
       # THE ROOM ALSO PULLS BACK AROUND THE SUBJECT, and only here. Left on
-      # the step's defaults — `background_fade: smoothstep`, margin 2,
+      # the step's defaults — `background_fade: smoothstep`, margin 1,
       # falloff 1 — because this is the render those defaults were chosen
       # for. The lines fade to the wall (`background_fade_target: plain`)
       # rather than to a flat patch or a blur, so what disappears next to the
@@ -946,9 +946,17 @@ steps:
       # grid running up to that outline reads to the model as an occluding
       # edge, so it will not paint past it and hair and bulky clothing get
       # squashed back onto the silhouette of a naked body — which is the one
-      # thing the drawing must not decide. The margin of 2 is that argument
-      # in a number: the shell is fitted to the naked mesh, and the subject
-      # the denoise should produce is bigger than the thing measured.
+      # thing the drawing must not decide.
+      #
+      # The margin is 1 — the fitted hull, no inflation — and it started at
+      # 2 on the argument that the mesh is naked and the subject should not
+      # be. What settled it was counting the ruling left in frame on a real
+      # body at exactly this framing: at 2 the room is gone from the whole
+      # half of the frame around the figure (22% of the ruling on a frontal
+      # view, 44% three-quarter) against 33% / 66-72% at 1. The backdrop is
+      # here to carry the rotation cue and that was too much of it to spend
+      # up front. If the denoise comes back with hair and clothing pinned to
+      # the bare outline, this is the knob that answers it.
       #
       # Unlike the two lines above it, this one is NOT repeated on
       # rerender_splat, and deliberately — see the note there.

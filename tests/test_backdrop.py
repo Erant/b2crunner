@@ -639,15 +639,17 @@ class TestSubjectFade(unittest.TestCase):
 
     What is this project's here: that the knobs exist on `render` and NOT on
     `render_splat`, that their defaults are the ones chosen for the drawings
-    (smoothstep, margin 2, falloff 1), that the shell is fitted in the world
+    (smoothstep, margin 1, falloff 1), that the shell is fitted in the world
     frame the cameras live in, and that no backdrop means no fade rather than
     a refusal. The ellipsoid fit, the decay profiles and the plain-texture
     reveal are body2colmap's and are tested there.
 
-    The margin of 2 is the one default worth stating twice: the shell is
-    fitted to a NAKED SAM-3D-Body mesh, and the subject the denoise should
-    produce is a dressed person with hair. A shell that stopped at the mesh's
-    own hull would clear nothing where it matters.
+    The margin is the one default worth stating twice, because it shipped at
+    2 first. The argument for inflating past the fitted hull is that the mesh
+    is NAKED and the subject the denoise should produce is not; the argument
+    against is what it costs, measured on a real body at `full` framing and
+    720x1280 — at 2 only 22% of the room's ruling survives a frontal view
+    against 33% at 1, and the backdrop is there to carry the rotation cue.
     """
 
     def setUp(self):
@@ -655,8 +657,8 @@ class TestSubjectFade(unittest.TestCase):
             n_frames=4, camera_template=_camera_template(64, 64))
         # A small subject at the point the cameras converge on, so the clear
         # zone lands in the middle of the frame and its band does not reach
-        # the corners: radius 0.2 inflated to 0.4 by the default margin and
-        # fading out by 0.8, against a half-width of ~1.25 at that distance.
+        # the corners: radius 0.2 at the default margin of 1, fading out by
+        # 0.4, against a half-width of ~1.25 at that distance.
         import trimesh
 
         sphere = trimesh.creation.icosphere(subdivisions=2, radius=0.2)
@@ -682,7 +684,7 @@ class TestSubjectFade(unittest.TestCase):
     def test_the_defaults_are_the_ones_the_drawings_were_tuned_for(self):
         params = _r_params()
         self.assertEqual(params["background_fade"], "smoothstep")
-        self.assertEqual(params["background_fade_margin"], 2.0)
+        self.assertEqual(params["background_fade_margin"], 1.0)
         self.assertEqual(params["background_fade_falloff"], 1.0)
         # The lines go to the WALL, not to a flat patch or a smear.
         self.assertEqual(params["background_fade_target"], "plain")
@@ -711,12 +713,12 @@ class TestSubjectFade(unittest.TestCase):
         self.assertIn("vertices", str(caught.exception))
 
     def test_the_margin_inflates_the_fitted_shell(self):
-        tight = build_fade(_r_params(background_fade_margin=1.0), self.vertices)
-        wide = build_fade(_r_params(), self.vertices)
+        tight = build_fade(_r_params(), self.vertices)
+        wide = build_fade(_r_params(background_fade_margin=2.0), self.vertices)
         np.testing.assert_allclose(
             wide.ellipsoid.axes, 2.0 * tight.ellipsoid.axes, rtol=1e-6)
-        # The tight one is the hull, so the mesh is inside it and the default
-        # clears well beyond where the drawing's outline can reach.
+        # The default IS the hull, so the mesh is inside it and the clear
+        # zone starts exactly at the outline the drawing can reach.
         self.assertTrue(tight.ellipsoid.contains(self.vertices).all())
         np.testing.assert_allclose(tight.ellipsoid.axes, 0.2, rtol=0.05)
 
@@ -815,6 +817,9 @@ class TestFadeStepWiring(unittest.TestCase):
         )
 
     def test_the_shell_encloses_the_mesh_the_renderer_was_handed(self):
+        # margin 1.0 is the default; passed explicitly because this test
+        # needs the TIGHT hull to tell the two frames apart, and it should
+        # keep working if the default moves again.
         self._run(render_mode="mesh", override_cam_from_mesh=False,
                   initial_rotation=90.0, background_fade_margin=1.0)
         ellipsoid = self.recorder.background.fade.ellipsoid

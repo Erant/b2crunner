@@ -215,16 +215,31 @@ BACKGROUND_FADE_PARAMS: Tuple[Param, ...] = (
                  "gaussian", "inverse_square", ""),
     ),
     Param(
-        "background_fade_margin", float, 2.0,
-        "Inflate the fitted shell by this before the fade is measured, where "
-        "1.0 is the hull that just encloses the mesh. 2.0, not body2colmap's "
-        "1.0, and the reason is the whole point of the fade: the ellipsoid is "
-        "fitted to a NAKED SAM-3D-Body mesh, and the subject the denoise is "
-        "meant to produce is a dressed person with hair — bigger than the "
-        "thing measured, in every direction. A shell that stopped at the "
-        "mesh's own hull would put the clear zone exactly where the outline "
-        "already is and leave the lines against the silhouette they were "
-        "crowding. Must be > 0",
+        "background_fade_margin", float, 1.0,
+        "Inflate the fitted shell by this before the fade is measured. 1.0 is "
+        "the hull that just encloses the mesh, and the argument for going "
+        "past it is real: the ellipsoid is fitted to a NAKED SAM-3D-Body "
+        "mesh, and the subject the denoise is meant to produce is a dressed "
+        "person with hair, bigger than the thing measured in every direction. "
+        "The argument against is what it costs, which was MEASURED on a real "
+        "body at the shipped framing — `full`, 720x1280 — by counting how "
+        "much of the room's ruling survives in frame:\n"
+        "\n"
+        "    margin   frontal view   three-quarter view\n"
+        "    1.0          33%            66-72%\n"
+        "    1.5          22%            48-49%\n"
+        "    2.0          22%            44%\n"
+        "\n"
+        "At 2.0 the ruling is gone from the whole half of the frame around "
+        "the figure and only the far wall keeps any. The backdrop exists to "
+        "carry the rotation cue, so that is a lot to spend on headroom the "
+        "denoise may not need — hence 1.0, which still clears a band against "
+        "the silhouette. What survives at ANY margin is the room's shading: "
+        "`plain` takes out the pattern only, so the lighter ceiling, the dark "
+        "floor and the corners between walls stay put and keep cueing "
+        "rotation where the lines have gone. Raise it if the frames come back "
+        "with hair and clothing pinned to the bare mesh's outline. Must be "
+        "> 0",
         minimum=0.0,
     ),
     Param(
