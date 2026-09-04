@@ -123,8 +123,9 @@ class TestResidency(unittest.TestCase):
     def test_run_params_that_do_not_affect_load_do_not_reload(self):
         """fast_helical_native's actual difference between the passes.
 
-        denoise_pass1 and denoise_pass2 differ only in `strength` (1.0 vs
-        0.8), which `Wan22VaceDenoiseStep.load()` never reads. A rule that
+        denoise_pass1 and denoise_pass2 differ only in `strength` (the same
+        fade, pass 2's scaled by 0.8), which `Wan22VaceDenoiseStep.load()`
+        never reads. A rule that
         reloaded on any param change would reload here — i.e. would do
         nothing for the one workflow this feature was built for.
         """
@@ -502,8 +503,12 @@ class TestWiring(unittest.TestCase):
         from pipeline.steps.wan22_vace_denoise import Wan22VaceDenoiseStep
 
         base = {"width": 720, "height": 1280}
-        first = Wan22VaceDenoiseStep.resolve_params({**base, "strength": 1.0})
-        second = Wan22VaceDenoiseStep.resolve_params({**base, "strength": 0.8})
+        first = Wan22VaceDenoiseStep.resolve_params(
+            {**base, "strength": [1, 1, 0.75, 0.5, 0.25, 0]}
+        )
+        second = Wan22VaceDenoiseStep.resolve_params(
+            {**base, "strength": [0.8, 0.8, 0.6, 0.4, 0.2, 0]}
+        )
         self.assertEqual(
             load_signature(Wan22VaceDenoiseStep, first),
             load_signature(Wan22VaceDenoiseStep, second),
