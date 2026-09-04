@@ -119,7 +119,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # frames at full weight over the face — silently, which is why the pin must
 # move with the step.
 ARG BRUSH_BRANCH=normal-map-supervision
-ARG BRUSH_REF=ccf38dbff4c2fda1044e42bc43b3bd03cf276482
+ARG BRUSH_REF=debff989bb4588bd16b549dbf9caf45cd8529767
 RUN git clone --depth 1 --branch ${BRUSH_BRANCH} \
         https://github.com/Erant/brush.git /src/brush \
     && cd /src/brush \
