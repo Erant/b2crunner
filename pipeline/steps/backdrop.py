@@ -63,6 +63,17 @@ changing one already has the rest of that render's knobs in front of them. The
 agreement is now a thing to keep by hand: the renders whose frames reach a
 denoise pass are `render_initial_views` and `rerender_splat` (plus the shell
 file's `render_shell_views`), and they must match.
+
+**Both shipped workflows currently break that**, deliberately and since
+2026-09-04: `render_initial_views` (and, in step with it,
+`render_shell_views`) carries `background: ""` while `rerender_splat` still
+carries `grid`. The first denoise pass was taken back to a blank backdrop to
+get a comparison against the room, the fade and the fade's margin — three
+things that landed in three days and were never measured against their own
+absence — and the second pass was left alone because that is what was asked
+for. It is a knowing exception, not the rule going soft: the note above each
+of those `background:` lines says which way it should be resolved, and the
+denoise prompt's 场景 slot still describes the ruled room either way.
 """
 
 from __future__ import annotations

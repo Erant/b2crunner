@@ -902,66 +902,43 @@ steps:
       #
       # For the ABLATION — is the skeleton earning its place at all? — set
       # `render_mode: outline+splat` here. That is this exact frame with the
-      # overlay and nothing else removed: same silhouette, same room, same
-      # face splat, same masks.
-      # The room the drawings stand in. Behind the flat grey silhouette and
-      # under the skeleton overlay, both — body2colmap's `render_composite`
-      # draws it beneath the BASE layer, which is the only correct place: the
-      # skeleton writes RGB without touching alpha, so a backdrop composited
-      # after it would blend the skeleton away everywhere off the mesh.
+      # overlay and nothing else removed: same silhouette, same face
+      # splat, same background, same masks.
+      # The room the drawings stand in — OFF as of 2026-09-04, and off
+      # ENTIRELY: an empty `background` makes build_background return before
+      # it reads a single fade param (steps/backdrop.py), so this one line
+      # takes the grid and the subject fade with it. What stood here was
+      # `background: grid` with `background_base_color: [0.5, 0.5, 0.5]` and
+      # the step's own fade defaults — smoothstep, margin 1, falloff 1,
+      # fading to `plain`.
       #
-      # Written here rather than read from a pipeline setting, and the same
-      # two lines have to be repeated on the render that feeds the SECOND
-      # denoise pass (rerender_splat below): the two passes must not be
-      # handed a subject that changed rooms between them. steps/backdrop.py
-      # records why the setting went away.
+      # Why it goes: the room (2026-09-01), the fade (09-04) and the fade's
+      # margin (09-04) all landed in the three days before a run that came
+      # back not looking right, and nothing on this pipeline has been
+      # compared against a run without them. Off is the baseline that
+      # comparison needs, and one line is a cheaper ablation than three.
       #
-      # Walls at a neutral 0.5 — #7F7F7F, the grey the outline base grounds
-      # on and the value bg_color already carries. grid's own default is
-      # [0.42, 0.44, 0.48], which renders 107/112/122: blue-tinted, and
-      # within four levels of the silhouette fill (#6F6F6F, 111), so the
-      # drawing very nearly disappeared into the wall. 0.5 renders a flat
-      # 128 (measured through build_background, not assumed: 0.5*255 rounds
-      # up) — seventeen levels off the fill, and no tint to disagree with
-      # the rest of the frame. The floor (~61) and ceiling (~153) keep
-      # grid's defaults on purpose: their reading apart from the walls is
-      # what resolves which way is up under an orbit.
+      # What it costs is the thing the backdrop was added for: over a blank
+      # backdrop a video diffusion model reads an orbit as the SUBJECT
+      # turning rather than the camera travelling — steps/backdrop.py's
+      # docstring is the long version. If the denoise comes back with a
+      # figure that spins in place, or a splat that will not converge
+      # because the frames disagree about which way it faced, this is the
+      # first line to put back. Putting it back is the two lines quoted at
+      # the top of this note; their colours were measured (0.5 walls render
+      # a flat 128, seventeen levels off the #6F6F6F silhouette fill, where
+      # grid's own blue-tinted default landed within four) and the margin
+      # was too (1 keeps 33% of the ruling in frame frontal / 66-72%
+      # three-quarter, against 22% / 44% at 2). This file at `542eb79` has
+      # both arguments in full.
       #
-      # The ruling has its own param too — `background_line_color`, left
-      # unset here, which leaves grid's [0.88, 0.89, 0.92] (224/226/234).
-      # The rest of the room is reachable through `background_params` and
-      # none of it is fixed: `floor_color` and `ceiling_color` for the two
-      # caps, `n_per_face` and `line_width` for the ruling's spacing and
-      # thickness.
-      #
-      # THE ROOM ALSO PULLS BACK AROUND THE SUBJECT, and only here. Left on
-      # the step's defaults — `background_fade: smoothstep`, margin 1,
-      # falloff 1 — because this is the render those defaults were chosen
-      # for. The lines fade to the wall (`background_fade_target: plain`)
-      # rather than to a flat patch or a blur, so what disappears next to the
-      # drawing is the RULING, while the wall, its shading and the corners
-      # stay where they were.
-      #
-      # It is here because of what these frames are: a bare-mesh outline. A
-      # grid running up to that outline reads to the model as an occluding
-      # edge, so it will not paint past it and hair and bulky clothing get
-      # squashed back onto the silhouette of a naked body — which is the one
-      # thing the drawing must not decide.
-      #
-      # The margin is 1 — the fitted hull, no inflation — and it started at
-      # 2 on the argument that the mesh is naked and the subject should not
-      # be. What settled it was counting the ruling left in frame on a real
-      # body at exactly this framing: at 2 the room is gone from the whole
-      # half of the frame around the figure (22% of the ruling on a frontal
-      # view, 44% three-quarter) against 33% / 66-72% at 1. The backdrop is
-      # here to carry the rotation cue and that was too much of it to spend
-      # up front. If the denoise comes back with hair and clothing pinned to
-      # the bare outline, this is the knob that answers it.
-      #
-      # Unlike the two lines above it, this one is NOT repeated on
-      # rerender_splat, and deliberately — see the note there.
-      background: grid
-      background_base_color: [0.5, 0.5, 0.5]
+      # `render_shell_views` below turns it off in step, because its frames
+      # are SUBSTITUTED into this batch and the two have to look alike.
+      # `rerender_splat` further down is still `grid` — that is what was
+      # asked for, the FIRST pass only, but it is exactly the invariant
+      # steps/backdrop.py's docstring names, so read that before assuming
+      # pass 2 wants the same treatment.
+      background: ""
       # Every frame whose view of the head is within this of the
       # photograph's takes the layer; past it the 2.5-D shell's open rim is
       # what would appear, so it is dropped entirely. body2colmap measured
@@ -1033,14 +1010,16 @@ steps:
       width: ${globals.resolution.0}
       height: ${globals.resolution.1}
       bg_color: [0.5, 0.5, 0.5]
-      # And the same backdrop as the drawings these replace — the same two
-      # values as render_initial_views, copied for the same reason the grey
-      # above is grey rather than black: a substituted frame lands in a batch
-      # of drawings and has to look like one of them. It comes out identical,
-      # not merely similar — `pattern: ""` reuses the mesh render's own
-      # cameras, and the environment is world-fixed.
-      background: grid
-      background_base_color: [0.5, 0.5, 0.5]
+      # And the same backdrop as the drawings these replace — for the same
+      # reason the grey above is grey rather than black: a substituted frame
+      # lands in a batch of drawings and has to look like one of them. So
+      # this follows render_initial_views wherever it goes, and it went to
+      # no room at all on 2026-09-04; it read `background: grid` with
+      # `background_base_color: [0.5, 0.5, 0.5]` while the room was on. Put
+      # them back together or not at all — a shell band in a gridded room
+      # dropped into a batch of roomless drawings is a worse frame than
+      # either choice made consistently.
+      background: ""
     outputs:
       images: scene.shell_views.images
       cameras: scene.shell_views.cameras
@@ -1222,6 +1201,19 @@ steps:
       # vocabulary, and the lighting tags stay the three camera-invariant
       # ones for the reason above. UNVERIFIED on a pod — like the lighting
       # edit before it, this is a quality change a real run has to judge.
+      #
+      # AND IT IS STALE as of 2026-09-04, knowingly: render_initial_views'
+      # room is OFF, so this pass's control frames are a drawing on flat
+      # #7F7F7F while the 场景 slot still describes ruled walls, a dark
+      # floor and a lighter ceiling. That is the 09-01 contradiction with
+      # its sign flipped — the prompt now asks for a room the frames do not
+      # show, and the model will paint one wherever nothing contradicts it,
+      # including the lighting claims that lean on it. Left standing on
+      # purpose: the grid came off to isolate ONE variable, and rewriting
+      # the prompt in the same change would spend the comparison. If the
+      # room stays off, this slot is the next thing to settle — and
+      # tests/test_workflows.py pins the string character for character, so
+      # it moves together with that pin.
       prompt: "人工光、柔光、低对比度、环绕运镜。时间静止，人物完全静止。身体\
         如雕塑般僵硬，胸口没有起伏，头部保持固定角度，面部肌肉完全不动，维持单\
         一的中性表情。双眼一眨不眨，眼睑保持张开且稳定，目光空洞而固定，锁定远\
@@ -1961,11 +1953,21 @@ steps:
       # therefore not set here. See docs/spatial-reinforcement.md.
       confidence: true
       cull_color: [0.5, 0.5, 0.5]
-      # The same room render_initial_views put the drawings in — the same two
-      # values, written out again because there is no setting sharing them
-      # any more — so the second denoise pass is not handed a subject that
-      # has just been teleported out of one. brush-splat-render draws one
-      # flat colour and knows nothing of environments, so steps/backdrop.py
+      # A room here, and NO room on render_initial_views since 2026-09-04,
+      # so the two denoise passes now disagree about it. That is deliberate
+      # — the FIRST pass is the one that was asked to lose the grid — but it
+      # breaks the agreement the note above that render's `background: ""`
+      # and steps/backdrop.py's docstring both name, so know what it means
+      # before reading a result: pass 1 denoises a subject standing in
+      # nothing, the splat trains on whatever room the PROMPT talked the
+      # model into painting (the 场景 slot still describes the gridded room,
+      # unchanged), and then this render composites a real grid behind it.
+      # If pass 2 comes back with two rooms disagreeing with each other, or
+      # a subject relit between the passes, this line is the first suspect
+      # and `background: ""` here is the matching change.
+      #
+      # Mechanically it is unchanged: brush-splat-render draws one flat
+      # colour and knows nothing of environments, so steps/backdrop.py
       # un-composites `cull_color` back out and re-composites over the
       # backdrop; exact wherever the gate culled, which is everywhere the
       # backdrop is actually visible.
