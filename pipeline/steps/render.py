@@ -69,7 +69,7 @@ import numpy as np
 
 from ..registry import register_step
 from ..step import REQUIRED, Param, Step
-from .backdrop import BACKGROUND_PARAMS, build_background
+from .backdrop import BACKGROUND_FADE_PARAMS, BACKGROUND_PARAMS, build_background
 
 logger = logging.getLogger(__name__)
 
@@ -488,7 +488,7 @@ class RenderStep(Step):
               minimum=0.0, maximum=180.0, advanced=True),
         Param("pointcloud_samples", int, 10000,
               "Points sampled off the mesh for points3D.txt", minimum=1, advanced=True),
-    ) + BACKGROUND_PARAMS
+    ) + BACKGROUND_PARAMS + BACKGROUND_FADE_PARAMS
 
     def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
         from body2colmap.camera import Camera
@@ -772,7 +772,13 @@ class RenderStep(Step):
         # single-mode branches below have no overlay and do their own.
         renderer = Renderer(
             scene=scene, render_size=(width, height),
-            background=build_background(params, cameras),
+            # `scene.vertices` and not `mesh_output["vertices"]`: the fade's
+            # shell is fitted in the same world frame the cameras live in, and
+            # the auto-orient branch above has already turned the scene in
+            # place by then. The raw input is the pre-rotation mesh, which
+            # would put the clear zone somewhere off to the side of a
+            # non-override render.
+            background=build_background(params, cameras, scene.vertices),
         )
 
         rendered_images = []

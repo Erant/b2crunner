@@ -27,8 +27,10 @@ import numpy as np
 
 from pipeline.registry import get_step_class
 from pipeline.steps.backdrop import (
+    BACKGROUND_FADE_PARAMS,
     BACKGROUND_PARAMS,
     build_background,
+    build_fade,
     composite_bgr,
     orbit_frame,
 )
@@ -57,6 +59,15 @@ def _path_gen():
 def _rs_params(**overrides):
     """render_splat's declared defaults with `overrides` on top."""
     return get_step_class("render_splat").resolve_params(overrides)
+
+
+def _r_params(**overrides):
+    """render's declared defaults with `overrides` on top.
+
+    `n_frames` has no default — it is the one knob every workflow states —
+    so it is supplied here to get at the rest.
+    """
+    return get_step_class("render").resolve_params({"n_frames": 4, **overrides})
 
 
 class TestOrbitFrame(unittest.TestCase):
@@ -621,6 +632,214 @@ class TestRenderSplatBackdrop(unittest.TestCase):
         without = self._run(alpha=255, background="")
         for a, b in zip(with_room["images"], without["images"]):
             np.testing.assert_array_equal(a, b)
+
+
+class TestSubjectFade(unittest.TestCase):
+    """The room pulling back around the subject — stage 1 only.
+
+    What is this project's here: that the knobs exist on `render` and NOT on
+    `render_splat`, that their defaults are the ones chosen for the drawings
+    (smoothstep, margin 2, falloff 1), that the shell is fitted in the world
+    frame the cameras live in, and that no backdrop means no fade rather than
+    a refusal. The ellipsoid fit, the decay profiles and the plain-texture
+    reveal are body2colmap's and are tested there.
+
+    The margin of 2 is the one default worth stating twice: the shell is
+    fitted to a NAKED SAM-3D-Body mesh, and the subject the denoise should
+    produce is a dressed person with hair. A shell that stopped at the mesh's
+    own hull would clear nothing where it matters.
+    """
+
+    def setUp(self):
+        self.cameras = _path_gen().circular(
+            n_frames=4, camera_template=_camera_template(64, 64))
+        # A small subject at the point the cameras converge on, so the clear
+        # zone lands in the middle of the frame and its band does not reach
+        # the corners: radius 0.2 inflated to 0.4 by the default margin and
+        # fading out by 0.8, against a half-width of ~1.25 at that distance.
+        import trimesh
+
+        sphere = trimesh.creation.icosphere(subdivisions=2, radius=0.2)
+        self.vertices = (
+            np.asarray(sphere.vertices, dtype=np.float32) + TARGET)
+
+    # -- declaration --------------------------------------------------------
+
+    def test_only_the_mesh_render_declares_the_fade(self):
+        """Stage 2 has no fade at all, and this is where that is decided.
+
+        `render_splat` never splices these in, so a workflow that tried to
+        set one on `rerender_splat` is refused by name rather than quietly
+        rendering without it."""
+        fade_names = {param.name for param in BACKGROUND_FADE_PARAMS}
+        self.assertTrue(fade_names.isdisjoint(
+            {param.name for param in BACKGROUND_PARAMS}))
+        self.assertTrue(fade_names.issubset(
+            {param.name for param in get_step_class("render").PARAMS}))
+        self.assertTrue(fade_names.isdisjoint(
+            {param.name for param in get_step_class("render_splat").PARAMS}))
+
+    def test_the_defaults_are_the_ones_the_drawings_were_tuned_for(self):
+        params = _r_params()
+        self.assertEqual(params["background_fade"], "smoothstep")
+        self.assertEqual(params["background_fade_margin"], 2.0)
+        self.assertEqual(params["background_fade_falloff"], 1.0)
+        # The lines go to the WALL, not to a flat patch or a smear.
+        self.assertEqual(params["background_fade_target"], "plain")
+
+    # -- building -----------------------------------------------------------
+
+    def test_the_default_params_build_a_fade(self):
+        fade = build_fade(_r_params(), self.vertices)
+        self.assertIsNotNone(fade)
+        self.assertEqual(fade.profile, "smoothstep")
+        self.assertEqual(fade.target, "plain")
+        self.assertAlmostEqual(fade.falloff, 1.0)
+
+    def test_an_empty_profile_is_the_off_switch(self):
+        self.assertIsNone(build_fade(_r_params(background_fade=""), self.vertices))
+        self.assertIsNone(build_fade(_r_params(background_fade="  "), self.vertices))
+
+    def test_a_step_that_declares_no_fade_params_gets_none(self):
+        """`render_splat`'s resolved params, which carry no `background_fade`
+        key at all — the lookup has to be a miss, not a KeyError."""
+        self.assertIsNone(build_fade(_rs_params(), self.vertices))
+
+    def test_a_fade_with_nothing_to_fit_it_to_is_refused(self):
+        with self.assertRaises(ValueError) as caught:
+            build_fade(_r_params(), None)
+        self.assertIn("vertices", str(caught.exception))
+
+    def test_the_margin_inflates_the_fitted_shell(self):
+        tight = build_fade(_r_params(background_fade_margin=1.0), self.vertices)
+        wide = build_fade(_r_params(), self.vertices)
+        np.testing.assert_allclose(
+            wide.ellipsoid.axes, 2.0 * tight.ellipsoid.axes, rtol=1e-6)
+        # The tight one is the hull, so the mesh is inside it and the default
+        # clears well beyond where the drawing's outline can reach.
+        self.assertTrue(tight.ellipsoid.contains(self.vertices).all())
+        np.testing.assert_allclose(tight.ellipsoid.axes, 0.2, rtol=0.05)
+
+    def test_a_bad_profile_is_refused_by_body2colmap(self):
+        with self.assertRaises(ValueError):
+            build_fade(_r_params(background_fade="smoothsteps"), self.vertices)
+
+    # -- through the backdrop -----------------------------------------------
+
+    def test_no_backdrop_is_no_fade_and_no_complaint(self):
+        """`background_fade` defaults ON, and the face-cap render turns the
+        ROOM off. That has to stay a one-line change, not a refusal telling
+        the workflow to turn off a second knob it never turned on."""
+        self.assertIsNone(build_background(
+            _r_params(background=""), self.cameras, self.vertices))
+
+    def test_the_backdrop_carries_the_fade(self):
+        background = build_background(_r_params(), self.cameras, self.vertices)
+        self.assertIsNotNone(background.fade)
+        background = build_background(
+            _r_params(background_fade=""), self.cameras, self.vertices)
+        self.assertIsNone(background.fade)
+
+    def test_it_clears_the_middle_of_the_frame_and_leaves_the_corners(self):
+        """The whole point, in pixels: the ruling next to the subject goes
+        and the far field — which is what carries the rotation cue — does
+        not move at all."""
+        camera = self.cameras[0]
+        faded = build_background(
+            _r_params(), self.cameras, self.vertices).render(camera)
+        plain = build_background(
+            _r_params(background_fade=""), self.cameras, self.vertices
+        ).render(camera)
+
+        difference = np.abs(faded.astype(np.int16) - plain.astype(np.int16))
+        middle = difference[28:36, 28:36]
+        self.assertTrue(np.any(middle > 0),
+                        "the fade changed nothing where the subject is")
+        for corner in (difference[:8, :8], difference[:8, -8:],
+                       difference[-8:, :8], difference[-8:, -8:]):
+            np.testing.assert_array_equal(corner, 0)
+
+    def test_a_loaded_texture_cannot_fade_to_a_plain_one(self):
+        """There is no pattern-free variant of a photograph to reveal, and
+        body2colmap refuses the pair rather than silently blurring. Worth
+        pinning because `background` takes a path and `background_fade`
+        defaults on, so the two meet without anybody asking for it."""
+        import cv2
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "room.png"
+            cv2.imwrite(str(path), np.full((32, 64, 3), 90, dtype=np.uint8))
+            with self.assertRaises(ValueError) as caught:
+                build_background(
+                    _r_params(background=str(path), background_geometry="sphere"),
+                    self.cameras, self.vertices)
+            self.assertIn("plain", str(caught.exception))
+
+
+class TestFadeStepWiring(unittest.TestCase):
+    """`render` fits the shell to the scene it is about to draw.
+
+    The one thing that can silently go wrong here is the FRAME. The
+    auto-orient branch turns the scene in place before any camera is built,
+    so the mesh the renderer draws is not the mesh that arrived on the step's
+    input. Fitting the shell to the input would put the clear zone off to one
+    side of the subject — visible only as a room that fails to pull back, on
+    a run that otherwise looks correct.
+    """
+
+    def setUp(self):
+        import trimesh
+
+        # Elongated along X, so turning it about Y is something a shell can
+        # be caught not having followed. An icosphere would fit the same
+        # ellipsoid either way and pin nothing.
+        mesh = trimesh.creation.icosphere(subdivisions=2, radius=0.5)
+        vertices = np.asarray(mesh.vertices, dtype=np.float32)
+        vertices[:, 0] *= 3.0
+        rng = np.random.default_rng(3)
+        self.mesh_output = {
+            "vertices": vertices,
+            "faces": np.asarray(mesh.faces, dtype=np.int32),
+            "cam_t": np.array([0.0, 0.0, 3.0], dtype=np.float32),
+            "keypoints_3d": (rng.normal(size=(70, 3)) * 0.3).astype(np.float32),
+            "focal_length": 1000.0,
+        }
+        self.recorder = _RecordingRenderer.install(self)
+
+    def _run(self, **params):
+        step = get_step_class("render")()
+        return step.run(
+            {"mesh_output": self.mesh_output},
+            get_step_class("render").resolve_params(
+                {"n_frames": 4, "resolution": [8, 8], **params}),
+        )
+
+    def test_the_shell_encloses_the_mesh_the_renderer_was_handed(self):
+        self._run(render_mode="mesh", override_cam_from_mesh=False,
+                  initial_rotation=90.0, background_fade_margin=1.0)
+        ellipsoid = self.recorder.background.fade.ellipsoid
+        self.assertTrue(ellipsoid.contains(self.recorder.scene.vertices).all())
+        # And not the mesh as it arrived: a quarter turn takes the long axis
+        # right out of a hull fitted after it.
+        self.assertFalse(
+            ellipsoid.contains(self.mesh_output["vertices"]).all())
+
+    def test_the_override_path_fits_the_scene_too(self):
+        """`override_cam_from_mesh` skips the auto-orient, but the step's
+        input is still not the world frame: `Scene.from_sam3d_output` is
+        where SAM-3D-Body coordinates become world ones, and it puts the mesh
+        `cam_t` away from where it arrived. So there is no path on which the
+        raw input is the right array to fit."""
+        self._run(render_mode="mesh", background_fade_margin=1.0)
+        ellipsoid = self.recorder.background.fade.ellipsoid
+        self.assertTrue(ellipsoid.contains(self.recorder.scene.vertices).all())
+        self.assertFalse(
+            ellipsoid.contains(self.mesh_output["vertices"]).all())
+
+    def test_turning_the_fade_off_leaves_the_room(self):
+        self._run(render_mode="mesh", background_fade="")
+        self.assertIsNotNone(self.recorder.background)
+        self.assertIsNone(self.recorder.background.fade)
 
 
 if __name__ == "__main__":

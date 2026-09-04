@@ -31,6 +31,17 @@ survives into a splat: `rmbg` re-derives the training matte from the denoised
 frames (`foreground_masks`, `export_masks`), so what brush fits is the subject
 cut out of the room, exactly as it was cut out of the flat grey before.
 
+**The backdrop is fed to both passes; the FADE is stage 1 only.** A room
+whose lines run right up to the drawing's outline reads to a video model as a
+hard occluding edge, and the outline it is being read off is the BARE MESH's —
+so hair and clothing get squashed back onto a naked body's silhouette. The
+subject fade (`BACKGROUND_FADE_PARAMS`, `build_fade`) clears a shell around
+the subject to leave room to grow into, and `render` declares it while
+`render_splat` does not: by stage 2 the silhouette on offer is a splat fitted
+to the DENOISED subject, already the right shape, so a clear zone there would
+spend rotation cue on nothing. The near reason is the same boundary — the
+shell is fitted to mesh vertices, and a .ply has none.
+
 **Where it must stay off**, and why the two step defaults are not the whole
 answer: a render whose frames feed `select_support_views` has to stay
 premultiplied over black, because that step divides the alpha back out to
@@ -164,6 +175,95 @@ BACKGROUND_PARAMS: Tuple[Param, ...] = (
 )
 
 
+#: The subject fade's knobs — kept OUT of `BACKGROUND_PARAMS` and spliced in
+#: by `render` alone, because the fade is a STAGE 1 control and stage 2 has
+#: no fade at all.
+#:
+#: Two reasons it cannot simply be shared. The near one is that the shell is
+#: fitted to a MESH: `Ellipsoid.fit` runs on the body's vertices, and
+#: `render_splat` has a .ply and no vertices to fit — body2colmap's own
+#: `configure_background_fade` raises `RuntimeError` on a splat scene for
+#: exactly this reason. The far one is what the fade is FOR. It exists to
+#: stop the backdrop reading as a hard occlusion boundary at the silhouette,
+#: which is a failure of the drawings that condition denoise_pass1: there the
+#: silhouette is the bare mesh's, and the model has to be free to paint hair
+#: and clothing outside it. By stage 2 that has already happened — the frames
+#: `rerender_splat` draws come off a splat FIT to the denoised subject, so
+#: its silhouette is the real one and there is nothing left to expand into.
+#: Clearing the room around it there would only throw away rotation cue.
+BACKGROUND_FADE_PARAMS: Tuple[Param, ...] = (
+    Param(
+        "background_fade", str, "smoothstep",
+        "Fade the room out in a shell around the subject, so the drawing does "
+        "not read as a hard occlusion boundary. The backdrop that carries the "
+        "rotation cue costs something at the silhouette: with grid lines "
+        "running right up to the outline, a video diffusion model takes the "
+        "outline for an occluding edge and refuses to paint past it — bulky "
+        "clothing and hair get squashed back onto the shape of the BARE MESH, "
+        "which is the one thing these frames must not pin down. Clearing a "
+        "band next to the subject keeps the cue in the far field and leaves "
+        "room to expand into. This names the profile the room comes back "
+        "over: `smoothstep` is flat at both ends, so neither the onset nor "
+        "the outer edge leaves a visible ring; `linear` leaves a slope "
+        "discontinuity, `cosine` is steeper through the middle, `step` is the "
+        "hard-edged control, and `exponential`/`gaussian`/`inverse_square` "
+        "take `background_fade_rate` and trail off instead of ending "
+        "(inverse_square's tail is a wash over the whole frame). (none) turns "
+        "the fade off. Ignored, quietly, by a render with no backdrop — "
+        "there is nothing to fade",
+        choices=("smoothstep", "linear", "cosine", "step", "exponential",
+                 "gaussian", "inverse_square", ""),
+    ),
+    Param(
+        "background_fade_margin", float, 2.0,
+        "Inflate the fitted shell by this before the fade is measured, where "
+        "1.0 is the hull that just encloses the mesh. 2.0, not body2colmap's "
+        "1.0, and the reason is the whole point of the fade: the ellipsoid is "
+        "fitted to a NAKED SAM-3D-Body mesh, and the subject the denoise is "
+        "meant to produce is a dressed person with hair — bigger than the "
+        "thing measured, in every direction. A shell that stopped at the "
+        "mesh's own hull would put the clear zone exactly where the outline "
+        "already is and leave the lines against the silhouette they were "
+        "crowding. Must be > 0",
+        minimum=0.0,
+    ),
+    Param(
+        "background_fade_falloff", float, 1.0,
+        "Width of the band the room fades back in over, as a multiple of the "
+        "subject's own radius in that direction — so 1.0 reaches full "
+        "backdrop at twice the (margin-inflated) subject extent. A multiple "
+        "rather than a pixel count on purpose: the orbit is auto-framed, so "
+        "the subject holds its size IN FRAME and a scale-free band holds its "
+        "look with it. Must be > 0; use `background_fade: step` for a "
+        "hard-edged clear zone instead of winding this down",
+        minimum=0.0,
+    ),
+    Param(
+        "background_fade_target", str, "plain",
+        "What the room fades TO. `plain` re-renders the same room with its "
+        "PATTERN suppressed — grid's walls, floor and ceiling in their own "
+        "colours and no ruling — so the lines fade out while the wall, its "
+        "shading and the room's corners stay put; it is the only one that "
+        "removes a line rather than moving it, and it needs a generated "
+        "texture (a loaded image cannot be split into pattern and shading, "
+        "and body2colmap refuses the pair outright). `color` lays down one "
+        "flat colour, the texture's mean, which reads as a patch wherever the "
+        "zone crosses a floor/wall seam. `blur` area-averages the room into "
+        "itself, which SPREADS a bright line into a grey band rather than "
+        "removing it — the fallback for a loaded texture, not the fix",
+        choices=("plain", "color", "blur"), advanced=True,
+    ),
+    Param(
+        "background_fade_rate", float, 4.0,
+        "Shape constant for the three profiles that trail off — "
+        "`exponential`, `gaussian` and `inverse_square`. Larger is tighter. "
+        "Ignored by the compact profiles, `smoothstep` included, which reach "
+        "zero at the end of the band by construction", minimum=0.0,
+        advanced=True,
+    ),
+)
+
+
 def orbit_frame(cameras: Sequence[Any]) -> Tuple[np.ndarray, float]:
     """Where a camera path looks, and how far out it sits.
 
@@ -223,13 +323,85 @@ def orbit_frame(cameras: Sequence[Any]) -> Tuple[np.ndarray, float]:
     return center.astype(np.float32), radius
 
 
-def build_background(params: Dict[str, Any], cameras: Sequence[Any]):
+def build_fade(params: Dict[str, Any], vertices: Optional[np.ndarray]):
+    """The `SubjectFade` a step's params ask for, or None for no fade.
+
+    The shell is an ellipsoid fitted to `vertices` — not to any one frame's
+    silhouette, which is the point. An ellipsoid enclosing the mesh encloses
+    its outline from EVERY viewpoint, so the clear zone cannot slip inside the
+    drawing partway round the orbit; it is one fixed object in the world that
+    the camera moves around, rather than a screen-space effect that would swim
+    from frame to frame.
+
+    Fitted on the vertices rather than on the mesh's bounding box on purpose,
+    which is body2colmap's own choice for the same reason: the ellipsoid
+    circumscribing a box has to clear the box's corners, and that pushes every
+    semi-axis out by sqrt(3) — a third again on top of whatever
+    `background_fade_margin` already asked for.
+
+    Args:
+        params: A step's resolved params, carrying `BACKGROUND_FADE_PARAMS`.
+        vertices: The subject's (N, 3) mesh vertices, in the same world frame
+            as the cameras — so after any `rotate_around_y`, not before.
+
+    Returns:
+        A `body2colmap.fade.SubjectFade`, or None when `background_fade` is
+        empty or the step declares no fade params at all.
+
+    Raises:
+        ValueError: When a fade is asked for with no vertices to fit it to, or
+            on a profile, target, margin or falloff body2colmap refuses.
+    """
+    profile = (params.get("background_fade") or "").strip()
+    if not profile:
+        return None
+
+    if vertices is None:
+        raise ValueError(
+            "background_fade needs the subject's mesh vertices to fit its "
+            "shell to, and this render has none. Only a mesh render can fade "
+            "the room around the subject — a splat has no vertices, which is "
+            "why `render_splat` does not declare these params."
+        )
+
+    from body2colmap.fade import Ellipsoid, SubjectFade
+
+    ellipsoid = Ellipsoid.fit(
+        np.asarray(vertices, dtype=np.float64).reshape(-1, 3),
+        margin=params["background_fade_margin"],
+    )
+    fade = SubjectFade(
+        ellipsoid,
+        profile=profile,
+        falloff=params["background_fade_falloff"],
+        rate=params["background_fade_rate"],
+        target=params["background_fade_target"],
+    )
+    logger.info(
+        "background fade: %s, margin %g, falloff %g, to %s; subject "
+        "semi-axes %s",
+        profile, params["background_fade_margin"],
+        params["background_fade_falloff"], params["background_fade_target"],
+        np.array2string(ellipsoid.axes, precision=3),
+    )
+    return fade
+
+
+def build_background(
+    params: Dict[str, Any],
+    cameras: Sequence[Any],
+    vertices: Optional[np.ndarray] = None,
+):
     """The `Background` a step's params ask for, or None for no backdrop.
 
     Args:
-        params: A step's resolved params, carrying `BACKGROUND_PARAMS`.
+        params: A step's resolved params, carrying `BACKGROUND_PARAMS`, and
+            `BACKGROUND_FADE_PARAMS` too if the step declares them.
         cameras: The cameras about to be rendered — the backdrop is centred
             and sized against them (see `orbit_frame`).
+        vertices: The subject's mesh vertices, for the subject fade (see
+            `build_fade`). None from a step that declares no fade params, and
+            required by one that does.
 
     Returns:
         A `body2colmap.background.Background`, or None when `background` is
@@ -238,11 +410,19 @@ def build_background(params: Dict[str, Any], cameras: Sequence[Any]):
     Raises:
         ValueError: On a texture that names neither a generator nor a path, a
             radius scale that would leave the camera outside the surface, a
-            world-unit radius smaller than the orbit it has to enclose, or a
-            `background_params` key the chosen generator does not accept.
+            world-unit radius smaller than the orbit it has to enclose, a
+            `background_params` key the chosen generator does not accept, or a
+            fade body2colmap refuses — `background_fade_target: plain` over a
+            texture loaded from a path is the one to expect, since a
+            photograph cannot be split into pattern and shading.
     """
     texture = (params["background"] or "").strip()
     if not texture:
+        # No room, so nothing to fade — and quietly, not as an error, because
+        # `background_fade` defaults ON. The renders that turn the backdrop
+        # off do it for `select_support_views` (see the module docstring) and
+        # would otherwise have to turn the fade off in a second line that says
+        # nothing a reader of the first does not already know.
         return None
 
     from body2colmap.background import Background
@@ -306,6 +486,12 @@ def build_background(params: Dict[str, Any], cameras: Sequence[Any]):
         center=center,
         radius=radius,
         rotation_deg=params["background_rotation_deg"],
+        # The clear zone around the subject, or None. Handed to the
+        # Background rather than applied afterwards because it belongs to the
+        # BACKDROP's own render, before the base layer goes over it — which
+        # is what keeps it off the subject: it can only ever lighten the room,
+        # never the drawing standing in it.
+        fade=build_fade(params, vertices),
         # Mostly unread — see `generator_params`. body2colmap checks these
         # against the generator's own signature and, on a miss, names every
         # argument it does accept, which is a better error than this project

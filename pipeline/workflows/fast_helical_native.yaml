@@ -866,6 +866,25 @@ steps:
       # none of it is fixed: `floor_color` and `ceiling_color` for the two
       # caps, `n_per_face` and `line_width` for the ruling's spacing and
       # thickness.
+      #
+      # THE ROOM ALSO PULLS BACK AROUND THE SUBJECT, and only here. Left on
+      # the step's defaults — `background_fade: smoothstep`, margin 2,
+      # falloff 1 — because this is the render those defaults were chosen
+      # for. The lines fade to the wall (`background_fade_target: plain`)
+      # rather than to a flat patch or a blur, so what disappears next to the
+      # drawing is the RULING, while the wall, its shading and the corners
+      # stay where they were.
+      #
+      # It is here because of what these frames are: a bare-mesh outline. A
+      # grid running up to that outline reads to the model as an occluding
+      # edge, so it will not paint past it and hair and bulky clothing get
+      # squashed back onto the silhouette of a naked body — which is the one
+      # thing the drawing must not decide. The margin of 2 is that argument
+      # in a number: the shell is fitted to the naked mesh, and the subject
+      # the denoise should produce is bigger than the thing measured.
+      #
+      # Unlike the two lines above it, this one is NOT repeated on
+      # rerender_splat, and deliberately — see the note there.
       background: grid
       background_base_color: [0.5, 0.5, 0.5]
       # Every frame whose view of the head is within this of the
@@ -1842,6 +1861,15 @@ steps:
       # un-composites `cull_color` back out and re-composites over the
       # backdrop; exact wherever the gate culled, which is everywhere the
       # backdrop is actually visible.
+      #
+      # THE FADE IS NOT REPEATED, and this is the one place the two rooms are
+      # allowed to differ. `render_splat` does not declare the fade params at
+      # all, so there is nothing to turn off here. Two reasons, and both hold:
+      # the shell is an ellipsoid fitted to MESH VERTICES and a .ply has none;
+      # and the fade's whole job was to stop the room pinning hair and
+      # clothing to a bare-mesh outline, which is spent by now — this render's
+      # silhouette comes off a splat fitted to the DENOISED subject, so it is
+      # already the right shape and a clear zone would only cost rotation cue.
       background: grid
       background_base_color: [0.5, 0.5, 0.5]
     outputs:

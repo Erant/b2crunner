@@ -829,19 +829,31 @@ COPY --from=python-builder /opt/vendor /opt/vendor
 # an older commit is not a degraded run, it is an ImportError on the first
 # render.
 #
-# d084702 ("Draw the skeleton the way DWPose draws one", 2026-09-01) adds
+# d66b8fa ("Document the plain-target contract and the flat generator form",
+# 2026-09-04) adds `body2colmap.fade` and the `fade=` seam on Background,
+# which steps/backdrop.py's `build_fade` clears the room around the subject
+# with. `background_fade` defaults ON for the `render` step, so an older
+# commit is a TypeError out of `Background.create` on the first frame of
+# stage 1.
+#
+# 637a6a6 ("Draw the skeleton the way DWPose draws one") adds
 # `body2colmap.skeleton`'s get_bone_colors_dwpose / get_skeleton_bones_dwpose
 # and the `style=` seam on Renderer.render_skeleton. steps/render.py's
 # `skeleton_style` defaults to "dwpose", so an older commit is a TypeError on
-# the first skeleton render rather than a degraded one. It lives on the
-# `dwpose-skeleton-style` branch, not main — pip resolves the SHA either way,
-# but do not rebase that branch while this pin points at it.
+# the first skeleton render rather than a degraded one.
+#
+# af48029 is where those two stopped being a choice. They were branches that
+# both forked off 958fd3b, neither containing the other, and this image needs
+# BOTH — the skeleton overlay draws in DWPose's convention on the same render
+# that fades the room. body2colmap landed them together on MAIN (the DWPose
+# work rebased on top of the fade, so d084702 became 637a6a6), which is why
+# this pin finally names a commit on main rather than a topic branch.
 #
 # Failing the build is deliberate: an image built against an older commit
 # would install cleanly and then raise on the first render_splat of a real
-# run, an hour into a pod booking. The last three asserts below are what stop it.
+# run, an hour into a pod booking. The last four asserts below are what stop it.
 RUN /opt/venv_base/bin/pip install --force-reinstall --no-deps \
-        'body2colmap @ git+https://github.com/Erant/body2colmap.git@d084702e007a3ee4a01f3955ee6f113964be1fd7' \
+        'body2colmap @ git+https://github.com/Erant/body2colmap.git@af480294326c8e8ad4841f855a9dd838f7b76a42' \
     && /opt/venv_base/bin/python -c "\
 import inspect; \
 import body2colmap.face as f; \
@@ -858,6 +870,8 @@ assert 'background' in inspect.signature(Renderer.__init__).parameters, \
     'bump the body2colmap pin: steps/backdrop.py needs Renderer(background=...)'; \
 assert 'style' in inspect.signature(Renderer.render_skeleton).parameters, \
     'bump the body2colmap pin: steps/render.py needs skeleton style=dwpose'; \
+assert 'fade' in inspect.signature(Background.create).parameters, \
+    'bump the body2colmap pin: steps/backdrop.py needs Background.create(fade=...)'; \
 print('body2colmap eye_style default:', f.DEFAULT_EYE_STYLE)"
 
 # NOT /workspace/b2c_runner, which is where this used to live. RunPod's
