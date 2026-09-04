@@ -13,6 +13,28 @@
 # and reads the .ply optionally, so the branch being off leaves it with
 # nothing to composite rather than nothing to resolve.
 #
+# WHAT CHANGED (2026-09-04, later still): **the refined face cap is hung on
+# the photograph's camera, moved by the refinement's delta** — not on the
+# refined anchor camera itself. `face_splat_refined` takes
+# `given_camera: scene.image_warp.camera?` (the anchor as the path built it,
+# look_at-turned 0.83 deg onto the orbit target on cyber2) and
+# `face_pointmap_splat` composes refined o given^-1 onto SAM-3D-Body's
+# camera. Run 5e2817 showed the cameras right after the common-mode fix and
+# the cap still 17 px / 28 mm above the frames' face: the photograph's rays
+# were being turned by the anchor's look_at tilt. See the step's docstring,
+# "The dataset's anchor camera is NOT the photograph's camera".
+#
+# WHAT CHANGED (2026-09-04, later): **the result .zip carries a `debug/`
+# directory.** `refine_cameras` and `refine_cameras_final` write the poses
+# they were given and the poses they published as two COLMAP models plus
+# stats.json; `face_splat` and `face_splat_refined` write their stats and
+# depth/mask visualisations; the face .ply files ride along too
+# (webui.DEBUG_SUBDIRS). All via the steps' `debug_dir` params pointed under
+# `${globals.output_root}/debug/`, which `build_result_zip` packages beside
+# the deliverables. The face-cap offset of run 5e2817 (2026-09-04) had to
+# be triangulated back out of the exported renders because the pod, and
+# with it face_refined.ply and the refined cameras, was gone.
+#
 # WHAT CHANGED (2026-09-04): **the helical anchor re-injection actually
 # runs.** The shared tail's `rerender_splat` now anchors its helix
 # (`override_cam_from_mesh: ${globals.anchor_helix}`) and publishes
@@ -756,6 +778,7 @@ steps:
       mesh_output: scene
     params:
       filepath: ${globals.output_root}/face/face.ply
+      debug_dir: ${globals.output_root}/debug/face_splat
     outputs:
       splat_path: scene.face_splat_path
       splat_stats: scene.face_splat_stats
@@ -1228,7 +1251,9 @@ steps:
       # Which frame is the photograph, so the step can republish where the
       # refinement put it. Falls back to frame 0, the circular anchor.
       anchor_frame_index: dataset.extras.anchor_frame_index?
-    params: {}
+    params:
+      # given/ + refined/ COLMAP models and stats.json, into the result .zip.
+      debug_dir: ${globals.output_root}/debug/refine_cameras
     outputs:
       cameras: dataset.cameras
       stats: scene.camera_refinement
@@ -1304,8 +1329,18 @@ steps:
       # under the bootstrap's splat. The step falls back to frame 0 without
       # it, which is where a circular path's anchor sits anyway.
       anchor_frame_index: dataset.extras.anchor_frame_index?
+      # That same anchor camera BEFORE the refinement — the camera the
+      # photograph was warped onto. The step hangs the photograph's rays on
+      # the motion between this and dataset.cameras[anchor], not on the
+      # refined camera itself: the path's anchor is look_at-turned onto the
+      # orbit target (0.83 deg on cyber2), and a shell hung on that rotation
+      # turns with it — 28 mm at the face, measured on run 5e2817. Optional
+      # because an unanchored bootstrap publishes no image_warp; without it
+      # the refined camera is taken to be the photograph's, and logged so.
+      given_camera: scene.image_warp.camera?
     params:
       filepath: ${globals.output_root}/face/face_refined.ply
+      debug_dir: ${globals.output_root}/debug/face_splat_refined
     outputs:
       splat_path: scene.face_splat_path
       splat_stats: scene.face_splat_stats
@@ -2182,7 +2217,8 @@ steps:
       image_names: dataset.image_names
       images: dataset.images
       masks: dataset.masks
-    params: {}
+    params:
+      debug_dir: ${globals.output_root}/debug/refine_cameras_final
     outputs:
       cameras: dataset.cameras
       stats: scene.camera_refinement_final

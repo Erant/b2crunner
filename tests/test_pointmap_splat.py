@@ -383,7 +383,8 @@ class TestStepRun(unittest.TestCase):
     """The whole step, with only the 1B forward pass stubbed out."""
 
     def _run(self, tmp: str, scale_the_pointmap_by: float = 2.5,
-             pointmap_camera=(FOCAL, CX, CY), camera=None, **params):
+             pointmap_camera=(FOCAL, CX, CY), camera=None, given_camera=None,
+             **params):
         z, normals, mask = _sphere()
         # The "mesh": SAM-3D-Body vertices sampled off the true surface,
         # with cam_t already folded out so vertices + cam_t is the truth.
@@ -394,7 +395,11 @@ class TestStepRun(unittest.TestCase):
         cam_t = np.array([0.02, -0.03, 0.05])
         surface = points[mask][::29]
         if camera is not None:
-            rotation, position = ps.camera_pose(camera)
+            # With a given camera too, the truth sits where the PHOTOGRAPH's
+            # camera ends up after the refinement's delta — not where the
+            # dataset camera is; that is the whole point of the input.
+            rotation, position = (ps.refined_photo_pose(camera, given_camera)
+                                  if given_camera is not None else ps.camera_pose(camera))
             surface = ((surface * ps.FLIP) @ rotation.T + position) * ps.FLIP
         mesh_output = {
             "vertices": surface - cam_t,
@@ -425,7 +430,28 @@ class TestStepRun(unittest.TestCase):
         }
         if camera is not None:
             inputs.update({"cameras": [camera], "anchor_frame_index": 0})
+        if given_camera is not None:
+            inputs["given_camera"] = given_camera
         return step.run(inputs, ps.PointmapSplatStep.resolve_params(merged)), (z, mask)
+
+    def test_debug_dir_gets_the_stats_beside_the_pictures(self):
+        """`stats.json` next to the mask/depth visualisations: the numbers a
+        placement question is answered from — which camera the shell was
+        built through, at what depth — as the record, not the log's summary
+        of it. They ride into the result .zip under debug/."""
+        import json
+
+        with tempfile.TemporaryDirectory() as tmp:
+            debug = Path(tmp) / "debug" / "face_splat"
+            result, _ = self._run(tmp, debug_dir=str(debug))
+
+            for name in ("mask.png", "depth.png", "normal.png", "stats.json"):
+                self.assertTrue((debug / name).is_file(), name)
+            with open(debug / "stats.json", encoding="utf-8") as handle:
+                dumped = json.load(handle)
+        self.assertEqual(dumped["n_splats"], result["splat_stats"]["n_splats"])
+        self.assertEqual(dumped["source_camera"]["frame_index"], None)
+        self.assertIn("depth_m", dumped["placement"])
 
     def test_run_puts_every_gaussian_back_on_its_own_pixel(self):
         """The gate: the shell must reproject onto the photo it came from,
@@ -486,6 +512,112 @@ class TestStepRun(unittest.TestCase):
             self.assertEqual(stats["source_camera"]["frame_index"], 0)
             np.testing.assert_allclose(stats["source_camera"]["position"], position, atol=1e-6)
 
+    @staticmethod
+    def _anchor_pair(tilt_target, delta_deg, delta_mm):
+        """A look_at-turned anchor at the origin, and it after a refinement.
+
+        `given` is what render's override mode builds: SAM-3D-Body's
+        position, turned onto an orbit target off the optical axis.
+        `refined` is that camera moved by a small rigid delta, the way a
+        bundle adjustment leaves it.
+        """
+        from body2colmap import coordinates
+        from body2colmap.camera import Camera
+
+        given = Camera(focal_length=(FOCAL, FOCAL), image_size=(WIDTH, HEIGHT),
+                       principal_point=(CX, CY), position=np.zeros(3))
+        given.look_at(np.asarray(tilt_target, np.float32), coordinates.WorldCoordinates.UP_AXIS)
+        angle = np.radians(delta_deg)
+        axis = np.array([0.6, 0.8, 0.0])
+        k = np.array([[0, -axis[2], axis[1]], [axis[2], 0, -axis[0]], [-axis[1], axis[0], 0]])
+        delta_r = np.eye(3) + np.sin(angle) * k + (1 - np.cos(angle)) * (k @ k)
+        r_g, p_g = ps.camera_pose(given)
+        refined = Camera(focal_length=(FOCAL, FOCAL), image_size=(WIDTH, HEIGHT),
+                         principal_point=(CX, CY),
+                         position=(p_g + np.array(delta_mm) / 1000.0).astype(np.float32))
+        refined.rotation = (delta_r @ r_g).astype(np.float32)
+        return given, refined
+
+    def test_refined_photo_pose_is_the_delta_applied_to_the_identity(self):
+        """T = refined o given^-1 on the pose the photograph was taken from:
+        when the given anchor is at the origin, the result's position is the
+        refined one and its rotation is the delta alone — the look_at tilt
+        drops out."""
+        given, refined = self._anchor_pair([0.03, 0.1, -2.1], 1.3, [-12.0, 16.0, -24.0])
+        rotation, position = ps.refined_photo_pose(refined, given)
+
+        np.testing.assert_allclose(position, ps.camera_pose(refined)[1], atol=1e-6)
+        self.assertAlmostEqual(ps.rotation_angle_deg(rotation), 1.3, places=3)
+        # The tilt is real (it is what the fix subtracts)...
+        self.assertGreater(ps.rotation_angle_deg(ps.camera_pose(given)[0]), 2.0)
+        # ...and an unturned given anchor makes the pose the refined camera.
+        from body2colmap.camera import Camera
+        plain = Camera(focal_length=(FOCAL, FOCAL), image_size=(WIDTH, HEIGHT),
+                       principal_point=(CX, CY), position=np.zeros(3))
+        rotation, position = ps.refined_photo_pose(refined, plain)
+        np.testing.assert_allclose(rotation, ps.camera_pose(refined)[0], atol=1e-6)
+
+    def test_run_with_the_given_anchor_ignores_its_lookat_tilt(self):
+        """The 5e2817 bug (2026-09-04). The path's anchor is look_at-turned
+        onto an orbit target off the photograph's axis; hung on that camera
+        the shell turns with it — 0.83 deg, 28 mm at the face, in the run.
+        With the given anchor handed in, the Gaussians land on the
+        photograph's pixels through the photograph's camera moved by the
+        refinement's delta, and NOT through the refined dataset camera."""
+        given, refined = self._anchor_pair([0.03, 0.1, -2.1], 0.6, [-12.0, 16.0, -24.0])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            result, (z_true, mask) = self._run(tmp, camera=refined, given_camera=given)
+
+            _, _, data = _read_ply(Path(result["splat_path"]))
+            means_world = data[:, 0:3].astype(np.float64)
+            rotation, position = ps.refined_photo_pose(refined, given)
+            cam = ((means_world - position) @ rotation) * ps.FLIP
+            u = FOCAL * cam[:, 0] / cam[:, 2] + CX
+            v = FOCAL * cam[:, 1] / cam[:, 2] + CY
+            self.assertLess(float(np.abs(u - np.round(u)).max()), 1e-3)
+            self.assertLess(float(np.abs(v - np.round(v)).max()), 1e-3)
+            self.assertTrue(mask[np.round(v).astype(int), np.round(u).astype(int)].all())
+
+            # Through the refined dataset camera itself the same pixels are
+            # off by the tilt — the error the run measured.
+            r_d, p_d = ps.camera_pose(refined)
+            cam_d = ((means_world - p_d) @ r_d) * ps.FLIP
+            u_d = FOCAL * cam_d[:, 0] / cam_d[:, 2] + CX
+            v_d = FOCAL * cam_d[:, 1] / cam_d[:, 2] + CY
+            tilt_px = np.radians(ps.rotation_angle_deg(ps.camera_pose(given)[0])) * FOCAL
+            self.assertGreater(float(np.median(np.hypot(u_d - u, v_d - v))), 0.5 * tilt_px)
+
+            # The depth is still the mesh's, read through the photograph's pose.
+            self.assertAlmostEqual(result["splat_stats"]["placement"]["depth_m"],
+                                   float(np.median(z_true[mask])), delta=0.03)
+            source = result["splat_stats"]["source_camera"]
+            self.assertAlmostEqual(source["refinement_delta_deg"], 0.6, places=2)
+            self.assertGreater(source["given_lookat_tilt_deg"], 2.0)
+            np.testing.assert_allclose(source["position"], position, atol=1e-6)
+
+    def test_run_with_an_unturned_given_anchor_is_the_plain_posed_route(self):
+        """Regression guard for the `cameras`-only route: a given anchor that
+        is the photograph's own camera changes nothing."""
+        from body2colmap import coordinates
+        from body2colmap.camera import Camera
+
+        target = np.array([0.4, -1.1, -2.0])
+        camera = Camera(focal_length=(FOCAL, FOCAL), image_size=(WIDTH, HEIGHT),
+                        principal_point=(CX, CY),
+                        position=target + coordinates.spherical_to_cartesian(2.2, 37.0, 9.0))
+        camera.look_at(target, coordinates.WorldCoordinates.UP_AXIS)
+        plain = Camera(focal_length=(FOCAL, FOCAL), image_size=(WIDTH, HEIGHT),
+                       principal_point=(CX, CY), position=np.zeros(3))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with_given, _ = self._run(tmp, camera=camera, given_camera=plain)
+            _, _, a = _read_ply(Path(with_given["splat_path"]))
+        with tempfile.TemporaryDirectory() as tmp:
+            without, _ = self._run(tmp, camera=camera)
+            _, _, b = _read_ply(Path(without["splat_path"]))
+        np.testing.assert_allclose(a[:, 0:3], b[:, 0:3], atol=1e-5)
+
     def test_run_refuses_an_anchor_index_off_the_path(self):
         from body2colmap.camera import Camera
 
@@ -494,8 +626,12 @@ class TestStepRun(unittest.TestCase):
         step = ps.PointmapSplatStep()
         with self.assertRaises(ValueError):
             step._source_camera({"cameras": [camera], "anchor_frame_index": 3}, "t")
-        self.assertEqual(step._source_camera({"cameras": []}, "t"), (None, None))
-        self.assertEqual(step._source_camera({}, "t"), (None, None))
+        self.assertEqual(step._source_camera({"cameras": []}, "t"), (None, None, None))
+        # A given camera on its own is nothing to hang rays on.
+        self.assertEqual(step._source_camera({"given_camera": camera}, "t"), (None, None, None))
+        self.assertIs(step._source_camera({"cameras": [camera], "given_camera": camera},
+                                          "t")[2], camera)
+        self.assertEqual(step._source_camera({}, "t"), (None, None, None))
         self.assertIs(step._source_camera({"cameras": [camera]}, "t")[0], camera)
 
     def test_run_scales_the_shell_onto_the_mesh(self):

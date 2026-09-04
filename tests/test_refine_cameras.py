@@ -418,5 +418,113 @@ class TestRunDrivesRefine(unittest.TestCase):
                                    atol=1e-6)
 
 
+class TestTheDebugDump(unittest.TestCase):
+    """`debug_dir`: the given and the published poses as two COLMAP models
+    beside a stats.json, on BOTH exits of `_refine`. A camera question
+    asked after the pod is gone is answered from these — run 5e2817's
+    face-cap offset (2026-09-04) had to be reconstructed from the exported
+    renders instead, because the refined cameras had died with the pod.
+    """
+
+    def _run(self, step, debug_dir):
+        import tempfile
+        from pathlib import Path
+
+        given = _orbit()
+        names = [f"frame_{i:05d}.png" for i in range(len(given))]
+        images = [np.zeros((8, 8, 3), dtype=np.uint8)] * len(given)
+        masks = [np.full((8, 8), 255, dtype=np.uint8)] * len(given)
+        with tempfile.TemporaryDirectory() as tmp:
+            params = RefineCamerasStep.resolve_params(
+                {"work_dir": str(Path(tmp) / "scratch"), "debug_dir": str(debug_dir)})
+            return given, step.run(
+                {"cameras": given, "image_names": names, "images": images,
+                 "masks": masks, "anchor_frame_index": 5},
+                params)
+
+    @staticmethod
+    def _positions(images_txt):
+        """Camera centres out of a COLMAP images.txt, in file order."""
+        from pipeline.steps.refine_cameras import _read_images_txt
+
+        poses = _read_images_txt(images_txt)
+        return [poses[name] for name in sorted(poses)]
+
+    def test_an_accepted_solve_writes_given_refined_and_stats(self):
+        import json
+        import tempfile
+        from pathlib import Path
+
+        refined = _transform(_orbit(), 1.19, 5.0, [0.1, 0.1, 0.1])
+
+        class Solving(RefineCamerasStep):
+            def _extract(self, *a, **k):
+                pass
+
+            def _match(self, *a, **k):
+                pass
+
+            def _triangulate_and_adjust(self, colmap, work, images_dir, params, label):
+                return work, 0.42
+
+            @staticmethod
+            def _read_poses(images_txt, image_names, cameras, label):
+                return refined
+
+        with tempfile.TemporaryDirectory() as tmp:
+            debug = Path(tmp) / "debug" / "refine_cameras"
+            given, result = self._run(Solving(), debug)
+
+            for model in ("given", "refined"):
+                for name in ("cameras.txt", "images.txt"):
+                    self.assertTrue((debug / model / name).is_file(), f"{model}/{name}")
+            self.assertEqual(len(self._positions(debug / "given" / "images.txt")),
+                             len(given))
+            with open(debug / "stats.json", encoding="utf-8") as handle:
+                dumped = json.load(handle)
+        self.assertTrue(dumped["stats"]["accepted"])
+        self.assertAlmostEqual(dumped["stats"]["reprojection_px"], 0.42)
+        np.testing.assert_allclose(dumped["anchor_position"], result["anchor_position"])
+
+    def test_a_refused_solve_records_the_refusal_and_the_given_poses_twice(self):
+        import json
+        import tempfile
+        from pathlib import Path
+
+        from pipeline.proc import ProcessFailed
+
+        class Failing(RefineCamerasStep):
+            def _extract(self, *a, **k):
+                raise ProcessFailed("colmap exited 1")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            debug = Path(tmp) / "refine_cameras"
+            self._run(Failing(), debug)
+            self.assertEqual((debug / "given" / "images.txt").read_text(),
+                             (debug / "refined" / "images.txt").read_text())
+            with open(debug / "stats.json", encoding="utf-8") as handle:
+                dumped = json.load(handle)
+        self.assertFalse(dumped["stats"]["accepted"])
+        self.assertIn("COLMAP failed", dumped["stats"]["failure"])
+
+    def test_a_stale_dump_is_replaced_not_merged(self):
+        import tempfile
+        from pathlib import Path
+
+        from pipeline.proc import ProcessFailed
+
+        class Failing(RefineCamerasStep):
+            def _extract(self, *a, **k):
+                raise ProcessFailed("colmap exited 1")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            debug = Path(tmp) / "refine_cameras"
+            debug.mkdir()
+            (debug / "leftover.txt").write_text("from an earlier run")
+            self._run(Failing(), debug)
+            self.assertFalse((debug / "leftover.txt").exists())
+            self.assertTrue((debug / "stats.json").is_file())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -879,9 +879,15 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   came from the mesh, which stays put and which the surrounding frames'
   face agrees with to a centimetre. So the workflows now run
   `face_pointmap_splat` a second time after the refinement
-  (`face_splat_refined`, `cameras: dataset.cameras`): the photograph's
-  pixels on the refined anchor's rays, depth re-taken from the mesh through
-  that camera. `render_face_support_views` and `face_support_views` follow
+  (`face_splat_refined`, `cameras: dataset.cameras` + `given_camera:
+  scene.image_warp.camera?`): the photograph's pixels on the photograph's
+  camera moved by the anchor's refinement delta (refined o given^-1 on
+  the identity pose), depth re-taken from the mesh through that pose.
+  Not on the refined dataset camera itself: the path's anchor is
+  `look_at`-turned onto the orbit target (0.83 deg on cyber2), and a
+  shell hung on that rotation turns with it — 28 mm at the face,
+  measured on run 5e2817 (2026-09-04) after the cameras themselves were
+  right. `render_face_support_views` and `face_support_views` follow
   it there, and `render_splat`'s cap aims along the live anchor camera
   (`dataset.cameras[anchor_frame_index]`) rather than the recorded
   `anchor_position`; `refine_cameras` now republishes that record from the

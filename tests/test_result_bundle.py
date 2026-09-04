@@ -427,5 +427,75 @@ class TestSettingWidgets(unittest.TestCase):
         self.assertEqual(param.title, param.name)
 
 
+class TestTheDebugDirectoryRidesAlong(_BundleCase):
+    """`debug/` holds what a misplaced face or a drifted camera is diagnosed
+    from — the face splat .ply files and refine_cameras' given/refined
+    models — and it rides along the way `log.txt` does: with an archive,
+    never instead of one.
+    """
+
+    def _debug_files(self, run: Path) -> None:
+        _touch(run / "face" / "face.ply", 2048)
+        _touch(run / "face" / "face_refined.ply", 2048)
+        _touch(run / "debug" / "refine_cameras" / "given" / "images.txt")
+        _touch(run / "debug" / "refine_cameras" / "refined" / "images.txt")
+        _touch(run / "debug" / "refine_cameras" / "stats.json")
+        _touch(run / "debug" / "face_splat_refined" / "stats.json")
+
+    def test_face_splats_and_debug_dumps_land_under_debug(self):
+        run = _run_dir(self.root, colmap=True, ply=True)
+        self._debug_files(run)
+
+        names = self._names(webui.build_result_zip(run))
+
+        for expected in (
+            "debug/face/face.ply",
+            "debug/face/face_refined.ply",
+            "debug/refine_cameras/given/images.txt",
+            "debug/refine_cameras/refined/images.txt",
+            "debug/refine_cameras/stats.json",
+            "debug/face_splat_refined/stats.json",
+        ):
+            self.assertIn(expected, names)
+        # The deliverables are untouched by it, and nothing else leaked in.
+        self.assertIn("ply/scene.ply", names)
+        self.assertNotIn("face/face.ply", names)
+        self.assertFalse([n for n in names if n.startswith("brush/")])
+
+    def test_the_shell_workflows_face_splat_is_carried_too(self):
+        run = _run_dir(self.root, colmap=True, ply=False)
+        _touch(run / "shell" / "face.ply", 2048)
+
+        self.assertIn("debug/shell/face.ply", self._names(webui.build_result_zip(run)))
+
+    def test_debug_alone_is_not_a_deliverable(self):
+        run = _run_dir(self.root, colmap=False, ply=False)
+        self._debug_files(run)
+
+        self.assertIsNone(webui.build_result_zip(run))
+        self.assertTrue(webui.debug_dirs(run))
+
+    def test_an_empty_debug_directory_is_not_offered(self):
+        run = _run_dir(self.root, colmap=True, ply=True)
+        (run / "debug" / "refine_cameras").mkdir(parents=True)
+
+        self.assertEqual(webui.debug_dirs(run), {})
+        self.assertFalse([n for n in self._names(webui.build_result_zip(run))
+                          if n.startswith("debug/")])
+
+    def test_text_members_are_deflated_and_binaries_stored(self):
+        run = _run_dir(self.root, colmap=True, ply=True)
+        self._debug_files(run)
+
+        with zipfile.ZipFile(webui.build_result_zip(run)) as bundle:
+            kinds = {info.filename: info.compress_type for info in bundle.infolist()}
+        self.assertEqual(kinds["debug/refine_cameras/stats.json"], zipfile.ZIP_DEFLATED)
+        self.assertEqual(kinds["debug/face/face.ply"], zipfile.ZIP_STORED)
+        self.assertEqual(kinds["ply/scene.ply"], zipfile.ZIP_STORED)
+
+    def test_no_run_at_all(self):
+        self.assertEqual(webui.debug_dirs(None), {})
+
+
 if __name__ == "__main__":
     unittest.main()

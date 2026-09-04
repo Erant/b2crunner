@@ -96,8 +96,17 @@ does not move.
 
 So the splat is **rebuilt**: `face_splat_refined` runs `face_pointmap_splat`
 again after `refine_cameras`, from the same crop, matte and normals, with
-`cameras: dataset.cameras` — the photograph's pixels on the refined anchor's
-rays, the depth re-taken from the mesh through that camera. The cap render
+`cameras: dataset.cameras` and `given_camera: scene.image_warp.camera?` —
+the photograph's pixels on the photograph's camera moved by the anchor's
+refinement delta (T = refined ∘ given⁻¹ applied to the identity pose), the
+depth re-taken from the mesh through that pose. Not the refined camera's
+own rays: the path's anchor camera is `look_at`-turned onto the orbit
+target (the mesh bbox centre, 31 mm off the photograph's axis on cyber2 →
+0.83 deg), and the photograph's rays hung on that rotation turn with it.
+Run 5e2817 (2026-09-04, the first run after trap 4 was fixed) had the
+cameras right and the cap still 17 px / 28 mm above the frames' face for
+exactly that reason — the same size as the trap-4 pitch in 9cc643, which
+is why the two were mistaken for one. The cap render
 and its selection follow it there, and `render_splat` aims the cap along
 the live anchor camera (`dataset.cameras[anchor_frame_index]`) rather than
 the `anchor_position` the render recorded. That record is kept truthful

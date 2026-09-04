@@ -554,6 +554,36 @@ def result_dirs(run_dir: Optional[Path], workflow: str = "") -> Dict[str, Path]:
     return found
 
 
+# Run-directory subdirectories that ride into the archive under `debug/`,
+# keyed by the name they take there. `debug/` is where the workflows point
+# every step's `debug_dir` (refine_cameras' given-vs-refined camera dumps,
+# the face splat's stats and depth visualisations); `face/` and `shell/`
+# are where the two workflows write the face splat .ply files, the one
+# artefact a face-placement question cannot be answered without. None of
+# these is a deliverable, so they are carried beside `result_dirs`'
+# rather than declared in a workflow's `outputs:` block, and none of them
+# is large: a face splat is ~10k Gaussians.
+DEBUG_SUBDIRS: Dict[str, str] = {"debug": "debug", "face": "debug/face", "shell": "debug/shell"}
+_DEBUG_TEXT_SUFFIXES = {".txt", ".json", ".log", ".csv"}
+
+
+def debug_dirs(run_dir: Optional[Path]) -> Dict[str, Path]:
+    """The debug subdirectories this run produced: {archive name -> path}.
+
+    The same shape as `result_dirs`, and the same rule about emptiness — a
+    directory a step created and then failed to fill is not offered.
+    """
+    if not run_dir:
+        return {}
+    root = Path(run_dir)
+    found = {}
+    for name, arcname in DEBUG_SUBDIRS.items():
+        candidate = root / name
+        if candidate.is_dir() and any(p.is_file() for p in candidate.rglob("*")):
+            found[arcname] = candidate
+    return found
+
+
 def run_log_path(run_dir: Optional[Path], log_path: Optional[Path] = None) -> Optional[Path]:
     """The log file that produced `run_dir`, if it is still on the volume.
 
@@ -592,6 +622,14 @@ def build_result_zip(
     lives under B2C_LOG_DIR — a different directory on the pod, and one
     that dies with the pod, so by the time the .zip is being looked at the
     log is usually already unreachable.
+
+    So does `debug/` — see `debug_dirs`. The face splats and the camera
+    dumps in there are small, and they are exactly what a misplaced face
+    was diagnosed from on 2026-09-04, when the pod that held them had
+    already been released and the diagnosis had to be triangulated back
+    out of the exported renders instead. Neither the log nor `debug/`
+    makes an archive on its own: a run that produced no deliverable has
+    nothing to download.
     """
     directories = result_dirs(run_dir, workflow)
     if not directories:
@@ -606,6 +644,15 @@ def build_result_zip(
             for path in sorted(directory.rglob("*")):
                 if path.is_file():
                     bundle.write(path, arcname=str(Path(name) / path.relative_to(directory)))
+        for name, directory in sorted(debug_dirs(run_dir).items()):
+            for path in sorted(directory.rglob("*")):
+                if path.is_file():
+                    # Text (COLMAP models, stats) deflates ~10x; the .ply
+                    # and .png members are the same story as the deliverables.
+                    text = path.suffix in _DEBUG_TEXT_SUFFIXES
+                    bundle.write(
+                        path, arcname=str(Path(name) / path.relative_to(directory)),
+                        compress_type=zipfile.ZIP_DEFLATED if text else zipfile.ZIP_STORED)
         log = run_log_path(run_dir, log_path)
         if log:
             # DEFLATE for this member alone: a log is text, it shrinks by

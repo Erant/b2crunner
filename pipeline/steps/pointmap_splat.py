@@ -1153,6 +1153,27 @@ def _write_debug(directory: Path, image: np.ndarray, mask: np.ndarray,
     cv2.imwrite(str(directory / "source.png"), image)
 
 
+def _write_stats(path: Path, stats: Dict[str, Any]) -> None:
+    """The step's `splat_stats` as JSON, numpy folded to plain Python.
+
+    Beside the images because a placement question is answered from the
+    numbers — `source_camera`, `placement.depth_m`, `depth_alignment` —
+    and the log prints a summary of them, not the record.
+    """
+    import json
+
+    def jsonable(value: Any) -> Any:
+        if isinstance(value, np.ndarray):
+            return value.tolist()
+        if isinstance(value, np.generic):
+            return value.item()
+        raise TypeError(f"{type(value).__name__} is not JSON serialisable")
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(stats, handle, indent=2, default=jsonable)
+
+
 # -- a Camera, and the two routes between it and the pointmap frame ---------
 def camera_pose(camera: Any) -> Tuple[np.ndarray, np.ndarray]:
     """`(R_c2w, position)` in float64, with the rotation hygiene.
@@ -1197,8 +1218,42 @@ def vertices_in_camera(mesh_world: np.ndarray, camera: Any) -> np.ndarray:
     nonsense depth scale — see tests/test_elevation_views.py, which checks
     a mirrored mesh is caught by `silhouette.height_ratio`.
     """
-    rotation, position = camera_pose(camera)
+    return vertices_in_pose(mesh_world, camera_pose(camera))
+
+
+def vertices_in_pose(mesh_world: np.ndarray,
+                     pose: Tuple[np.ndarray, np.ndarray]) -> np.ndarray:
+    """`vertices_in_camera` for a bare `(R_c2w, position)` pair."""
+    rotation, position = pose
     return ((mesh_world - position) @ rotation) * FLIP     # (R.T @ x).T == x @ R
+
+
+def refined_photo_pose(refined: Any, given: Any) -> Tuple[np.ndarray, np.ndarray]:
+    """The photograph's camera, moved the way the refinement moved the anchor.
+
+    `given` is the anchor camera as the path built it (SAM-3D-Body's
+    position, `look_at`-turned onto the orbit target); `refined` is the same
+    camera after `refine_cameras`. The rigid motion between them, in world
+    coordinates, is T = refined o given^-1; applied to the identity pose the
+    photograph was actually taken from it gives (R_T, p_T) with
+
+        R_T = R_f @ R_g.T
+        p_T = p_f - R_T @ p_g          (= p_f when the given anchor is the origin)
+
+    That is what the photograph's rays hang on — not `refined` itself,
+    which carries the path's `look_at` tilt on top (see the class
+    docstring, "The dataset's anchor camera is NOT the photograph's").
+    """
+    r_f, p_f = camera_pose(refined)
+    r_g, p_g = camera_pose(given)
+    rotation = r_f @ r_g.T
+    return rotation, p_f - rotation @ p_g
+
+
+def rotation_angle_deg(rotation: np.ndarray) -> float:
+    """The angle of a rotation matrix, in degrees."""
+    cosine = (float(np.trace(rotation)) - 1.0) / 2.0
+    return float(np.degrees(np.arccos(np.clip(cosine, -1.0, 1.0))))
 
 
 # ---------------------------------------------------------------------------
@@ -1229,7 +1284,11 @@ class PointmapSplatStep(Step):
               "cameras": Optional[List[Camera]], the dataset's poses, when the
                                                  photograph's camera is one of
                                                  them rather than the origin
-              "anchor_frame_index": Optional[int]} which one; default 0
+              "anchor_frame_index": Optional[int], which one; default 0
+              "given_camera": Optional[Camera]}  that same anchor camera as the
+                                                 path built it, BEFORE any
+                                                 refinement (render's
+                                                 `image_warp.camera`)
     outputs: {"splat_path": str,                 what render_splat/load_splat take
               "splat_scene": SplatScene,
               "splat_stats": dict}               the diagnostics; read them
@@ -1253,6 +1312,32 @@ class PointmapSplatStep(Step):
     with the mesh, not with the slide. Read through the refined camera the
     depth is re-taken from the mesh and lands where the frames put the
     face; see tests/test_pointmap_splat.py's posed-run test.
+
+    The dataset's anchor camera is NOT the photograph's camera
+    ----------------------------------------------------------
+    Even before the refinement. `render`'s override mode puts the anchor
+    camera at SAM-3D-Body's position and then `look_at`s the orbit target —
+    the mesh's bounding-box centre, which sits off the photograph's optical
+    axis. On cyber2 that is 31 mm above it at 2.14 m: 0.83 degrees of tilt,
+    17 px at the render's focal, 28 mm at the face. The anchor FRAME is
+    right regardless, because `generate_firstlast` warps the photograph by
+    the homography that includes that tilt. But this step unprojects the
+    PHOTOGRAPH's pixels with the photograph's intrinsics, and those rays are
+    in the photograph's camera — hang them on the dataset camera's rotation
+    and the whole shell turns by the tilt. Run 5e2817 (2026-09-04) measured
+    exactly that: the cap 28 mm above the frames' face in every view, the
+    cameras themselves right.
+
+    So the pose the rays go on is the photograph's camera moved by the
+    refinement's DELTA on the anchor: `refined_photo_pose(cameras[i],
+    given_camera)` = (R_f R_g^T, p_f - R_f R_g^T p_g), the world motion that
+    took the given anchor to the refined one, applied to the identity pose
+    the photograph was taken from. The depth is still re-read from the mesh
+    through that pose; only the rotation the rays are hung on changes. The
+    given anchor is `image_warp.camera`, the very camera the frame was
+    warped for. Without `given_camera` the dataset camera is taken to BE the
+    photograph's — right only when the path was not `look_at`-turned, and
+    logged as an assumption.
 
     The intrinsics stay the photograph's throughout (`_source_intrinsics`):
     a dataset camera carries the RENDER's focal length, and the anchor frame
@@ -1335,7 +1420,10 @@ class PointmapSplatStep(Step):
               "Image-bin size for that fit: big enough to hold enough mesh "
               "vertices to stand in for a z-buffer", minimum=4, advanced=True),
         Param("debug_dir", str, None,
-              "Write mask / alpha / depth / normal visualisations here",
+              "Write mask / alpha / depth / normal visualisations here, plus "
+              "the step's stats (splat_stats, including which camera the "
+              "shell was built through) as stats.json. The workflows point "
+              "it under <output_root>/debug/ so it rides into the result .zip",
               advanced=True),
     )
 
@@ -1453,8 +1541,14 @@ class PointmapSplatStep(Step):
 
     # -- which camera the photograph is unprojected through ----------------
     @staticmethod
-    def _source_camera(inputs: Dict[str, Any], label: str) -> Tuple[Any, Optional[int]]:
-        """The dataset camera to build through, or `(None, None)` for the origin.
+    def _source_camera(inputs: Dict[str, Any], label: str) -> Tuple[Any, Optional[int], Any]:
+        """`(dataset camera, its index, the given anchor camera or None)`, or
+        `(None, None, None)` for the origin.
+
+        `given_camera` only means anything beside a dataset camera: it is
+        the pose that camera had before the refinement, and the rays are
+        hung on the motion between the two (`refined_photo_pose`). On its
+        own it is ignored — the origin route IS the photograph's camera.
 
         `cameras` is optional and empty means absent — with the refinement
         switched off a workflow still wires `dataset.cameras`, and that list
@@ -1466,10 +1560,10 @@ class PointmapSplatStep(Step):
         """
         cameras = inputs.get("cameras")
         if cameras is None:
-            return None, None
+            return None, None, None
         cameras = list(cameras)
         if not cameras:
-            return None, None
+            return None, None, None
         index = int(inputs.get("anchor_frame_index") or 0)
         if not 0 <= index < len(cameras):
             raise ValueError(
@@ -1477,7 +1571,7 @@ class PointmapSplatStep(Step):
                 f"{len(cameras)}-camera path. It names the frame the photograph "
                 f"was taken from — the anchor."
             )
-        return cameras[index], index
+        return cameras[index], index, inputs.get("given_camera")
 
     # -- the shell, with an explicit camera ------------------------------
     def _build_shell(self, image: np.ndarray, matte: np.ndarray,
@@ -1707,7 +1801,8 @@ class PointmapSplatStep(Step):
         # whichever way the camera below is chosen: the pixels being
         # unprojected are the photograph's either way.
         focal, cx, cy = self._source_intrinsics(inputs, params, width, height)
-        camera, index = self._source_camera(inputs, label)
+        camera, index, given = self._source_camera(inputs, label)
+        source_stats: Dict[str, Any]
         if camera is None:
             # The origin: SAM-3D-Body's own camera, which is where the
             # photograph was taken from until something says otherwise.
@@ -1715,15 +1810,43 @@ class PointmapSplatStep(Step):
             vertices_cam = (np.asarray(mesh_output["vertices"], dtype=np.float64)
                             + np.asarray(mesh_output["cam_t"], dtype=np.float64).reshape(3))
             source = "SAM-3D-Body's camera at the origin"
+            source_stats = {"frame_index": None, "position": [0.0, 0.0, 0.0]}
+        elif given is not None:
+            # The photograph's camera moved by the refinement's delta on
+            # the anchor — NOT the dataset camera itself, which carries the
+            # path's look_at tilt. See the class docstring; the mesh's
+            # depth is re-read through the same pose.
+            pose = refined_photo_pose(camera, given)
+            vertices_cam = vertices_in_pose(mesh_in_world(mesh_output), pose)
+            tilt = rotation_angle_deg(camera_pose(given)[0])
+            delta_deg = rotation_angle_deg(pose[0])
+            delta_mm = float(np.linalg.norm(pose[1] - camera_pose(given)[1])) * 1000.0
+            source = (
+                f"the photograph's camera moved by the anchor's (frame {index}) "
+                f"refinement: {delta_deg:.3f} deg, {delta_mm:.1f} mm, to "
+                f"({pose[1][0]:.4f}, {pose[1][1]:.4f}, {pose[1][2]:.4f}); the "
+                f"dataset's anchor camera itself is look_at-tilted {tilt:.3f} deg "
+                f"off the photograph's, which the rays are NOT turned by"
+            )
+            source_stats = {
+                "frame_index": index, "position": [float(v) for v in pose[1]],
+                "given_position": [float(v) for v in camera_pose(given)[1]],
+                "refined_position": [float(v) for v in camera_pose(camera)[1]],
+                "refinement_delta_deg": delta_deg, "refinement_delta_mm": delta_mm,
+                "given_lookat_tilt_deg": tilt,
+            }
         else:
-            # A dataset camera: the photograph's rays as that camera now
-            # describes them, and the mesh's depth read through the same
-            # camera. See the class docstring on why the depth is re-read
-            # rather than carried.
+            # A dataset camera taken to BE the photograph's: right only for
+            # a path that was not look_at-turned at the anchor (a plain
+            # origin camera). The workflows pass `given_camera` so this
+            # branch is the fallback, and it says so.
             pose = camera_pose(camera)
             vertices_cam = vertices_in_camera(mesh_in_world(mesh_output), camera)
             source = (f"dataset camera {index} at "
-                      f"({pose[1][0]:.4f}, {pose[1][1]:.4f}, {pose[1][2]:.4f})")
+                      f"({pose[1][0]:.4f}, {pose[1][1]:.4f}, {pose[1][2]:.4f}), "
+                      f"taken to be the photograph's own camera (no given_camera: "
+                      f"a look_at tilt at the anchor, if any, turns the shell with it)")
+            source_stats = {"frame_index": index, "position": [float(v) for v in pose[1]]}
         logger.info("%s: unprojecting through %s", label, source)
 
         shell = self._build_shell(
@@ -1731,10 +1854,7 @@ class PointmapSplatStep(Step):
             vertices_cam=vertices_cam, pose=pose, params=params, label=label,
         )
         gaussians, stats = shell.gaussians, shell.stats
-        stats["source_camera"] = (
-            {"frame_index": None, "position": [0.0, 0.0, 0.0]} if camera is None
-            else {"frame_index": index, "position": [float(v) for v in pose[1]]}
-        )
+        stats["source_camera"] = source_stats
 
         path = Path(params["filepath"])
         write_ply(path, gaussians)
@@ -1743,6 +1863,7 @@ class PointmapSplatStep(Step):
         if params["debug_dir"]:
             _write_debug(Path(params["debug_dir"]), image, shell.mask, shell.alpha,
                          shell.z_aligned, shell.z_refined, shell.n_cam)
+            _write_stats(Path(params["debug_dir"]) / "stats.json", stats)
 
         scene = SplatScene(
             means=gaussians["means"].astype(np.float32),

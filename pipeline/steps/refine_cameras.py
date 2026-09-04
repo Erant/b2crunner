@@ -369,6 +369,16 @@ class RefineCamerasStep(Step):
               "the way out. NOT a dataset directory and not under one — see "
               "trap 2 in the module docstring",
               advanced=True),
+        Param("debug_dir", str, None,
+              "Write the poses this step was handed and the poses it "
+              "published as two COLMAP models (given/, refined/ — "
+              "cameras.txt + images.txt, the export's own format) plus the "
+              "stats it logged as stats.json. The workflows point it under "
+              "<output_root>/debug/ so it rides into the result .zip: a "
+              "camera question asked after the pod is gone is answered from "
+              "these, not from the log's summary lines. NOT a dataset "
+              "directory — see trap 2",
+              advanced=True),
     )
 
     def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
@@ -402,11 +412,40 @@ class RefineCamerasStep(Step):
             if root.exists():
                 shutil.rmtree(root)
             root.mkdir(parents=True)
-            return self._refine(root, cameras, image_names, images, masks, params,
-                                label, anchor_index)
-        with tempfile.TemporaryDirectory(prefix="b2c_refine_") as temp_dir:
-            return self._refine(Path(temp_dir), cameras, image_names, images,
-                                masks, params, label, anchor_index)
+            result = self._refine(root, cameras, image_names, images, masks, params,
+                                  label, anchor_index)
+        else:
+            with tempfile.TemporaryDirectory(prefix="b2c_refine_") as temp_dir:
+                result = self._refine(Path(temp_dir), cameras, image_names, images,
+                                      masks, params, label, anchor_index)
+        if params["debug_dir"]:
+            self._write_debug(Path(params["debug_dir"]), cameras, result, image_names)
+        return result
+
+    def _write_debug(self, directory: Path, given: Sequence[Any],
+                     result: Dict[str, Any], image_names: Sequence[str]) -> None:
+        """given/ and refined/ as COLMAP models, and the stats as JSON.
+
+        Both exits of `_refine` come through here — a refused solve writes
+        the given poses twice, which is the truthful record of what was
+        published. The models are written by the same exporter as the
+        pipeline's deliverable, so whatever reads a `colmap/images.txt`
+        reads these; the pose the anchor frame was given, and the pose the
+        refinement left it at, are then one subtraction apart.
+        """
+        import json
+
+        directory = Path(directory)
+        if directory.exists():
+            shutil.rmtree(directory)
+        for name, cameras in (("given", given), ("refined", result["cameras"])):
+            model = directory / name
+            model.mkdir(parents=True)
+            self._write_input_model(cameras, image_names, model)
+        with open(directory / "stats.json", "w", encoding="utf-8") as handle:
+            json.dump({"stats": result.get("stats"),
+                       "anchor_position": result.get("anchor_position")},
+                      handle, indent=2, default=_jsonable)
 
     # ------------------------------------------------------------------
     # the pipeline itself
@@ -781,6 +820,15 @@ class RefineCamerasStep(Step):
                 rotation=r_w2c.T @ gl_from_cv,
             ))
         return out
+
+
+def _jsonable(value: Any) -> Any:
+    """`json.dump`'s `default`: numpy scalars and arrays as plain Python."""
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    raise TypeError(f"{type(value).__name__} is not JSON serialisable")
 
 
 def _position_of(cameras: Sequence[Any], index: int) -> Optional[List[float]]:

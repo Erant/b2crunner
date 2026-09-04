@@ -276,6 +276,30 @@ class TestWorkflowFiles(unittest.TestCase):
                     f"{name}: python_bin must be absolute inside the image",
                 )
 
+    def test_every_debug_dir_points_under_output_root_debug(self):
+        """`build_result_zip` packages `<output_root>/debug/` (and the face
+        .ply directories) beside the deliverables; a `debug_dir` aimed
+        anywhere else is written and never downloaded. Both refinements and
+        both face splats have one — the four things run 5e2817's face-cap
+        diagnosis (2026-09-04) needed and did not have."""
+        for path in _workflows():
+            spec = WorkflowSpec.from_yaml(str(path))
+            wired = {}
+            for step in spec.steps:
+                if "debug_dir" in step.params:
+                    wired[step.id] = step.params["debug_dir"]
+            with self.subTest(workflow=path.name):
+                for step_id in ("refine_cameras", "refine_cameras_final",
+                                "face_splat", "face_splat_refined"):
+                    self.assertIn(step_id, wired)
+                for step_id, value in wired.items():
+                    self.assertTrue(
+                        value.startswith("${globals.output_root}/debug/"),
+                        f"{path.name}: {step_id}.debug_dir = {value!r}")
+                # One directory per step: two steps sharing one would
+                # overwrite each other's dumps.
+                self.assertEqual(len(set(wired.values())), len(wired))
+
     def test_all_param_templates_resolve(self):
         """A ${globals.x} naming a global that doesn't exist is the single
         easiest mistake to make in these files, and it would otherwise only
@@ -983,6 +1007,14 @@ class TestWorkflowFiles(unittest.TestCase):
                 refined = by_id["face_splat_refined"]
                 self.assertEqual(priority.inputs["splat_path"],
                                  refined.outputs["splat_path"])
+                # The rebuild hangs the photograph's rays on the anchor's
+                # refinement DELTA, which needs the anchor as the path built
+                # it: render's image_warp camera, the one the frame was
+                # warped for. Hung on the refined camera alone the cap turns
+                # by the path's look_at tilt (run 5e2817, 28 mm).
+                self.assertEqual(refined.inputs.get("given_camera"),
+                                 "scene.image_warp.camera?")
+                self.assertEqual(refined.inputs.get("cameras"), "dataset.cameras")
                 self.assertEqual(priority.inputs["anchor_cameras"], "dataset.cameras")
                 selector = by_id["face_support_views"]
                 self.assertEqual(priority.inputs["splat_center"],
