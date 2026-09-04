@@ -109,6 +109,20 @@ smoke test this was verified against never exercised the gap — a dataset
 built from scratch needs those two steps wired in before this mask exists
 at all.
 
+**How hard the control video pushes** is three params, not one.
+`strength` is diffusers' `conditioning_scale` and is the whole of it for an
+ordinary run. `strength_layers` tapers that across the eight VACE injection
+layers, which diffusers already supports (`conditioning_scale` takes a list
+as readily as a float) and this step merely types and validates.
+`strength_low` is the one thing diffusers cannot do: it scales the
+LOW-NOISE expert alone. The pipeline builds one scale tensor before the
+denoising loop and passes it to whichever expert the timestep picks, so the
+override goes in through a forward pre-hook on `transformer_2` rather than
+a param — see `_low_noise_scale_hook`, which explains why a pre-hook and
+not a `forward` wrapper. Both default to leaving `strength` exactly as it
+was, and neither is a load param, so the resident worker still serves both
+passes from one pipeline.
+
 Attention backend: defaults to SageAttention via diffusers' attention
 dispatcher (params["attention_backend"] = "auto"), steered per-GPU-arch by
 `_select_sage_backend()` below — see its docstring for the SM89/L40S
@@ -185,6 +199,78 @@ def resolve_fp8_checkpoint(
     return hf_hub_download(repo, value, local_files_only=local_files_only)
 
 
+def _conditioning_scale(
+    strength: float, taper: Optional[list], n_layers: int
+) -> list:
+    """`strength` spread over the VACE layers, tapered by `strength_layers`.
+
+    diffusers takes `conditioning_scale` as one float or as one value per
+    entry in the transformer's `vace_layers` — [0, 5, 10, 15, 20, 25, 30, 35]
+    here, the transformer layers the control latents are injected at,
+    shallow to deep. It broadcasts a float to all of them, which is exactly
+    what a `taper` of None keeps doing; a taper multiplies each layer's
+    share of it, so a run that sets neither knob is unchanged.
+
+    The length has to match the model, not a constant: `vace_layers` is read
+    off the loaded transformer's config, so a checkpoint with a different
+    injection pattern is a clear error here rather than a shape mismatch
+    eight layers deep.
+    """
+    if taper is None:
+        return [float(strength)] * n_layers
+    if len(taper) != n_layers:
+        raise ValueError(
+            f"wan22_vace_denoise: strength_layers has {len(taper)} entries, "
+            f"but this transformer injects at {n_layers} VACE layers"
+        )
+    return [float(strength) * float(multiplier) for multiplier in taper]
+
+
+def _low_noise_scale_hook(step: "Wan22VaceDenoiseStep"):
+    """A forward pre-hook that rewrites the LOW-noise expert's VACE scale.
+
+    There is no per-expert knob to set. diffusers builds `conditioning_scale`
+    once, before the denoising loop, and hands that same tensor to whichever
+    expert the timestep selects — `current_model(...,
+    control_hidden_states_scale=conditioning_scale)` in
+    pipeline_wan_vace.py, for both the cond and uncond calls. The call
+    itself is the only seam, and this is it.
+
+    A module pre-hook specifically, NOT a wrapper around `transformer_2`'s
+    `.forward`: `enable_model_cpu_offload()` replaces `forward`, and
+    `release_vram()` makes it do so again after every pass
+    (`maybe_free_model_hooks()` removes accelerate's hooks and re-attaches
+    them), so a wrapper installed at load time would be dropped somewhere
+    between the two denoise passes and the override would silently stop
+    applying. Pre-hooks run in `Module._call_impl`, ahead of whatever
+    `forward` currently is, and nothing in that cycle touches them.
+
+    The scale is read off the step per call rather than closed over, because
+    the two passes share one resident pipeline and disagree about it.
+    """
+
+    def hook(module, args, kwargs):
+        scales = step._low_scale
+        if scales is None:
+            return None
+        incoming = kwargs.get("control_hidden_states_scale")
+        if incoming is None:
+            raise RuntimeError(
+                "wan22_vace_denoise: strength_low is set, but the pipeline "
+                "called the low-noise expert without "
+                "control_hidden_states_scale. diffusers' WanVACEPipeline "
+                "passes it on every call; a version that does not means this "
+                "override no longer has a seam to work through, and refusing "
+                "beats denoising at the wrong strength."
+            )
+        # new_tensor keeps the device and dtype diffusers already resolved
+        # for the scale it built (execution device, transformer dtype).
+        kwargs["control_hidden_states_scale"] = incoming.new_tensor(scales)
+        return args, kwargs
+
+    return hook
+
+
 @register_step("wan22_vace_denoise")
 class Wan22VaceDenoiseStep(Step):
     # The per-call knobs come first; everything from `checkpoint` down is
@@ -201,6 +287,22 @@ class Wan22VaceDenoiseStep(Step):
         Param("strength", float, 1.0,
               "VACE conditioning scale: 1.0 generates from the control video, lower "
               "values keep more of it", minimum=0.0, maximum=1.0),
+        # No minimum/maximum on this one, unlike `strength` above, and the
+        # reason is the UI rather than the range: a param declaring both
+        # draws as a slider (webui.py's _control), a slider has no empty
+        # position, and the value it would hand back for this param's None
+        # default is its minimum — 0.0, which is VACE switched off on the
+        # low-noise expert. A plain number box has an empty position and
+        # returns None from it, which is what "same as `strength`" needs.
+        Param("strength_low", float, None,
+              "VACE conditioning scale for the LOW-noise expert alone; empty means "
+              "whatever `strength` is. Lowering it keeps the pose lock the control "
+              "video buys while the structure is being set, and gives the later "
+              "steps room to paint over the drawing instead of copying it"),
+        Param("strength_layers", list, None,
+              "Per-layer multipliers on the two scales above, one for each VACE "
+              "injection layer (8 of them, shallow to deep); empty means 1.0 at "
+              "every layer, which is the plain scale"),
         Param("prompt", str, "",
               "Positive prompt. $SUBJECT_DESC$ in it is filled in from the "
               "`subject_desc` input (dataset.prompt)"),
@@ -244,11 +346,14 @@ class Wan22VaceDenoiseStep(Step):
     # worker reuses the loaded pipeline while these are unchanged and
     # rebuilds it when they are not — see load_signature() there.
     #
-    # The per-call params are deliberately ABSENT: `strength`, `steps`,
-    # `cfg`, `seed`, `prompt`, `negative_prompt`, `width`, `height`,
-    # `subject_desc`. That is the whole point — fast_helical_native's two
-    # passes differ only by `strength` (1.0 then 0.8), so listing it here
-    # would rebuild the pipeline between them and buy nothing at all.
+    # The per-call params are deliberately ABSENT: `strength`,
+    # `strength_low`, `strength_layers`, `steps`, `cfg`, `seed`, `prompt`,
+    # `negative_prompt`, `width`, `height`, `subject_desc`. That is the whole
+    # point — fast_helical_native's two passes differ only by `strength` (1.0
+    # then 0.8), so listing it here would rebuild the pipeline between them
+    # and buy nothing at all. The three strength knobs reach the pipeline
+    # through the call and a pre-hook that reads the step per call, never
+    # through the loaded weights, so none of them needs a rebuild either.
     LOAD_PARAMS = (
         "checkpoint", "fp8_repo", "fp8_checkpoint_high", "fp8_checkpoint_low",
         "fp8_config", "use_lora", "lora_repo", "lora_subfolder",
@@ -262,6 +367,10 @@ class Wan22VaceDenoiseStep(Step):
         # placement load() chose, and they need opposite treatment.
         self._device = "cuda"
         self._cpu_offload = True
+        # The low-noise expert's per-layer VACE scale, or None for "same as
+        # the high-noise one". Written by run(), read by the pre-hook
+        # _finish_load installs — see _low_noise_scale_hook.
+        self._low_scale = None
 
     def load(self, params: Dict[str, Any]) -> None:
         """Build the pipeline around the pre-quantized fp8 transformers.
@@ -383,6 +492,14 @@ class Wan22VaceDenoiseStep(Step):
                         f"({e!r}), falling back to PyTorch native SDPA"
                     )
 
+        # Installed once, for the life of the pipeline, and inert until a
+        # run sets `strength_low` — see _low_noise_scale_hook for why it is a
+        # pre-hook and why it goes on before the offload hooks below.
+        if pipe.transformer_2 is not None:
+            pipe.transformer_2.register_forward_pre_hook(
+                _low_noise_scale_hook(self), with_kwargs=True
+            )
+
         self._device = device
         self._cpu_offload = params["cpu_offload"]
         if self._cpu_offload:
@@ -477,6 +594,41 @@ class Wan22VaceDenoiseStep(Step):
         if subject_desc and "$SUBJECT_DESC$" in prompt:
             prompt = prompt.replace("$SUBJECT_DESC$", subject_desc)
 
+        # How hard the control video pushes, per VACE injection layer and
+        # per expert. `vace_layers` is read off the model rather than
+        # assumed: it is the same list on both experts (wan_fp8.py builds
+        # them from one config), so either one answers.
+        #
+        # `strength_low` is what splits the two. With this checkpoint's
+        # boundary_ratio of 0.875 and the scheduler's flow_shift of 3.0, a
+        # 6-step run puts t=1000 and 937 on the high-noise expert and t=857,
+        # 750, 600 and 375 on the low-noise one — four of the six steps, and
+        # the four where detail is decided. A control frame here is a
+        # drawing (a flat silhouette under a DWPose skeleton), so those late
+        # steps at full scale are where its ink survives into the output as
+        # ink instead of being read as pose.
+        vace_layers = (
+            pipe.transformer.config.vace_layers
+            if pipe.transformer is not None
+            else pipe.transformer_2.config.vace_layers
+        )
+        taper = params["strength_layers"]
+        conditioning_scale = _conditioning_scale(
+            params["strength"], taper, len(vace_layers)
+        )
+        strength_low = params["strength_low"]
+        self._low_scale = (
+            None
+            if strength_low is None
+            else _conditioning_scale(strength_low, taper, len(vace_layers))
+        )
+        if self._low_scale is not None or taper is not None:
+            logger.info(
+                "  VACE scale: high %s, low %s",
+                conditioning_scale,
+                self._low_scale if self._low_scale is not None else "same",
+            )
+
         # Timings, not just a call. Everything up to the progress bar's
         # "0%" is silent otherwise, which on a resident worker's second
         # pass reads as a two-minute hang — see _PRE_LOOP_PHASES.
@@ -488,7 +640,7 @@ class Wan22VaceDenoiseStep(Step):
                 video=video,
                 mask=masks,
                 reference_images=reference_images,
-                conditioning_scale=params["strength"],
+                conditioning_scale=conditioning_scale,
                 height=params["height"],
                 width=params["width"],
                 num_frames=params["length"] or len(video),

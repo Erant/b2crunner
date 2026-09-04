@@ -1113,6 +1113,14 @@ steps:
       # circular render from scratch, pass 2 (strength 0.8) cleans up the
       # helical re-render.
       strength: 1.0
+      # Two knobs sit beside it, both left unset here so this pass runs
+      # exactly as it always has. `strength_low` caps the conditioning scale
+      # on the LOW-noise expert alone — four of these six steps, and the ones
+      # that decide detail — which is the lever for a control frame whose
+      # skeleton survives into the output as ink rather than as pose;
+      # `strength_layers` tapers either scale across the eight VACE injection
+      # layers, shallow to deep. steps/wan22_vace_denoise.py's docstring has
+      # the mechanism and run() has the timestep arithmetic.
       # The negative is the live ComfyUI graph's string (denoise.json node
       # 7). The positive STARTED as node 188's and deliberately diverged on
       # 2026-08-31 — the graph is reference only now, nothing here runs it.
