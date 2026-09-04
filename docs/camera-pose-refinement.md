@@ -269,6 +269,47 @@ multi-view inconsistency into the camera model and warping geometry to
 do it. Keep `refine_focal_length 0`, `refine_principal_point 0`,
 `refine_extra_params 0`.
 
+## Trap 4 — the ring's flat valley: every camera pitches, no centre moves
+
+Found on run 9cc643 (2026-09-04), after the step had been in the pipeline
+for four days. For a ring of inward-looking cameras, "the subject sits a
+little lower" and "every camera pitches up by that angle over the radius"
+are the same picture to first order, so BA sees a flat valley along that
+direction and stops wherever noise leaves it. The Sim(3) of the recipe's
+step 5 is fitted to camera *centres*, which a rotation of each camera
+about its own centre does not move — so the valley coordinate passes
+straight through it, and through every check above: radius exact, no
+centre moved, reprojection error down.
+
+Measured, refined against given, all 81 cameras:
+
+    pitch  mean +0.94 deg  std 0.24  min +0.40  max +1.35   (19 px at f=1166.8)
+    yaw    mean -0.04      std 1.05
+    roll   mean -0.13      std 0.58
+    reprojection 1.540 -> 1.487 px
+
+In the given poses the denoised frames' face sat within 6 px of the mesh
+and of the face cap; in the refined ones 19-21 px below both, in every
+frame including the photograph's own. Everything the pipeline anchors to
+the mesh after this step — the face cap rebuilt through the refined
+anchor, the shells' depth ruler, the points3D init, `face_priority`'s
+coverage — stayed with the mesh while the training pixels moved, and
+brush trained two faces. The two Sep-2 runs carried the same mode at
++0.2 deg; the size is luck.
+
+The given poses are the drawings' poses and the frames follow the
+drawings on average, so the refinement's legitimate output is per-camera
+jitter about them; anything common to every camera is gauge. The fix is
+the missing half of step 5: after the Sim(3), take the chordal mean of
+each camera's residual rotation in its own frame out of all of them
+(`_remove_common_mode`), positions untouched. On 9cc643's cameras that
+removes 0.946 deg and puts the frames' face 0.5-2.4 px from the cap in
+every view — tighter than the given poses, since the per-camera
+correction now shows. A uniform pitch goes exactly; a single camera's
+correction keeps all but its 1/N share; a rigid motion never reaches it.
+`max_common_mode_rotation_deg` (3) refuses a mean that says BA lost the
+scene rather than drifted along the valley.
+
 ## What the ceiling is, and why
 
 Reprojection error over the tracks:
@@ -319,6 +360,10 @@ Cheap, in the order they catch things:
   beyond a few percent means BA re-solved the scene rather than refining
   it, so suspect the matches
 - `model_analyzer` mean reprojection error, before vs after — must fall
+- the common-mode rotation the step removed, and the anchor frame's
+  residual rotation, both logged in degrees and px at the image centre —
+  **a fraction of a degree, a few px** (catches trap 4; 19 px is what run
+  9cc643 would have printed. None of the checks above can see it)
 - the loader's reported train/eval split — **70 / 11** here
 
 ## Porting

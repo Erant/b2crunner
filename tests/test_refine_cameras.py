@@ -23,7 +23,7 @@ from body2colmap.camera import Camera
 
 from pipeline.steps.refine_cameras import (
     RefineCamerasStep, _align_to, _check, _movement, _quaternion_to_rotation,
-    _read_images_txt, onnx_options_for,
+    _read_images_txt, _remove_common_mode, _residual_rotation, onnx_options_for,
 )
 
 TARGET = np.array([0.0, 0.9, 0.0])
@@ -119,6 +119,95 @@ class TestGauge(unittest.TestCase):
         self.assertEqual(int(np.argmax(shift)), 3)
         self.assertGreater(shift[3], 0.05)
         self.assertLess(np.median(shift), 0.01)
+
+
+def _pitched(cameras, degrees):
+    """Every camera turned about its OWN x axis — trap 4's mode. Centres stay."""
+    angle = np.radians(degrees)
+    pitch = np.array([[1.0, 0.0, 0.0],
+                      [0.0, np.cos(angle), -np.sin(angle)],
+                      [0.0, np.sin(angle), np.cos(angle)]])
+    return [
+        Camera(
+            focal_length=(c.fx, c.fy), image_size=(c.width, c.height),
+            position=np.asarray(c.position, dtype=np.float64),
+            rotation=np.asarray(c.rotation, dtype=np.float64) @ pitch,
+        )
+        for c in cameras
+    ]
+
+
+class TestCommonMode(unittest.TestCase):
+    """Trap 4: the rotation every camera shares about its own centre.
+
+    Run 9cc643 came back with all 81 cameras pitched +0.94 deg, no centre
+    moved, every check green, and the frames' face 19 px below the mesh in
+    every view. The Sim(3) cannot see it; `_remove_common_mode` must.
+    """
+
+    def test_a_uniform_pitch_is_removed_exactly_and_reported(self):
+        given = _orbit()
+        # The measured mode, under the usual inflation on top of it: both
+        # gauge fixes have to compose.
+        drifted = _transform(_pitched(given, 0.94), scale=1.178, degrees=9.0,
+                             translation=[0.3, -0.1, 0.2])
+
+        aligned, _ = _align_to(drifted, given)
+        corrected, removed = _remove_common_mode(aligned, given)
+
+        self.assertAlmostEqual(removed["deg"], 0.94, places=5)
+        # A pitch is about the camera's x axis, and it moves the image
+        # centre by f * tan(angle).
+        self.assertAlmostEqual(abs(removed["axis_camera"][0]), 1.0, places=6)
+        self.assertAlmostEqual(removed["px_at_centre"],
+                               1066.17 * np.tan(np.radians(0.94)), places=3)
+        for camera, expected in zip(corrected, given):
+            np.testing.assert_allclose(camera.position, expected.position, atol=1e-5)
+            np.testing.assert_allclose(camera.rotation, expected.rotation, atol=1e-6)
+
+    def test_a_single_camera_correction_is_kept(self):
+        """One camera turned 1.5 deg loses its 1/N share to the mean and no
+        more; the rest pick that share up. Per-camera jitter is what the
+        step exists to publish — the mean is the only thing taken."""
+        given = _orbit()
+        refined = list(given)
+        refined[4] = _pitched([given[4]], 1.5)[0]
+
+        corrected, removed = _remove_common_mode(refined, given)
+
+        self.assertAlmostEqual(removed["deg"], 1.5 / len(given), places=3)
+        self.assertAlmostEqual(_residual_rotation(corrected[4], given[4])["deg"],
+                               1.5 * (1 - 1 / len(given)), places=3)
+        self.assertAlmostEqual(_residual_rotation(corrected[0], given[0])["deg"],
+                               1.5 / len(given), places=3)
+
+    def test_the_step_reports_and_gates_it(self):
+        params = RefineCamerasStep.resolve_params({})
+        given = _orbit()
+        aligned, transform = _align_to(_pitched(given, 0.94), given)
+        corrected, removed = _remove_common_mode(aligned, given)
+        stats = _movement(corrected, given, transform)
+        stats["common_mode_rotation"] = removed
+        self.assertEqual(_check(stats, params), "")
+        # `Camera` stores float32, which is worth ~0.01 deg of rotation noise.
+        self.assertLess(stats["rotation_deg"]["max"], 0.05)
+
+        stats["common_mode_rotation"] = dict(removed, deg=4.0, px_at_centre=75.0)
+        self.assertIn("own centre", _check(stats, params))
+
+    def test_a_roll_moves_the_image_centre_by_nothing(self):
+        given = _orbit()
+        angle = np.radians(2.0)
+        roll = np.array([[np.cos(angle), -np.sin(angle), 0.0],
+                         [np.sin(angle), np.cos(angle), 0.0],
+                         [0.0, 0.0, 1.0]])
+        rolled = Camera(focal_length=(given[0].fx, given[0].fy),
+                        image_size=(given[0].width, given[0].height),
+                        position=np.asarray(given[0].position, dtype=np.float64),
+                        rotation=np.asarray(given[0].rotation, dtype=np.float64) @ roll)
+        residual = _residual_rotation(rolled, given[0])
+        self.assertAlmostEqual(residual["deg"], 2.0, places=3)   # float32 Camera
+        self.assertLess(residual["px_at_centre"], 0.1)
 
 
 class TestChecks(unittest.TestCase):

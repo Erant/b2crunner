@@ -38,7 +38,9 @@ The recipe, in six parts
     strands observations; a fresh triangulation between passes lets tracks
     reform against the corrected poses. Converges by the third round.
 5.  **Put the gauge back** — a Sim(3) (Umeyama, with scale) from the refined
-    camera centres onto the given ones. Non-negotiable; see trap 1.
+    camera centres onto the given ones. Non-negotiable; see trap 1. Then
+    the one thing a fit on centres cannot see: the rotation every camera
+    shares about its OWN centre, taken out as a mean. See trap 4.
 6.  Rebuild `Camera` objects from the aligned poses, intrinsics untouched.
 
 **Foreground-only, deliberately.** Letting features land on the backdrop
@@ -83,6 +85,41 @@ given 1066.17 / 1066.17 — a 24% pixel aspect no real camera has — bought
 for 0.017 px of mean reprojection error. BA absorbs multi-view
 inconsistency into the camera model and warps geometry to do it. Every
 intrinsic is frozen here and there is no param to unfreeze one.
+
+Trap 4 — the ring's flat valley: every camera pitches, no centre moves
+----------------------------------------------------------------------
+For a ring of inward-looking cameras, "the whole subject sits a little
+lower" and "every camera pitches up by that angle over the radius" are the
+same picture to first order. BA sees a flat valley along that direction
+and stops wherever noise leaves it — and the Sim(3) of step 5 is fitted to
+camera CENTRES, which a rotation of each camera about its own centre does
+not touch, so it passes through untouched. Every check below it passes
+too: the radius is exact, no centre moved.
+
+Measured on run 9cc643 (2026-09-04): all 81 cameras came back pitched by
++0.94 deg (std 0.24, none under +0.40) against the given poses, 19 px at
+f=1166.8, for a reprojection error that improved 1.540 -> 1.487 px. In
+the given poses the denoised frames' face sat within 6 px of the mesh and
+the face cap; in the refined ones it sat 19-21 px below both, in every
+frame including the photograph's own. Nothing built from the mesh — the
+face cap rebuilt through the refined anchor, the shells' depth ruler, the
+points3D init, `face_priority`'s coverage — can follow that, because the
+mesh is what the cameras drifted away from: brush was handed two faces
+and trained both. The Sep-2 runs carried the same mode at +0.2 deg; the
+size is luck.
+
+The given poses are the drawings' poses, and the frames follow the
+drawings on average (+-6 px), so the refinement's *legitimate* output is
+per-camera jitter about them. Anything common to every camera is gauge.
+So after the Sim(3), the chordal mean of each camera's residual rotation
+in its own frame is taken out of all of them (`_remove_common_mode`),
+positions untouched: a uniform pitch is removed exactly, per-camera
+corrections keep all but their 1/N share of the mean, and a rigid motion
+never reaches it because the Sim(3) already took it. The removed angle is
+logged in degrees and as pixels at the image centre, with the anchor's
+residual beside it — 19 px is the number that would have named this run.
+`max_common_mode_rotation_deg` refuses a mean of several degrees, which
+is a broken solve rather than a drifting one.
 
 What the ceiling is
 -------------------
@@ -312,6 +349,13 @@ class RefineCamerasStep(Step):
               "a few percent means BA re-solved the scene rather than "
               "refining it, so the matches are the thing to suspect",
               minimum=0.0, advanced=True),
+        Param("max_common_mode_rotation_deg", float, 3.0,
+              "Refuse a result whose cameras share a rotation about their own "
+              "centres of more than this many degrees (the mean that is "
+              "removed under trap 4). Measured at 0.94 deg on the run that "
+              "found it and 0.2 on two others; several degrees is BA having "
+              "lost the scene, not drifted along its valley",
+              minimum=0.0, advanced=True),
         Param("on_check_failure", str, "keep_given",
               "What a failed check does. `keep_given` logs the failure and "
               "publishes the poses unchanged — the behaviour the pipeline had "
@@ -422,9 +466,13 @@ class RefineCamerasStep(Step):
                                  anchor_index=anchor_index)
 
         aligned, transform = _align_to(refined, cameras)
+        aligned, common_mode = _remove_common_mode(aligned, cameras)
         stats = _movement(aligned, cameras, transform)
         stats["reprojection_px"] = reprojection
         stats["frames"] = len(cameras)
+        stats["common_mode_rotation"] = common_mode
+        stats["anchor_residual"] = _residual_rotation(
+            aligned[anchor_index], cameras[anchor_index])
 
         logger.info(
             "%s: BA scale drift removed %+.2f%% (s=%.6f), leaving %.3f%% of "
@@ -437,6 +485,14 @@ class RefineCamerasStep(Step):
             stats["centre_shift"]["max"], stats["centre_shift"]["mean_frac"] * 100.0,
             stats["centre_shift"]["max_frac"] * 100.0, stats["scene_radius"],
             stats["rotation_deg"]["mean"], stats["rotation_deg"]["max"],
+        )
+        logger.info(
+            "%s: common-mode rotation removed %.3f deg (%.1f px at the image "
+            "centre, axis %s in camera coords) — trap 4; the anchor frame is "
+            "left %.3f deg (%.1f px) from its given pose",
+            label, common_mode["deg"], common_mode["px_at_centre"],
+            np.round(common_mode["axis_camera"], 3).tolist(),
+            stats["anchor_residual"]["deg"], stats["anchor_residual"]["px_at_centre"],
         )
 
         failure = _check(stats, params)
@@ -782,6 +838,81 @@ def _umeyama(source: np.ndarray, target: np.ndarray) -> Tuple[float, np.ndarray,
     return scale, rotation, mu_target - scale * rotation @ mu_source
 
 
+def _rotation_about_own_centre(refined: Any, given: Any) -> np.ndarray:
+    """The rotation `given` needs, in ITS OWN frame, to become `refined`.
+
+    `Camera.rotation` is camera-to-world, so with `R_r = R_g @ Q` the `Q`
+    is a rotation expressed in the camera's local axes: a pitch is a pitch
+    for every camera on the ring, whichever way round it faces. That is
+    the frame the common mode lives in — see trap 4.
+    """
+    r_given = np.asarray(given.rotation, dtype=np.float64)
+    r_refined = np.asarray(refined.rotation, dtype=np.float64)
+    return r_given.T @ r_refined
+
+
+def _angle_axis(rotation: np.ndarray) -> Tuple[float, np.ndarray]:
+    """(degrees, unit axis) of a rotation matrix; a zero axis at identity."""
+    cos = float(np.clip((np.trace(rotation) - 1.0) / 2.0, -1.0, 1.0))
+    angle = float(np.degrees(np.arccos(cos)))
+    axis = np.array([rotation[2, 1] - rotation[1, 2],
+                     rotation[0, 2] - rotation[2, 0],
+                     rotation[1, 0] - rotation[0, 1]])
+    norm = float(np.linalg.norm(axis))
+    return angle, (axis / norm if norm > 1e-12 else np.zeros(3))
+
+
+def _residual_rotation(refined: Any, given: Any) -> Dict[str, Any]:
+    """How far one camera's orientation still is from its given pose.
+
+    `px_at_centre` is what that rotation does to the point on the optical
+    axis: the pitch/yaw share of the angle through the focal length. A
+    pure roll moves the centre by nothing and reports 0.
+    """
+    angle, axis = _angle_axis(_rotation_about_own_centre(refined, given))
+    tilt = float(np.hypot(axis[0], axis[1]))  # the share not about the optical axis
+    px = float(given.fx) * float(np.tan(np.radians(angle))) * tilt
+    return {"deg": angle, "axis_camera": [float(v) for v in axis], "px_at_centre": px}
+
+
+def _remove_common_mode(refined: Sequence[Any], given: Sequence[Any]) -> Tuple[List[Any], Dict[str, Any]]:
+    """Take the rotation every camera shares about its own centre out of all of them.
+
+    Trap 4's fix. The chordal (L2) mean of the per-camera rotations
+    `given.T @ refined` — the SVD projection of their sum back onto SO(3)
+    — is removed from every camera, positions untouched. A uniform pitch
+    goes exactly; a correction on one camera keeps all but its 1/N share;
+    a rigid motion of the rig never reaches here because `_align_to` has
+    already taken it. Returns the corrected list and what was removed.
+    """
+    from body2colmap.camera import Camera
+
+    total = np.zeros((3, 3))
+    for camera, template in zip(refined, given):
+        total += _rotation_about_own_centre(camera, template)
+    u, _, vt = np.linalg.svd(total)
+    flip = np.eye(3)
+    if np.linalg.det(u @ vt) < 0:
+        flip[2, 2] = -1.0
+    mean = u @ flip @ vt
+
+    corrected = [
+        Camera(
+            focal_length=(camera.fx, camera.fy),
+            image_size=(camera.width, camera.height),
+            principal_point=(camera.cx, camera.cy),
+            position=np.asarray(camera.position, dtype=np.float64),
+            rotation=np.asarray(camera.rotation, dtype=np.float64) @ mean.T,
+        )
+        for camera in refined
+    ]
+    angle, axis = _angle_axis(mean)
+    tilt = float(np.hypot(axis[0], axis[1]))
+    px = float(given[0].fx) * float(np.tan(np.radians(angle))) * tilt if given else 0.0
+    return corrected, {"deg": angle, "axis_camera": [float(v) for v in axis],
+                       "px_at_centre": px}
+
+
 def _movement(refined: Sequence[Any], given: Sequence[Any],
               transform: Tuple[float, np.ndarray, np.ndarray]) -> Dict[str, Any]:
     """How far the cameras actually moved, with the gauge already removed.
@@ -841,6 +972,15 @@ def _check(stats: Dict[str, Any], params: Dict[str, Any]) -> str:
             f"radius, over the {params['max_centre_shift'] * 100:.2f}% "
             f"allowed. That is BA re-solving the scene rather than refining "
             f"it; suspect the matches"
+        )
+    common = stats.get("common_mode_rotation")
+    if common is not None and common["deg"] > params["max_common_mode_rotation_deg"]:
+        return (
+            f"every camera shared a {common['deg']:.2f} deg rotation about its "
+            f"own centre ({common['px_at_centre']:.0f} px at the image centre), "
+            f"over the {params['max_common_mode_rotation_deg']:.2f} deg allowed. "
+            f"Trap 4's valley is a fraction of a degree deep; this is BA having "
+            f"lost the scene"
         )
     return ""
 
