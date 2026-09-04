@@ -109,19 +109,23 @@ smoke test this was verified against never exercised the gap — a dataset
 built from scratch needs those two steps wired in before this mask exists
 at all.
 
-**How hard the control video pushes** is three params, not one.
+**How hard the control video pushes** is four params, not one.
 `strength` is diffusers' `conditioning_scale` and is the whole of it for an
 ordinary run. `strength_layers` tapers that across the eight VACE injection
 layers, which diffusers already supports (`conditioning_scale` takes a list
-as readily as a float) and this step merely types and validates.
-`strength_low` is the one thing diffusers cannot do: it scales the
-LOW-NOISE expert alone. The pipeline builds one scale tensor before the
-denoising loop and passes it to whichever expert the timestep picks, so the
-override goes in through a forward pre-hook on `transformer_2` rather than
-a param — see `_low_noise_scale_hook`, which explains why a pre-hook and
-not a `forward` wrapper. Both default to leaving `strength` exactly as it
-was, and neither is a load param, so the resident worker still serves both
-passes from one pipeline.
+as readily as a float) and this step merely types and validates. The other
+two are the things diffusers cannot do, and they are two different axes of
+the same rewrite: `strength_low` scales the LOW-NOISE expert alone, and
+`strength_steps` scales each DENOISE STEP in turn — a schedule like
+[1, 1, 0.75, 0.5, 0.25, 0] over a 6-step run, which lets the drawing set
+the pose and then hands the frame back to the model. The pipeline builds
+one scale tensor before the denoising loop and passes it to whichever
+expert the timestep picks, so both overrides go in through forward
+pre-hooks on the transformers rather than params — see `_vace_scale_hook`,
+which explains why a pre-hook and not a `forward` wrapper, and
+`_step_index` for how a hook knows which step it is on. All three default
+to leaving `strength` exactly as it was, and none is a load param, so the
+resident worker still serves both passes from one pipeline.
 
 Attention backend: defaults to SageAttention via diffusers' attention
 dispatcher (params["attention_backend"] = "auto"), steered per-GPU-arch by
@@ -226,17 +230,56 @@ def _conditioning_scale(
     return [float(strength) * float(multiplier) for multiplier in taper]
 
 
-def _low_noise_scale_hook(step: "Wan22VaceDenoiseStep"):
-    """A forward pre-hook that rewrites the LOW-noise expert's VACE scale.
+def _scale_schedule(
+    strength: float,
+    taper: Optional[list],
+    schedule: Optional[list],
+    n_layers: int,
+    n_steps: int,
+) -> list:
+    """One per-layer scale list per denoise step: the whole run's plan.
 
-    There is no per-expert knob to set. diffusers builds `conditioning_scale`
-    once, before the denoising loop, and hands that same tensor to whichever
-    expert the timestep selects — `current_model(...,
-    control_hidden_states_scale=conditioning_scale)` in
+    The second axis after `strength_layers`. That one says how hard the
+    control video pushes at each DEPTH; this one says how hard it pushes at
+    each TIME, and they multiply: entry [s][l] is `strength` times
+    `strength_steps[s]` times `strength_layers[l]`.
+
+    A `schedule` of None returns a single entry, not `n_steps` copies of
+    one, and that shortness is load-bearing rather than an optimization —
+    it is what tells the hook the scale is constant, so it never has to ask
+    which step it is on and an unscheduled run stays exactly the run that
+    came before this knob existed.
+
+    Lengths are checked against the run, not a constant: `n_steps` is the
+    step's own `steps` param, so a 6-entry schedule on a 4-step run is
+    refused here, before any weights are touched, rather than silently
+    applying the wrong step's value or running off the end.
+    """
+    base = _conditioning_scale(strength, taper, n_layers)
+    if schedule is None:
+        return [base]
+    if len(schedule) != n_steps:
+        raise ValueError(
+            f"wan22_vace_denoise: strength_steps has {len(schedule)} entries, "
+            f"but this run takes {n_steps} denoise steps"
+        )
+    return [
+        [scale * float(multiplier) for scale in base] for multiplier in schedule
+    ]
+
+
+def _vace_scale_hook(step: "Wan22VaceDenoiseStep", expert: str):
+    """A forward pre-hook that rewrites one expert's VACE scale per step.
+
+    There is no per-expert knob to set, and no per-step one either.
+    diffusers builds `conditioning_scale` ONCE, before the denoising loop,
+    and hands that same tensor to whichever expert the timestep selects —
+    `current_model(..., control_hidden_states_scale=conditioning_scale)` in
     pipeline_wan_vace.py, for both the cond and uncond calls. The call
-    itself is the only seam, and this is it.
+    itself is the only seam, and this is it. One hook per expert, so
+    `strength_low` is just the two of them being given different plans.
 
-    A module pre-hook specifically, NOT a wrapper around `transformer_2`'s
+    A module pre-hook specifically, NOT a wrapper around the transformer's
     `.forward`: `enable_model_cpu_offload()` replaces `forward`, and
     `release_vram()` makes it do so again after every pass
     (`maybe_free_model_hooks()` removes accelerate's hooks and re-attaches
@@ -245,27 +288,29 @@ def _low_noise_scale_hook(step: "Wan22VaceDenoiseStep"):
     applying. Pre-hooks run in `Module._call_impl`, ahead of whatever
     `forward` currently is, and nothing in that cycle touches them.
 
-    The scale is read off the step per call rather than closed over, because
+    The plan is read off the step per call rather than closed over, because
     the two passes share one resident pipeline and disagree about it.
     """
 
     def hook(module, args, kwargs):
-        scales = step._low_scale
+        scales = step._scales[expert]
         if scales is None:
             return None
         incoming = kwargs.get("control_hidden_states_scale")
         if incoming is None:
             raise RuntimeError(
-                "wan22_vace_denoise: strength_low is set, but the pipeline "
-                "called the low-noise expert without "
-                "control_hidden_states_scale. diffusers' WanVACEPipeline "
-                "passes it on every call; a version that does not means this "
-                "override no longer has a seam to work through, and refusing "
-                "beats denoising at the wrong strength."
+                "wan22_vace_denoise: strength_low or strength_steps is set, "
+                "but the pipeline called the "
+                f"{expert}-noise expert without control_hidden_states_scale. "
+                "diffusers' WanVACEPipeline passes it on every call; a "
+                "version that does not means this override no longer has a "
+                "seam to work through, and refusing beats denoising at the "
+                "wrong strength."
             )
+        index = 0 if len(scales) == 1 else step._step_index(kwargs.get("timestep"))
         # new_tensor keeps the device and dtype diffusers already resolved
         # for the scale it built (execution device, transformer dtype).
-        kwargs["control_hidden_states_scale"] = incoming.new_tensor(scales)
+        kwargs["control_hidden_states_scale"] = incoming.new_tensor(scales[index])
         return args, kwargs
 
     return hook
@@ -303,6 +348,12 @@ class Wan22VaceDenoiseStep(Step):
               "Per-layer multipliers on the two scales above, one for each VACE "
               "injection layer (8 of them, shallow to deep); empty means 1.0 at "
               "every layer, which is the plain scale"),
+        Param("strength_steps", list, None,
+              "Per-step multipliers on the scales above, one for each denoise step "
+              "(`steps` of them, first to last); empty means 1.0 at every step. "
+              "[1, 1, 0.75, 0.5, 0.25, 0] holds the control video at full scale "
+              "while the pose is set and lets go of it before the last step, so "
+              "the drawing steers the structure without being painted in"),
         Param("prompt", str, "",
               "Positive prompt. $SUBJECT_DESC$ in it is filled in from the "
               "`subject_desc` input (dataset.prompt)"),
@@ -347,13 +398,14 @@ class Wan22VaceDenoiseStep(Step):
     # rebuilds it when they are not — see load_signature() there.
     #
     # The per-call params are deliberately ABSENT: `strength`,
-    # `strength_low`, `strength_layers`, `steps`, `cfg`, `seed`, `prompt`,
-    # `negative_prompt`, `width`, `height`, `subject_desc`. That is the whole
-    # point — fast_helical_native's two passes differ only by `strength` (1.0
-    # then 0.8), so listing it here would rebuild the pipeline between them
-    # and buy nothing at all. The three strength knobs reach the pipeline
-    # through the call and a pre-hook that reads the step per call, never
-    # through the loaded weights, so none of them needs a rebuild either.
+    # `strength_low`, `strength_layers`, `strength_steps`, `steps`, `cfg`,
+    # `seed`, `prompt`, `negative_prompt`, `width`, `height`, `subject_desc`.
+    # That is the whole point — fast_helical_native's two passes differ only
+    # by `strength` (1.0 then 0.8), so listing it here would rebuild the
+    # pipeline between them and buy nothing at all. The four strength knobs
+    # reach the pipeline through the call and pre-hooks that read the step
+    # per call, never through the loaded weights, so none of them needs a
+    # rebuild either.
     LOAD_PARAMS = (
         "checkpoint", "fp8_repo", "fp8_checkpoint_high", "fp8_checkpoint_low",
         "fp8_config", "use_lora", "lora_repo", "lora_subfolder",
@@ -367,10 +419,15 @@ class Wan22VaceDenoiseStep(Step):
         # placement load() chose, and they need opposite treatment.
         self._device = "cuda"
         self._cpu_offload = True
-        # The low-noise expert's per-layer VACE scale, or None for "same as
-        # the high-noise one". Written by run(), read by the pre-hook
-        # _finish_load installs — see _low_noise_scale_hook.
-        self._low_scale = None
+        # Each expert's VACE conditioning plan: a list of per-layer scale
+        # lists, one entry per denoise step — or one entry in total when the
+        # scale is constant, or None for "leave the scale diffusers built
+        # alone". Written by run(), read per call by the pre-hooks
+        # _finish_load installs — see _vace_scale_hook.
+        self._scales = {"high": None, "low": None}
+        # The run's timesteps, descending, cached on first use within a pass
+        # and cleared at the top of the next one — see _step_index.
+        self._timesteps = None
 
     def load(self, params: Dict[str, Any]) -> None:
         """Build the pipeline around the pre-quantized fp8 transformers.
@@ -493,12 +550,19 @@ class Wan22VaceDenoiseStep(Step):
                     )
 
         # Installed once, for the life of the pipeline, and inert until a
-        # run sets `strength_low` — see _low_noise_scale_hook for why it is a
-        # pre-hook and why it goes on before the offload hooks below.
-        if pipe.transformer_2 is not None:
-            pipe.transformer_2.register_forward_pre_hook(
-                _low_noise_scale_hook(self), with_kwargs=True
-            )
+        # run sets `strength_low` or `strength_steps` — see _vace_scale_hook
+        # for why they are pre-hooks and why they go on before the offload
+        # hooks below. Both experts, because a per-step schedule spans the
+        # whole run and the high-noise expert owns its opening steps; with
+        # neither knob set each hook returns None and nothing is touched.
+        for expert, transformer in (
+            ("high", pipe.transformer),
+            ("low", pipe.transformer_2),
+        ):
+            if transformer is not None:
+                transformer.register_forward_pre_hook(
+                    _vace_scale_hook(self, expert), with_kwargs=True
+                )
 
         self._device = device
         self._cpu_offload = params["cpu_offload"]
@@ -547,6 +611,53 @@ class Wan22VaceDenoiseStep(Step):
             self._pipe.to("cpu")
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+
+    def _step_index(self, timestep) -> int:
+        """Which denoise step the call the hook just intercepted belongs to.
+
+        Read off the timestep the pipeline is passing the transformer rather
+        than counted. The loop is `for i, t in enumerate(timesteps)` and `t`
+        goes into the call as `timestep`, so the position of that value in
+        `scheduler.timesteps` IS `i` — no bookkeeping to reset between the
+        two passes a resident worker serves, no assumption about how many
+        times an expert is called per step (classifier-free guidance calls
+        it twice, at the same timestep, and both must get the same scale).
+
+        The schedule is read from the live scheduler, which `pipe()` has by
+        then called `set_timesteps` on, and cached for the rest of the pass;
+        run() drops the cache before each one. A count that disagrees with
+        the plan means the scheduler is not stepping the way `steps` says it
+        is, and every index after the disagreement would be the wrong step's
+        scale — so refuse, on the same grounds as the missing-kwarg guard.
+        """
+        if timestep is None:
+            raise RuntimeError(
+                "wan22_vace_denoise: a per-step VACE schedule is set, but the "
+                "pipeline called the transformer without `timestep`, which is "
+                "what says which step this is. Refusing beats denoising at "
+                "the wrong strength."
+            )
+        if self._timesteps is None:
+            timesteps = self._pipe.scheduler.timesteps
+            self._timesteps = [float(value) for value in timesteps]
+            planned = max(
+                len(scales) for scales in self._scales.values() if scales is not None
+            )
+            if len(self._timesteps) != planned:
+                raise RuntimeError(
+                    "wan22_vace_denoise: strength_steps plans "
+                    f"{planned} steps, but the scheduler is stepping "
+                    f"{len(self._timesteps)} times"
+                )
+        # One value per frame in the batch, all of them `t` expanded.
+        value = float(timestep.flatten()[0])
+        # Equality is what actually holds — these are the scheduler's own
+        # numbers coming back — with nearest as the tiebreak so a dtype cast
+        # somewhere in diffusers cannot turn a scale into a lookup failure.
+        return min(
+            range(len(self._timesteps)),
+            key=lambda index: abs(self._timesteps[index] - value),
+        )
 
     def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
         import torch
@@ -607,27 +718,61 @@ class Wan22VaceDenoiseStep(Step):
         # drawing (a flat silhouette under a DWPose skeleton), so those late
         # steps at full scale are where its ink survives into the output as
         # ink instead of being read as pose.
+        #
+        # `strength_steps` is the other axis, and it spans the whole run
+        # rather than one expert's share of it: a 6-entry schedule numbers
+        # those same six steps, so its first two land on the high-noise
+        # expert and its last four on the low-noise one — which is why BOTH
+        # experts carry a hook, and why a schedule that fades to 0 is a
+        # control video that sets the pose and then lets the model finish
+        # the frame on its own.
         vace_layers = (
             pipe.transformer.config.vace_layers
             if pipe.transformer is not None
             else pipe.transformer_2.config.vace_layers
         )
+        n_layers = len(vace_layers)
+        n_steps = params["steps"]
         taper = params["strength_layers"]
-        conditioning_scale = _conditioning_scale(
-            params["strength"], taper, len(vace_layers)
-        )
+        schedule = params["strength_steps"]
         strength_low = params["strength_low"]
-        self._low_scale = (
-            None
-            if strength_low is None
-            else _conditioning_scale(strength_low, taper, len(vace_layers))
-        )
-        if self._low_scale is not None or taper is not None:
-            logger.info(
-                "  VACE scale: high %s, low %s",
-                conditioning_scale,
-                self._low_scale if self._low_scale is not None else "same",
-            )
+
+        # What pipe() itself is given. With a schedule set every call is
+        # rewritten and this is only the value the hooks replace, but it
+        # stays the honest base so that a run setting neither per-expert nor
+        # per-step knob never reaches a hook at all.
+        conditioning_scale = _conditioning_scale(params["strength"], taper, n_layers)
+        self._timesteps = None
+        self._scales = {
+            "high": (
+                None
+                if schedule is None
+                else _scale_schedule(
+                    params["strength"], taper, schedule, n_layers, n_steps
+                )
+            ),
+            "low": (
+                None
+                if schedule is None and strength_low is None
+                else _scale_schedule(
+                    params["strength"] if strength_low is None else strength_low,
+                    taper,
+                    schedule,
+                    n_layers,
+                    n_steps,
+                )
+            ),
+        }
+        overridden = [name for name, scales in self._scales.items() if scales]
+        if overridden or taper is not None:
+            logger.info("  VACE scale: %s", conditioning_scale)
+            for expert in overridden:
+                scales = self._scales[expert]
+                logger.info(
+                    "    %s-noise expert: %s",
+                    expert,
+                    scales[0] if len(scales) == 1 else scales,
+                )
 
         # Timings, not just a call. Everything up to the progress bar's
         # "0%" is silent otherwise, which on a resident worker's second

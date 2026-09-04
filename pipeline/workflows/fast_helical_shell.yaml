@@ -1113,14 +1113,31 @@ steps:
       # circular render from scratch, pass 2 (strength 0.8) cleans up the
       # helical re-render.
       strength: 1.0
-      # Two knobs sit beside it, both left unset here so this pass runs
-      # exactly as it always has. `strength_low` caps the conditioning scale
-      # on the LOW-noise expert alone — four of these six steps, and the ones
-      # that decide detail — which is the lever for a control frame whose
-      # skeleton survives into the output as ink rather than as pose;
-      # `strength_layers` tapers either scale across the eight VACE injection
-      # layers, shallow to deep. steps/wan22_vace_denoise.py's docstring has
-      # the mechanism and run() has the timestep arithmetic.
+      # And the shape of it over the run. One multiplier per denoise step,
+      # first to last, so the control video is at full scale while the pose
+      # is being set and gone by the time the last step paints — which is
+      # the lever for a control frame whose skeleton otherwise survives into
+      # the output as ink rather than as pose. The fade sits where it does
+      # because of where the experts split: with this checkpoint's
+      # boundary_ratio (0.875) and the scheduler's flow_shift (3.0) steps 1-2
+      # are the high-noise expert's and steps 3-6 the low-noise one's, so the
+      # two 1.0s leave the structure pass untouched and the taper is spent
+      # entirely on the four steps that decide detail. The last entry is a
+      # true 0: VACE off, the frame finished on the model's own prior.
+      #
+      # These are MULTIPLIERS on `strength` above, not scales in their own
+      # right — the same convention as `strength_layers`. At pass 1's
+      # strength of 1.0 the two readings coincide; denoise_pass2 runs this
+      # same shape scaled by its 0.8.
+      strength_steps: [1, 1, 0.75, 0.5, 0.25, 0]
+      # Two knobs sit beside those, both left unset here so this pass keeps
+      # pushing on every layer and on both experts alike. `strength_low`
+      # caps the conditioning scale on the LOW-noise expert alone — the
+      # per-expert axis, where `strength_steps` is the per-step one, and the
+      # two multiply; `strength_layers` tapers every scale across the eight
+      # VACE injection layers, shallow to deep.
+      # steps/wan22_vace_denoise.py's docstring has the mechanism and run()
+      # has the timestep arithmetic.
       # The negative is the live ComfyUI graph's string (denoise.json node
       # 7). The positive STARTED as node 188's and deliberately diverged on
       # 2026-08-31 — the graph is reference only now, nothing here runs it.
@@ -2043,6 +2060,11 @@ steps:
       cfg: 1.0
       seed: ${globals.seed}
       strength: 0.8
+      # The same fade as pass 1, spelled identically on purpose: these are
+      # multipliers, so the shape rides on this pass's lower `strength`
+      # rather than overriding it — 0.8 down through 0.6, 0.4 and 0.2 to a
+      # true 0 on the last step.
+      strength_steps: [1, 1, 0.75, 0.5, 0.25, 0]
       prompt: "人工光、柔光、低对比度、环绕运镜。时间静止，人物完全静止。身体\
         如雕塑般僵硬，胸口没有起伏，头部保持固定角度，面部肌肉完全不动，维持单\
         一的中性表情。双眼一眨不眨，眼睑保持张开且稳定，目光空洞而固定，锁定远\
