@@ -16,7 +16,7 @@ import yaml
 
 from pipeline.registry import STEP_REGISTRY
 from pipeline.templating import resolve
-from pipeline.workflow import WorkflowSpec
+from pipeline.workflow import WorkflowSpec, truthy
 
 import pipeline.steps  # noqa: F401
 
@@ -443,8 +443,17 @@ class TestWorkflowFiles(unittest.TestCase):
                 self.assertEqual(step.keep_loaded, twin.keep_loaded)
                 self.assertEqual(step.params, twin.params)
 
+        # Two names are deliberately per-file. `output_root` is obvious.
+        # `anchor_helix` is the same kind of thing one level down: it is not
+        # a knob but a statement about what each bootstrap hands the tail —
+        # native's render is anchored and shell's is not, so the tail's
+        # helical re-render can bend itself onto the photograph's camera in
+        # one file and must not pretend to in the other. Everything the two
+        # files SAY about it is still checked (the params referencing it are
+        # compared verbatim, above); only the value may differ.
+        per_file = {"output_root", "anchor_helix"}
         for key, value in native.globals.items():
-            if key == "output_root":
+            if key in per_file:
                 continue
             with self.subTest(glob=key):
                 self.assertEqual(
@@ -622,6 +631,77 @@ class TestWorkflowFiles(unittest.TestCase):
                                 f"splat alpha mask_splat needs",
                             )
 
+
+    def test_an_inject_anchor_has_a_path_that_reaches_the_anchor(self):
+        """An `inject_anchor` that can actually match something.
+
+        The step matches the anchor by camera POSITION, so it is only ever
+        as good as the path the batch was rendered along. A `render_splat`
+        that builds a fresh orbit without anchoring it puts no camera on the
+        anchor at all — measured on cyber_6f with fast_helical_native's own
+        params, the nearest unanchored helical camera is 0.1408 from it
+        against a 0.00593 tolerance, 24x — so the injection matches zero
+        frames, returns the batch untouched and the run carries on. That was
+        this file's state until 2026-09-04: denoise_pass2 conditioned on 81
+        synthetic frames and an all-1.0 VACE mask, with the reference
+        photograph nowhere in it.
+
+        So: whenever a workflow injects an anchor into a batch that a
+        `render_splat` re-rendered along a NEW path, that render must be
+        anchored, and must publish where it put the anchor rather than
+        leaving the extras describing the old path. A file with no anchor
+        image to inject (fast_helical_shell, whose bootstrap has none and
+        whose `inject_anchor` is a documented no-op) has nothing to check.
+        """
+        for path in _workflows():
+            spec = WorkflowSpec.from_yaml(str(path))
+            steps = spec.steps
+            by_index = {i: s for i, s in enumerate(steps)}
+            # An anchor image is what makes the injection live at all: with
+            # none, inject_anchor passes through by design.
+            writes_anchor_image = any(
+                "dataset.anchor_image" in s.outputs.values() for s in steps
+            )
+            if not writes_anchor_image:
+                continue
+
+            for i, step in by_index.items():
+                if step.step != "inject_anchor":
+                    continue
+                # The last render_splat before this injection that rebuilt
+                # the batch — i.e. one with a `pattern`. Without one the
+                # batch is still on the cameras the anchor was recorded
+                # against and there is nothing to re-anchor.
+                repaths = [
+                    j for j, s in by_index.items()
+                    if j < i and s.step == "render_splat" and s.params.get("pattern")
+                    and "dataset.cameras" in s.outputs.values()
+                ]
+                if not repaths:
+                    continue
+                render = by_index[max(repaths)]
+                with self.subTest(workflow=path.name, step=step.id):
+                    anchored = render.params.get("override_cam_from_mesh")
+                    self.assertTrue(
+                        truthy(resolve(anchored, {"globals": spec.globals}))
+                        if isinstance(anchored, str) else truthy(anchored),
+                        f"{path.name}: '{step.id}' injects the anchor by position "
+                        f"into the batch '{render.id}' re-rendered along a fresh "
+                        f"'{render.params.get('pattern')}' path, but that render is "
+                        f"not anchored (override_cam_from_mesh={anchored!r}), so no "
+                        f"camera in it sits on the anchor and the injection is a "
+                        f"silent no-op",
+                    )
+                    self.assertEqual(
+                        render.outputs.get("anchor_position?")
+                        or render.outputs.get("anchor_position"),
+                        "dataset.extras.anchor_position",
+                        f"{path.name}: '{render.id}' anchors its path but does not "
+                        f"publish anchor_position, so '{step.id}' would match "
+                        f"against whichever anchor an earlier step left in the "
+                        f"extras — refine_cameras republishes it ~62mm off the "
+                        f"origin, ~10x the match tolerance",
+                    )
 
     def test_a_confidence_render_is_paired_with_a_passthrough_mask_splat(self):
         """The two halves of one decision, and running both is worse than

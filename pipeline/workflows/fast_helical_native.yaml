@@ -13,7 +13,25 @@
 # and reads the .ply optionally, so the branch being off leaves it with
 # nothing to composite rather than nothing to resolve.
 #
-# WHAT CHANGED (2026-09-02, latest): the FACE CAP WINS (docs/face-priority.md).
+# WHAT CHANGED (2026-09-04): **the helical anchor re-injection actually
+# runs.** The shared tail's `rerender_splat` now anchors its helix
+# (`override_cam_from_mesh: ${globals.anchor_helix}`) and publishes
+# `anchor_position` / `anchor_frame_index` for the path it built, so the
+# stage-3 `reinject_anchor` has a frame to match. It had none: an
+# unanchored helix passes no closer than 24x the match tolerance to the
+# anchor, so the step silently returned the batch untouched and
+# denoise_pass2 conditioned on 81 synthetic frames with no 0.0 anywhere in
+# its VACE mask. The base does anchor it — ComfyUI-Body2COLMAP `17f9f1a`,
+# and cyber_6f/helical records anchor_frame_index 37 at the origin to prove
+# the recorded run used it. Publishing the anchor from the render is the
+# other half: `refine_cameras` republishes it ~62 mm off the origin, which
+# on its own misses by ~10x. `inject_anchor` also logs what it did or did
+# not match (it said nothing at all before), the output form `name?:` was
+# added for the two keys an unanchored render does not publish, and
+# tests/test_workflows.py refuses an inject_anchor whose batch was
+# re-rendered along an unanchored path.
+#
+# WHAT CHANGED (2026-09-02): the FACE CAP WINS (docs/face-priority.md).
 # The shared tail
 # gained `face_priority` (after face_support_views) and
 # `face_priority_shells` (after stage1_support_band), both the new
@@ -405,6 +423,23 @@ globals:
   # which on a pod is the container's writable layer — small, and gone when
   # the pod is recycled.
   output_root: output/fast_helical_native
+
+  # Whether the shared tail's helical re-render anchors itself on the
+  # photograph's camera. Not a knob — a statement about what THIS file's
+  # bootstrap hands the tail, which is why it is here and not in
+  # `settings:`. render_initial_views runs in override mode, so the dataset
+  # reaching the tail has its original camera at the world origin and
+  # carries the `original_focal_length` marker that says so; the tail's
+  # rerender_splat can therefore bend its helix to pass exactly through that
+  # camera, which is the only thing that gives `reinject_anchor` a frame to
+  # overwrite. Turning this off makes that re-injection a silent no-op — see
+  # the long note at rerender_splat.
+  #
+  # fast_helical_shell.yaml declares the same global `false`, because its
+  # bootstrap publishes no anchor at all. That disagreement is deliberate
+  # and the mirror test in tests/test_workflows.py exempts this one name
+  # alongside `output_root`.
+  anchor_helix: true
 
 steps:
   # ================================================================ bootstrap
@@ -1168,10 +1203,15 @@ steps:
       # anchor's position here; leaving it would have the extras describe
       # a pose the camera list no longer holds. Its readers — render_splat's
       # cap axis (which prefers the live camera anyway) and inject_anchor's
-      # position match — now see the same anchor the cameras do. Only this
-      # refinement republishes it: after rerender_splat the extras' index
-      # names a frame of the circular path, not the helix, so
-      # refine_cameras_final has nothing truthful to say about it.
+      # position match — now see the same anchor the cameras do.
+      #
+      # It does not stay this file's last word on the anchor: rerender_splat
+      # republishes both keys for the helix it builds, because a position
+      # match has to be against the path the frames were rendered along, and
+      # this refinement's ~62 mm move would miss it by ~10x the tolerance.
+      # refine_cameras_final, after that, republishes nothing — it wires no
+      # anchor_frame_index, and moving the helix's anchor off the pose its
+      # own frames were rendered from is exactly the mistake above.
       anchor_position: dataset.extras.anchor_position
 
   # --------------------------- the face splat, rebuilt on the refined poses
@@ -1687,12 +1727,49 @@ steps:
     outputs:
       splat_scene: scene.splat
 
-  # The ComfyUI node leaves override_cam_from_mesh off here: this is a
-  # fresh, longer orbit framed from the splat's own bounds (fill_ratio 0.8,
-  # focal length inherited from the dataset), not an anchored one. The
-  # anchor is re-applied by inject_anchor below, matching on position. Both
-  # of those are steps/splat.py's declared defaults, so this block only has
-  # to say what the helical path itself is.
+  # ANCHORED, when the bootstrap handed this tail an anchored dataset
+  # (`${globals.anchor_helix}` — true in fast_helical_native, false in
+  # fast_helical_shell, whose bootstrap publishes no anchor at all).
+  #
+  # This block used to read "the ComfyUI node leaves override_cam_from_mesh
+  # off here", and to lean on `inject_anchor` below re-applying the anchor
+  # by matching on position afterwards. Both halves were wrong, and together
+  # they made the stage-3 re-injection a SILENT NO-OP:
+  #
+  #   * The base does anchor it. ComfyUI-Body2COLMAP `17f9f1a` ("Anchor
+  #     splat and helical paths to the original camera") added the option to
+  #     the splat renderer precisely so a helix could pass exactly through
+  #     the SAM-3D-Body camera, and the recorded run proves it was used:
+  #     cyber_6f/helical (and /splatted, /masked_splatted) carries
+  #     anchor_frame_index 37 with that camera at [0, 0, 0] — a key only the
+  #     anchored branch republishes. The checked-in resplat_helical.json
+  #     omits the widget because it was hand-edited three minutes after that
+  #     commit and never regenerated; it is the stale artefact, not the run.
+  #
+  #   * Matching on position cannot re-apply an anchor to a path that was
+  #     never bent to touch it. Measured on the recorded dataset with this
+  #     file's own params, the nearest unanchored helical camera is 0.1408
+  #     from the anchor against a tolerance of 0.00593 — 24x — so
+  #     inject_anchor matched zero frames and denoise_pass2 ran with no real
+  #     photograph in its batch and no 0.0 in its VACE mask. Anchored, the
+  #     same solve lands a camera at 0.0000 from it.
+  #
+  # `anchor_position` / `anchor_frame_index` are published from HERE (see
+  # outputs), overwriting what refine_cameras left in the extras. That
+  # matters as much as the flag: refine republishes the anchor at the pose
+  # the bundle adjustment moved it to (~62 mm off the origin on run e593a8),
+  # while this path — like steps/render.py's override mode — puts its anchor
+  # camera at the world origin, which is where the photograph was taken from
+  # and where warp_reference_to_anchor warped it for. Matching the refined
+  # position against this path misses by ~10x the tolerance. The extras must
+  # describe the path the frames were actually rendered along.
+  #
+  # Otherwise unchanged: a fresh, longer helix at the dataset's inherited
+  # focal length. `fill_ratio` and `bounds_source` are steps/splat.py's
+  # declared defaults and the anchored path consults neither — it takes its
+  # target and radius from the source render's own orbit_target and framed
+  # focal length, which is what keeps this render's anchor frame identical
+  # to the mesh render's.
   #
   # `framing: ${globals.framing}` keeps this render in step with
   # render_initial_views, which frames the mesh at that same preset — the
@@ -1714,6 +1791,11 @@ steps:
       n_frames: 81
       n_loops: 2
       amplitude_deg: 30.0
+      # See the block above. The bootstrap decides this, not the operator:
+      # anchoring needs a dataset whose original camera is at the world
+      # origin, and extras['original_focal_length'] — written only by an
+      # override-mode render — is the marker for that.
+      override_cam_from_mesh: ${globals.anchor_helix}
       # 30/90, not the 45/45 the solver defaults to — the values
       # resplat_helical.json's Body2COLMAP_HelicalPath node carries.
       lead_in_deg: 30.0
@@ -1743,6 +1825,13 @@ steps:
       cameras: dataset.cameras
       image_names: dataset.image_names
       points_3d: dataset.points_3d
+      # Where THIS path put the anchor, replacing what refine_cameras left
+      # in the extras — see the block above. render_splat writes both keys
+      # only when it anchored the path; with `anchor_helix` off it writes
+      # neither and the extras keep the bootstrap's, which is what the shell
+      # file wants (nothing there injects an anchor anyway).
+      anchor_position?: dataset.extras.anchor_position
+      anchor_frame_index?: dataset.extras.anchor_frame_index
 
   # ---------------------------------------------------------------- stage 3
   # This used to be the stage that dropped the splat's low-confidence
@@ -1772,7 +1861,13 @@ steps:
       dataset: dataset
 
   # Put the warped reference photo back onto whichever new frames landed on
-  # the original camera. Matches by position, so it survives the reorbit.
+  # the original camera. Matches by position, so it survives the reorbit —
+  # but only because rerender_splat above ANCHORED its helix and published
+  # where it put the anchor. A position match cannot re-apply an anchor to a
+  # path that never passes through it; with the re-render unanchored (as
+  # this file had it until 2026-09-04) the nearest camera is ~24x the
+  # tolerance away, this step matches nothing, and denoise_pass2 runs with
+  # no real photograph in its batch. It now says so in the log either way.
   #
   # AFTER mask_splat, not before it — the ordering is load-bearing and was
   # wrong. Before mask_splat this step sits where dataset.masks is carrying

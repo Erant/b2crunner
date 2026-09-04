@@ -264,7 +264,26 @@ class WorkflowRunner:
         outputs = dispatcher.run(step_spec.step, inputs, params)
 
         for name, path in step_spec.outputs.items():
+            # A trailing `?` on the output NAME (not the path) marks a
+            # return value the step only produces in some configurations:
+            # absent means "leave the context alone" rather than a failed
+            # run. The shipped case is rerender_splat's `anchor_position?` /
+            # `anchor_frame_index?`, which render_splat publishes only when
+            # it anchored the path — with `anchor_helix` off it publishes
+            # neither, and the extras keep whatever the bootstrap wrote.
+            #
+            # Deliberately narrower than the input form: the marker is on
+            # the step's own return key, so the context path stays a plain
+            # path and every consumer of it reads the same string.
+            optional = name.endswith("?")
+            name = name[:-1] if optional else name
             if name not in outputs:
+                if optional:
+                    logger.info(
+                        "%s (%s): optional output '%s' not returned; leaving %s "
+                        "as it was", step_spec.id, step_spec.step, name, path,
+                    )
+                    continue
                 raise KeyError(
                     f"Step '{step_spec.id}' ({step_spec.step}) did not return output '{name}'; "
                     f"it returned: {sorted(outputs)}"

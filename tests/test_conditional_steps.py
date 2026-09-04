@@ -176,6 +176,36 @@ class TestOptionalInputs(unittest.TestCase):
         ])
         self.assertEqual(ctx.get("out.b"), 7)
 
+    def test_a_missing_required_output_still_fails(self):
+        """The default, and what keeps a typo'd output name a failure."""
+        with self.assertRaises(KeyError) as caught:
+            self._run([{"id": "a", "step": "_test_echo", "params": {"value": 1},
+                        "outputs": {"vlaue": "out.a"}}])
+        self.assertIn("vlaue", str(caught.exception))
+
+    def test_an_optional_output_the_step_did_not_return_is_skipped(self):
+        """`name?:` — the mirror of the optional input, one step further in.
+
+        `render_splat` publishes `anchor_position` only when it anchored the
+        path it rendered along, and the shared tail is written once for two
+        bootstraps that disagree about whether it can. The context path is
+        simply left as it was.
+        """
+        ctx = self._run([
+            {"id": "seed", "step": "_test_echo", "params": {"value": "old"},
+             "outputs": {"value": "out.a"}},
+            {"id": "b", "step": "_test_echo", "params": {"value": 1},
+             "outputs": {"value": "out.b", "anchor_position?": "out.a"}},
+        ])
+        self.assertEqual(ctx.get("out.b"), 1)
+        self.assertEqual(ctx.get("out.a"), "old", "the earlier value was clobbered")
+
+    def test_an_optional_output_that_is_returned_is_written(self):
+        """The marker says 'may be absent', not 'ignore it'."""
+        ctx = self._run([{"id": "a", "step": "_test_echo", "params": {"value": 5},
+                          "outputs": {"value?": "out.a"}}])
+        self.assertEqual(ctx.get("out.a"), 5)
+
     def test_a_gated_producer_feeds_an_ungated_consumer(self):
         """The shape this exists for: the face branch writes the supporting
         views when it runs, and the training downstream takes them or

@@ -303,9 +303,13 @@ class RenderSplatStep(Step):
               "0 inherits the dataset's, then falls back to one derived from width"),
         Param("override_cam_from_mesh", bool, False,
               "Anchor the new path on the dataset's original camera, as steps/render.py "
-              "does. Off here in the helical re-render: that is a fresh, longer orbit "
-              "framed from the splat's own bounds, and inject_anchor re-applies the "
-              "anchor afterwards by matching on position"),
+              "does, and publish where it landed as anchor_position / "
+              "anchor_frame_index. ON for the helical re-render of a dataset that was "
+              "rendered in override mode: inject_anchor matches on position, so it can "
+              "only re-apply the anchor to a path that actually passes through it. "
+              "Requires the marker an override-mode render leaves in the extras "
+              "(original_focal_length); a dataset without one has been auto-oriented "
+              "and its original camera is no longer at the world origin"),
         Param("bg_color", list, [0.0, 0.0, 0.0],
               "RGB in [0,1]. Black, not the recorded run's 127 grey: black is where "
               "that pipeline ends up after mask_splat, and matching its intermediate "

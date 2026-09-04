@@ -32,6 +32,7 @@ wires the rest itself:
           width: ${globals.resolution.0}
         outputs:
           denoised: dataset.images    # written back into the shared Context
+          stats?: scene.stats         # optional; skipped when not returned
         when: ${globals.run_denoise}  # optional; skip the step when falsy
 
 **One flat namespace, three ways to declare into it.** A `settings:` entry,
@@ -78,6 +79,14 @@ outputs are simply not in the Context when it is switched off, and there is
 otherwise no way to say "take these if they were built". Everything else
 stays required, which is what makes a typo'd path a failure at that step
 rather than a silently missing input.
+
+An output NAME ending in `?` is the mirror of that, one step further in: the
+step returns that key only in some configurations, and when it does not, the
+context path is left as it was rather than the run failing. The marker goes
+on the step's return key, never on the path, so every consumer still reads
+one plain path. The shipped case is `rerender_splat`'s `anchor_position?` —
+`render_splat` publishes an anchor only when it anchored the path it
+rendered along.
 
 Only a step whose Step subclass actually writes to disk (e.g. `save_dataset`)
 touches disk — everything else stays in the in-memory Context between steps.

@@ -133,6 +133,21 @@ composited, not filtered) at alpha 0.
 `masks` stays an optional input regardless. When it is supplied it is
 passed through untouched; a step handed somebody else's data should not
 destroy it, which is the general form of the bug above.
+
+**The path the batch was rendered along has to touch the anchor.** Matching
+on position is only durable against reordering, not against a re-render:
+where the frames came from a NEW camera path, that path must have been
+anchored (`render_splat`'s `override_cam_from_mesh`), and the
+`anchor_position` handed here must be the one that render published for it.
+fast_helical_native shipped with neither until 2026-09-04 — an unanchored
+helical re-render, matched against an anchor `refine_cameras` had since
+moved — and the two failures compound: the nearest camera was 24x the
+tolerance away, so the stage-3 injection matched nothing, returned the
+batch untouched, and `denoise_pass2` conditioned on a batch with no real
+photograph in it and no 0.0 in its VACE mask. Nothing failed; the run just
+quietly lost its one piece of ground truth. That is why the no-match case
+logs a WARNING naming the distance, and why tests/test_workflows.py refuses
+the wiring outright.
 """
 
 from __future__ import annotations
@@ -259,6 +274,13 @@ class InjectAnchorStep(Step):
             masks = [np.asarray(m, dtype=np.float32) for m in in_masks]
 
         if anchor_image is None or anchor_position is None:
+            logger.info(
+                "inject_anchor: nothing to inject (anchor_image=%s, "
+                "anchor_position=%s); passing %d frames through unchanged",
+                "set" if anchor_image is not None else "unset",
+                "set" if anchor_position is not None else "unset",
+                len(images),
+            )
             return {"images": images, "masks": masks}
 
         anchor_position = np.asarray(anchor_position, dtype=np.float32)
@@ -271,6 +293,22 @@ class InjectAnchorStep(Step):
         matches = [int(i) for i in np.flatnonzero(distances <= threshold)]
 
         if not matches:
+            # Loud, because this is the failure that looks like success: the
+            # batch comes out intact, the run finishes, and the diffusion
+            # pass downstream simply never sees a real photograph. It means
+            # the path this batch was rendered along does not pass through
+            # the anchor at all — the usual cause is a re-render that built
+            # a fresh orbit without anchoring it (render_splat's
+            # `override_cam_from_mesh`), or an `anchor_position` that has
+            # been republished since the path was built.
+            logger.warning(
+                "inject_anchor: NO frame matched the anchor within %.3f%% "
+                "(threshold=%.6f, scene scale=%.6f, closest=%.6f at frame %d "
+                "of %d). Returning the batch unchanged — nothing in it is "
+                "marked as a real photograph.",
+                tolerance_pct, threshold, scale, float(distances.min()),
+                int(distances.argmin()), len(distances),
+            )
             return {"images": images, "masks": masks}
 
         if tuple(anchor_image.shape) != tuple(images[0].shape):
@@ -289,6 +327,13 @@ class InjectAnchorStep(Step):
             # silhouette. See the module docstring.
             masks[idx] = np.zeros(anchor_image.shape[:2], dtype=np.float32)
 
+        logger.info(
+            "inject_anchor: injected the anchor into %d/%d frames %s "
+            "(tolerance=%.3f%%, threshold=%.6f)",
+            len(matches), len(images),
+            ", ".join(f"{i} (d={distances[i]:.8f})" for i in matches),
+            tolerance_pct, threshold,
+        )
         return {"images": out_images, "masks": masks}
 
 

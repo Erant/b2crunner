@@ -114,6 +114,25 @@ class TestInjectAnchorAgainstRecordedData(unittest.TestCase):
         out = self._run(anchor_position=None)
         self.assertIs(out["images"], self.ds.images)
 
+    def test_a_missed_anchor_is_logged_loudly(self):
+        """The no-match case is the one that looks like success.
+
+        The batch comes back intact and the run finishes; the only thing
+        that changed is that nothing in it is marked as a real photograph.
+        fast_helical_native shipped in exactly that state — an unanchored
+        helical re-render, whose nearest camera is 24x the tolerance from
+        the anchor — and the port, unlike the ComfyUI node it was ported
+        from, said nothing at all. So a WARNING naming the distance is part
+        of the step's contract, not decoration.
+        """
+        far = self.anchor_position + np.array([1e3, 0.0, 0.0], dtype=np.float32)
+        with self.assertLogs("pipeline.steps.anchor_stub", level="WARNING") as logged:
+            out = self._run(anchor_position=far)
+        self.assertIs(out["images"], self.ds.images)
+        message = "\n".join(logged.output)
+        self.assertIn("NO frame matched", message)
+        self.assertIn("closest", message)
+
     def test_shape_mismatch_raises(self):
         wrong = np.zeros((64, 64, 3), dtype=np.uint8)
         with self.assertRaises(ValueError):
