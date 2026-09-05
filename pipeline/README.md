@@ -93,6 +93,14 @@ pipeline/
 │                      build_server): a second process with a scheduler of
 │                      its own would start a run on a card this one already
 │                      had busy
+├── client.py          `B2CClient` — pipeline/api.py from the outside, over
+│                      `requests` alone (no gradio, no fastapi, no torch),
+│                      so a laptop that could not host the pipeline can
+│                      still drive a pod. Its `follow()` turns whole-
+│                      RunState polls into one event per real transition
+├── api_cli.py         `python -m pipeline.cli api ...` — one subcommand per
+│                      route, plus `api run`: submit, print each stage as it
+│                      finishes with what it cost, download the result
 ├── webui.py           The browser's view of runs.py: the Run/Progress/
 │                      Results/All results/Models/Doctor tabs, drawn from
 │                      the workflow's own settings:/outputs: blocks

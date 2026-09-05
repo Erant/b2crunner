@@ -381,7 +381,12 @@ def build_router(scheduler: GpuScheduler, envs_path: str = "") -> APIRouter:
         looks like a whole one.
         """
         state = _lookup(name)
-        if state.status in ("queued", "running"):
+        # `state.status` alone is not enough: a container that died mid-run
+        # leaves its status file at `running` for good, so a run whose
+        # colmap/ and ply/ are sitting complete on the volume could never
+        # be collected. Only this server's own scheduler can say a run is
+        # really still going — same test `cancel_run` makes below.
+        if state.status in ("queued", "running") and scheduler.snapshot(name).name == name:
             raise HTTPException(
                 status_code=409,
                 detail=f"Run {name!r} is {state.status}; its exports are the last steps.",

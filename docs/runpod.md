@@ -239,6 +239,73 @@ Every route needs `B2C_API_TOKEN` as a bearer token, and none of them is
 served if that variable is unset. `--no-api` on `pipeline.cli ui` serves the
 UI alone.
 
+### From this repo
+
+`pipeline.cli api` is a client for all of it. No gradio, no fastapi, no
+torch and no GPU: a plain `pip install -r requirements.txt` is enough, so
+it runs from a laptop that could not host the pipeline itself. (The
+`pipeline.client` module underneath needs only `requests`, if you would
+rather drive it from your own script than from the CLI.)
+`--url`/`$B2C_API_URL` and `--token`/`$B2C_API_TOKEN` say where and as whom.
+
+```bash
+export B2C_API_URL=https://<pod-id>-7860.proxy.runpod.net
+export B2C_API_TOKEN=...        # the value on the pod template
+
+# the whole job in one command: submit, watch every stage finish with what
+# it cost, then download the .zip. `--param` is spelled exactly as it is
+# for a local `pipeline.cli run`
+python -m pipeline.cli api run sheet.png --prompt 'a woman in a red jacket' \
+    --param run_upscale=false --param train_final_splat.total_steps=15000 \
+    -o results/
+```
+```
+run fast_helical_native-20260905-101500-a1b2c3
+  queued
+  waiting for model download: wan22, seedvr2 (~48 GB)
+  running
+  [ 1/42] split_sheet                       1.9s
+  [ 2/42] reconstruct_body                 44.2s
+  [ 3/42] detect_face                       0.6s
+  ...
+  [33/42] upscale                        skipped
+  ...
+  [42/42] train_final_splat               1h04m
+
+OK: complete — 81 frames in /data/output/...  (2h11m wall clock)
+   50%  0.9 GB of 1.8 GB
+  100%  1.8 GB of 1.8 GB
+saved results/fast_helical_native-20260905-101500-a1b2c3-result.zip (1.8 GB)
+```
+
+A failed run prints the last 40 log lines instead of a download, which is
+usually the whole diagnosis. Interrupting the watch stops watching, not the
+run — it is a process on the pod.
+
+The rest, one per route:
+
+```bash
+python -m pipeline.cli api health              # slots, queue depth, model status
+python -m pipeline.cli api workflows fast_helical_native   # what --param accepts
+python -m pipeline.cli api submit sheet.png    # queue it and return the name
+python -m pipeline.cli api submit batch.zip    # one run per pair, fanned across GPUs
+python -m pipeline.cli api submit /data/uploads/sheet.png --remote   # already there
+python -m pipeline.cli api runs                # everything on the pod, in flight first
+python -m pipeline.cli api status <run>
+python -m pipeline.cli api follow <run>        # attach to one already going
+python -m pipeline.cli api log <run> --tail 200
+python -m pipeline.cli api result <run> -o results/
+python -m pipeline.cli api cancel <run>
+python -m pipeline.cli api schema              # the OpenAPI document
+```
+
+`--remote` is the one worth remembering for a batch: put the sheets on the
+volume with `rsync` or `runpodctl send` and name the path, rather than
+pushing hundreds of MB back through the proxy to reach a disk they are
+already on.
+
+### With curl
+
 ```bash
 POD=https://<pod-id>-7860.proxy.runpod.net
 AUTH="Authorization: Bearer $B2C_API_TOKEN"

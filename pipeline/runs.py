@@ -486,10 +486,26 @@ def result_subdirs(workflow: str = "") -> List[str]:
     whose workflow file has since been renamed — the union across every
     shipped workflow, so a finished run is still packaged rather than
     reported as empty.
+
+    A name that no longer resolves takes that same fallback. It has to be
+    caught explicitly: `resolve_workflow` refuses with `SystemExit`, which
+    is a BaseException and so passes straight through the `except` below
+    and through a request handler's too — a run recorded against a
+    workflow file that has since been renamed or removed (or one submitted
+    by path, which is not under the workflow directory at all) turned
+    packaging into a 500 rather than the documented fallback.
     """
     from .cli import available_workflows, resolve_workflow
 
-    paths = [resolve_workflow(workflow)] if workflow else available_workflows()
+    paths = available_workflows()
+    if workflow:
+        try:
+            paths = [resolve_workflow(workflow)]
+        except SystemExit:
+            logger.info(
+                "run recorded workflow %r, which no longer resolves; packaging "
+                "against every shipped workflow's deliverables", workflow,
+            )
     names: List[str] = []
     for path in paths:
         try:
@@ -610,6 +626,16 @@ def _write_run_members(
     return True
 
 
+# Stamped into every archive this module writes, and checked before one is
+# reused. Mtimes answer "have the sources changed since"; they cannot
+# answer "was this built by code that packaged the same things" — and that
+# has already changed twice (log.txt, then debug/). Without the stamp, a
+# run packaged before `debug/` was carried keeps handing back its old
+# contents forever, while the docs say `debug/` is in there. **Bump this
+# whenever `_write_run_members` changes what it writes.**
+ARCHIVE_FORMAT = b"b2c-result-1: outputs + debug/ + log.txt"
+
+
 def archive_is_current(
     archive: Path,
     run_dir: Path,
@@ -626,10 +652,17 @@ def archive_is_current(
 
     Compares modification times rather than contents — the sources are
     hundreds of megabytes of PNG, and the only writer is a run that has
-    already finished.
+    already finished — plus `ARCHIVE_FORMAT`, which is what makes the
+    cache safe to change the packaging under.
     """
     if not archive.is_file():
         return False
+    try:
+        with zipfile.ZipFile(archive) as bundle:
+            if bundle.comment != ARCHIVE_FORMAT:
+                return False
+    except (OSError, zipfile.BadZipFile):
+        return False  # truncated, or not an archive this module wrote
     stamp = archive.stat().st_mtime
     sources = list(result_dirs(run_dir, workflow).values())
     sources += list(debug_dirs(run_dir).values())
@@ -717,6 +750,7 @@ def build_result_zip(
             # them on a pod's CPU buys a couple of percent for minutes of
             # wall clock.
             with zipfile.ZipFile(staging, "w", compression=zipfile.ZIP_STORED) as bundle:
+                bundle.comment = ARCHIVE_FORMAT
                 _write_run_members(bundle, Path(run_dir), workflow, log_path)
             os.replace(staging, archive)
         finally:
@@ -746,6 +780,7 @@ def build_bundle_zip(states: List[RunState]) -> Optional[str]:
         staging = archive.with_suffix(f".zip.{secrets.token_hex(4)}.part")
         try:
             with zipfile.ZipFile(staging, "w", compression=zipfile.ZIP_STORED) as bundle:
+                bundle.comment = ARCHIVE_FORMAT
                 for state in states:
                     if not state.output_dir:
                         continue

@@ -535,6 +535,15 @@ class TestCollectingTheResult(ApiTestCase):
         self.assertEqual(response.status_code, 409)
         self.assertIn("running", response.json()["detail"])
 
+    def test_a_stale_running_status_does_not_lock_the_result_away(self):
+        # A container that died mid-run leaves its status file at
+        # `running` for good. The deliverables are on the volume; refusing
+        # on the published status alone would make them unreachable
+        # through the API forever.
+        self.finished_run(name="orphaned-run", status="running")
+        response = self.client.get(f"{API_PREFIX}/runs/orphaned-run/result", headers=AUTH)
+        self.assertEqual(response.status_code, 200, response.text)
+
     def test_a_finished_run_that_produced_nothing_has_no_result(self):
         self.finished_run(name="empty-run", deliverables=False)
         response = self.client.get(f"{API_PREFIX}/runs/empty-run/result", headers=AUTH)

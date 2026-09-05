@@ -87,6 +87,17 @@ python -m pipeline.cli doctor
 # the API is not served at all. See docs/runpod.md, "Automating it".
 python -m pipeline.cli ui            # needs the `ui` extra (gradio, fastapi, uvicorn)
 
+# ...and a client for it. No gradio, no fastapi, no torch — the plain
+# `requirements.txt` install is enough, so it runs from a laptop that
+# could not host the pipeline. `api run` does the whole job:
+# submit, print each stage as it finishes with what it cost, download the
+# result .zip. One subcommand per route besides.
+export B2C_API_URL=https://<pod-id>-7860.proxy.runpod.net B2C_API_TOKEN=...
+python -m pipeline.cli api run sheet.png --prompt "a woman in a red jacket" \
+    --param run_upscale=false -o results/
+python -m pipeline.cli api runs
+python -m pipeline.cli api follow <run>
+
 python -m pipeline.cli workflows     # what's available
 python -m pipeline.cli steps
 ```

@@ -357,6 +357,32 @@ class TestEveryRunOnTheVolume(_BundleCase):
         runs.build_result_zip(run, reuse=True)
         self.assertIn("ply/second.ply", self._names(str(archive)))
 
+    def test_an_archive_from_an_older_packaging_format_is_rebuilt(self):
+        """Mtimes cannot answer "was this built by the same code".
+
+        `debug/` started riding along on 2026-09-04; every archive built
+        before that is newer than all of its sources, so without a format
+        stamp `reuse=True` would keep serving pre-`debug/` contents
+        forever while the docs promise otherwise.
+        """
+        run = _run_dir(self.runs, colmap=True, ply=False, name="stale-format")
+        archive = Path(runs.build_result_zip(run))
+        with zipfile.ZipFile(archive) as bundle:
+            self.assertEqual(bundle.comment, runs.ARCHIVE_FORMAT)
+
+        # Rewrite it as an older build would have: same members, no stamp.
+        with zipfile.ZipFile(archive, "w") as bundle:
+            bundle.writestr("colmap/cameras.txt", "old")
+        self.assertFalse(runs.archive_is_current(archive, run))
+        self.assertIn("colmap/points3D.txt",
+                      self._names(runs.build_result_zip(run, reuse=True)))
+
+    def test_a_corrupt_archive_is_never_current(self):
+        run = _run_dir(self.runs, colmap=True, ply=False, name="corrupt")
+        archive = Path(runs.build_result_zip(run))
+        archive.write_bytes(b"not a zip at all")
+        self.assertFalse(runs.archive_is_current(archive, run))
+
     def test_a_missing_archive_is_never_current(self):
         run = _run_dir(self.runs, colmap=True, ply=False, name="never-packaged")
         self.assertFalse(
@@ -414,6 +440,20 @@ class TestOutputSelection(unittest.TestCase):
         self.assertTrue(all(o.label and o.help for o in outputs))
         preupscale = outputs[-1]
         self.assertEqual(preupscale.requires, "run_upscale")
+
+    def test_a_workflow_name_that_no_longer_resolves_takes_the_fallback(self):
+        """A renamed or deleted workflow must not take packaging down.
+
+        `cli.resolve_workflow` refuses with `SystemExit`, a BaseException
+        that passes through an ordinary `except` — and through a request
+        handler's, so this reached the HTTP API as a 500 rather than as the
+        union `result_subdirs` documents. A run submitted by path (rather
+        than by name) records one that stops resolving the moment the file
+        moves, which makes this ordinary rather than exotic.
+        """
+        union = runs.result_subdirs()
+        self.assertEqual(runs.result_subdirs("a_workflow_that_was_deleted"), union)
+        self.assertIn("colmap", union)
 
     def test_a_workflow_without_an_outputs_block_offers_nothing(self):
         """The box hides itself rather than pretending to switch something

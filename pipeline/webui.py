@@ -84,7 +84,6 @@ is where the two are put on one port: the API first, the UI mounted under it.
 
 from __future__ import annotations
 
-import json
 import logging
 import time
 from pathlib import Path
@@ -1070,6 +1069,11 @@ def build_server(
             "unauthenticated. Set it to enable both.", TOKEN_ENV,
         )
 
+    # Keeps the app usable as a handle onto the scheduler it drives, the
+    # way `build_app` does for the Blocks — `launch` needs it to stop the
+    # workers before uvicorn starts waiting on connections.
+    server.state.gpu_scheduler = scheduler
+
     return gr.mount_gradio_app(
         server, blocks, "/",
         auth=("b2c", token) if token else None,
@@ -1085,13 +1089,52 @@ def launch(
     host: str = "0.0.0.0", port: int = 7860, envs_path: str = "", share: bool = False,
     gpu_count: Optional[int] = None, serve_api: bool = True,
 ) -> None:
+    """Serve until stopped, and take the GPU workers down first when it is.
+
+    The signal handlers are ours rather than uvicorn's, and they run
+    `scheduler.shutdown()` *before* asking uvicorn to wind down. That order
+    is the whole point. A shutdown hook on the ASGI lifespan is not enough:
+    uvicorn runs lifespan shutdown only after its graceful phase, which
+    loops while any connection is still open — and a browser left on the
+    Progress or Results tab is holding a Gradio SSE stream for the length
+    of the run. So a pod stop with one tab attached would sit in graceful
+    shutdown until SIGKILL, and every in-flight `pipeline.run_worker` would
+    be orphaned holding a CUDA context: exactly the failure the handler
+    exists to prevent, reintroduced by moving it. The lifespan hook stays
+    as well, for the shutdowns no signal announces.
+
+    `timeout_graceful_shutdown` bounds the wait in any case — those streams
+    poll forever by design and will not close on their own.
+    """
+    import signal
+
     import uvicorn
 
     server = build_server(envs_path, gpu_count=gpu_count, serve_api=serve_api)
+    scheduler: GpuScheduler = server.state.gpu_scheduler
+
+    config = uvicorn.Config(
+        server, host=host, port=port, timeout_graceful_shutdown=10,
+    )
+    running = uvicorn.Server(config)
+    # Uvicorn installs its own through `loop.add_signal_handler`, which
+    # would replace anything set here; telling it not to is the supported
+    # way to embed it.
+    running.install_signal_handlers = lambda: None
+
+    def _stop(signum, _frame) -> None:
+        logger.info("received signal %s; stopping %d GPU worker slot(s)",
+                    signum, scheduler.gpu_count)
+        scheduler.shutdown()
+        running.should_exit = True
+
+    signal.signal(signal.SIGTERM, _stop)
+    signal.signal(signal.SIGINT, _stop)
+
     logger.info("serving on http://%s:%d", host, port)
     if share:
         _open_tunnel(host, port)
-    uvicorn.run(server, host=host, port=port)
+    running.run()
 
 
 def _open_tunnel(host: str, port: int) -> None:

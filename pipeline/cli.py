@@ -5,12 +5,19 @@
     python -m pipeline.cli doctor
     python -m pipeline.cli steps | workflows
     python -m pipeline.cli ui
+    python -m pipeline.cli api run <sheet.png> --prompt "..."
 
 `run` loads a starting Dataset — either a complete on-disk one, or a
 bootstrap carrying only the front/back reference sheet (see
 Dataset.from_reference_image)
 — runs the workflow, and writes the final in-memory dataset to `--out` so a
 run always leaves something on disk to inspect.
+
+`api` is the same work aimed at a pod that is already serving: `api run`
+submits a sheet, prints each stage as it finishes with what it cost, and
+downloads the result. It talks to `pipeline.api` over HTTP and needs only
+`requests`, so it runs from a laptop that could not host the pipeline
+itself. See `pipeline/api_cli.py`.
 
 `doctor` is the one to reach for on a fresh pod: it answers whether Vulkan,
 EGL, the venvs, the brush binaries and the HF token are all actually usable,
@@ -479,6 +486,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     params_p.set_defaults(func=show_params)
 
+    from .api_cli import add_parser as add_api_parser
+
+    add_api_parser(sub)
+
     ui_p = sub.add_parser("ui", help="Launch the web UI")
     ui_p.add_argument("--host", default="0.0.0.0")
     ui_p.add_argument("--port", type=int, default=7860)
@@ -501,6 +512,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
+    if args.command == "api":
+        # Its own dispatcher: a refusal from a pod is a sentence to print,
+        # not a traceback, and an interrupted watch is not a failed run.
+        from .api_cli import dispatch
+
+        sys.exit(dispatch(args))
     sys.exit(args.func(args))
 
 
