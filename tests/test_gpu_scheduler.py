@@ -191,6 +191,70 @@ class TestGpuScheduler(unittest.TestCase):
         with self.assertRaises(ValueError):
             GpuScheduler(gpu_count=0, work_dir=Path(self.tmp.name), spawn=self.spawner)
 
+    def test_shutdown_does_not_start_the_next_queued_run(self):
+        """Terminating a worker frees its slot, and a free slot dispatches.
+
+        Which meant stopping the server *started* fresh workers: the dying
+        one's watcher reached its `finally`, freed the slot and pulled the
+        next job off the queue, so a shutdown spawned processes that began
+        holding GPUs as the server exited — and outlived it on any host
+        that does not tear the whole container down.
+        """
+        scheduler = GpuScheduler(
+            gpu_count=1, work_dir=Path(self.tmp.name), spawn=self.spawner,
+        )
+        scheduler.submit(_job("running"))
+        scheduler.submit(_job("queued-1"))
+        scheduler.submit(_job("queued-2"))
+        self.assertEqual(len(self.spawner.calls), 1)
+
+        scheduler.shutdown()
+        # The watcher thread notices the terminated child within its 1s
+        # poll; give it room to do the wrong thing if it is going to.
+        time.sleep(1.5)
+
+        self.assertEqual(
+            [call["run_name"] for call in self.spawner.calls], ["running"],
+            "shutdown started a queued run",
+        )
+        self.assertEqual(scheduler.queued_count(), 0)
+
+    def test_shutdown_marks_the_runs_it_dropped(self):
+        scheduler = GpuScheduler(
+            gpu_count=1, work_dir=Path(self.tmp.name), spawn=self.spawner,
+        )
+        scheduler.submit(_job("running"))
+        scheduler.submit(_job("dropped"))
+        scheduler.shutdown()
+        self.assertEqual(scheduler.snapshot("dropped").status, "cancelled")
+        self.assertIn("shutting down", scheduler.snapshot("dropped").message)
+
+    def test_submitting_after_shutdown_is_refused(self):
+        self.scheduler.shutdown()
+        with self.assertRaises(RuntimeError):
+            self.scheduler.submit(_job("late"))
+
+    def test_shutdown_waits_for_a_worker_that_stops(self):
+        # A worker between steps exits on SIGTERM, and the caller needs to
+        # know that before it runs something that destroys the machine.
+        self.scheduler.submit(_job("a"))
+        self.assertEqual(self.scheduler.shutdown(timeout=5.0), [])
+        self.assertTrue(self.spawner.processes["a"].terminated)
+
+    def test_shutdown_names_a_worker_that_did_not_stop_in_time(self):
+        """A step is one opaque call; a brush training has no boundary for
+        an hour, so its worker is still there when the wait expires."""
+        class _Stubborn(_FakeProcess):
+            def terminate(self):
+                self.terminated = True  # ignores it, like a worker mid-step
+
+        stubborn = _Stubborn()
+        scheduler = GpuScheduler(
+            gpu_count=1, work_dir=Path(self.tmp.name), spawn=lambda *_: stubborn,
+        )
+        scheduler.submit(_job("long-step"))
+        self.assertEqual(scheduler.shutdown(timeout=0.3), ["long-step"])
+
     def test_a_spawn_that_raises_fails_that_run_without_wedging_the_slot(self):
         def _bad_spawn(job, gpu_index, job_path, status_path):
             raise OSError("no such interpreter")

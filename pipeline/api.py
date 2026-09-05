@@ -36,12 +36,16 @@ import json
 import logging
 import os
 import shutil
+import subprocess
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import (
+    APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, Request,
+    UploadFile,
+)
 from fastapi.responses import FileResponse
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -49,7 +53,8 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from .gpu_scheduler import GpuScheduler
 from .run_state import tail_lines
 from .runs import (
-    WORKFLOW_NATIVE, SubmitError, build_result_zip, find_run, merged_runs,
+    WORKFLOW_NATIVE, SubmitError, build_result_zip, check_submission,
+    discover_runs, find_run, merged_runs,
     resolve_upload, run_log_path, submit_runs, workflow_param_panel,
 )
 
@@ -65,9 +70,125 @@ TOKEN_ENV = "B2C_API_TOKEN"
 _FORM_TYPES = {"multipart/form-data", "application/x-www-form-urlencoded"}
 
 
+# An optional command run just before the server exits, for whatever the
+# *host* has to be told. The container knows how to stop itself; it does
+# not know whether stopping means a pod stops billing, a compose service
+# exits, or a machine powers off — and baking any one of those in would
+# make this a RunPod image and need a rebuild to support the next host.
+# So the escalation comes from the template:
+#
+#   B2C_SHUTDOWN_COMMAND="runpodctl stop pod $RUNPOD_POD_ID"
+#   B2C_SHUTDOWN_COMMAND="shutdown -h now"
+#   B2C_SHUTDOWN_COMMAND="curl -X POST https://.../done"
+SHUTDOWN_COMMAND_ENV = "B2C_SHUTDOWN_COMMAND"
+
+# How long that command gets. It runs after the GPU workers are already
+# stopped, so overrunning it costs nothing but a delayed exit — but the
+# exit must still happen, or a hook that hangs leaves the very thing
+# running that was asked to stop.
+SHUTDOWN_COMMAND_TIMEOUT = 30.0
+
+# How long the workers get to go before the host command runs. A worker
+# between steps exits almost at once; one inside a step does not stop until
+# that step ends, and a step can be an hour of brush training — so this is
+# short on purpose. It buys the common case (idle, or a fast step) a clean
+# stop before something like `runpodctl stop pod` destroys the machine, and
+# reports the rest rather than pretending to have waited for them.
+WORKER_STOP_TIMEOUT = 10.0
+
+
 def api_token() -> Optional[str]:
     """The shared secret, or None when the deployment has not set one."""
     return os.environ.get(TOKEN_ENV) or None
+
+
+def shutdown_command() -> str:
+    return os.environ.get(SHUTDOWN_COMMAND_ENV, "").strip()
+
+
+class ShutdownController:
+    """Stops this server, in the order that does not lose work.
+
+    Workers first, then the host's own command, then the server itself.
+    That order is the point: a hook like `runpodctl stop pod` can make the
+    machine disappear seconds later, and a `pipeline.run_worker` killed
+    mid-write by the platform leaves a half-written export behind, where
+    one stopped here gets its SIGTERM and stops at a step boundary.
+
+    **It is a bound, not a guarantee.** `run_worker` checks its cancelled
+    flag at step boundaries only — a step is one opaque call, often a
+    subprocess holding the GPU, and tearing one down mid-flight risks
+    leaving the card in a state the next run inherits. So a worker inside a
+    30,000-iteration brush training is still running when
+    `WORKER_STOP_TIMEOUT` expires, and goes down with the container like
+    anything else. `run()` says which ones those were rather than waiting
+    an hour for them or claiming they stopped.
+
+    `bind` is how `pipeline.webui.launch` hands over the one thing this
+    cannot know for itself — how to make uvicorn return.
+    """
+
+    def __init__(self, scheduler: GpuScheduler) -> None:
+        self._scheduler = scheduler
+        self._stop_server: Optional[Callable[[], None]] = None
+
+    def bind(self, stop_server: Callable[[], None]) -> None:
+        self._stop_server = stop_server
+
+    @property
+    def bound(self) -> bool:
+        return self._stop_server is not None
+
+    def plan(self) -> Dict[str, Any]:
+        """What `run()` would do, for the reply that precedes it."""
+        return {
+            "stops_gpu_workers": self._scheduler.gpu_count,
+            "host_command": shutdown_command(),
+            "exits_server": self.bound,
+        }
+
+    def run(self) -> None:
+        """Do it. Called after the response has gone out, never inline."""
+        logger.info("shutdown requested; stopping %d GPU worker slot(s)",
+                    self._scheduler.gpu_count)
+        alive = self._scheduler.shutdown(timeout=WORKER_STOP_TIMEOUT)
+        if alive:
+            # Said plainly because the next line may destroy the machine.
+            logger.warning(
+                "%d worker(s) did not stop within %.0fs and will be killed "
+                "mid-step: %s. A step is one opaque call; they stop at step "
+                "boundaries, and a brush training has none for an hour.",
+                len(alive), WORKER_STOP_TIMEOUT, ", ".join(alive),
+            )
+
+        command = shutdown_command()
+        if command:
+            logger.info("running %s: %s", SHUTDOWN_COMMAND_ENV, command)
+            try:
+                # shell=True on purpose: this is an operator-supplied
+                # command line from the container's own environment, the
+                # same trust as the container itself, and it is meant to be
+                # written the way it would be typed.
+                result = subprocess.run(
+                    command, shell=True, timeout=SHUTDOWN_COMMAND_TIMEOUT,
+                    capture_output=True, text=True,
+                )
+                for stream, label in ((result.stdout, "out"), (result.stderr, "err")):
+                    for line in (stream or "").strip().splitlines():
+                        logger.info("  %s: %s", label, line)
+                if result.returncode:
+                    logger.error("%s exited %d", SHUTDOWN_COMMAND_ENV, result.returncode)
+            except Exception:
+                # Never fatal. The container still has to stop — a hook
+                # that fails means the host was not told, not that this
+                # server should keep running and billing.
+                logger.exception("%s failed; exiting anyway", SHUTDOWN_COMMAND_ENV)
+
+        if self._stop_server is None:  # pragma: no cover - launch always binds
+            logger.error("nothing bound to stop the server; it will keep running")
+            return
+        logger.info("stopping the server")
+        self._stop_server()
 
 
 def _require_token(request: Request) -> None:
@@ -128,13 +249,22 @@ class SubmitBody(BaseModel):
     workflow: str = WORKFLOW_NATIVE
 
 
-def _parse_json_field(raw: Optional[str], field: str) -> Dict[str, Any]:
+def _parse_json_field(
+    raw: Optional[str], field: str, of_objects: bool = False,
+) -> Dict[str, Any]:
     """One multipart field carrying a JSON object, or {} when it is absent.
 
     Multipart has no types, so `settings` arrives as a string. Refusing a
     malformed one here, by name, beats letting it through as a no-op — an
     override that silently does nothing is the failure mode this pipeline's
     `--param` handling already goes out of its way to prevent.
+
+    `of_objects` checks the second level too, which `step_params` needs:
+    `{"train_final_splat": "oops"}` is a well-formed object whose value is
+    not, and without this it reached `submit_runs`' `dict(v)` and came back
+    as a 500. The JSON body gets that check from pydantic
+    (`Dict[str, Dict[str, Any]]`); this is multipart's half of the same
+    rule, so the two entry points cannot disagree about one typo.
     """
     if not raw or not raw.strip():
         return {}
@@ -146,6 +276,14 @@ def _parse_json_field(raw: Optional[str], field: str) -> Dict[str, Any]:
         raise HTTPException(
             status_code=400, detail=f"{field}: expected a JSON object, got {type(value).__name__}."
         )
+    if of_objects:
+        bad = sorted(k for k, v in value.items() if not isinstance(v, dict))
+        if bad:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{field}: {', '.join(bad)} must map to an object of "
+                       f'that step\'s params, e.g. {{"{bad[0]}": {{"steps": 4}}}}.',
+            )
     return value
 
 
@@ -199,8 +337,29 @@ def add_schema_route(app, prefix: str = API_PREFIX) -> None:
         return app.openapi()
 
 
-def build_router(scheduler: GpuScheduler, envs_path: str = "") -> APIRouter:
-    """The whole API, bound to the scheduler the UI is already driving."""
+class ShutdownBody(BaseModel):
+    """The one field `POST /shutdown` takes."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    force: bool = Field(
+        False,
+        description="Shut down even with runs queued or running, throwing away "
+                    "whatever they have not yet exported.",
+    )
+
+
+def build_router(
+    scheduler: GpuScheduler,
+    envs_path: str = "",
+    shutdown: Optional[ShutdownController] = None,
+) -> APIRouter:
+    """The whole API, bound to the scheduler the UI is already driving.
+
+    `shutdown` is optional so a caller that only wants the run routes — a
+    test, or a future server that is not the one being stopped — gets them
+    without a stop button attached to nothing.
+    """
     router = APIRouter(dependencies=[Depends(_require_token)])
 
     # -- the box ----------------------------------------------------------
@@ -329,11 +488,21 @@ def build_router(scheduler: GpuScheduler, envs_path: str = "") -> APIRouter:
         becomes the 400's detail verbatim rather than being restated here.
         """
         try:
+            # Checked before `resolve_upload`, which copies the sheet onto
+            # the volume (or extracts a whole zip there). A submission
+            # refused for a misspelled setting used to leave its input
+            # behind anyway, so a scripted batch with a typo'd --param
+            # filled the volume with data nothing would ever read.
+            check_submission(
+                _parse_json_field(settings, "settings"),
+                _parse_json_field(step_params, "step_params", of_objects=True),
+                workflow=workflow, strict=True,
+            )
             plan = resolve_upload(str(upload), prompt)
             return submit_runs(
                 scheduler, plan,
                 _parse_json_field(settings, "settings"),
-                _parse_json_field(step_params, "step_params"),
+                _parse_json_field(step_params, "step_params", of_objects=True),
                 envs_path=envs_path, workflow=workflow,
                 # A script has no stale param panel to forgive — an override
                 # it misspells is a typo, and one that silently does nothing
@@ -433,6 +602,73 @@ def build_router(scheduler: GpuScheduler, envs_path: str = "") -> APIRouter:
             )
         scheduler.cancel(name)
         return scheduler.snapshot(name).to_dict()
+
+    # -- stopping ----------------------------------------------------------
+
+    if shutdown is not None:
+        @router.post("/shutdown", status_code=202)
+        def stop_server(
+            background: BackgroundTasks, body: ShutdownBody = ShutdownBody(),
+        ) -> Dict[str, Any]:
+            """Stop this server, and with it the container it is in.
+
+            What that *means* is the host's business, not this image's: a
+            pod stops, a compose service exits, a systemd unit restarts.
+            `B2C_SHUTDOWN_COMMAND` is where a deployment says what else to
+            do about it — `runpodctl stop pod $RUNPOD_POD_ID` on a rented
+            pod, where a container exiting does not on its own stop the
+            meter. See `ShutdownController`.
+
+            Refused while anything is queued or running unless `force`: a
+            run in flight is hours of GPU already spent, and its exports
+            are its last steps, so stopping now usually throws all of it
+            away rather than most of it.
+
+            The work happens after this response is sent — a 202 means it
+            is going to stop, and the connection dropping shortly after is
+            the expected end of it.
+            """
+            known = scheduler.list_runs()
+            live = [s for s in known if s.status in ("queued", "running")]
+            if live and not body.force:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"{len(live)} run(s) still going: "
+                        f"{', '.join(state.name for state in live)}. "
+                        "Their exports are their last steps, so stopping now "
+                        "loses them. Wait, cancel them, or send force: true."
+                    ),
+                )
+
+            # Runs the volume says are going that this scheduler has never
+            # heard of: a `pipeline.cli run` started over SSH (the
+            # documented way to run something long inside tmux), or a
+            # status file left behind by a server that died. Reported, not
+            # refused on — a stale file must never make a pod impossible to
+            # stop, which would be a worse failure than this one — but a
+            # three-hour tmux run deserves better than silence. Computed
+            # after the refusal above: it walks the whole volume, which is
+            # not work to do for a request that is about to be turned down.
+            mine = {state.name for state in known}
+            unmanaged = [
+                state.name for state in discover_runs()
+                if state.status in ("queued", "running") and state.name not in mine
+            ]
+            background.add_task(shutdown.run)
+            logger.info("shutdown accepted (force=%s, %d run(s) in flight)",
+                        body.force, len(live))
+            if unmanaged:
+                logger.warning(
+                    "stopping with %d run(s) this server does not manage still "
+                    "marked running: %s", len(unmanaged), ", ".join(unmanaged),
+                )
+            return {
+                "stopping": True,
+                "abandoned_runs": [state.name for state in live],
+                "unmanaged_running": unmanaged,
+                **shutdown.plan(),
+            }
 
     def _lookup(name: str):
         state = find_run(scheduler, name)

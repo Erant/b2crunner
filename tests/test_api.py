@@ -56,12 +56,16 @@ class _StubProcess:
 
     `poll()` returning None is what keeps the scheduler's slot busy and the
     run at `running`, which is the state most of these want to submit into.
+    It stops on `terminate()`, like a real worker between steps — a stub
+    that ignored SIGTERM would make every shutdown test wait out
+    `WORKER_STOP_TIMEOUT`.
     """
 
-    returncode = None
+    def __init__(self):
+        self.returncode = None
 
     def poll(self):
-        return None
+        return self.returncode
 
     def terminate(self):
         self.returncode = -15
@@ -362,6 +366,57 @@ class TestWhatItRefuses(ApiTestCase):
             "does not declare stpes",
         )
 
+    def test_a_step_param_that_is_not_an_object(self):
+        # Well-formed JSON whose second level is not. Pydantic catches this
+        # on the JSON body; without the matching check on multipart it
+        # reached `dict(v)` inside submit_runs and came back a 500 — the
+        # two entry points disagreeing about one typo.
+        response = self.submit_sheet(
+            step_params=json.dumps({"train_final_splat": "oops"}),
+        )
+        self.assertRefused(response, "train_final_splat")
+        self.assertIn("must map to an object", response.json()["detail"])
+
+    def test_a_step_param_object_of_numbers(self):
+        self.assertRefused(
+            self.submit_sheet(step_params=json.dumps({"denoise_pass1": 5})),
+            "must map to an object",
+        )
+
+    def test_the_json_body_refuses_the_same_shape(self):
+        sheet = self.data / "staged.png"
+        sheet.write_bytes(_png())
+        response = self.post(json={
+            "reference_image": str(sheet),
+            "step_params": {"train_final_splat": "oops"},
+        })
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertEqual(self.submitted, [])
+
+    def test_a_refused_submission_leaves_nothing_on_the_volume(self):
+        # `resolve_upload` copies the sheet onto the volume (or extracts a
+        # whole zip there), so validating after it meant a scripted batch
+        # with a typo'd --param filled the disk with data nothing reads.
+        before = sorted(p.name for p in runs.upload_dir().iterdir())
+        self.assertRefused(
+            self.submit_sheet(settings=json.dumps({"nosuchsetting": 1})),
+            "nosuchsetting",
+        )
+        self.assertEqual(sorted(p.name for p in runs.upload_dir().iterdir()), before)
+
+    def test_a_refused_zip_leaves_no_extracted_tree(self):
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            archive.writestr("a.png", _png())
+        self.assertRefused(
+            self.post(
+                files={"file": ("batch.zip", buffer.getvalue(), "application/zip")},
+                data={"settings": json.dumps({"export_colmap": False, "export_ply": False})},
+            ),
+            "Pick at least one output",
+        )
+        self.assertEqual(list(runs.upload_dir().iterdir()), [])
+
     def test_a_setting_of_the_wrong_type(self):
         # ParamError is a ValueError; without the translation in
         # submit_runs this is a 500 for what is plainly a bad request.
@@ -605,6 +660,190 @@ class TestCancelling(ApiTestCase):
         )
 
 
+class TestStopping(ApiTestCase):
+    """`POST /shutdown` — what it refuses, and what it actually does."""
+
+    def setUp(self):
+        super().setUp()
+        # The router in ApiTestCase is built without a controller, so this
+        # class builds its own app with one bound to a recorder rather than
+        # to a real uvicorn.
+        from fastapi import FastAPI
+
+        from pipeline.api import ShutdownController, build_router
+
+        self.stopped = []
+        self.shutdown = ShutdownController(self.scheduler)
+        self.shutdown.bind(lambda: self.stopped.append("server"))
+        app = FastAPI()
+        app.include_router(
+            build_router(self.scheduler, "envs.yaml", self.shutdown), prefix=API_PREFIX,
+        )
+        self.client = TestClient(app, raise_server_exceptions=False)
+
+    def post_shutdown(self, **body):
+        return self.client.post(f"{API_PREFIX}/shutdown", headers=AUTH, json=body or None)
+
+    def test_an_idle_server_stops(self):
+        response = self.post_shutdown()
+        self.assertEqual(response.status_code, 202)
+        self.assertIs(response.json()["stopping"], True)
+        self.assertEqual(response.json()["abandoned_runs"], [])
+        # TestClient runs background tasks before returning, so by here the
+        # controller has already done its work.
+        self.assertEqual(self.stopped, ["server"])
+
+    def test_a_bodyless_post_works(self):
+        # `curl -XPOST .../shutdown` with no -d is the natural spelling and
+        # the one the docs show; the body's only field defaults to false.
+        response = self.client.post(f"{API_PREFIX}/shutdown", headers=AUTH)
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertEqual(self.stopped, ["server"])
+
+    def test_it_is_refused_while_a_run_is_going(self):
+        # Hours of GPU already spent, and the exports are the last steps —
+        # stopping now loses all of it rather than most of it.
+        name = self.submit_sheet().json()["runs"][0]["name"]
+        response = self.post_shutdown()
+        self.assertEqual(response.status_code, 409)
+        self.assertIn(name, response.json()["detail"])
+        self.assertEqual(self.stopped, [], "stopped anyway")
+
+    def test_force_stops_regardless_and_names_what_it_abandoned(self):
+        name = self.submit_sheet().json()["runs"][0]["name"]
+        response = self.post_shutdown(force=True)
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()["abandoned_runs"], [name])
+        self.assertEqual(self.stopped, ["server"])
+
+    def test_a_queued_run_counts_as_in_flight(self):
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            for stem in ("a", "b"):
+                archive.writestr(f"{stem}.png", _png())
+        self.post(files={"file": ("batch.zip", buffer.getvalue(), "application/zip")})
+        self.assertEqual(self.scheduler.queued_count(), 1)
+        self.assertEqual(self.post_shutdown().status_code, 409)
+
+    def test_a_finished_run_on_the_volume_does_not_block_it(self):
+        self.finished_run(name="older-run")
+        self.assertEqual(self.post_shutdown().status_code, 202)
+
+    def test_a_run_this_server_does_not_manage_is_reported_not_refused(self):
+        """A `pipeline.cli run` in tmux, or a status file left by a crash.
+
+        Refusing on these would let one stale file make a pod impossible
+        to stop, which is a worse failure than the one being prevented —
+        so it warns and stops. Going quiet about them is how a three-hour
+        tmux run disappears without explanation.
+        """
+        self.finished_run(name="tmux-run", status="running")
+        response = self.post_shutdown()
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()["unmanaged_running"], ["tmux-run"])
+        self.assertEqual(self.stopped, ["server"])
+
+    def test_this_servers_own_run_is_not_also_reported_as_unmanaged(self):
+        name = self.submit_sheet().json()["runs"][0]["name"]
+        response = self.post_shutdown(force=True)
+        self.assertEqual(response.json()["abandoned_runs"], [name])
+        self.assertEqual(response.json()["unmanaged_running"], [])
+
+    def test_the_gpu_workers_are_stopped_before_the_server(self):
+        # Order matters: a host command like `runpodctl stop pod` can make
+        # the machine vanish seconds later, and a worker killed mid-write
+        # by the platform leaves a half-written export behind.
+        order = []
+        self.scheduler.shutdown = lambda timeout=0.0: order.append("workers") or []
+        self.shutdown.bind(lambda: order.append("server"))
+        self.post_shutdown()
+        self.assertEqual(order, ["workers", "server"])
+
+    def test_a_typod_field_is_refused(self):
+        response = self.client.post(
+            f"{API_PREFIX}/shutdown", headers=AUTH, json={"forse": True},
+        )
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(self.stopped, [])
+
+    def test_it_needs_the_token_like_everything_else(self):
+        self.assertEqual(
+            self.client.post(f"{API_PREFIX}/shutdown").status_code, 401
+        )
+        self.assertEqual(self.stopped, [])
+
+    def test_no_route_at_all_when_nothing_can_be_stopped(self):
+        # A router built without a controller has no stop button attached
+        # to nothing.
+        from fastapi import FastAPI
+
+        from pipeline.api import build_router
+
+        app = FastAPI()
+        app.include_router(build_router(self.scheduler, "envs.yaml"), prefix=API_PREFIX)
+        response = TestClient(app, raise_server_exceptions=False).post(
+            f"{API_PREFIX}/shutdown", headers=AUTH,
+        )
+        self.assertEqual(response.status_code, 404)
+
+
+class TestTheHostCommand(unittest.TestCase):
+    """`B2C_SHUTDOWN_COMMAND` — the part the image deliberately does not know.
+
+    A container exiting is not, on its own, a host doing anything about it:
+    on a rented pod a stopped container is still a pod that bills. What to
+    do about that differs per host, so it comes from the environment rather
+    than from a code path in here.
+    """
+
+    def setUp(self):
+        from pipeline.api import ShutdownController
+
+        self._tmp = TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.marker = Path(self._tmp.name) / "ran"
+
+        class _Scheduler:
+            gpu_count = 1
+
+            def shutdown(self, timeout=0.0):
+                return []
+
+        self.stopped = []
+        self.controller = ShutdownController(_Scheduler())
+        self.controller.bind(lambda: self.stopped.append("server"))
+
+    def _with(self, command):
+        return unittest.mock.patch.dict(os.environ, {"B2C_SHUTDOWN_COMMAND": command})
+
+    def test_it_runs_before_the_server_stops(self):
+        with self._with(f"touch {self.marker}"):
+            self.controller.run()
+        self.assertTrue(self.marker.exists(), "the host was never told")
+        self.assertEqual(self.stopped, ["server"])
+
+    def test_a_command_that_fails_does_not_keep_the_container_running(self):
+        # A hook that failed means the host was not told — not that this
+        # server should stay up and keep billing.
+        with self._with("exit 3"):
+            self.controller.run()
+        self.assertEqual(self.stopped, ["server"])
+
+    def test_a_command_that_hangs_does_not_keep_the_container_running(self):
+        from pipeline import api
+
+        with unittest.mock.patch.object(api, "SHUTDOWN_COMMAND_TIMEOUT", 0.2):
+            with self._with("sleep 30"):
+                self.controller.run()
+        self.assertEqual(self.stopped, ["server"])
+
+    def test_unset_means_the_container_stops_and_nothing_else(self):
+        with self._with(""):
+            self.assertEqual(self.controller.plan()["host_command"], "")
+            self.controller.run()
+        self.assertEqual(self.stopped, ["server"])
+
+
 try:
     from pipeline import webui
 except ImportError:  # pragma: no cover - depends on the local env
@@ -673,6 +912,7 @@ class TestMountedServer(unittest.TestCase):
                 f"{API_PREFIX}/runs/{{name}}/cancel",
                 f"{API_PREFIX}/runs/{{name}}/log",
                 f"{API_PREFIX}/runs/{{name}}/result",
+                f"{API_PREFIX}/shutdown",
                 f"{API_PREFIX}/workflows",
                 f"{API_PREFIX}/workflows/{{name}}",
             ],

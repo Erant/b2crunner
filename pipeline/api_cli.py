@@ -6,6 +6,7 @@ recipe in a document, plus one that does the whole job:
     api run       submit, follow the stages as they finish, download the .zip
     api follow    the same watch, attached to a run already going
     api submit    queue it and return; for a batch loop that polls later
+    api shutdown  stop the server, and with it the container it is in
     api status | runs | log | cancel | result | health | workflows
 
 `api run` is the one to reach for. A run is tens of minutes to hours of
@@ -208,7 +209,18 @@ def cmd_run(args: argparse.Namespace) -> int:
               "pass --download-anyway to try regardless")
         return 1
     print()
-    return _download(client, name, Path(args.output))
+    failed = _download(client, name, Path(args.output))
+    if args.shutdown_when_done:
+        if failed:
+            # Only once the .zip is on this disk. Stopping the container is
+            # what makes everything still on its volume unreachable, so
+            # doing it on a download that failed would turn a recoverable
+            # afternoon into a lost one.
+            print("\nnot shutting down: the result was not collected")
+        else:
+            print()
+            _shutdown(client)
+    return failed
 
 
 def cmd_follow(args: argparse.Namespace) -> int:
@@ -319,6 +331,39 @@ def cmd_schema(args: argparse.Namespace) -> int:
     return _emit(_client(args).schema())
 
 
+def _shutdown(client: B2CClient, force: bool = False) -> int:
+    """Ask the server to stop, and say what that will and will not do."""
+    body = client.shutdown(force=force)
+    abandoned = body.get("abandoned_runs") or []
+    if abandoned:
+        print(f"abandoning {len(abandoned)} run(s): {', '.join(abandoned)}")
+    unmanaged = body.get("unmanaged_running") or []
+    if unmanaged:
+        # Most likely a `pipeline.cli run` someone started over SSH. The
+        # server cannot refuse on these — a stale status file would make
+        # the pod unstoppable — but going quiet about them is how a
+        # three-hour tmux run disappears without explanation.
+        print(f"WARNING: {len(unmanaged)} run(s) this server does not manage are "
+              f"still marked running and will be killed with the container: "
+              f"{', '.join(unmanaged)}")
+    print(f"stopping the server and its {body.get('stops_gpu_workers', '?')} "
+          f"GPU worker slot(s)")
+    command = body.get("host_command")
+    if command:
+        print(f"host command: {command}")
+    else:
+        # Worth saying plainly: on a rented pod a container that exits is
+        # not a pod that stopped billing, and the variable that fixes that
+        # lives on the template rather than in the image.
+        print("no B2C_SHUTDOWN_COMMAND is set, so this stops the container and "
+              "nothing else — whether that ends the bill is the host's business")
+    return 0
+
+
+def cmd_shutdown(args: argparse.Namespace) -> int:
+    return _shutdown(_client(args), force=args.force)
+
+
 # --------------------------------------------------------------------------
 # wiring
 # --------------------------------------------------------------------------
@@ -381,6 +426,12 @@ def add_parser(subparsers) -> argparse.ArgumentParser:
     run_p.add_argument("-o", "--output", default=".", help="Where to save the result .zip")
     run_p.add_argument("--interval", type=float, default=5.0, help="Seconds between polls")
     run_p.add_argument(
+        "--shutdown-when-done", action="store_true",
+        help="Stop the server (and its container) once the result .zip is safely "
+             "on this disk. Does nothing if the run failed or the download did — "
+             "see `api shutdown`",
+    )
+    run_p.add_argument(
         "--download-anyway", action="store_true",
         help="Try the download even if the run failed or was cancelled — a run "
              "stopped after its COLMAP export still has one",
@@ -432,6 +483,16 @@ def add_parser(subparsers) -> argparse.ArgumentParser:
     schema_p = action("schema", help="The generated OpenAPI document")
     schema_p.set_defaults(func=cmd_schema)
 
+    shutdown_p = action(
+        "shutdown", help="Stop the server, and with it the container it is in",
+    )
+    shutdown_p.add_argument(
+        "--force", action="store_true",
+        help="Stop even with runs queued or running, throwing away whatever they "
+             "have not yet exported",
+    )
+    shutdown_p.set_defaults(func=cmd_shutdown)
+
     return api
 
 
@@ -465,9 +526,16 @@ def dispatch(args: argparse.Namespace) -> int:
             # Losing the connection does not stop the run, and `api run`
             # gets this far only after `follow` has already retried for
             # minutes — so say what to do rather than leave it looking like
-            # the work was lost.
-            name = getattr(args, "name", "") or "<run>"
-            print(f"The run is unaffected. Reattach with `api follow {name}`, "
-                  f"or collect it later with `api result {name}`.", file=sys.stderr)
+            # the work was lost. Only where there is a run to say it about:
+            # after `api shutdown` the likeliest reason the server is
+            # unreachable is that it did what it was asked.
+            name = getattr(args, "name", "")
+            if args.api_command in ("run", "follow", "status", "log", "result", "cancel"):
+                target = name or "<run>"
+                print(f"The run is unaffected. Reattach with `api follow {target}`, "
+                      f"or collect it later with `api result {target}`.", file=sys.stderr)
+            elif args.api_command == "shutdown":
+                print("If this followed a shutdown, that is what a stopped server "
+                      "looks like.", file=sys.stderr)
             return 1
         raise

@@ -32,6 +32,7 @@ has and hasn't been verified on real hardware.
 | `NVIDIA_DRIVER_CAPABILITIES` | `compute,utility,graphics,display` | **Set this here even though the image also sets it.** It is read by nvidia-container-toolkit at container-*creation* time, and whether RunPod honours an image-level `ENV` for it is unresolved. Without `graphics`, `vulkaninfo` finds no driver, and `brush` (Vulkan) and `render` (EGL) both fail — 40 minutes into a run, not at startup. |
 | `B2C_API_TOKEN` | a long random string | **Set this.** It turns on the HTTP API at `/api/v1` (as a bearer token) *and* puts the web UI behind a login form that takes it as the password, username `b2c`. Without it the API is not served at all and the UI is open to anyone who can guess the pod id — the proxy URL below is public. Generate one with `openssl rand -hex 24`. |
 | `PUBLIC_KEY` | your SSH public key | RunPod usually injects this. The entrypoint starts `sshd` only when it is present. |
+| `B2C_SHUTDOWN_COMMAND` | `runpodctl stop pod $RUNPOD_POD_ID` | What to do about the *host* when `POST /api/v1/shutdown` stops the container. Optional, and empty by default: the container knows how to stop itself, but it cannot know whether that ends a bill — see [Stopping when you are done](#stopping-when-you-are-done). Needs `runpodctl` on the pod (**it is not in the image**) and `RUNPOD_API_KEY` / `RUNPOD_POD_ID` set. |
 | `B2C_PORT` | `7860` | Only if you need a different port. |
 | `B2C_PREFETCH` | `0` | Only if you want the old lazy behaviour — each step downloading its own checkpoint mid-run. Default is to pull everything at start. |
 
@@ -296,6 +297,7 @@ python -m pipeline.cli api follow <run>        # attach to one already going
 python -m pipeline.cli api log <run> --tail 200
 python -m pipeline.cli api result <run> -o results/
 python -m pipeline.cli api cancel <run>
+python -m pipeline.cli api shutdown [--force]  # stop the server and its container
 python -m pipeline.cli api schema              # the OpenAPI document
 ```
 
@@ -348,6 +350,11 @@ curl -sH "$AUTH" -OJ $POD/api/v1/runs/$NAME/result
 
 # stop one (at the next step boundary, not mid-step)
 curl -sXPOST -H "$AUTH" $POD/api/v1/runs/$NAME/cancel
+
+# stop the server, and with it the container — 409 while anything is still
+# going, unless you mean it. See "Stopping when you are done" below
+curl -sXPOST -H "$AUTH" -H 'Content-Type: application/json' \
+  -d '{"force": false}' $POD/api/v1/shutdown
 ```
 
 A poll loop is three lines, because `status` is terminal exactly when it
@@ -582,13 +589,78 @@ nvidia-smi
 inside the subprocess workers.
 
 **Get results off the pod.** `/data/output/<run>/` holds the final dataset,
-the splat and the COLMAP export. The UI's Results tab zips it for download;
-`rsync`, `scp` and `runpodctl send` are all in the image.
+the splat and the COLMAP export. The UI's Results tab zips it for download,
+`GET /api/v1/runs/<run>/result` does the same over HTTP, and `rsync` and
+`scp` are in the image. **`runpodctl` is not** — this page claimed it was
+until 2026-09-05, and nothing in `docker/Dockerfile` installs it. If you
+want it on a pod, fetch it there.
+
+## Stopping when you are done
+
+```bash
+python -m pipeline.cli api shutdown
+# or, for the whole unattended job:
+python -m pipeline.cli api run sheet.png --prompt '...' -o results/ \
+    --shutdown-when-done
+```
+
+`POST /api/v1/shutdown` stops the GPU workers, then the server, and the
+container exits. It is refused with **409** while anything is queued or
+running — a run in flight is hours of GPU already spent and its exports are
+its last steps, so stopping then loses all of it rather than most of it.
+`{"force": true}` (or `api shutdown --force`) overrides, and the reply names
+what it abandoned. A run this server does not manage — a `pipeline.cli run`
+someone started over SSH, or a status file a crashed server left at
+`running` — is reported in `unmanaged_running` and warned about, but not
+refused on: one stale file must never make a pod impossible to stop. `--shutdown-when-done` stops only after the result `.zip`
+is on your disk; a download that failed leaves the pod up, because stopping
+the container is what makes everything still on its volume unreachable.
+
+**What the container can and cannot do.** It can stop itself, and that is
+all it does by default — deliberately, because this image is not a RunPod
+image. It runs under `docker-compose` too, and on a rented pod **a container
+that exits is not a pod that stopped billing.** What a host should do about
+a stopped container is a template concern, like everything else on this
+page, so it comes from an environment variable rather than from a code path
+in the image:
+
+```
+B2C_SHUTDOWN_COMMAND=runpodctl stop pod $RUNPOD_POD_ID   # a rented pod
+B2C_SHUTDOWN_COMMAND=shutdown -h now                     # a machine you own
+B2C_SHUTDOWN_COMMAND=curl -fsS -X POST https://…/done     # tell something else
+```
+
+It runs *after* the GPU workers are stopped and before the server exits —
+that order matters, because a command that makes the machine disappear
+seconds later would otherwise kill a `pipeline.run_worker` mid-write.
+
+**That is a bound, not a guarantee.** A worker is given SIGTERM and ten
+seconds; it stops at the next *step boundary*, and a step is one opaque
+call — a 30,000-iteration brush training has no boundary for an hour. So a
+worker inside a long step is still there when the wait expires, is named in
+the log as such, and goes down with the container like anything else.
+Shutting down between runs is clean; shutting down mid-training is not, and
+that is why the endpoint refuses without `force`.
+
+The command itself gets 30 seconds. One that fails, hangs or is missing is
+logged and the container still stops, since a hook that did not fire means
+the host was not told, not that this server should stay up and keep billing.
+The entrypoint prints which of the two cases you are in at startup.
+
+Queued runs are dropped rather than started: a terminated worker frees its
+GPU slot, and a free slot would otherwise dispatch the next job — so
+stopping the server used to *spawn* fresh workers that began pulling
+checkpoints as it exited.
+
+Note that `runpodctl` is **not in this image**. Install it on the pod if you
+want the first line above.
 
 ## Cost safety
 
-The image does **not** arm an auto-shutdown. `scripts/pod_bootstrap.sh` has
+The shutdown endpoint above is the deliberate case. For the unattended one,
+the image does **not** arm an auto-shutdown: `scripts/pod_bootstrap.sh` has
 one (`runpodctl stop pod` after `AUTO_SHUTDOWN_HOURS`) that predates the
-container, and it is worth copying onto the pod for an unattended run —
+container, and it is worth copying onto the pod —
 `fast_helical_native.yaml` at production settings is hours of GPU time, and a
-step that hangs bills exactly like a step that works.
+step that hangs bills exactly like a step that works, and neither `/shutdown`
+nor `--shutdown-when-done` fires for a run that never finishes.

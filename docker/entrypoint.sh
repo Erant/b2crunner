@@ -135,6 +135,19 @@ serve_ui() {
         log "  Set it on the pod template to enable both."
     fi
 
+    # What `POST /api/v1/shutdown` will do besides stopping this container.
+    # Said here because the container exiting is NOT the same as the host
+    # doing anything about it — on a rented pod, a stopped container is
+    # still a pod that bills — and that is a template setting, not
+    # something the image can know.
+    if [ -n "${B2C_SHUTDOWN_COMMAND:-}" ]; then
+        log "shutdown hook: $B2C_SHUTDOWN_COMMAND"
+    else
+        log "no B2C_SHUTDOWN_COMMAND: POST /api/v1/shutdown stops this container"
+        log "  and nothing else. On a rented pod set it to something like"
+        log "  'runpodctl stop pod \$RUNPOD_POD_ID' to actually end the bill."
+    fi
+
     log "starting the web UI on 0.0.0.0:${B2C_PORT}"
     exec "$PYTHON" -m pipeline.cli ui --host 0.0.0.0 --port "$B2C_PORT"
 }

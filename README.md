@@ -98,6 +98,14 @@ python -m pipeline.cli api run sheet.png --prompt "a woman in a red jacket" \
 python -m pipeline.cli api runs
 python -m pipeline.cli api follow <run>
 
+# ...and stop paying for it. The container knows how to stop itself; what
+# the HOST should do about that comes from B2C_SHUTDOWN_COMMAND on the
+# template (`runpodctl stop pod $RUNPOD_POD_ID`, `shutdown -h now`, a
+# webhook), because this image is not a RunPod image. Refused while a run
+# is still going unless you force it.
+python -m pipeline.cli api run sheet.png -o results/ --shutdown-when-done
+python -m pipeline.cli api shutdown
+
 python -m pipeline.cli workflows     # what's available
 python -m pipeline.cli steps
 ```

@@ -838,7 +838,14 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
                 size = sum(f.stat().st_size for f in files)
                 lines.append(f"- **`{name}/`** — {len(files)} files, {size / 1e9:.2f} GB")
 
-            archive = build_result_zip(Path(directory), state.workflow, state.log_path)
+            # `reuse=True` like every other caller: `archive_is_current`
+            # compares mtimes, so a run still writing is correctly seen as
+            # stale and rebuilt — while pressing Refresh again on a
+            # finished 2 GB run stops re-copying 2 GB to answer the same
+            # question.
+            archive = build_result_zip(
+                Path(directory), state.workflow, state.log_path, reuse=True,
+            )
             if run_log_path(Path(directory), state.log_path):
                 lines.append("- **`log.txt`** — the log this run wrote")
             info = (
@@ -1016,7 +1023,10 @@ def build_server(
 
     import fastapi
 
-    from .api import API_PREFIX, TOKEN_ENV, add_schema_route, api_token, build_router
+    from .api import (
+        API_PREFIX, SHUTDOWN_COMMAND_ENV, TOKEN_ENV, ShutdownController,
+        add_schema_route, api_token, build_router, shutdown_command,
+    )
     from .cli import DEFAULT_ENVS
 
     envs_path = envs_path or DEFAULT_ENVS
@@ -1056,13 +1066,21 @@ def build_server(
         lifespan=lifespan,
     )
 
+    shutdown = ShutdownController(scheduler)
     if not serve_api:
         logger.info("HTTP API disabled by --no-api; serving the web UI alone")
     elif token:
-        server.include_router(build_router(scheduler, envs_path), prefix=API_PREFIX)
+        server.include_router(
+            build_router(scheduler, envs_path, shutdown), prefix=API_PREFIX,
+        )
         add_schema_route(server, API_PREFIX)
         logger.info("HTTP API on %s (bearer %s), schema at %s/openapi.json",
                     API_PREFIX, TOKEN_ENV, API_PREFIX)
+        command = shutdown_command()
+        logger.info(
+            "%s: %s", SHUTDOWN_COMMAND_ENV,
+            command or "(unset — POST /shutdown stops this container and nothing else)",
+        )
     else:
         logger.warning(
             "%s is not set: the HTTP API is not being served and the web UI is "
@@ -1073,6 +1091,7 @@ def build_server(
     # way `build_app` does for the Blocks — `launch` needs it to stop the
     # workers before uvicorn starts waiting on connections.
     server.state.gpu_scheduler = scheduler
+    server.state.shutdown = shutdown
 
     return gr.mount_gradio_app(
         server, blocks, "/",
@@ -1117,6 +1136,10 @@ def launch(
         server, host=host, port=port, timeout_graceful_shutdown=10,
     )
     running = uvicorn.Server(config)
+    # The one thing `POST /api/v1/shutdown` cannot work out for itself.
+    # Same `should_exit` the signal handler below sets, so a requested stop
+    # and a SIGTERM wind down through exactly one path.
+    server.state.shutdown.bind(lambda: setattr(running, "should_exit", True))
     # Uvicorn installs its own through `loop.add_signal_handler`, which
     # would replace anything set here; telling it not to is the supported
     # way to embed it.

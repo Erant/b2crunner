@@ -374,6 +374,38 @@ def _refuse_unknown_overrides(
             )
 
 
+def check_submission(
+    global_overrides: Optional[Dict[str, Any]] = None,
+    step_overrides: Optional[Dict[str, Dict[str, Any]]] = None,
+    workflow: str = WORKFLOW_NATIVE,
+    strict: bool = False,
+) -> None:
+    """Raise `SubmitError` for anything `submit_runs` would refuse.
+
+    Everything `submit_runs` checks except the plan, which it does not
+    need: whether the overrides name real settings, whether their values
+    fit, and whether the outputs they select leave a deliverable.
+
+    It exists so a caller can ask *before* putting the submission's input
+    on the volume. `resolve_upload` copies a sheet there (or extracts a
+    whole zip), and a refusal after that leaves the copy behind with
+    nothing that will ever read it.
+    """
+    from .cli import resolve_workflow
+
+    spec = WorkflowSpec.from_yaml(resolve_workflow(workflow))
+    global_overrides = dict(global_overrides or {})
+    step_overrides = {k: dict(v) for k, v in (step_overrides or {}).items()}
+    if strict:
+        _refuse_unknown_overrides(spec, global_overrides, step_overrides)
+    try:
+        apply_ui_overrides(spec, global_overrides, step_overrides)
+        spec.globals.update(resolve_outputs(spec))
+        spec.validate()
+    except ValueError as exc:
+        raise SubmitError(str(exc)) from None
+
+
 def submit_runs(
     scheduler: GpuScheduler,
     plan: RunPlan,
@@ -585,6 +617,54 @@ def run_log_path(run_dir: Optional[Path], log_path: Optional[Path] = None) -> Op
     return None
 
 
+def _run_members(
+    run_dir: Path,
+    workflow: str = "",
+    log_path: Optional[Path] = None,
+    prefix: str = "",
+) -> List["tuple[str, Path, int]"]:
+    """Every (arcname, source, compression) one run contributes, in order.
+
+    One list, two readers: `_write_run_members` writes it, and
+    `archive_is_current` compares its names against what a cached archive
+    actually holds. Deriving both from here is what keeps "is this archive
+    still right" honest — a separate reimplementation of the naming would
+    drift from the writer and answer for an archive nobody builds.
+
+    Empty for a run with no deliverables, which is what makes "a log alone
+    does not make an archive" true of every caller.
+    """
+    directories = result_dirs(run_dir, workflow)
+    if not directories:
+        return []
+
+    base = Path(prefix)
+    members: List["tuple[str, Path, int]"] = []
+    for name, directory in sorted(directories.items()):
+        for path in sorted(directory.rglob("*")):
+            if path.is_file():
+                members.append((
+                    str(base / name / path.relative_to(directory)),
+                    path, zipfile.ZIP_STORED,
+                ))
+    for name, directory in sorted(debug_dirs(run_dir).items()):
+        for path in sorted(directory.rglob("*")):
+            if path.is_file():
+                # Text (COLMAP models, stats) deflates ~10x; the .ply
+                # and .png members are the same story as the deliverables.
+                text = path.suffix in _DEBUG_TEXT_SUFFIXES
+                members.append((
+                    str(base / name / path.relative_to(directory)), path,
+                    zipfile.ZIP_DEFLATED if text else zipfile.ZIP_STORED,
+                ))
+    log = run_log_path(run_dir, log_path)
+    if log:
+        # DEFLATE for this member alone: a log is text, it shrinks by
+        # ~10x, and it is small enough for the CPU cost to be nothing.
+        members.append((str(base / "log.txt"), log, zipfile.ZIP_DEFLATED))
+    return members
+
+
 def _write_run_members(
     bundle: zipfile.ZipFile,
     run_dir: Path,
@@ -596,34 +676,12 @@ def _write_run_members(
 
     Shared by the single-run download and the all-runs bundle, so the two
     can never drift into carrying different things. Returns False, having
-    written nothing at all, for a run with no deliverables — which is what
-    makes "a log alone does not make an archive" true of both callers.
+    written nothing at all, for a run with no deliverables.
     """
-    directories = result_dirs(run_dir, workflow)
-    if not directories:
-        return False
-    base = Path(prefix)
-    for name, directory in sorted(directories.items()):
-        for path in sorted(directory.rglob("*")):
-            if path.is_file():
-                bundle.write(
-                    path, arcname=str(base / name / path.relative_to(directory)))
-    for name, directory in sorted(debug_dirs(run_dir).items()):
-        for path in sorted(directory.rglob("*")):
-            if path.is_file():
-                # Text (COLMAP models, stats) deflates ~10x; the .ply
-                # and .png members are the same story as the deliverables.
-                text = path.suffix in _DEBUG_TEXT_SUFFIXES
-                bundle.write(
-                    path, arcname=str(base / name / path.relative_to(directory)),
-                    compress_type=zipfile.ZIP_DEFLATED if text else zipfile.ZIP_STORED)
-    log = run_log_path(run_dir, log_path)
-    if log:
-        # DEFLATE for this member alone: a log is text, it shrinks by
-        # ~10x, and it is small enough for the CPU cost to be nothing.
-        bundle.write(log, arcname=str(base / "log.txt"),
-                     compress_type=zipfile.ZIP_DEFLATED)
-    return True
+    members = _run_members(run_dir, workflow, log_path, prefix)
+    for arcname, path, compression in members:
+        bundle.write(path, arcname=arcname, compress_type=compression)
+    return bool(members)
 
 
 # Stamped into every archive this module writes, and checked before one is
@@ -650,16 +708,28 @@ def archive_is_current(
     built the first time it was looked at. Without this, the All results
     tab would re-copy every gigabyte on the volume on every press.
 
-    Compares modification times rather than contents — the sources are
-    hundreds of megabytes of PNG, and the only writer is a run that has
-    already finished — plus `ARCHIVE_FORMAT`, which is what makes the
-    cache safe to change the packaging under.
+    Three checks, cheapest first: the `ARCHIVE_FORMAT` stamp (was this
+    built by code that packaged the same things), the member list (does it
+    still hold exactly what it would hold now), and modification times
+    (has any surviving source changed since). Never contents — the sources
+    are hundreds of megabytes of PNG, and the only writer is a run that
+    has already finished.
     """
     if not archive.is_file():
         return False
+    expected = [name for name, _path, _c in _run_members(run_dir, workflow, log_path)]
     try:
         with zipfile.ZipFile(archive) as bundle:
             if bundle.comment != ARCHIVE_FORMAT:
+                return False
+            # What it holds, against what it would hold now. Mtimes cannot
+            # answer this: deleting a file updates its parent's mtime and
+            # nothing else, and deleting the last file in a deliverable
+            # directory drops that directory out of `result_dirs` so even
+            # the parent stops being looked at. Prune `ply/` off a full
+            # volume and every later download kept handing back an archive
+            # that still contained it.
+            if bundle.namelist() != expected:
                 return False
     except (OSError, zipfile.BadZipFile):
         return False  # truncated, or not an archive this module wrote
@@ -670,10 +740,15 @@ def archive_is_current(
     if log:
         sources.append(log)
     for source in sources:
-        paths = [source] if source.is_file() else source.rglob("*")
+        # Directories as well as files, and the source root itself:
+        # removing a file updates its parent's mtime and nothing else, so
+        # a files-only walk cannot see a deletion at all. Prune `debug/`
+        # off a full volume and every later download would keep handing
+        # back the cached archive that still contains it.
+        paths = [source] if source.is_file() else [source, *source.rglob("*")]
         for path in paths:
             try:
-                if path.is_file() and path.stat().st_mtime > stamp:
+                if path.stat().st_mtime > stamp:
                     return False
             except OSError:  # pruned between the walk and the stat
                 continue

@@ -357,6 +357,22 @@ class TestEveryRunOnTheVolume(_BundleCase):
         runs.build_result_zip(run, reuse=True)
         self.assertIn("ply/second.ply", self._names(str(archive)))
 
+    def test_deleting_a_source_file_makes_the_archive_stale(self):
+        """A files-only walk cannot see a deletion.
+
+        Removing a file updates its parent directory's mtime and nothing
+        else, so pruning `ply/` off a full volume left every later
+        download handing back a cached archive that still contained it.
+        """
+        run = _run_dir(self.runs, colmap=True, ply=True, name="pruned")
+        archive = Path(runs.build_result_zip(run))
+        self.assertTrue(runs.archive_is_current(archive, run))
+
+        (run / "ply" / "scene.ply").unlink()
+        self.assertFalse(runs.archive_is_current(archive, run))
+        self.assertNotIn("ply/scene.ply",
+                         self._names(runs.build_result_zip(run, reuse=True)))
+
     def test_an_archive_from_an_older_packaging_format_is_rebuilt(self):
         """Mtimes cannot answer "was this built by the same code".
 

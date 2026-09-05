@@ -36,7 +36,9 @@ except ImportError as exc:  # pragma: no cover - depends on the local env
     raise unittest.SkipTest(f"the server's dependencies are not installed here: {exc}")
 
 from pipeline import runs
-from pipeline.api import API_PREFIX, TOKEN_ENV, add_schema_route, build_router
+from pipeline.api import (
+    API_PREFIX, TOKEN_ENV, ShutdownController, add_schema_route, build_router,
+)
 from pipeline.client import ApiError, B2CClient
 from pipeline.gpu_scheduler import GpuScheduler
 from pipeline.run_state import RunState
@@ -51,10 +53,13 @@ def _png(value: int = 0) -> bytes:
 
 
 class _StubProcess:
-    returncode = None
+    """A started worker that stops when it is told, like one between steps."""
+
+    def __init__(self):
+        self.returncode = None
 
     def poll(self):
-        return None
+        return self.returncode
 
     def terminate(self):
         self.returncode = -15
@@ -85,8 +90,16 @@ class TestAgainstAServer(unittest.TestCase):
         self.scheduler.submit = lambda job: (self.submitted.append(job), queue(job))[1]
         self.addCleanup(self.scheduler.shutdown)
 
+        # Bound to a recorder rather than to this test's uvicorn: what is
+        # being checked here is the round trip, not that the process dies.
+        self.stopped = []
+        controller = ShutdownController(self.scheduler)
+        controller.bind(lambda: self.stopped.append("server"))
+
         app = FastAPI()
-        app.include_router(build_router(self.scheduler, "envs.yaml"), prefix=API_PREFIX)
+        app.include_router(
+            build_router(self.scheduler, "envs.yaml", controller), prefix=API_PREFIX,
+        )
         add_schema_route(app, API_PREFIX)
         self.url = self._serve(app)
         self.client = B2CClient(self.url, TOKEN)
@@ -284,6 +297,18 @@ class TestAgainstAServer(unittest.TestCase):
         path = self.client.download_result("packaged", self.data / "mine.zip")
         self.assertEqual(path.name, "mine.zip")
 
+    def test_an_existing_non_zip_file_as_the_destination_is_refused(self):
+        # It fell into `mkdir` and raised a bare FileExistsError out of
+        # `dispatch`, which special-cases ApiError/ValueError/transport —
+        # a traceback where this module gives sentences everywhere else.
+        self.finished_run(name="packaged")
+        notes = self.data / "notes"
+        notes.write_text("not a zip")
+        with self.assertRaises(ValueError) as caught:
+            self.client.download_result("packaged", notes)
+        self.assertIn("refusing to overwrite", str(caught.exception).lower())
+        self.assertEqual(notes.read_text(), "not a zip")
+
     def test_a_destination_that_does_not_exist_yet_is_a_directory(self):
         # The one shape of this argument that is always a mistake: `-o out`
         # used to write a *file* called `out` holding a zip.
@@ -322,6 +347,48 @@ class TestAgainstAServer(unittest.TestCase):
         with self.assertRaises(ApiError) as caught:
             self.client.cancel("older-run")
         self.assertEqual(caught.exception.status, 409)
+
+    # -- stopping ----------------------------------------------------------
+
+    def _wait_for_stop(self, timeout: float = 5.0) -> None:
+        """The reply precedes the work, so wait for the work.
+
+        Deliberately not asserted inline: `POST /shutdown` answers 202 and
+        *then* stops, which is what lets a client read the reply at all
+        rather than having the connection cut from under it. Against a real
+        server that ordering is visible; `fastapi.testclient` hides it by
+        running background tasks synchronously.
+        """
+        deadline = time.monotonic() + timeout
+        while not self.stopped and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertEqual(self.stopped, ["server"])
+
+    def test_shutdown_asks_the_server_to_stop(self):
+        body = self.client.shutdown()
+        self.assertIs(body["stopping"], True)
+        self.assertEqual(body["abandoned_runs"], [])
+        self._wait_for_stop()
+
+    def test_the_reply_arrives_before_the_server_stops(self):
+        # If the work happened inline the client would get a reset
+        # connection instead of a body it can read.
+        self.assertEqual(self.stopped, [])
+        self.assertIs(self.client.shutdown()["stopping"], True)
+        self._wait_for_stop()
+
+    def test_shutdown_is_refused_while_a_run_is_going(self):
+        name = self.client.submit(reference_image=str(self._sheet()))[0]["name"]
+        with self.assertRaises(ApiError) as caught:
+            self.client.shutdown()
+        self.assertEqual(caught.exception.status, 409)
+        self.assertIn(name, caught.exception.detail)
+        self.assertEqual(self.stopped, [])
+
+    def test_shutdown_force_stops_regardless(self):
+        name = self.client.submit(reference_image=str(self._sheet()))[0]["name"]
+        self.assertEqual(self.client.shutdown(force=True)["abandoned_runs"], [name])
+        self._wait_for_stop()
 
     def test_a_workflow_whose_file_no_longer_resolves_still_packages(self):
         """A renamed workflow must not turn packaging into a 500.
@@ -489,6 +556,39 @@ class TestFollow(unittest.TestCase):
         # Backed off between attempts rather than hammering.
         self.assertEqual(slept[:2], [4.0, 8.0])
 
+    def test_a_gateway_error_is_retried(self):
+        # 502/503/504 from a pod proxy is the transport, not the server
+        # answering — as ordinary as a reset, and the docstring promises to
+        # survive one.
+        from pipeline.client import ApiError
+
+        states = [_state("running"), _state("done")]
+        failures = [2]
+
+        class _Flaky(_ScriptedClient):
+            def run(self, name):
+                if failures[0]:
+                    failures[0] -= 1
+                    raise ApiError(503, "upstream unavailable")
+                return super().run(name)
+
+        events = list(_Flaky(states).follow("r", interval=0, sleep=lambda _: None))
+        self.assertEqual(events[-1]["status"], "done")
+
+    def test_a_404_is_not_retried(self):
+        from pipeline.client import ApiError
+
+        calls = [0]
+
+        class _Gone(_ScriptedClient):
+            def run(self, name):
+                calls[0] += 1
+                raise ApiError(404, "No run named 'r'.")
+
+        with self.assertRaises(ApiError):
+            list(_Gone([_state("running")]).follow("r", interval=0, sleep=lambda _: None))
+        self.assertEqual(calls[0], 1)
+
     def test_a_server_that_stays_gone_ends_the_watch(self):
         # Bounded: a pod that has actually been released should stop the
         # watch, with the error it stopped on, not poll forever.
@@ -519,6 +619,119 @@ class TestFollow(unittest.TestCase):
     def test_a_run_already_finished_yields_its_steps_and_one_end(self):
         events = self._events([_state("done", [("a", "done", 1.0)])])
         self.assertEqual([e["kind"] for e in events], ["step", "end"])
+
+
+class TestShutdownWhenDone(unittest.TestCase):
+    """`api run --shutdown-when-done` stops only once the .zip is on disk.
+
+    Stopping the container is what makes everything still on its volume
+    unreachable, so doing it on a download that failed turns a recoverable
+    afternoon into a lost one.
+    """
+
+    def _run(self, *, download_ok: bool, flag: bool = True):
+        import argparse
+
+        from pipeline import api_cli
+
+        calls = []
+
+        class _Client:
+            def submit(self, **kwargs):
+                return [{"name": "r"}]
+
+            def follow(self, name, interval=5.0, sleep=None):
+                yield {"kind": "end", "status": "done",
+                       "state": {"name": "r", "status": "done",
+                                 "started": 1.0, "finished": 2.0, "message": "complete"}}
+
+            def download_result(self, name, into, on_progress=None):
+                calls.append("download")
+                if not download_ok:
+                    raise ApiError(404, "produced no deliverables")
+                path = Path(into)
+                path.mkdir(parents=True, exist_ok=True)
+                target = path / "r-result.zip"
+                target.write_bytes(b"zip")
+                return target
+
+            def shutdown(self, force=False):
+                calls.append("shutdown")
+                return {"stopping": True, "abandoned_runs": [],
+                        "stops_gpu_workers": 1, "host_command": ""}
+
+        args = argparse.Namespace(
+            image="sheet.png", prompt="", remote=False, param=None, workflow="",
+            output=self._tmp.name, interval=0.0, download_anyway=False,
+            shutdown_when_done=flag,
+        )
+        import io
+        from contextlib import redirect_stdout
+
+        buffer = io.StringIO()
+        with unittest.mock.patch.object(api_cli, "_client", lambda _a: _Client()):
+            with redirect_stdout(buffer):
+                code = api_cli.cmd_run(args)
+        return calls, code, buffer.getvalue()
+
+    def setUp(self):
+        self._tmp = TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+
+    def test_a_collected_result_is_followed_by_a_shutdown(self):
+        calls, code, _ = self._run(download_ok=True)
+        self.assertEqual(calls, ["download", "shutdown"])
+        self.assertEqual(code, 0)
+
+    def test_a_failed_download_stops_nothing(self):
+        calls, code, output = self._run(download_ok=False)
+        self.assertEqual(calls, ["download"])
+        self.assertNotEqual(code, 0)
+        self.assertIn("not shutting down", output)
+
+    def test_without_the_flag_it_never_shuts_down(self):
+        calls, _, _ = self._run(download_ok=True, flag=False)
+        self.assertEqual(calls, ["download"])
+
+
+class TestUnreachableServerMessages(unittest.TestCase):
+    """What `dispatch` says when the connection fails, per subcommand."""
+
+    def _dispatch(self, api_command, **extra):
+        import argparse
+        import io
+        from contextlib import redirect_stderr
+
+        import requests
+
+        from pipeline import api_cli
+
+        def boom(_args):
+            raise requests.ConnectionError("refused")
+
+        args = argparse.Namespace(api_command=api_command, func=boom, **extra)
+        buffer = io.StringIO()
+        with redirect_stderr(buffer):
+            code = api_cli.dispatch(args)
+        return code, buffer.getvalue()
+
+    def test_a_run_command_says_how_to_reattach(self):
+        code, output = self._dispatch("follow", name="r")
+        self.assertEqual(code, 1)
+        self.assertIn("api follow r", output)
+
+    def test_shutdown_does_not_offer_to_reattach_to_a_run(self):
+        # The likeliest reason the server is unreachable right after a
+        # shutdown is that it did what it was asked.
+        code, output = self._dispatch("shutdown")
+        self.assertEqual(code, 1)
+        self.assertNotIn("api follow", output)
+        self.assertIn("stopped server", output)
+
+    def test_a_readonly_command_says_neither(self):
+        _code, output = self._dispatch("health")
+        self.assertIn("could not reach the server", output)
+        self.assertNotIn("api follow", output)
 
 
 class TestTheSummaryLine(unittest.TestCase):

@@ -96,6 +96,7 @@ class GpuScheduler:
         self._work_dir = Path(work_dir)
         self._work_dir.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
+        self._stopping = False
         self._slots = [_Slot(gpu_index=i) for i in range(gpu_count)]
         self._queue: "deque[RunJob]" = deque()
         self._states: Dict[str, RunState] = {}
@@ -109,6 +110,10 @@ class GpuScheduler:
 
     def submit(self, job: RunJob) -> str:
         with self._lock:
+            if self._stopping:
+                raise RuntimeError(
+                    "this scheduler is shutting down and is not accepting work"
+                )
             self._states[job.run_name] = RunState(
                 name=job.run_name, workflow=job.workflow_name, status="queued",
                 output_dir=Path(job.output_dir),
@@ -119,7 +124,17 @@ class GpuScheduler:
         return job.run_name
 
     def _dispatch_locked(self) -> None:
-        """Assign queued jobs to free slots. Caller holds `self._lock`."""
+        """Assign queued jobs to free slots. Caller holds `self._lock`.
+
+        Nothing is started once `shutdown` has been called. Without that
+        check, terminating a running worker *starts the next queued one*:
+        the dying worker's watcher reaches its `finally`, frees the slot,
+        and dispatches — so stopping the server would spawn fresh workers
+        that begin pulling checkpoints and holding GPUs as it exits, and
+        outlive it on any host that does not tear the whole container down.
+        """
+        if self._stopping:
+            return
         for slot in self._slots:
             if slot.busy or not self._queue:
                 continue
@@ -242,16 +257,52 @@ class GpuScheduler:
 
     # -- shutdown -----------------------------------------------------------
 
-    def shutdown(self) -> None:
-        """Best-effort SIGTERM to every running child, for a clean pod stop.
+    def shutdown(self, timeout: float = 0.0) -> List[str]:
+        """SIGTERM every running child; return the ones still alive after.
 
-        The scheduler lives inside the Gradio process; nothing forwards a
-        signal to children it spawned unless this does it explicitly.
+        The scheduler lives inside the server process; nothing forwards a
+        signal to children it spawned unless this does it explicitly. It
+        also drops whatever is still queued and latches `_stopping`, so a
+        terminated worker's watcher cannot start the next job on the slot
+        it just freed.
+
+        `timeout` waits for the children to actually go. That matters when
+        something is going to happen *after* this returns — a
+        `B2C_SHUTDOWN_COMMAND` that destroys the machine, say. But it is a
+        bound, not a guarantee: `pipeline.run_worker` checks its cancelled
+        flag at step boundaries only, and a step is one opaque call that
+        can be an hour of brush training, so a worker inside a long one
+        will still be alive when this returns. The names it returns are
+        exactly those, for the caller to report.
         """
         with self._lock:
-            processes = [slot.process for slot in self._slots if slot.process is not None]
-        for process in processes:
+            self._stopping = True
+            dropped = [job.run_name for job in self._queue]
+            self._queue.clear()
+            for name in dropped:
+                state = self._states.get(name)
+                if state is not None and state.status in ("queued", "running"):
+                    state.status = "cancelled"
+                    state.message = "cancelled: the server was shutting down"
+                    state.finished = time.time()
+            slots = [
+                (slot.run_name, slot.process)
+                for slot in self._slots if slot.process is not None
+            ]
+        if dropped:
+            logger.info("dropped %d queued run(s): %s", len(dropped), ", ".join(dropped))
+
+        for _name, process in slots:
             try:
                 process.terminate()
             except OSError:
                 pass
+
+        deadline = time.monotonic() + max(0.0, timeout)
+        alive = []
+        for name, process in slots:
+            while process.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.1)
+            if process.poll() is None:
+                alive.append(name)
+        return alive

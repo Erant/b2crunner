@@ -87,7 +87,13 @@ pipeline/
 │                      ends drive it, so a curl and a button press cannot
 │                      mean different things. Imports no UI framework
 ├── api.py             The HTTP API — pipeline/runs.py over /api/v1, bearer
-│                      -guarded by B2C_API_TOKEN, not registered at all
+│                      -guarded, plus ShutdownController: stop the workers,
+│                      run the host's own B2C_SHUTDOWN_COMMAND if it has
+│                      one, then stop the server. The container knows how
+│                      to stop ITSELF; whether that ends a bill is the
+│                      host's business and comes from the environment, so
+│                      the image stays vendor-neutral. Guarded by
+│                      B2C_API_TOKEN, not registered at all
 │                      without one. Mounted into the same server process
 │                      and the same GpuScheduler as the UI (webui.
 │                      build_server): a second process with a scheduler of

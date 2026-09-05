@@ -58,6 +58,12 @@ LIVE = ("queued", "running")
 # much. Five seconds costs a handful of requests per hour of run.
 POLL_SECONDS = 5.0
 
+# Statuses a *proxy* produces when the thing behind it is briefly not
+# there — as ordinary as a TCP reset on a rented pod, and just as much a
+# transport problem rather than an answer. Retried; every other 4xx and
+# 5xx is the server saying something, and saying it again next time.
+RETRYABLE_STATUSES = (502, 503, 504)
+
 # How long `follow` keeps trying after the connection drops, and how it
 # backs off. A watch runs for hours across a rented pod's HTTP proxy, so a
 # reset somewhere in the middle is ordinary rather than exceptional — and
@@ -203,6 +209,18 @@ class B2CClient:
     def cancel(self, name: str) -> Dict[str, Any]:
         return self._json("POST", f"/runs/{name}/cancel")
 
+    # -- stopping ----------------------------------------------------------
+
+    def shutdown(self, force: bool = False) -> Dict[str, Any]:
+        """Stop the server, and with it the container it is in.
+
+        Refused while runs are in flight unless `force`. The server replies
+        before it acts, so this returns normally — but the connection dies
+        moments later by design, and a caller doing anything else
+        afterwards should expect it to be gone.
+        """
+        return self._json("POST", "/shutdown", json={"force": force})
+
     def follow(
         self,
         name: str,
@@ -288,14 +306,18 @@ class B2CClient:
     def _poll(self, name: str, sleep: Callable[[float], None]) -> Dict[str, Any]:
         """One `GET /runs/{name}`, retried through a transient outage.
 
-        Only the transport is retried. An `ApiError` — the run went away, a
-        token stopped working — is the server answering, and answering the
-        same way next time.
+        Only the transport is retried: a dropped connection, and the
+        gateway statuses a proxy returns when what is behind it is briefly
+        unreachable. An `ApiError` that is the *server* answering — the run
+        went away, a token stopped working — is not retried, because it
+        will answer the same way next time.
         """
         for attempt in range(POLL_RETRIES):
             try:
                 return self.run(name)
-            except requests.RequestException as exc:
+            except (requests.RequestException, ApiError) as exc:
+                if isinstance(exc, ApiError) and exc.status not in RETRYABLE_STATUSES:
+                    raise
                 if attempt == POLL_RETRIES - 1:
                     raise
                 delay = POLL_BACKOFF * (attempt + 1)
@@ -330,10 +352,19 @@ class B2CClient:
         # (connect, read): a read timeout would kill a legitimate download
         # of a couple of gigabytes over a pod proxy, but a connection that
         # never opens should still give up rather than hang.
+        target = Path(destination)
+        # Before the request, so a destination that cannot work does not
+        # cost a download first.
+        if target.is_file() and target.suffix.lower() != ".zip":
+            raise ValueError(
+                f"{target} is an existing file and not a .zip — refusing to "
+                "overwrite it. Name a directory to save into, or a path "
+                "ending in .zip."
+            )
+
         response = self._request(
             "GET", f"/runs/{name}/result", stream=True, timeout=(self.timeout, None),
         )
-        target = Path(destination)
         if target.is_dir() or target.suffix.lower() != ".zip":
             target.mkdir(parents=True, exist_ok=True)
             target = target / _filename(response, fallback=f"{name}-result.zip")
