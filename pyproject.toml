@@ -27,11 +27,19 @@ splat = [
     "plyfile>=0.8.0",
 ]
 
-# The web UI (pipeline/webui.py), which is what the container serves by
-# default. Optional so a headless CLI install stays small; the Docker image
-# installs it into venv_main.
+# What `python -m pipeline.cli ui` serves: the web UI (pipeline/webui.py)
+# and the HTTP API (pipeline/api.py), on one port. Optional so a headless
+# CLI install stays small; the Docker image installs it into venv_main.
+#
+# fastapi and uvicorn arrive with gradio anyway — the server the API mounts
+# the UI into is a FastAPI app either way — but they are named here because
+# pipeline/api.py imports them directly, and a dependency you rely on
+# through someone else's requirements is one that can vanish in a minor
+# release of theirs.
 ui = [
     "gradio>=5.0,<7.0",
+    "fastapi>=0.110,<1.0",
+    "uvicorn>=0.27,<1.0",
 ]
 
 [build-system]

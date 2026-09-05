@@ -6,23 +6,27 @@ metadata.json, 81 full-resolution frames, pointcloud.npz — with the COLMAP
 export tucked in a subdirectory and an intermediate `brush/training_<ms>/`
 alongside it. These pin the replacement to the two things a run is for.
 
-`pipeline.webui` imports gradio, so this skips rather than fails where the
-UI's own dependency isn't installed — same rule the golden-data tests use
-for cyber_6f.
+Packaging lives in `pipeline.runs`, which imports no UI framework, so all
+of this runs in a headless install. Only `TestSettingWidgets` — how a
+declared setting is *drawn* — needs gradio, and only that class skips
+without it.
 """
 
 from __future__ import annotations
 
 import tempfile
+import threading
 import unittest
 import unittest.mock
 import zipfile
 from pathlib import Path
 
+from pipeline import runs
+
 try:
     from pipeline import webui
-except ImportError as exc:  # pragma: no cover - depends on the local env
-    raise unittest.SkipTest(f"the web UI's dependencies are not installed here: {exc}")
+except ImportError:  # pragma: no cover - depends on the local env
+    webui = None
 
 
 def _touch(path: Path, size: int = 16) -> None:
@@ -56,14 +60,14 @@ class _BundleCase(unittest.TestCase):
         # build_result_zip writes the archive to output_dir(); keep that off
         # the real volume (or the repo) for the duration of the test.
         self._patched = unittest.mock.patch.object(
-            webui, "output_dir", lambda: self.root / "archives"
+            runs, "output_dir", lambda: self.root / "archives"
         )
         (self.root / "archives").mkdir()
         self._patched.start()
         # Same for the log directory the archive picks `log.txt` out of:
         # without this the fallback would go looking on the real volume.
         self._patched_logs = unittest.mock.patch.object(
-            webui, "log_dir", lambda: self.root / "logs"
+            runs, "log_dir", lambda: self.root / "logs"
         )
         (self.root / "logs").mkdir()
         self._patched_logs.start()
@@ -81,7 +85,7 @@ class _BundleCase(unittest.TestCase):
 class TestResultBundle(_BundleCase):
     def test_it_holds_the_deliverables_and_only_those(self):
         run = _run_dir(self.root, colmap=True, ply=True)
-        names = self._names(webui.build_result_zip(run))
+        names = self._names(runs.build_result_zip(run))
 
         self.assertEqual(names, [
             "colmap/cameras.txt",
@@ -96,7 +100,7 @@ class TestResultBundle(_BundleCase):
         """The dataset frames and the intermediate splat are the bulk of a
         run directory and none of what the archive is for."""
         run = _run_dir(self.root, colmap=True, ply=True)
-        names = self._names(webui.build_result_zip(run))
+        names = self._names(runs.build_result_zip(run))
 
         self.assertNotIn("frame_00001_.png", names)
         self.assertNotIn("metadata.json", names)
@@ -104,27 +108,27 @@ class TestResultBundle(_BundleCase):
 
     def test_one_selected_output_gives_a_one_directory_archive(self):
         run = _run_dir(self.root, colmap=False, ply=True, name="ply-only")
-        self.assertEqual(self._names(webui.build_result_zip(run)), ["ply/scene.ply"])
+        self.assertEqual(self._names(runs.build_result_zip(run)), ["ply/scene.ply"])
 
         run = _run_dir(self.root, colmap=True, ply=False, name="colmap-only")
-        self.assertFalse([n for n in self._names(webui.build_result_zip(run))
+        self.assertFalse([n for n in self._names(runs.build_result_zip(run))
                           if n.startswith("ply/")])
 
     def test_no_deliverables_means_no_archive(self):
         run = _run_dir(self.root, colmap=False, ply=False)
-        self.assertIsNone(webui.build_result_zip(run))
-        self.assertEqual(webui.result_dirs(run), {})
+        self.assertIsNone(runs.build_result_zip(run))
+        self.assertEqual(runs.result_dirs(run), {})
 
     def test_an_empty_output_directory_does_not_count(self):
         """A step that created its output directory and then failed leaves
         one behind; offering an archive of it is a lie."""
         run = _run_dir(self.root, colmap=False, ply=False)
         (run / "colmap").mkdir()
-        self.assertIsNone(webui.build_result_zip(run))
+        self.assertIsNone(runs.build_result_zip(run))
 
     def test_no_run_at_all(self):
-        self.assertIsNone(webui.build_result_zip(None))
-        self.assertEqual(webui.result_dirs(None), {})
+        self.assertIsNone(runs.build_result_zip(None))
+        self.assertEqual(runs.result_dirs(None), {})
 
 
 class TestTheLogRidesAlong(_BundleCase):
@@ -142,7 +146,7 @@ class TestTheLogRidesAlong(_BundleCase):
         run = _run_dir(self.root, colmap=True, ply=True)
         log = self._log(run)
 
-        archive = webui.build_result_zip(run, log_path=log)
+        archive = runs.build_result_zip(run, log_path=log)
 
         self.assertIn("log.txt", self._names(archive))
         with zipfile.ZipFile(archive) as bundle:
@@ -155,13 +159,13 @@ class TestTheLogRidesAlong(_BundleCase):
         run = _run_dir(self.root, colmap=True, ply=False)
         self._log(run)
 
-        self.assertIn("log.txt", self._names(webui.build_result_zip(run)))
+        self.assertIn("log.txt", self._names(runs.build_result_zip(run)))
 
     def test_a_recorded_path_that_no_longer_exists_falls_back(self):
         run = _run_dir(self.root, colmap=True, ply=False)
         self._log(run)
 
-        archive = webui.build_result_zip(run, log_path=self.root / "gone.log")
+        archive = runs.build_result_zip(run, log_path=self.root / "gone.log")
 
         self.assertIn("log.txt", self._names(archive))
 
@@ -170,7 +174,7 @@ class TestTheLogRidesAlong(_BundleCase):
         pruned must still be downloadable."""
         run = _run_dir(self.root, colmap=True, ply=True)
 
-        names = self._names(webui.build_result_zip(run))
+        names = self._names(runs.build_result_zip(run))
 
         self.assertNotIn("log.txt", names)
         self.assertIn("ply/scene.ply", names)
@@ -181,10 +185,10 @@ class TestTheLogRidesAlong(_BundleCase):
         run = _run_dir(self.root, colmap=False, ply=False)
         self._log(run)
 
-        self.assertIsNone(webui.build_result_zip(run))
+        self.assertIsNone(runs.build_result_zip(run))
 
     def test_run_log_path_without_a_run(self):
-        self.assertIsNone(webui.run_log_path(None))
+        self.assertIsNone(runs.run_log_path(None))
 
 
 class TestEveryRunOnTheVolume(_BundleCase):
@@ -208,7 +212,7 @@ class TestEveryRunOnTheVolume(_BundleCase):
         # writes its archives into the same place; keep the two apart so a
         # `-result.zip` is never mistaken for a run.
         self._patched_jobs = unittest.mock.patch.object(
-            webui, "run_jobs_dir", lambda: self.jobs)
+            runs, "run_jobs_dir", lambda: self.jobs)
         self._patched_jobs.start()
         self.addCleanup(self._patched_jobs.stop)
 
@@ -228,8 +232,8 @@ class TestEveryRunOnTheVolume(_BundleCase):
         # A CLI run: deliverables, no status file, nothing known about it.
         _run_dir(self.runs, colmap=True, ply=False, name="from-the-cli")
 
-        with unittest.mock.patch.object(webui, "output_dir", lambda: self.runs):
-            found = {s.name: s for s in webui.discover_runs()}
+        with unittest.mock.patch.object(runs, "output_dir", lambda: self.runs):
+            found = {s.name: s for s in runs.discover_runs()}
 
         self.assertEqual(set(found), {"published", "from-the-cli"})
         self.assertEqual(found["published"].status, "done")
@@ -242,8 +246,8 @@ class TestEveryRunOnTheVolume(_BundleCase):
         run = _run_dir(self.runs, colmap=True, ply=True, name="both")
         self._status(run, status="cancelled", workflow="fast_helical_native")
 
-        with unittest.mock.patch.object(webui, "output_dir", lambda: self.runs):
-            found = webui.discover_runs()
+        with unittest.mock.patch.object(runs, "output_dir", lambda: self.runs):
+            found = runs.discover_runs()
 
         self.assertEqual([s.name for s in found], ["both"])
         self.assertEqual(found[0].status, "cancelled")
@@ -254,8 +258,8 @@ class TestEveryRunOnTheVolume(_BundleCase):
             self._status(_run_dir(self.runs, colmap=True, ply=False, name=name),
                          finished=finished)
 
-        with unittest.mock.patch.object(webui, "output_dir", lambda: self.runs):
-            self.assertEqual([s.name for s in webui.discover_runs()],
+        with unittest.mock.patch.object(runs, "output_dir", lambda: self.runs):
+            self.assertEqual([s.name for s in runs.discover_runs()],
                              ["newest", "middle", "older"])
 
     def test_a_truncated_status_file_does_not_take_the_scan_down(self):
@@ -264,8 +268,8 @@ class TestEveryRunOnTheVolume(_BundleCase):
         _run_dir(self.runs, colmap=True, ply=False, name="fine")
         (self.jobs / "broken.status.json").write_text('{"name": "brok')
 
-        with unittest.mock.patch.object(webui, "output_dir", lambda: self.runs):
-            self.assertEqual([s.name for s in webui.discover_runs()], ["fine"])
+        with unittest.mock.patch.object(runs, "output_dir", lambda: self.runs):
+            self.assertEqual([s.name for s in runs.discover_runs()], ["fine"])
 
     def test_completed_means_it_produced_something_not_that_it_said_done(self):
         """A cancelled run that got as far as its COLMAP export still has a
@@ -278,8 +282,8 @@ class TestEveryRunOnTheVolume(_BundleCase):
         self._status(_run_dir(self.runs, colmap=True, ply=True, name="in-flight"),
                      status="running")
 
-        with unittest.mock.patch.object(webui, "output_dir", lambda: self.runs):
-            self.assertEqual([s.name for s in webui.completed_runs()],
+        with unittest.mock.patch.object(runs, "output_dir", lambda: self.runs):
+            self.assertEqual([s.name for s in runs.completed_runs()],
                              ["cancelled-late"])
 
     def test_contents_names_every_part_of_the_archive(self):
@@ -288,9 +292,9 @@ class TestEveryRunOnTheVolume(_BundleCase):
         (self.root / "logs" / "described.log").write_text("hello\n")
         self._status(run)
 
-        with unittest.mock.patch.object(webui, "output_dir", lambda: self.runs):
-            state = webui.completed_runs()[0]
-        contents, size = webui.run_contents(state)
+        with unittest.mock.patch.object(runs, "output_dir", lambda: self.runs):
+            state = runs.completed_runs()[0]
+        contents, size = runs.run_contents(state)
 
         self.assertIn("colmap/ (5)", contents)
         self.assertIn("ply/ (1)", contents)
@@ -302,11 +306,11 @@ class TestEveryRunOnTheVolume(_BundleCase):
         first = _run_dir(self.runs, colmap=True, ply=False, name="run-a")
         second = _run_dir(self.runs, colmap=False, ply=True, name="run-b")
         states = [
-            webui.RunState(name=first.name, status="done", output_dir=first),
-            webui.RunState(name=second.name, status="done", output_dir=second),
+            runs.RunState(name=first.name, status="done", output_dir=first),
+            runs.RunState(name=second.name, status="done", output_dir=second),
         ]
 
-        names = self._names(webui.build_bundle_zip(states))
+        names = self._names(runs.build_bundle_zip(states))
 
         self.assertIn("run-a/colmap/cameras.txt", names)
         self.assertIn("run-b/ply/scene.ply", names)
@@ -315,10 +319,10 @@ class TestEveryRunOnTheVolume(_BundleCase):
     def test_a_run_with_nothing_in_it_is_skipped_not_bundled_empty(self):
         good = _run_dir(self.runs, colmap=True, ply=False, name="good")
         empty = _run_dir(self.runs, colmap=False, ply=False, name="empty")
-        states = [webui.RunState(name=p.name, status="done", output_dir=p)
+        states = [runs.RunState(name=p.name, status="done", output_dir=p)
                   for p in (good, empty)]
 
-        names = self._names(webui.build_bundle_zip(states))
+        names = self._names(runs.build_bundle_zip(states))
 
         self.assertEqual(names, ["good/colmap/cameras.txt", "good/colmap/images.txt",
                                  "good/colmap/images/frame_00001_.png",
@@ -327,10 +331,10 @@ class TestEveryRunOnTheVolume(_BundleCase):
 
     def test_no_run_produced_anything_means_no_bundle_and_no_stray_file(self):
         empty = _run_dir(self.runs, colmap=False, ply=False, name="empty")
-        states = [webui.RunState(name=empty.name, status="done", output_dir=empty)]
+        states = [runs.RunState(name=empty.name, status="done", output_dir=empty)]
 
-        self.assertIsNone(webui.build_bundle_zip(states))
-        self.assertFalse((self.root / "archives" / webui.BUNDLE_NAME).exists())
+        self.assertIsNone(runs.build_bundle_zip(states))
+        self.assertFalse((self.root / "archives" / runs.BUNDLE_NAME).exists())
 
     def test_reuse_keeps_an_up_to_date_archive_and_rebuilds_a_stale_one(self):
         """The press that makes this tab usable: rescanning a volume of
@@ -338,32 +342,68 @@ class TestEveryRunOnTheVolume(_BundleCase):
         import os
 
         run = _run_dir(self.runs, colmap=True, ply=True, name="reused")
-        archive = Path(webui.build_result_zip(run))
+        archive = Path(runs.build_result_zip(run))
         first = archive.stat().st_mtime
         os.utime(archive, (first, first))
 
-        self.assertTrue(webui.archive_is_current(archive, run))
-        self.assertEqual(webui.build_result_zip(run, reuse=True), str(archive))
+        self.assertTrue(runs.archive_is_current(archive, run))
+        self.assertEqual(runs.build_result_zip(run, reuse=True), str(archive))
         self.assertEqual(archive.stat().st_mtime, first)
 
         # A deliverable written after the archive was built invalidates it.
         _touch(run / "ply" / "second.ply", 1024)
         os.utime(run / "ply" / "second.ply", (first + 60, first + 60))
-        self.assertFalse(webui.archive_is_current(archive, run))
-        webui.build_result_zip(run, reuse=True)
+        self.assertFalse(runs.archive_is_current(archive, run))
+        runs.build_result_zip(run, reuse=True)
         self.assertIn("ply/second.ply", self._names(str(archive)))
 
     def test_a_missing_archive_is_never_current(self):
         run = _run_dir(self.runs, colmap=True, ply=False, name="never-packaged")
         self.assertFalse(
-            webui.archive_is_current(self.root / "archives" / "nope.zip", run))
+            runs.archive_is_current(self.root / "archives" / "nope.zip", run))
+
+    def test_packaging_one_run_from_several_threads_at_once(self):
+        """The archive path is fixed, so callers collide on one file.
+
+        There are three that can reach the same run at once now: the
+        Results tab, the All-results scan, and `GET /runs/{name}/result` —
+        a sync route, so anyio runs several of them in its threadpool. Two
+        `ZipFile(archive, "w")` at once interleave into a corrupt archive,
+        and `FileResponse` streaming a file another thread has truncated
+        hands back a short .zip under a 200. Built to a temp name and
+        `os.replace`d, a reader sees one whole archive or the other.
+        """
+        run = _run_dir(self.runs, colmap=True, ply=True, name="contended")
+        results, errors = [], []
+
+        def package():
+            try:
+                results.append(runs.build_result_zip(run))
+            except Exception as exc:  # pragma: no cover - the failure this pins
+                errors.append(exc)
+
+        threads = [threading.Thread(target=package) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(errors, [])
+        self.assertEqual(len(set(results)), 1, "callers disagreed on the archive path")
+        # Every one of them, read after the fact, is a whole archive.
+        for archive in results:
+            self.assertIn("colmap/cameras.txt", self._names(archive))
+        # And no staging file was left behind.
+        self.assertEqual(
+            [p.name for p in (self.root / "archives").glob("*.part")], []
+        )
 
 
 class TestOutputSelection(unittest.TestCase):
     def test_the_shipped_workflow_declares_its_deliverables(self):
         """The Outputs box IS the workflow's `outputs:` block: its labels,
         its order, and the `dir:` each one lands in."""
-        outputs = webui.workflow_outputs("fast_helical_native")
+        outputs = runs.workflow_outputs("fast_helical_native")
         self.assertEqual(
             [(o.name, o.directory) for o in outputs],
             [("export_colmap", "colmap"),
@@ -389,8 +429,8 @@ class TestOutputSelection(unittest.TestCase):
             )
             bare = handle.name
         self.addCleanup(os.unlink, bare)
-        self.assertEqual(webui.workflow_outputs(bare), [])
-        self.assertEqual(webui.result_subdirs(bare), [])
+        self.assertEqual(runs.workflow_outputs(bare), [])
+        self.assertEqual(runs.result_subdirs(bare), [])
 
     def test_which_workflows_can_start_from_a_photo(self):
         """The gate on the UI's photo input. It got this wrong once by
@@ -405,7 +445,7 @@ class TestOutputSelection(unittest.TestCase):
         import os
         import tempfile
 
-        self.assertFalse(webui.workflow_needs_a_dataset("fast_helical_native"))
+        self.assertFalse(runs.workflow_needs_a_dataset("fast_helical_native"))
 
         with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as handle:
             handle.write(
@@ -415,7 +455,7 @@ class TestOutputSelection(unittest.TestCase):
             )
             needs_dataset = handle.name
         self.addCleanup(os.unlink, needs_dataset)
-        self.assertTrue(webui.workflow_needs_a_dataset(needs_dataset))
+        self.assertTrue(runs.workflow_needs_a_dataset(needs_dataset))
 
     def test_the_photo_gate_keys_off_the_fields_a_photo_cannot_fill(self):
         """`Dataset.from_reference_image` leaves exactly these empty, so
@@ -426,7 +466,7 @@ class TestOutputSelection(unittest.TestCase):
         import numpy as np
 
         seeded = Dataset.from_reference_image(np.zeros((8, 8, 3), np.uint8))
-        for path in webui._NEEDS_A_REAL_DATASET:
+        for path in runs._NEEDS_A_REAL_DATASET:
             field = path.split(".", 1)[1]
             with self.subTest(field=field):
                 value = getattr(seeded, field)
@@ -438,7 +478,7 @@ class TestOutputSelection(unittest.TestCase):
         touches either. A deliverable's switch belongs to the Outputs box;
         `WorkflowSpec.from_yaml` refuses it being declared twice, and the
         Settings box draws `settings:` only."""
-        _spec, settings, outputs, _steps = webui.workflow_param_panel(
+        _spec, settings, outputs, _steps = runs.workflow_param_panel(
             "fast_helical_native")
         names = {s.name for s in settings}
         self.assertFalse(names & {o.name for o in outputs})
@@ -450,7 +490,7 @@ class TestOutputSelection(unittest.TestCase):
         fast_helical_native. It has to stay a declared param (that is how the
         value crosses the dispatcher), so the panel is what keeps it from
         being a second editable home for the frame size."""
-        *_, steps = webui.workflow_param_panel("fast_helical_native")
+        *_, steps = runs.workflow_param_panel("fast_helical_native")
         render = next(s for s in steps if s["step"] == "render")
         self.assertEqual(render["global_refs"].get("resolution"), "resolution")
 
@@ -470,13 +510,14 @@ class TestOutputSelection(unittest.TestCase):
         It is a bare `globals:` key, not a declared setting, and the panel
         draws declarations only — so this is now structural rather than a
         denylist that could be forgotten."""
-        spec, settings, outputs, _steps = webui.workflow_param_panel(
+        spec, settings, outputs, _steps = runs.workflow_param_panel(
             "fast_helical_native")
         self.assertIn("output_root", spec.globals)
         drawn = {s.name for s in settings} | {o.name for o in outputs}
         self.assertNotIn("output_root", drawn)
 
 
+@unittest.skipIf(webui is None, "the web UI's dependencies are not installed here")
 class TestSettingWidgets(unittest.TestCase):
     """A declared setting draws and reads back as the value it declared.
 
@@ -618,7 +659,7 @@ class TestTheDebugDirectoryRidesAlong(_BundleCase):
         run = _run_dir(self.root, colmap=True, ply=True)
         self._debug_files(run)
 
-        names = self._names(webui.build_result_zip(run))
+        names = self._names(runs.build_result_zip(run))
 
         for expected in (
             "debug/face/face.ply",
@@ -638,29 +679,29 @@ class TestTheDebugDirectoryRidesAlong(_BundleCase):
         run = _run_dir(self.root, colmap=False, ply=False)
         self._debug_files(run)
 
-        self.assertIsNone(webui.build_result_zip(run))
-        self.assertTrue(webui.debug_dirs(run))
+        self.assertIsNone(runs.build_result_zip(run))
+        self.assertTrue(runs.debug_dirs(run))
 
     def test_an_empty_debug_directory_is_not_offered(self):
         run = _run_dir(self.root, colmap=True, ply=True)
         (run / "debug" / "refine_cameras").mkdir(parents=True)
 
-        self.assertEqual(webui.debug_dirs(run), {})
-        self.assertFalse([n for n in self._names(webui.build_result_zip(run))
+        self.assertEqual(runs.debug_dirs(run), {})
+        self.assertFalse([n for n in self._names(runs.build_result_zip(run))
                           if n.startswith("debug/")])
 
     def test_text_members_are_deflated_and_binaries_stored(self):
         run = _run_dir(self.root, colmap=True, ply=True)
         self._debug_files(run)
 
-        with zipfile.ZipFile(webui.build_result_zip(run)) as bundle:
+        with zipfile.ZipFile(runs.build_result_zip(run)) as bundle:
             kinds = {info.filename: info.compress_type for info in bundle.infolist()}
         self.assertEqual(kinds["debug/refine_cameras/stats.json"], zipfile.ZIP_DEFLATED)
         self.assertEqual(kinds["debug/face/face.ply"], zipfile.ZIP_STORED)
         self.assertEqual(kinds["ply/scene.ply"], zipfile.ZIP_STORED)
 
     def test_no_run_at_all(self):
-        self.assertEqual(webui.debug_dirs(None), {})
+        self.assertEqual(runs.debug_dirs(None), {})
 
 
 if __name__ == "__main__":

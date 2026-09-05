@@ -79,7 +79,13 @@ python -m pipeline.cli doctor
 # back as one .zip. Its Settings and Outputs boxes are the workflow's own
 # `settings:` / `outputs:` blocks; the ~300 per-step knobs are still all
 # there, behind the "Per-step settings" fold.
-python -m pipeline.cli ui            # needs `pip install 'gradio>=5.0,<7.0'`
+#
+# The same command also serves an HTTP API at /api/v1 on the same port —
+# submit, poll, download, cancel — for everything a browser is the wrong
+# tool for. Both need B2C_API_TOKEN set: the API takes it as a bearer
+# token, the UI as its login password. Without it neither is guarded and
+# the API is not served at all. See docs/runpod.md, "Automating it".
+python -m pipeline.cli ui            # needs the `ui` extra (gradio, fastapi, uvicorn)
 
 python -m pipeline.cli workflows     # what's available
 python -m pipeline.cli steps
@@ -92,9 +98,10 @@ timestamped log under `$B2C_LOG_DIR`. See [pipeline/paths.py](pipeline/paths.py)
 ## Deploying
 
 One image holds every step's venv plus the `brush` binaries, and serves the
-web UI by default. [docs/runpod.md](docs/runpod.md) has the pod template
-settings and the debugging recipes; [docs/docker.md](docs/docker.md) has the
-design rationale.
+web UI and the HTTP API by default, on one port. [docs/runpod.md](docs/runpod.md)
+has the pod template settings, the `B2C_API_TOKEN` both are guarded by, the
+curl recipes under **Automating it**, and the debugging recipes;
+[docs/docker.md](docs/docker.md) has the design rationale.
 
 ## Tests
 

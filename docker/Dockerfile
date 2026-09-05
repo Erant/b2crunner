@@ -600,7 +600,9 @@ from detectron2 import _C; print('detectron2 native extension OK')"
 
 # gradio, for pipeline/webui.py — the web UI the container serves by
 # default, and the reason the image can be built once and then driven
-# entirely over HTTP.
+# entirely over HTTP. Its fastapi/uvicorn are also what pipeline/api.py
+# runs on: the server is one FastAPI app with the API registered on it and
+# the UI mounted under it, so one install covers both.
 #
 # Installed HERE, in its own layer at the end of the stage, rather than up
 # in the venv_main block where it belongs logically. Docker's layer cache is
@@ -616,9 +618,13 @@ from detectron2 import _C; print('detectron2 native extension OK')"
 # (`gr.Timer`, `queue()` arguments and `Dataframe` datatypes have all
 # changed), and this image is meant to be built once and left alone — a
 # rebuild months from now silently picking up gradio 7 is exactly the class
-# of surprise that costs a pod-hour.
-RUN /opt/venv_main/bin/pip install 'gradio>=5.0,<7.0' \
-    && /opt/venv_main/bin/python -c "import gradio; print('gradio', gradio.__version__)"
+# of surprise that costs a pod-hour. fastapi and uvicorn are capped for the
+# same reason and not because of anything they have done: pipeline/api.py
+# imports them directly, so a 1.0 arriving between two builds of this image
+# would break it at build time, on a pod.
+RUN /opt/venv_main/bin/pip install 'gradio>=5.0,<7.0' 'fastapi>=0.110,<1.0' 'uvicorn>=0.27,<1.0' \
+    && /opt/venv_main/bin/python -c "import gradio; print('gradio', gradio.__version__)" \
+    && /opt/venv_main/bin/python -c "import fastapi, uvicorn; print('fastapi', fastapi.__version__)"
 
 # -----------------------------------------------------------------------------
 # sageattention — built from source, because there is no other way to get it

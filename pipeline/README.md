@@ -79,6 +79,23 @@ pipeline/
 ├── worker.py            Entry point run *inside* an isolated venv/container
 │                      by SubprocessPythonDispatcher/DockerDispatcher
 ├── cli.py               `python -m pipeline.cli run <workflow.yaml> --dataset <dir>`
+├── runs.py            What a run IS, with no front end attached: what an
+│                      upload means and the runs it fans out to, the one
+│                      place a RunJob is built (submit_runs), what a
+│                      finished run left on the volume (discover_runs) and
+│                      how that is packaged (build_result_zip). Both front
+│                      ends drive it, so a curl and a button press cannot
+│                      mean different things. Imports no UI framework
+├── api.py             The HTTP API — pipeline/runs.py over /api/v1, bearer
+│                      -guarded by B2C_API_TOKEN, not registered at all
+│                      without one. Mounted into the same server process
+│                      and the same GpuScheduler as the UI (webui.
+│                      build_server): a second process with a scheduler of
+│                      its own would start a run on a card this one already
+│                      had busy
+├── webui.py           The browser's view of runs.py: the Run/Progress/
+│                      Results/All results/Models/Doctor tabs, drawn from
+│                      the workflow's own settings:/outputs: blocks
 ├── dispatch/
 │   ├── base.py          Dispatcher ABC
 │   ├── in_process.py    InProcessDispatcher

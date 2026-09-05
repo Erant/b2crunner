@@ -121,6 +121,20 @@ serve_ui() {
 
     start_prefetch
 
+    # Whether the pod is scriptable, and whether anyone can drive it. Said
+    # here for the same reason the volume and doctor lines are: it is a
+    # question you otherwise only get to ask after something has behaved
+    # unexpectedly — a 401 from every request, or an open UI on a public
+    # proxy URL — and the answer is one environment variable.
+    if [ -n "${B2C_API_TOKEN:-}" ]; then
+        log "HTTP API on /api/v1 (bearer B2C_API_TOKEN); the web UI asks for the"
+        log "  same token as its password (username b2c)"
+    else
+        log "WARNING: no B2C_API_TOKEN — the HTTP API is NOT served, and the web UI"
+        log "  is unauthenticated on a proxy URL anyone with the pod id can reach."
+        log "  Set it on the pod template to enable both."
+    fi
+
     log "starting the web UI on 0.0.0.0:${B2C_PORT}"
     exec "$PYTHON" -m pipeline.cli ui --host 0.0.0.0 --port "$B2C_PORT"
 }

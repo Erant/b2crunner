@@ -21,7 +21,7 @@ has and hasn't been verified on real hardware.
 | Volume size | 100 GB+ | HF checkpoints alone are ~60 GB, before any run output. |
 | Container disk | 20 GB | Only the image's own writable layer; nothing the pipeline writes should land here. |
 | **RAM** | **64 GB+** | Not optional for `fast_helical_native`. Its two denoise passes use `keep_loaded: true`, which holds ~47 GB of Wan weights resident in host RAM between them so they come off the volume once instead of twice. Too little and the worker is OOM-killed mid-run, which looks like a mysterious dead worker rather than a sizing mistake. `doctor` warns. Drop `keep_loaded` from the workflow if you must run smaller. |
-| HTTP ports | `7860` | The web UI. RunPod proxies it at `https://<pod-id>-7860.proxy.runpod.net`. |
+| HTTP ports | `7860` | The web UI *and* the HTTP API, on one port. RunPod proxies it at `https://<pod-id>-7860.proxy.runpod.net`. |
 | TCP ports | `22` | SSH. Optional, but it is how you get a shell if the UI won't start. |
 
 ### Environment variables
@@ -30,6 +30,7 @@ has and hasn't been verified on real hardware.
 |---|---|---|
 | `HF_TOKEN` | `hf_...` | **Required.** From an account that has accepted the licences for `briaai/RMBG-2.0` and `facebook/sam-3d-body-dinov3`; both are gated and a human has to click through each one. `doctor` reports whether the token can actually reach them. |
 | `NVIDIA_DRIVER_CAPABILITIES` | `compute,utility,graphics,display` | **Set this here even though the image also sets it.** It is read by nvidia-container-toolkit at container-*creation* time, and whether RunPod honours an image-level `ENV` for it is unresolved. Without `graphics`, `vulkaninfo` finds no driver, and `brush` (Vulkan) and `render` (EGL) both fail — 40 minutes into a run, not at startup. |
+| `B2C_API_TOKEN` | a long random string | **Set this.** It turns on the HTTP API at `/api/v1` (as a bearer token) *and* puts the web UI behind a login form that takes it as the password, username `b2c`. Without it the API is not served at all and the UI is open to anyone who can guess the pod id — the proxy URL below is public. Generate one with `openssl rand -hex 24`. |
 | `PUBLIC_KEY` | your SSH public key | RunPod usually injects this. The entrypoint starts `sshd` only when it is present. |
 | `B2C_PORT` | `7860` | Only if you need a different port. |
 | `B2C_PREFETCH` | `0` | Only if you want the old lazy behaviour — each step downloading its own checkpoint mid-run. Default is to pull everything at start. |
@@ -184,6 +185,9 @@ through the batch, captured after every step, one row per step in run
 order. That last one is for answering "which step broke it" by looking
 rather than by reading the log; it fills in while the run is going.
 
+The UI asks for a password when `B2C_API_TOKEN` is set: username `b2c`, the
+token as the password. With it unset there is no login and no HTTP API.
+
 The run happens in a background thread. **Closing the browser tab does not
 stop it** — reopen the page and press *Attach / refresh* on the Progress
 tab. Cancel takes effect at the next step boundary, not mid-step: a step is
@@ -222,6 +226,94 @@ python -m pipeline.cli run fast_helical_native --reference-image /data/sheet.png
 python -m pipeline.cli run fast_helical_native --reference-image /data/sheet.png \
     --param export_colmap_intermediate=true
 ```
+
+## Automating it
+
+Everything the UI does, `/api/v1` does — same queue, same GPU slots, same
+`.zip`. It is the same server process on the same port: the API is
+registered on a FastAPI app and the Gradio UI is mounted underneath it, so
+a run submitted by curl shows up in the browser's run picker and vice
+versa. There is no second scheduler and no second set of GPU slots.
+
+Every route needs `B2C_API_TOKEN` as a bearer token, and none of them is
+served if that variable is unset. `--no-api` on `pipeline.cli ui` serves the
+UI alone.
+
+```bash
+POD=https://<pod-id>-7860.proxy.runpod.net
+AUTH="Authorization: Bearer $B2C_API_TOKEN"
+
+# is there capacity, and have the weights landed?
+curl -sH "$AUTH" $POD/api/v1/health | jq '{gpus, queued}'
+
+# the whole surface, machine-readable
+curl -sH "$AUTH" $POD/api/v1/openapi.json | jq '.paths | keys'
+
+# what can I set? — the workflow's own settings: and outputs: blocks,
+# with types, defaults and choice lists. These names are exactly what
+# `settings` below accepts; a name it does not list is refused, not ignored
+curl -sH "$AUTH" $POD/api/v1/workflows/fast_helical_native | jq '.settings[].name'
+
+# submit a reference sheet
+NAME=$(curl -sH "$AUTH" \
+  -F file=@sheet.png \
+  -F prompt='a woman in a red jacket' \
+  -F 'settings={"run_upscale": false, "export_ply": false}' \
+  $POD/api/v1/runs | jq -r '.runs[0].name')
+
+# ...or a .zip of image/prompt pairs: one run per pair, fanned across
+# every GPU, exactly as the UI's upload box does it
+curl -sH "$AUTH" -F file=@subjects.zip $POD/api/v1/runs | jq '.runs[].name'
+
+# ...or a sheet already on the volume, which is the right way for anything
+# large — rsync/runpodctl it in, then name the path
+curl -sH "$AUTH" -H 'Content-Type: application/json' \
+  -d '{"reference_image": "/data/uploads/sheet.png", "prompt": "..."}' \
+  $POD/api/v1/runs
+
+# watch it
+curl -sH "$AUTH" $POD/api/v1/runs/$NAME | jq '{status, current, total, message}'
+curl -sH "$AUTH" "$POD/api/v1/runs/$NAME/log?tail=100" | jq -r .log
+
+# collect it: the same archive the Results tab builds, cached beside the
+# run so asking twice does not re-zip a couple of gigabytes
+curl -sH "$AUTH" -OJ $POD/api/v1/runs/$NAME/result
+
+# stop one (at the next step boundary, not mid-step)
+curl -sXPOST -H "$AUTH" $POD/api/v1/runs/$NAME/cancel
+```
+
+A poll loop is three lines, because `status` is terminal exactly when it
+leaves `queued`/`running`:
+
+```bash
+until curl -sH "$AUTH" $POD/api/v1/runs/$NAME \
+      | jq -e '.status | . != "queued" and . != "running"' >/dev/null; do
+    sleep 30
+done
+```
+
+Codes worth handling: **400** is a submission to fix and its `detail` says
+what (an unknown setting, a `.txt` where a sheet should be, a run that
+would export nothing); **409** on `/result` means the run is still going —
+its exports are the last steps, so a `.zip` built now would look whole and
+not be; **404** on `/result` means it finished without producing a
+deliverable. `GET /api/v1/openapi.json` is the generated schema for the
+rest — behind the same token, since FastAPI's own docs routes would
+otherwise advertise every route of a guarded API on a public URL.
+
+Two things only the pod can answer, so check them on a new template: that
+the RunPod proxy forwards the `Authorization` header, and that a
+multi-gigabyte `/result` download survives it. If either does not, the
+`.zip` is still on the volume at `/data/output/<run>-result.zip` and
+`runpodctl send` still works.
+
+**What the API does not give you is a durable queue.** `GpuScheduler` holds
+queued jobs in memory; if the container restarts, anything not yet started
+is gone (and anything running is stopped). Treat a `queued` reply as live
+state, not a receipt — a client submitting a batch should confirm each run
+reached `running` or a terminal status rather than assuming the queue
+survived.
 
 ## When and where the models are downloaded
 

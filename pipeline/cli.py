@@ -390,7 +390,7 @@ def launch_ui(args: argparse.Namespace) -> int:
     configure_tmpdir()
     launch(
         host=args.host, port=args.port, envs_path=args.envs, share=args.share,
-        gpu_count=args.gpus,
+        gpu_count=args.gpus, serve_api=not args.no_api,
     )
     return 0
 
@@ -483,6 +483,11 @@ def build_parser() -> argparse.ArgumentParser:
     ui_p.add_argument("--host", default="0.0.0.0")
     ui_p.add_argument("--port", type=int, default=7860)
     ui_p.add_argument("--share", action="store_true", help="Request a public gradio.live tunnel")
+    ui_p.add_argument(
+        "--no-api", action="store_true",
+        help="Serve the web UI alone. Without this the HTTP API is served at "
+             "/api/v1 whenever B2C_API_TOKEN is set (and not at all when it is not)",
+    )
     ui_p.add_argument(
         "--gpus", type=int, default=None,
         help="Number of parallel GPU worker slots (default: torch.cuda.device_count(), "
