@@ -229,7 +229,7 @@ class TestFaceIntrinsics(unittest.TestCase):
         self.assertAlmostEqual(f, FOCAL)
 
     def test_the_body_step_is_the_full_frame(self):
-        step = ps.BodyPointmapSplatStep()
+        step = ps.PointmapSplatStep()
         f, cx, cy = step._source_intrinsics(
             {"mesh_output": {"focal_length": FOCAL}}, {}, WIDTH, HEIGHT)
         self.assertEqual((f, cx, cy), (FOCAL, WIDTH / 2.0, HEIGHT / 2.0))
@@ -237,7 +237,7 @@ class TestFaceIntrinsics(unittest.TestCase):
 
 class TestSpecializationDefaults(unittest.TestCase):
     def test_the_three_measured_defaults_differ_and_nothing_else_does(self):
-        body = ps.BodyPointmapSplatStep.declared_params()
+        body = ps.PointmapSplatStep.declared_params()
         face = ps.FacePointmapSplatStep.declared_params()
         self.assertEqual(sorted(body), sorted(face))
         differing = {name for name in body

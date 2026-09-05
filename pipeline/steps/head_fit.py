@@ -16,10 +16,11 @@ Two steps, split by environment:
     is a new mesh, skeleton and an updated `pose_params` that regenerate it,
     so nothing downstream has to know the head was touched.
 
-Why this and not `head_angle_fix`
----------------------------------
-`head_angle_fix` nods the head back to a fixed 10 deg of forward lean. It
-has no idea where the photograph's face is looking, and measured on
+Why a fit and not a fixed nod
+-----------------------------
+The step this replaced (`head_angle_fix`, retired 2026-09-04) nodded the
+head back to a fixed 10 deg of forward lean. It had no idea where the
+photograph's face was looking, and measured on
 cyber2_6f it nods the head 30 deg AWAY from it: the landmark residual of the
 mesh's head goes 10.5 px (raw fit) -> 20.7 px (auto nod), where this step
 reaches 2.4 px. The face splat, which sits on the photo's rays by
@@ -39,8 +40,8 @@ headfit_*.png in the run that produced this step):
     px but squashes the skull — plausible from the front, flat in profile;
   * the body model's own head parameters reach 2.4 px with an intact head
     from every angle, and the pose parameters stay a faithful handle on the
-    geometry — which is the property `refine_pose_to_splat`'s round-trip
-    gate depends on and `head_angle_fix` destroys.
+    geometry — which is the property this step's own round-trip gate
+    depends on.
 
 What is fitted
 --------------
@@ -76,15 +77,14 @@ All inputs and outputs are in SAM-3D-Body's raw output space (what
 `pred_vertices` and `pred_keypoints_3d` share, `vertices + cam_t` being the
 OpenCV camera frame). `mhr_head.forward` applies `diag(1,-1,-1)` to the
 model's output AFTER `mhr_forward`; replaying a pose has to do the same or
-the body lands ~2.8 m away (see `FLIP`, and `pose_refine.py`, which
-learned this first).
+the body lands ~2.8 m away (see `FLIP`).
 
 The replay gate
 ---------------
 Before anything is fitted the pose parameters are replayed and must
-reproduce the input mesh to 1 mm. `head_angle_fix` breaks that — it edits
-the vertices and leaves the parameters describing the old geometry — which
-is why the two are declared incompatible in `INCOMPATIBLE_STEPS`.
+reproduce the input mesh to 1 mm. Anything that edits the vertices and
+leaves the parameters describing the old geometry (the retired
+`head_angle_fix` did exactly that) fails this gate.
 """
 
 from __future__ import annotations
@@ -515,11 +515,9 @@ class FitHeadToFaceStep(Step):
         if drift > 1e-3:
             raise RuntimeError(
                 f"fit_head_to_face: replaying the pose parameters does not reproduce "
-                f"the input mesh ({drift * 1000:.2f} mm off). The likely cause is "
-                f"head_angle_fix having run first — it deforms the vertices without "
-                f"updating the parameters — and the two are incompatible (see "
-                f"INCOMPATIBLE_STEPS). Otherwise mesh_output and pose_params are from "
-                f"different fits."
+                f"the input mesh ({drift * 1000:.2f} mm off). Either something "
+                f"deformed the vertices without updating the parameters, or "
+                f"mesh_output and pose_params are from different fits."
             )
         self._check_handles(forward, verts0, keypoints0, pose_idx, zero_pose, zero_scale,
                             zero_shape, params["fit_scale"])

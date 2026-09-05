@@ -16,7 +16,6 @@ import numpy as np
 import pipeline.steps  # noqa: F401  — registers the steps
 from pipeline.registry import get_step_class
 from pipeline.steps import head_fit
-from pipeline.workflow import INCOMPATIBLE_STEPS
 
 
 def _skeleton_and_mesh(focal=1000.0, width=720, height=1280, depth=2.5):
@@ -99,9 +98,6 @@ class TestFitStepContract(unittest.TestCase):
         self.assertEqual(len(head_fit.FACE_OVAL), 36)
         self.assertEqual(len(set(head_fit.FACE_OVAL)), 36)
         self.assertTrue(all(0 <= i < 468 for i in head_fit.FACE_OVAL))
-
-    def test_it_cannot_be_combined_with_head_angle_fix(self):
-        self.assertIn(frozenset({"head_angle_fix", "fit_head_to_face"}), INCOMPATIBLE_STEPS)
 
     def test_both_steps_are_registered_with_defaults_that_resolve(self):
         for name in ("map_face_to_mesh", "fit_head_to_face"):

@@ -7,14 +7,9 @@ shape `colmap_export` writes with `layout: brush`). Refining the camera
 poses with COLMAP before training is worth **+0.63 PSNR** on held-out
 views.
 
-It is now `pipeline/steps/refine_cameras.py`, running twice in each of the
-two shipped workflows — see "Porting", at the bottom, for what the step
+It is now `pipeline/steps/refine_cameras.py`, running twice in the
+shipped workflow — see "Porting", at the bottom, for what the step
 does differently from the scratch scripts and for what is still unverified.
-
-Note the name clash before reading further: `steps/pose_refine.py` is
-about *body* pose — re-posing a SAM-3D-Body fit so its mesh agrees with
-the shell. This document is about *camera* pose, and the two share
-nothing but the word.
 
 ## Why there is anything to refine
 
@@ -224,7 +219,7 @@ Nothing warns you. The reconstruction stays self-consistent, reprojection
 error looks fine, and `model_analyzer` is happy. What you get is a splat
 a fifth too large, in a frame whose `points3D.txt` init no longer matches
 it — and if anything downstream assumes the splat's scale (anchor
-reinjection, the mesh/shell agreement `pose_refine` depends on, any
+reinjection, any
 fixed-radius helical re-render) that is a silent, hard-to-attribute
 corruption.
 

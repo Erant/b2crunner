@@ -32,7 +32,6 @@ wires the rest itself:
           width: ${globals.resolution.0}
         outputs:
           denoised: dataset.images    # written back into the shared Context
-          stats?: scene.stats         # optional; skipped when not returned
         when: ${globals.run_denoise}  # optional; skip the step when falsy
 
 **One flat namespace, three ways to declare into it.** A `settings:` entry,
@@ -79,14 +78,6 @@ outputs are simply not in the Context when it is switched off, and there is
 otherwise no way to say "take these if they were built". Everything else
 stays required, which is what makes a typo'd path a failure at that step
 rather than a silently missing input.
-
-An output NAME ending in `?` is the mirror of that, one step further in: the
-step returns that key only in some configurations, and when it does not, the
-context path is left as it was rather than the run failing. The marker goes
-on the step's return key, never on the path, so every consumer still reads
-one plain path. The shipped case is `rerender_splat`'s `anchor_position?` —
-`render_splat` publishes an anchor only when it anchored the path it
-rendered along.
 
 Only a step whose Step subclass actually writes to disk (e.g. `save_dataset`)
 touches disk — everything else stays in the in-memory Context between steps.
@@ -459,18 +450,6 @@ class WorkflowSpec:
                     f"It accepts: {', '.join(declared)}"
                 )
 
-        # Steps that are individually fine and wrong together. Asked of the
-        # ENABLED set, not every step in the file: a `when:`-gated step that
-        # this run switches off is not in the run.
-        enabled = {step.step for step in self.enabled_steps()}
-        for pair, reason in INCOMPATIBLE_STEPS.items():
-            if pair <= enabled:
-                first, second = sorted(pair)
-                raise ValueError(
-                    f"Workflow '{self.name}' enables both '{first}' and "
-                    f"'{second}', which cannot be combined. {reason}"
-                )
-
     def _validate_declarations(self) -> None:
         """Check the `settings:` and `outputs:` blocks against the steps.
 
@@ -533,47 +512,6 @@ def _among(value: Any, choices: Any) -> bool:
             if list(choice) == list(value):
                 return True
     return False
-
-
-#: Step pairs that must not run in the same workflow, and why. Checked by
-#: `WorkflowSpec.validate()`, so it fires at second zero for any workflow —
-#: including one a user writes — rather than forty minutes into a pod run.
-#:
-#: Keep this for genuine incompatibilities only: two steps that each work,
-#: and that quietly produce a wrong result together. A step that merely
-#: needs another to run first belongs in a workflow comment, not here.
-INCOMPATIBLE_STEPS: Dict[frozenset, str] = {
-    frozenset({"head_angle_fix", "fit_head_to_face"}): (
-        "head_angle_fix deforms scene.vertices/keypoints_3d without updating "
-        "the MHR pose parameters; fit_head_to_face replays those parameters "
-        "through the body model (and refuses to run once they no longer "
-        "reproduce the mesh). fit_head_to_face is the replacement: it turns "
-        "the head to where the photograph's face actually looks instead of "
-        "to a fixed lean. Use one or the other."
-    ),
-    frozenset({"head_angle_fix", "refine_pose_to_splat"}): (
-        "head_angle_fix rewrites scene.vertices/keypoints_3d directly, as a "
-        "graded deformation, and does NOT update the MHR pose parameters "
-        "behind them. refine_pose_to_splat replays those parameters through "
-        "the body model and regenerates the mesh from them, so it would "
-        "silently discard the nod (and its own round-trip gate refuses to "
-        "run at all once the two disagree). They also pull in different "
-        "directions, and NOT because one ignores the head: re-posing moves "
-        "the head centre 33 mm back along the sagittal axis, i.e. it is "
-        "already correcting the crane's depth component. It just answers to "
-        "a different authority — the shell, which inherited the same craned "
-        "head from the same photograph — so it settles at a different "
-        "answer than the anatomical prior wants, and would partly undo a nod "
-        "applied before it. (The measured lean goes 32.4 -> 36.0 deg, but "
-        "that metric is relative: the hips came 17 mm forward and the neck "
-        "27 mm back, rotating the torso axis more than the head-neck vector "
-        "rotated.) Pick one. Making them genuinely cooperate is not an "
-        "ordering fix — it means putting the anatomical constraint INTO the "
-        "pose objective as a term, so one optimisation balances shell "
-        "agreement against plausibility, rather than two steps overwriting "
-        "each other."
-    ),
-}
 
 
 def apply_ui_overrides(

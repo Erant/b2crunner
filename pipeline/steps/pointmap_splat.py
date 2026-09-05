@@ -60,53 +60,15 @@ shared verbatim, which is the point of the split.
 
 How it is wired
 ---------------
-`workflows/fast_helical_native.yaml` is that wiring; read it for the whole
-bootstrap. Everything this step needs already existed on that prologue, and
-the three feeds must all be the same photo — `scene.front_image`:
-
-    - id: front_matte
-      step: rmbg
-      dispatch: in_process
-      inputs: {image: scene.front_image}
-      outputs: {mask: scene.front_matte}
-
-    - id: front_normals
-      step: sapiens2_lite
-      dispatch: in_process
-      inputs: {image: scene.front_image}
-      outputs: {normal_map: scene.front_normals}
-
-    - id: shell_splat
-      step: pointmap_splat
-      dispatch: in_process
-      inputs:
-        image: scene.front_image
-        mask: scene.front_matte
-        normal_map: scene.front_normals
-        mesh_output: scene            # sam3d_body's own outputs
-      params:
-        filepath: ${globals.output_root}/shell/shell.ply
-      outputs:
-        splat_path: scene.shell_splat_path
-        splat_stats: scene.shell_splat_stats
-
-`render_splat` takes that `splat_path` directly — with `pattern: ""` it
-re-renders the shell along the mesh render's own cameras, which is what
-lets `inject_shell_views` swap those frames into the band around the source
-view and mark them as the batch's real-photograph frames. That is the job
-`generate_firstlast` + `inject_anchor` used to do for one anchored frame,
-which is why neither is in that bootstrap any more. If
-`fix_head_angle` is ever put back in place of the pose fit, it belongs
-BEFORE this step: this one reads `mesh_output["vertices"]`, and the head
-correction rewrites them.
-
-`refine_pose_to_splat` follows it there, for the same reason it was
-written — it re-poses the body so the mesh agrees with the shell in novel
-views, which is what stops the rendered skeleton drifting off the subject a
-few degrees either side of the anchor. Note it is mutually exclusive with
-`fix_head_angle` (see `INCOMPATIBLE_STEPS` in pipeline/workflow.py), so a
-workflow picks one; and re-running this step afterwards, on the re-posed
-mesh, is the untried second iteration of the loop.
+As `face_pointmap_splat`, twice in `workflows/fast_helical_native.yaml`:
+`face_splat` in the bootstrap (through SAM-3D-Body's camera at the origin)
+and `face_splat_refined` after `refine_cameras` (through the photograph's
+camera moved by the anchor's refinement delta). See that class. The
+whole-body registration this base class used to carry (`pointmap_splat`,
+the photo-to-splat shell bootstrap's `shell_splat`, rendered along the mesh
+cameras and swapped into the frames near the source view by
+`inject_shell_views`, with `refine_pose_to_splat` re-posing the body onto
+it) was retired with that bootstrap on 2026-09-04 and lives in git history.
 
 Coordinate frames
 -----------------
@@ -775,12 +737,12 @@ def mesh_depth_prior(z: np.ndarray, mask: np.ndarray, front: np.ndarray,
     `align_bin_px` (32 px) is far too coarse for a hand: fingers get dragged
     toward the depth of whatever shares their bin, and visibly deform.
 
-    So: useful as an experiment, wrong as a default — and superseded.
-    `refine_pose_to_splat` addresses the same disagreement from the other
-    end, moving the *body* onto the shell instead of the shell onto the
-    body, which keeps the mesh a valid body and so cannot deform a finger
-    at all. Prefer that. This option is kept because it is the only lever
-    that acts when no body fit is available to re-pose, and because the
+    So: useful as an experiment, wrong as a default. The better direction
+    was to move the *body* onto the shell instead of the shell onto the
+    body (the shell bootstrap's `refine_pose_to_splat`, retired with it on
+    2026-09-04), which keeps the mesh a valid body and so cannot deform a
+    finger at all. This option is kept because it is the only lever that
+    acts when no body fit is available to re-pose, and because the
     comparison is what established which direction to push.
 
     Returns a depth map, defined inside `mask`.
@@ -1262,12 +1224,12 @@ def rotation_angle_deg(rotation: np.ndarray) -> float:
 class PointmapSplatStep(Step):
     """Single photo -> a Gaussian-splat shell in SAM-3D-Body's world.
 
-    **The base class, not a registered step.** Two specializations sit at
-    the bottom of this module and they are what a workflow names:
-    `pointmap_splat` (a whole body, from the full frame) and
-    `face_pointmap_splat` (a head, from a crop of it). See
-    `_source_intrinsics` for the one thing that genuinely differs between
-    them; everything else is a pair of measured defaults.
+    **The base class, not a registered step.** The one specialization at
+    the bottom of this module, `face_pointmap_splat` (a head, from a crop of
+    the photograph), is what a workflow names. See `_source_intrinsics` for
+    the one thing it changes; everything else is a measured default. The
+    whole-body registration (`pointmap_splat`) went with the shell
+    bootstrap on 2026-09-04.
 
     Instantiable and complete on its own, deliberately: the full-frame
     behaviour lives here as the default rather than in a subclass, because
@@ -1335,9 +1297,10 @@ class PointmapSplatStep(Step):
     the photograph was taken from. The depth is still re-read from the mesh
     through that pose; only the rotation the rays are hung on changes. The
     given anchor is `image_warp.camera`, the very camera the frame was
-    warped for. Without `given_camera` the dataset camera is taken to BE the
-    photograph's — right only when the path was not `look_at`-turned, and
-    logged as an assumption.
+    warped for, and it is REQUIRED beside `cameras`: a dataset camera taken
+    to be the photograph's own is right only for a path that was never
+    `look_at`-turned, which no shipped path is, so that reading is refused
+    rather than assumed.
 
     The intrinsics stay the photograph's throughout (`_source_intrinsics`):
     a dataset camera carries the RENDER's focal length, and the anchor frame
@@ -1545,10 +1508,11 @@ class PointmapSplatStep(Step):
         """`(dataset camera, its index, the given anchor camera or None)`, or
         `(None, None, None)` for the origin.
 
-        `given_camera` only means anything beside a dataset camera: it is
-        the pose that camera had before the refinement, and the rays are
-        hung on the motion between the two (`refined_photo_pose`). On its
-        own it is ignored — the origin route IS the photograph's camera.
+        `given_camera` is the pose that dataset camera had before the
+        refinement, and the rays are hung on the motion between the two
+        (`refined_photo_pose`). It is required beside `cameras` — see the
+        class docstring — and ignored on its own: the origin route IS the
+        photograph's camera.
 
         `cameras` is optional and empty means absent — with the refinement
         switched off a workflow still wires `dataset.cameras`, and that list
@@ -1571,7 +1535,16 @@ class PointmapSplatStep(Step):
                 f"{len(cameras)}-camera path. It names the frame the photograph "
                 f"was taken from — the anchor."
             )
-        return cameras[index], index, inputs.get("given_camera")
+        given = inputs.get("given_camera")
+        if given is None:
+            raise ValueError(
+                f"{label}: 'cameras' was wired without 'given_camera'. The "
+                f"photograph's rays are hung on the anchor's refinement delta, "
+                f"which needs the anchor camera as the path built it "
+                f"(render's image_warp.camera); the refined camera alone carries "
+                f"the path's look_at tilt and would turn the shell with it."
+            )
+        return cameras[index], index, given
 
     # -- the shell, with an explicit camera ------------------------------
     def _build_shell(self, image: np.ndarray, matte: np.ndarray,
@@ -1811,7 +1784,7 @@ class PointmapSplatStep(Step):
                             + np.asarray(mesh_output["cam_t"], dtype=np.float64).reshape(3))
             source = "SAM-3D-Body's camera at the origin"
             source_stats = {"frame_index": None, "position": [0.0, 0.0, 0.0]}
-        elif given is not None:
+        else:
             # The photograph's camera moved by the refinement's delta on
             # the anchor — NOT the dataset camera itself, which carries the
             # path's look_at tilt. See the class docstring; the mesh's
@@ -1835,18 +1808,6 @@ class PointmapSplatStep(Step):
                 "refinement_delta_deg": delta_deg, "refinement_delta_mm": delta_mm,
                 "given_lookat_tilt_deg": tilt,
             }
-        else:
-            # A dataset camera taken to BE the photograph's: right only for
-            # a path that was not look_at-turned at the anchor (a plain
-            # origin camera). The workflows pass `given_camera` so this
-            # branch is the fallback, and it says so.
-            pose = camera_pose(camera)
-            vertices_cam = vertices_in_camera(mesh_in_world(mesh_output), camera)
-            source = (f"dataset camera {index} at "
-                      f"({pose[1][0]:.4f}, {pose[1][1]:.4f}, {pose[1][2]:.4f}), "
-                      f"taken to be the photograph's own camera (no given_camera: "
-                      f"a look_at tilt at the anchor, if any, turns the shell with it)")
-            source_stats = {"frame_index": index, "position": [float(v) for v in pose[1]]}
         logger.info("%s: unprojecting through %s", label, source)
 
         shell = self._build_shell(
@@ -1877,28 +1838,11 @@ class PointmapSplatStep(Step):
 
 
 # ---------------------------------------------------------------------------
-# The two specializations. Everything above is shared; these are the names a
-# workflow writes.
+# The registered step. Everything above is shared and is the base class,
+# which tests/test_pointmap_splat.py exercises directly; this is the name a
+# workflow writes. (A whole-body `pointmap_splat` registration existed for
+# the photo-to-splat shell bootstrap, retired 2026-09-04.)
 # ---------------------------------------------------------------------------
-@register_step("pointmap_splat")
-class BodyPointmapSplatStep(PointmapSplatStep):
-    """The whole subject, from the whole photograph. `PointmapSplatStep` verbatim.
-
-    Thin on purpose. The base is already the full-frame case (see its
-    docstring), so this class exists to carry the registered name and to
-    state the input contract that goes with it: the matte is RMBG-2.0's,
-    over the same photo `sam3d_body` was fitted to, at that photo's own
-    resolution.
-
-    It keeps the name `pointmap_splat` rather than becoming
-    `body_pointmap_splat` for symmetry with `face_pointmap_splat`: the name
-    is written into workflows/fast_helical_native.yaml, the BOOTSTRAPS table
-    in tests/test_workflows.py, pipeline/models.py's prefetch registry,
-    docs/runpod.md and two READMEs, and renaming it buys nothing but the
-    symmetry.
-    """
-
-
 @register_step("face_pointmap_splat")
 class FacePointmapSplatStep(PointmapSplatStep):
     """A head, from a crop of that same photograph.

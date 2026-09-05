@@ -557,13 +557,13 @@ def result_dirs(run_dir: Optional[Path], workflow: str = "") -> Dict[str, Path]:
 # Run-directory subdirectories that ride into the archive under `debug/`,
 # keyed by the name they take there. `debug/` is where the workflows point
 # every step's `debug_dir` (refine_cameras' given-vs-refined camera dumps,
-# the face splat's stats and depth visualisations); `face/` and `shell/`
-# are where the two workflows write the face splat .ply files, the one
-# artefact a face-placement question cannot be answered without. None of
+# the face splat's stats and depth visualisations); `face/` is where the
+# workflow writes the face splat .ply files, the one artefact a
+# face-placement question cannot be answered without. None of
 # these is a deliverable, so they are carried beside `result_dirs`'
 # rather than declared in a workflow's `outputs:` block, and none of them
 # is large: a face splat is ~10k Gaussians.
-DEBUG_SUBDIRS: Dict[str, str] = {"debug": "debug", "face": "debug/face", "shell": "debug/shell"}
+DEBUG_SUBDIRS: Dict[str, str] = {"debug": "debug", "face": "debug/face"}
 _DEBUG_TEXT_SUFFIXES = {".txt", ".json", ".log", ".csv"}
 
 

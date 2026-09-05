@@ -462,12 +462,6 @@ class TestTheDebugDirectoryRidesAlong(_BundleCase):
         self.assertNotIn("face/face.ply", names)
         self.assertFalse([n for n in names if n.startswith("brush/")])
 
-    def test_the_shell_workflows_face_splat_is_carried_too(self):
-        run = _run_dir(self.root, colmap=True, ply=False)
-        _touch(run / "shell" / "face.ply", 2048)
-
-        self.assertIn("debug/shell/face.ply", self._names(webui.build_result_zip(run)))
-
     def test_debug_alone_is_not_a_deliverable(self):
         run = _run_dir(self.root, colmap=False, ply=False)
         self._debug_files(run)

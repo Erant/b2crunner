@@ -46,9 +46,8 @@ shell is fitted to mesh vertices, and a .ply has none.
 answer: a render whose frames feed `select_support_views` has to stay
 premultiplied over black, because that step divides the alpha back out to
 recover a straight colour. A backdrop makes that division recover the room.
-Both workflows' `render_face_support_views` — and the shell file's
-`render_shell_views` — therefore set `background: ""` explicitly, next to the
-`bg_color: [0, 0, 0]` they already carry for the same reason.
+`render_face_support_views` therefore sets `background: ""` explicitly, next
+to the `bg_color: [0, 0, 0]` it already carries for the same reason.
 
 **Every render that wants one names it itself.** These were a `background`
 workflow SETTING briefly (2026-09-01), on the reasoning that frames sharing a

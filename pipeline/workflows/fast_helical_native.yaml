@@ -13,6 +13,16 @@
 # and reads the .ply optionally, so the branch being off leaves it with
 # nothing to composite rather than nothing to resolve.
 #
+# WHAT CHANGED (2026-09-04, last): **the shell experiment is over.**
+# fast_helical_shell.yaml is gone, and with it everything only it used:
+# `refine_pose_to_splat` (steps/pose_refine.py), `inject_shell_views`, the
+# whole-body `pointmap_splat` registration, the `anchor_helix` global
+# (rerender_splat is simply `override_cam_from_mesh: true` and publishes
+# plain `anchor_position` / `anchor_frame_index` outputs), the runner's
+# optional-OUTPUT `name?:` form, the mirror test, and the `?` on
+# face_splat_refined's `given_camera` — that input is required now, and the
+# step refuses `cameras` without it. This is the one workflow file.
+#
 # WHAT CHANGED (2026-09-04, later still): **the refined face cap is hung on
 # the photograph's camera, moved by the refinement's delta** — not on the
 # refined anchor camera itself. `face_splat_refined` takes
@@ -37,7 +47,7 @@
 #
 # WHAT CHANGED (2026-09-04): **the helical anchor re-injection actually
 # runs.** The shared tail's `rerender_splat` now anchors its helix
-# (`override_cam_from_mesh: ${globals.anchor_helix}`) and publishes
+# (`override_cam_from_mesh: true`) and publishes
 # `anchor_position` / `anchor_frame_index` for the path it built, so the
 # stage-3 `reinject_anchor` has a frame to match. It had none: an
 # unanchored helix passes no closer than 24x the match tolerance to the
@@ -148,16 +158,15 @@
 # not deselected), and `align_bin_px` dropped from 32 to 8. The CROP stays
 # the Face_Neck box: cutting it to the face as well was measured to flatten
 # the face, see the note on locate_face. `fix_head_angle` gained a `cam_t`
-# ray-hold the same day; that step has since left this file (above).
+# ray-hold the same day; that step has since been retired (above).
 #
 # The circular orbit, override_cam_from_mesh, the anchor warp and the
 # anchor injection remain exactly as they were, deliberately: this file
 # exists to test the face in isolation, so a run that looks different from
 # the last one differs because of the face and nothing else. A separate,
-# larger change — the photo-to-splat SHELL, which replaces the whole
-# bootstrap with a helical orbit, a body-wide Gaussian shell, a pose refit
-# and a substituted band of frames — is parked in fast_helical_shell.yaml
-# and selected by nothing.
+# larger change — the photo-to-splat SHELL bootstrap: a helical orbit, a
+# body-wide Gaussian shell, a pose refit and a substituted band of frames —
+# was tried alongside in fast_helical_shell.yaml and retired on 2026-09-04.
 #
 # The compositing is body2colmap's own `skeleton+splat` render mode, as
 # `outline+skeleton+splat` on render_initial_views. It used to be a pair of
@@ -173,9 +182,8 @@
 # (VACE mask 1.0). cyber_6f/initial IS that dataset; here the workflow builds
 # it from one image.
 #
-# FROM denoise_pass1 ON — this is the shared tail: fast_helical_shell.yaml
-# carries an identical copy, step for step, id for id (there is no include
-# mechanism). tests/test_workflows.py checks it has not drifted.
+# FROM denoise_pass1 ON — the tail: the native port of the ComfyUI pipeline
+# over the dataset the bootstrap built.
 #
 # STATUS: never executed end-to-end. render's rasterization and
 # generate_firstlast's warp have never run on real hardware (their module
@@ -446,28 +454,10 @@ globals:
   # the pod is recycled.
   output_root: output/fast_helical_native
 
-  # Whether the shared tail's helical re-render anchors itself on the
-  # photograph's camera. Not a knob — a statement about what THIS file's
-  # bootstrap hands the tail, which is why it is here and not in
-  # `settings:`. render_initial_views runs in override mode, so the dataset
-  # reaching the tail has its original camera at the world origin and
-  # carries the `original_focal_length` marker that says so; the tail's
-  # rerender_splat can therefore bend its helix to pass exactly through that
-  # camera, which is the only thing that gives `reinject_anchor` a frame to
-  # overwrite. Turning this off makes that re-injection a silent no-op — see
-  # the long note at rerender_splat.
-  #
-  # fast_helical_shell.yaml declares the same global `false`, because its
-  # bootstrap publishes no anchor at all. That disagreement is deliberate
-  # and the mirror test in tests/test_workflows.py exempts this one name
-  # alongside `output_root`.
-  anchor_helix: true
-
 steps:
   # ================================================================ bootstrap
   # Build the dataset the shared tail expects as its input. Everything from
-  # `denoise_pass1` on is that shared tail — fast_helical_shell.yaml carries
-  # a verbatim copy.
+  # `denoise_pass1` on is that tail.
 
   # The input is the two-panel front/back sheet, not a photo of the subject.
   # Nothing downstream wants both panels, and the two halves go to opposite
@@ -528,13 +518,10 @@ steps:
   # splat looks where the photograph looks — and the outline the diffusion
   # pass conditions on had better agree with it.
   #
-  # `head_angle_fix` used to run here. It nods the head back to a fixed
-  # 10 deg of forward lean, which on this subject turned it 30 deg AWAY from
-  # the photograph (landmark residual 10.5 -> 20.7 px): the outline head
-  # looked up while the face on it looked slightly down. It is still
-  # registered, still tested, and declared incompatible with the fit below
-  # (INCOMPATIBLE_STEPS) — it deforms the vertices without updating the
-  # parameters the fit replays.
+  # `head_angle_fix` used to run here (retired 2026-09-04). It nodded the
+  # head back to a fixed 10 deg of forward lean, which on this subject turned
+  # it 30 deg AWAY from the photograph (landmark residual 10.5 -> 20.7 px):
+  # the outline head looked up while the face on it looked slightly down.
   #
   # The fit is dense and lives in the body model's own parameters: a
   # MediaPipe<->vertex correspondence is built by rendering THIS mesh's
@@ -625,9 +612,7 @@ steps:
   # here is only that the two agree about depth.
   #
   # The circular orbit, the anchor warp and the anchor injection are all
-  # exactly as they were in the bootstrap before the face. The photo-to-
-  # splat SHELL bootstrap, which changes all of those, is parked in
-  # fast_helical_shell.yaml.
+  # exactly as they were in the bootstrap before the face.
   #
   # None of these steps declare `keep_loaded`, so the seg head is read from
   # the HF cache twice (locate, then mask) rather than held in host RAM
@@ -986,9 +971,7 @@ steps:
       masks: dataset.masks
 
   # ================================================================
-  # From here down: this file's shared tail. fast_helical_shell.yaml carries
-  # a verbatim copy. Keep the two in sync — tests/test_workflows.py checks
-  # they have not drifted.
+  # From here down: the tail — the native port of the ComfyUI pipeline.
   # ================================================================
 
   # ---------------------------------------------------------------- stage 1
@@ -1334,10 +1317,8 @@ steps:
       # the motion between this and dataset.cameras[anchor], not on the
       # refined camera itself: the path's anchor is look_at-turned onto the
       # orbit target (0.83 deg on cyber2), and a shell hung on that rotation
-      # turns with it — 28 mm at the face, measured on run 5e2817. Optional
-      # because an unanchored bootstrap publishes no image_warp; without it
-      # the refined camera is taken to be the photograph's, and logged so.
-      given_camera: scene.image_warp.camera?
+      # turns with it — 28 mm at the face, measured on run 5e2817.
+      given_camera: scene.image_warp.camera
     params:
       filepath: ${globals.output_root}/face/face_refined.ply
       debug_dir: ${globals.output_root}/debug/face_splat_refined
@@ -1444,9 +1425,9 @@ steps:
   # supporting view sitting on it competes with a denoised frame wherever
   # it sits; being 140 degrees round the orbit from the photograph does
   # not make a view out of distribution, being off the path does. (On a
-  # circle this comes out as the elevation difference; on
-  # fast_helical_shell.yaml's helix it follows the sweep, which is why the
-  # measure is to the path and not to a latitude.) Of the cap's 36 views
+  # circle this comes out as the elevation difference; on a helix it would
+  # follow the sweep, which is why the measure is to the path and not to a
+  # latitude.) Of the cap's 36 views
   # against 81 ring cameras, that drops the 7 nearest the ring.
   #
   # Only the STAGE-2 training reads these (`train_splat`). The final one
@@ -1454,9 +1435,8 @@ steps:
   # re-render, denoised again and upscaled, while these renders are still
   # the circular bootstrap's — stale path, stale resolution. The `?` on
   # `train_splat`'s reads is an optional read (see pipeline/workflow.py),
-  # so this file and the shell file can share one tail: with the face
-  # branch off (`face_splat: false`), nothing writes that path and brush
-  # trains exactly as before.
+  # so with the face branch off (`face_splat: false`) nothing writes that
+  # path and brush trains exactly as before.
   - id: face_support_views
     step: select_support_views
     dispatch: in_process
@@ -1796,9 +1776,8 @@ steps:
     outputs:
       splat_scene: scene.splat
 
-  # ANCHORED, when the bootstrap handed this tail an anchored dataset
-  # (`${globals.anchor_helix}` — true in fast_helical_native, false in
-  # fast_helical_shell, whose bootstrap publishes no anchor at all).
+  # ANCHORED: the bootstrap hands this tail an anchored dataset (its render
+  # ran under override_cam_from_mesh), so the helix bends onto the anchor.
   #
   # This block used to read "the ComfyUI node leaves override_cam_from_mesh
   # off here", and to lean on `inject_anchor` below re-applying the anchor
@@ -1843,9 +1822,7 @@ steps:
   # `framing: ${globals.framing}` keeps this render in step with
   # render_initial_views, which frames the mesh at that same preset — the
   # splat re-render has to match it or the two disagree about how tight the
-  # body fills the frame. fast_helical_shell.yaml carries the identical
-  # param for the same reason; test_workflows.py's mirror check expects the
-  # two to agree.
+  # body fills the frame.
   - id: rerender_splat
     step: render_splat
     dispatch: in_process
@@ -1860,11 +1837,10 @@ steps:
       n_frames: 81
       n_loops: 2
       amplitude_deg: 30.0
-      # See the block above. The bootstrap decides this, not the operator:
-      # anchoring needs a dataset whose original camera is at the world
-      # origin, and extras['original_focal_length'] — written only by an
-      # override-mode render — is the marker for that.
-      override_cam_from_mesh: ${globals.anchor_helix}
+      # See the block above. Anchoring needs a dataset whose original camera
+      # is at the world origin, which render_initial_views' override mode
+      # guarantees (extras['original_focal_length'] is its marker).
+      override_cam_from_mesh: true
       # 30/90, not the 45/45 the solver defaults to — the values
       # resplat_helical.json's Body2COLMAP_HelicalPath node carries.
       lead_in_deg: 30.0
@@ -1914,12 +1890,9 @@ steps:
       image_names: dataset.image_names
       points_3d: dataset.points_3d
       # Where THIS path put the anchor, replacing what refine_cameras left
-      # in the extras — see the block above. render_splat writes both keys
-      # only when it anchored the path; with `anchor_helix` off it writes
-      # neither and the extras keep the bootstrap's, which is what the shell
-      # file wants (nothing there injects an anchor anyway).
-      anchor_position?: dataset.extras.anchor_position
-      anchor_frame_index?: dataset.extras.anchor_frame_index
+      # in the extras — see the block above.
+      anchor_position: dataset.extras.anchor_position
+      anchor_frame_index: dataset.extras.anchor_frame_index
 
   # ---------------------------------------------------------------- stage 3
   # This used to be the stage that dropped the splat's low-confidence

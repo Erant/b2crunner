@@ -10,10 +10,6 @@ SSIM** on held-out views (30k iters, three seeds per condition, seed spread
 +-0.003 on the baseline). The measurement, and everything else this module
 is a port of, is docs/camera-pose-refinement.md.
 
-Do not confuse this with `steps/pose_refine.py`, which is about *body*
-pose — re-posing a SAM-3D-Body fit so its mesh agrees with the shell. This
-is about *camera* pose. The two share nothing but the word.
-
 Anything BUILT from one of the cameras this step moves is stale once it
 has run. The face splat is the case: it is unprojected from the anchor
 photograph, and its supporting views are renders of it. Those are REBUILT

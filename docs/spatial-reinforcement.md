@@ -32,9 +32,7 @@ denoise_pass1 -> colmap_export -> brush (train, --export-evidence)
               -> denoise_pass2   (strength 0.8)
 ```
 
-Identical in both workflow files (`fast_helical_native.yaml`,
-`fast_helical_shell.yaml`); the shell file's copy is kept in sync with
-native's by `tests/test_workflows.py`.
+In `fast_helical_native.yaml`.
 
 Before 2026-08-30 the middle two lines read `BLACK bg` and `filter_size
 6, dilation 2`, and that is what sections 1-3 describe.

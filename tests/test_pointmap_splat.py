@@ -487,9 +487,13 @@ class TestStepRun(unittest.TestCase):
             position=target + coordinates.spherical_to_cartesian(2.2, 37.0, 9.0),
         )
         camera.look_at(target, coordinates.WorldCoordinates.UP_AXIS)
+        # The given anchor here is the photograph's own camera, so the
+        # refinement delta IS the dataset camera and the shell sits on its rays.
+        plain = Camera(focal_length=(FOCAL, FOCAL), image_size=(WIDTH, HEIGHT),
+                       principal_point=(CX, CY), position=np.zeros(3))
 
         with tempfile.TemporaryDirectory() as tmp:
-            result, (z_true, mask) = self._run(tmp, camera=camera)
+            result, (z_true, mask) = self._run(tmp, camera=camera, given_camera=plain)
 
             _, _, data = _read_ply(Path(result["splat_path"]))
             means_world = data[:, 0:3].astype(np.float64)
@@ -596,28 +600,6 @@ class TestStepRun(unittest.TestCase):
             self.assertGreater(source["given_lookat_tilt_deg"], 2.0)
             np.testing.assert_allclose(source["position"], position, atol=1e-6)
 
-    def test_run_with_an_unturned_given_anchor_is_the_plain_posed_route(self):
-        """Regression guard for the `cameras`-only route: a given anchor that
-        is the photograph's own camera changes nothing."""
-        from body2colmap import coordinates
-        from body2colmap.camera import Camera
-
-        target = np.array([0.4, -1.1, -2.0])
-        camera = Camera(focal_length=(FOCAL, FOCAL), image_size=(WIDTH, HEIGHT),
-                        principal_point=(CX, CY),
-                        position=target + coordinates.spherical_to_cartesian(2.2, 37.0, 9.0))
-        camera.look_at(target, coordinates.WorldCoordinates.UP_AXIS)
-        plain = Camera(focal_length=(FOCAL, FOCAL), image_size=(WIDTH, HEIGHT),
-                       principal_point=(CX, CY), position=np.zeros(3))
-
-        with tempfile.TemporaryDirectory() as tmp:
-            with_given, _ = self._run(tmp, camera=camera, given_camera=plain)
-            _, _, a = _read_ply(Path(with_given["splat_path"]))
-        with tempfile.TemporaryDirectory() as tmp:
-            without, _ = self._run(tmp, camera=camera)
-            _, _, b = _read_ply(Path(without["splat_path"]))
-        np.testing.assert_allclose(a[:, 0:3], b[:, 0:3], atol=1e-5)
-
     def test_run_refuses_an_anchor_index_off_the_path(self):
         from body2colmap.camera import Camera
 
@@ -632,7 +614,11 @@ class TestStepRun(unittest.TestCase):
         self.assertIs(step._source_camera({"cameras": [camera], "given_camera": camera},
                                           "t")[2], camera)
         self.assertEqual(step._source_camera({}, "t"), (None, None, None))
-        self.assertIs(step._source_camera({"cameras": [camera]}, "t")[0], camera)
+        # A dataset camera without the anchor it was refined from is refused:
+        # it carries the path's look_at tilt, the 5e2817 bug.
+        with self.assertRaises(ValueError) as caught:
+            step._source_camera({"cameras": [camera]}, "t")
+        self.assertIn("given_camera", str(caught.exception))
 
     def test_run_scales_the_shell_onto_the_mesh(self):
         with tempfile.TemporaryDirectory() as tmp:

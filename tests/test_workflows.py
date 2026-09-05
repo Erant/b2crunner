@@ -86,22 +86,14 @@ DENOISE_NEGATIVE_PROMPT = (
 )
 
 
-# The from-a-sheet workflows, and the bootstrap prologue each one runs before
-# it picks up the shared tail verbatim (see denoise_pass1 on). Pinned here
+# The from-a-sheet workflow, and the bootstrap prologue it runs before it
+# picks up the tail (see denoise_pass1 on). Pinned here
 # rather than derived, because "the prologue changed shape" is exactly the
 # edit that should make somebody look: this list is how the pipeline is
 # allowed to manufacture the dataset that tail expects.
-#
-# 2026-08-29: it changed shape. `fix_head_angle` left (it cannot run beside
-# `refine_pose_to_splat`), the matte/normals/shell/re-pose steps arrived, and
-# `warp_reference_to_anchor` + `reinject_anchor_initial` left because
-# `inject_shell_views` does that job — it puts photo-derived content on every
-# frame near the source view, not just the one exactly on it, so the render
-# no longer has to bend its path to land a camera there either.
 #: The face branch — detect_face / locate_face / crop_face / face_seg /
 #: face_mask / face_normals / face_splat, then render_face_support_views +
-#: face_support_views — is common to both and gated on each file's
-#: `face_splat` global. `render_initial_views` carries the rest of it and is
+#: face_support_views — is gated on the `face_splat` global. `render_initial_views` carries the rest of it and is
 #: NOT gated: it composites the splat itself.
 #:
 #: 2026-08-30: `face_support_views` joined it. The face renders now reach
@@ -122,12 +114,12 @@ DENOISE_NEGATIVE_PROMPT = (
 #: photograph's face instead of to a fixed lean (steps/head_fit.py), and
 #: `detect_face` moved ahead of them, ungated — the fit needs the landmarks
 #: whether or not the face splat is drawn.
-#: 2026-08-31: `render_face_views` and `composite_face` LEFT, both files.
+#: 2026-08-31: `render_face_views` and `composite_face` LEFT.
 #: body2colmap dropped gsplat for brush-splat-render, so its own
 #: `skeleton+splat` composite mode is usable here and `render_initial_views`
 #: draws the overlay itself — see docs/revert-when-body2colmap-drops-gsplat.md.
 #: 2026-09-02: `render_face_support_views` and `face_support_views` LEFT the
-#: bootstraps for the shared tail, where they follow `face_splat_refined` —
+#: bootstrap for the tail, where they follow `face_splat_refined` —
 #: the face splat built again through the REFINED anchor camera after
 #: `refine_cameras`. The bootstrap `face_splat` stays: render_initial_views
 #: still composites it onto the drawings before the denoise.
@@ -143,18 +135,6 @@ BOOTSTRAPS = {
         "render_initial_views",
         "warp_reference_to_anchor", "reinject_anchor_initial",
     ],
-    # Parked: the photo-to-splat shell, which replaces the whole bootstrap.
-    # Nothing selects it (webui.WORKFLOW_NATIVE names the file above); it is
-    # kept in the tree so the shell wiring does not have to be reconstructed
-    # from git history, and checked here so it cannot rot silently.
-    "fast_helical_shell": [
-        "split_sheet", "reconstruct_body",
-        "front_matte", "front_normals", "shell_splat", "refine_pose",
-        "detect_face", "locate_face", "crop_face", "face_seg", "face_mask",
-        "face_normals", "face_splat",
-        "render_initial_views",
-        "render_shell_views", "inject_shell_band",
-    ],
 }
 
 
@@ -167,12 +147,11 @@ def _splat_alpha_producer(case, path, spec, mask_at: int) -> int:
     about to threshold — i.e. the last one before it that publishes
     `dataset.masks`.
 
-    Not simply "the first render_splat in the file": `fast_helical_native`
-    renders a second splat in its bootstrap (the photo-derived shell, along
-    the mesh render's own cameras) into a scratch namespace, publishing no
-    masks at all. That render is not in this relationship with mask_splat,
-    and treating it as the producer would put the entire bootstrap inside a
-    gap that does not exist.
+    Not simply "the first render_splat in the file": a bootstrap may render
+    a splat of its own without publishing masks at all (the retired shell
+    bootstrap did). Such a render is not in this relationship with
+    mask_splat, and treating it as the producer would put the entire
+    bootstrap inside a gap that does not exist.
     """
     producers = [i for i, step in enumerate(spec.steps[:mask_at])
                  if step.step == "render_splat"
@@ -427,64 +406,6 @@ class TestWorkflowFiles(unittest.TestCase):
                         f"exporting what was trained on",
                     )
 
-    def test_shell_mirrors_native_from_denoise_pass1_on(self):
-        """fast_helical_shell.yaml is a bootstrap prologue followed by a
-        verbatim copy of fast_helical_native.yaml's tail. There is no
-        include mechanism, so the thing worth checking is that the copy has
-        not drifted.
-
-        Everything but `output_root` (deliberately per-file) is compared:
-        step id, class, dispatch, env, inputs, outputs, when, keep_loaded,
-        and the raw params block. A bootstrap file may declare globals of
-        its own; what it may not do is disagree about one of native's.
-        """
-        native = WorkflowSpec.from_yaml(str(WORKFLOW_DIR / "fast_helical_native.yaml"))
-        native_tail = native.steps[len(BOOTSTRAPS["fast_helical_native"]):]
-        self._assert_mirrors_native(native, native_tail, "fast_helical_shell",
-                                     BOOTSTRAPS["fast_helical_shell"])
-
-    def _assert_mirrors_native(self, native, native_tail, name, bootstrap):
-        shell = WorkflowSpec.from_yaml(str(WORKFLOW_DIR / f"{name}.yaml"))
-        shell_ids = [s.id for s in shell.steps]
-        self.assertEqual(
-            shell_ids[: len(bootstrap)], bootstrap,
-            f"{name}'s bootstrap prologue has changed shape",
-        )
-        tail = shell.steps[len(bootstrap):]
-        self.assertEqual(
-            [s.id for s in tail], [s.id for s in native_tail],
-            f"{name}'s tail has drifted from fast_helical_native's steps",
-        )
-        for step in tail:
-            twin = next(s for s in native_tail if s.id == step.id)
-            with self.subTest(step=step.id):
-                self.assertEqual(step.step, twin.step)
-                self.assertEqual(step.dispatch, twin.dispatch)
-                self.assertEqual(step.env, twin.env)
-                self.assertEqual(step.inputs, twin.inputs)
-                self.assertEqual(step.outputs, twin.outputs)
-                self.assertEqual(step.when, twin.when)
-                self.assertEqual(step.keep_loaded, twin.keep_loaded)
-                self.assertEqual(step.params, twin.params)
-
-        # Two names are deliberately per-file. `output_root` is obvious.
-        # `anchor_helix` is the same kind of thing one level down: it is not
-        # a knob but a statement about what each bootstrap hands the tail —
-        # native's render is anchored and shell's is not, so the tail's
-        # helical re-render can bend itself onto the photograph's camera in
-        # one file and must not pretend to in the other. Everything the two
-        # files SAY about it is still checked (the params referencing it are
-        # compared verbatim, above); only the value may differ.
-        per_file = {"output_root", "anchor_helix"}
-        for key, value in native.globals.items():
-            if key in per_file:
-                continue
-            with self.subTest(glob=key):
-                self.assertEqual(
-                    shell.globals.get(key), value,
-                    f"global '{key}' differs between {name} and fast_helical_native",
-                )
-
     def test_output_switches_and_the_steps_they_guard_agree(self):
         """A workflow's globals carry `export_colmap`/`export_ply` exactly
         when it has steps guarded by them.
@@ -496,9 +417,7 @@ class TestWorkflowFiles(unittest.TestCase):
         are derived from the globals, so globals that do not match the steps
         mean the UI is offering the wrong choices.
 
-        The shipped workflow declares all of these, and the parked shell
-        file mirrors it after its own bootstrap prologue, exports included.
-        A workflow that declared a switch with no guarded step (or the
+        The shipped workflow declares all of these. A workflow that declared a switch with no guarded step (or the
         reverse) is what this still guards against. `run_upscale` is in the
         list for the same reason — it is a global whose only job is to gate
         steps.
@@ -674,8 +593,7 @@ class TestWorkflowFiles(unittest.TestCase):
         `render_splat` re-rendered along a NEW path, that render must be
         anchored, and must publish where it put the anchor rather than
         leaving the extras describing the old path. A file with no anchor
-        image to inject (fast_helical_shell, whose bootstrap has none and
-        whose `inject_anchor` is a documented no-op) has nothing to check.
+        image to inject has nothing to check.
         """
         for path in _workflows():
             spec = WorkflowSpec.from_yaml(str(path))
@@ -717,8 +635,7 @@ class TestWorkflowFiles(unittest.TestCase):
                         f"silent no-op",
                     )
                     self.assertEqual(
-                        render.outputs.get("anchor_position?")
-                        or render.outputs.get("anchor_position"),
+                        render.outputs.get("anchor_position"),
                         "dataset.extras.anchor_position",
                         f"{path.name}: '{render.id}' anchors its path but does not "
                         f"publish anchor_position, so '{step.id}' would match "
@@ -1013,7 +930,7 @@ class TestWorkflowFiles(unittest.TestCase):
                 # warped for. Hung on the refined camera alone the cap turns
                 # by the path's look_at tilt (run 5e2817, 28 mm).
                 self.assertEqual(refined.inputs.get("given_camera"),
-                                 "scene.image_warp.camera?")
+                                 "scene.image_warp.camera")
                 self.assertEqual(refined.inputs.get("cameras"), "dataset.cameras")
                 self.assertEqual(priority.inputs["anchor_cameras"], "dataset.cameras")
                 selector = by_id["face_support_views"]
@@ -1321,8 +1238,7 @@ class TestWorkflowFiles(unittest.TestCase):
         thing to keep by hand and worth pinning.
 
         Why it has to hold: the renders feeding the two denoise passes share
-        a batch (and, in the shell workflow, `render_shell_views` substitutes
-        frames straight into one), so a subject whose room changes between
+        a batch, so a subject whose room changes between
         them is a subject that has been teleported. The one render that must
         NOT have a backdrop states that with `background: ""` and is exempt
         here — `select_support_views` divides the alpha back out of its
@@ -1497,65 +1413,6 @@ class TestWorkflowFiles(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-
-class TestIncompatibleSteps(unittest.TestCase):
-    """Step pairs that each work and are wrong together.
-
-    `head_angle_fix` deforms the mesh directly without touching the MHR pose
-    parameters; `refine_pose_to_splat` regenerates the mesh *from* those
-    parameters. Run together, one silently discards the other — and they are
-    corrections in opposite directions besides (the head fix is an
-    anatomical prior; the pose fit chases what the shell observed, and the
-    shell inherited the same craned head from the same photo).
-    """
-
-    def _spec(self, *step_names, globals_=None):
-        from pipeline.workflow import StepSpec, WorkflowSpec
-
-        return WorkflowSpec(
-            name="synthetic",
-            globals=dict(globals_ or {}),
-            steps=[StepSpec(id=f"s{i}", step=name)
-                   for i, name in enumerate(step_names)],
-        )
-
-    def test_the_shipped_workflows_do_not_mix_them(self):
-        for path in sorted(WORKFLOW_DIR.glob("*.yaml")):
-            spec = WorkflowSpec.from_yaml(path)
-            spec.validate()          # raises if any pair is enabled together
-
-    def test_enabling_both_is_refused(self):
-        spec = self._spec("head_angle_fix", "refine_pose_to_splat")
-        with self.assertRaises(ValueError) as caught:
-            spec.validate()
-        message = str(caught.exception)
-        self.assertIn("head_angle_fix", message)
-        self.assertIn("refine_pose_to_splat", message)
-        # The refusal has to say why, not just that.
-        self.assertIn("pose parameters", message)
-
-    def test_either_one_alone_is_fine(self):
-        self._spec("head_angle_fix").validate()
-        self._spec("refine_pose_to_splat").validate()
-
-    def test_a_when_gated_step_that_is_off_does_not_count(self):
-        """`when:` is how this pipeline makes a step optional, so a pair is
-        only a conflict when both actually run."""
-        from pipeline.workflow import StepSpec, WorkflowSpec
-
-        spec = WorkflowSpec(
-            name="synthetic",
-            globals={"fix_head": False},
-            steps=[StepSpec(id="a", step="head_angle_fix",
-                            when="${globals.fix_head}"),
-                   StepSpec(id="b", step="refine_pose_to_splat")],
-        )
-        spec.validate()
-
-        spec.globals["fix_head"] = True
-        with self.assertRaises(ValueError):
-            spec.validate()
 
 
 class TestDeclaredSettings(unittest.TestCase):
