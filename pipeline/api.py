@@ -54,7 +54,7 @@ from .gpu_scheduler import GpuScheduler
 from .run_state import tail_lines
 from .runs import (
     WORKFLOW_NATIVE, SubmitError, build_result_zip, check_submission,
-    discover_runs, find_run, merged_runs,
+    discover_runs, find_run, merged_runs, wants_debug,
     resolve_upload, run_log_path, submit_runs, workflow_param_panel,
 )
 
@@ -561,7 +561,8 @@ def build_router(
                 detail=f"Run {name!r} is {state.status}; its exports are the last steps.",
             )
         archive = build_result_zip(
-            state.output_dir, state.workflow, state.log_path, reuse=True
+            state.output_dir, state.workflow, state.log_path, reuse=True,
+            debug=wants_debug(state),
         )
         if archive is None:
             raise HTTPException(

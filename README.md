@@ -29,6 +29,10 @@ the run's output directory:
 <run>/ply/                   scene.ply — brush, normal-supervised
 <run>/colmap_intermediate/   debug: what the first brush training was fed
 <run>/colmap_preupscale/     debug: the same, from the pre-upscale frames
+<run>/debug/                 camera dumps, face splat stats, and
+                             intermediate_splat.ply — the splat the helical
+                             re-render is built from. Rides into the result
+                             .zip unless the Debug bundle output is off
 ```
 
 ## Install

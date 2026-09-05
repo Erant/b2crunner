@@ -168,6 +168,19 @@ unchecked step does not run:
   `requires: run_upscale`, so with the upscale off the checkbox is greyed
   out: the frames would then be the same as `colmap/`'s, and it used to
   silently give you that instead, under a name that says otherwise.
+- **Debug bundle** (on by default) — the `debug/` directory in the result
+  `.zip`: refine_cameras' given-vs-refined camera models, the face splat's
+  stats and depth visualisations, the face `.ply` files, and
+  `intermediate_splat.ply` — the splat the helical re-render is built from,
+  and therefore the first thing to look at when that re-render is wrong.
+  Unlike every other switch here it skips no work: those dumps are a side
+  effect of steps the run needs anyway, so they are written to the volume
+  either way and this decides only whether they are packaged. Worth turning
+  off for a run you are only going to look at, because the intermediate
+  splat is hundreds of MB against a few hundred KB for the rest of that
+  directory. It is not a deliverable on its own — a run with every other
+  output off is still refused.
+
 - **Intermediate COLMAP dataset (debug)** — also exports
   `colmap_intermediate/`: the dataset the **first** brush training is
   handed, i.e. the frames as `denoise_pass1` leaves them plus the RMBG
@@ -178,8 +191,8 @@ unchecked step does not run:
   it is a valid sole output. Sets `export_colmap_intermediate`.
 
 The **Results** tab has three things: the one `.zip` of the run's
-deliverables (`colmap/` and/or `ply/`, plus either debug export you asked
-for, and nothing else — the run directory's own frames and the intermediate
+deliverables (`colmap/` and/or `ply/`, plus `debug/` and either debug export
+you asked for, and nothing else — the run directory's own frames and the intermediate
 splat stay on the volume), the
 final frames, and a **per-step contact sheet**: eight frames spaced evenly
 through the batch, captured after every step, one row per step in run

@@ -1415,6 +1415,50 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class TestTheIntermediateSplatIsKept(unittest.TestCase):
+    """The first brush training exports somewhere the result .zip carries.
+
+    That splat is what the helical re-render is built from, so it is the
+    first thing to look at when the re-render is wrong — and it is only
+    reachable afterwards if it lands under the run's `debug/`, which is
+    what `runs.DEBUG_SUBDIRS` packages. An `output_dir` here instead would
+    put it in `brush/training_<ms>/`: on the volume, and gone with the pod.
+    """
+
+    def test_the_first_training_exports_into_debug(self):
+        from pipeline.cli import resolve_workflow
+        from pipeline.templating import resolve
+        from pipeline.workflow import WorkflowSpec
+
+        spec = WorkflowSpec.from_yaml(resolve_workflow("fast_helical_native"))
+        scope = {"globals": dict(spec.globals, output_root="/out")}
+        trainings = {
+            step.id: resolve(step.params, scope)
+            for step in spec.steps if step.step == "brush"
+        }
+        self.assertIn("train_splat", trainings)
+        intermediate = trainings["train_splat"]
+        self.assertEqual(intermediate.get("export_dir"), "/out/debug")
+        self.assertTrue(str(intermediate.get("export_name", "")).endswith(".ply"))
+        # `output_dir` would win nothing here (export_dir takes precedence),
+        # but leaving both set would be a contradiction to read later.
+        self.assertIsNone(intermediate.get("output_dir"))
+
+    def test_the_two_trainings_cannot_collide(self):
+        from pipeline.cli import resolve_workflow
+        from pipeline.templating import resolve
+        from pipeline.workflow import WorkflowSpec
+
+        spec = WorkflowSpec.from_yaml(resolve_workflow("fast_helical_native"))
+        scope = {"globals": dict(spec.globals, output_root="/out")}
+        exports = [
+            (resolve(step.params, scope).get("export_dir"),
+             resolve(step.params, scope).get("export_name"))
+            for step in spec.steps if step.step == "brush"
+        ]
+        self.assertEqual(len(exports), len(set(exports)), f"two trainings share a path: {exports}")
+
+
 class TestDeclaredSettings(unittest.TestCase):
     """The `settings:` and `outputs:` blocks, which are the whole UI.
 

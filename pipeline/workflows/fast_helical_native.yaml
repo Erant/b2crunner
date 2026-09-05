@@ -430,6 +430,26 @@ outputs:
       out wrong — including a supporting view that landed somewhere other than
       where its content belongs.
 
+  - name: export_debug
+    label: Debug bundle
+    dir: debug
+    default: true
+    help: >-
+      The `debug/` directory: refine_cameras' given-vs-refined camera models
+      and their stats, the face splat's stats and depth visualisations, the
+      face .ply files, and — the big one — `intermediate_splat.ply`, the
+      splat the helical re-render is built from. This is what a misplaced
+      face or a drifted camera is diagnosed from after the pod is gone, and
+      it is why the 2026-09-04 face-cap offset had to be triangulated back
+      out of exported renders instead of read off the splat that caused it.
+      Unlike the switches above it does not skip any work — every step still
+      writes its dumps to the volume, because they are a side effect of
+      steps the run needs anyway. It decides only whether they are packaged,
+      which matters because the intermediate splat is hundreds of MB against
+      a few hundred KB for everything else in there. Turn it off for a run
+      whose output you are only going to look at, on for one you may have to
+      explain.
+
   - name: export_colmap_preupscale
     label: Pre-upscale COLMAP dataset (debug)
     dir: colmap_preupscale
@@ -1758,13 +1778,28 @@ steps:
       # warns and falls back to plain alpha — i.e. silently back to the
       # behaviour mask_splat used to patch up.
       export_evidence: true
-      # Without this brush exports into tempfile.gettempdir() (see
+      # Without one of these brush exports into tempfile.gettempdir() (see
       # steps/brush.py) — the trained .ply then only survives because
-      # Dataset.to_disk copies it at the very end. `output_dir` rather than
-      # `export_dir` because this is an intermediate: it lands under
-      # <output_root>/brush/training_<ms>/, which cannot collide with the
-      # second training below.
-      output_dir: ${globals.output_root}
+      # Dataset.to_disk copies it at the very end.
+      #
+      # `export_dir` under debug/ rather than `output_dir`, since
+      # 2026-09-05: this splat is the one that DRIVES the helical
+      # re-render, so when the re-render comes out wrong it is the first
+      # thing to look at, and it used to land in
+      # <output_root>/brush/training_<ms>/ — on the volume, not in the
+      # result .zip, and therefore gone with the pod. It rides into the
+      # archive's debug/ now, beside the camera dumps and the face splats
+      # that are there for the same reason. The collision `output_dir`
+      # avoided is still avoided: train_final_splat exports to ply/scene.ply,
+      # a different directory and a different name. brush writes nothing
+      # else into an export_dir — the COLMAP export it trains from is a
+      # TemporaryDirectory — so this puts exactly one file there.
+      #
+      # It is the biggest thing in debug/ by a long way: a 30,000-iteration
+      # training is hundreds of MB, where the rest of that directory is
+      # camera dumps and a ~10k-Gaussian face cap.
+      export_dir: ${globals.output_root}/debug
+      export_name: intermediate_splat.ply
     outputs:
       splat_path: dataset.splat_path
 

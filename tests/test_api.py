@@ -317,6 +317,7 @@ class TestWhatItRefuses(ApiTestCase):
         self.assertRefused(
             self.submit_sheet(settings=json.dumps({
                 "export_colmap": False, "export_ply": False,
+                "export_colmap_intermediate": False,
             })),
             "Pick at least one output",
         )
@@ -411,7 +412,10 @@ class TestWhatItRefuses(ApiTestCase):
         self.assertRefused(
             self.post(
                 files={"file": ("batch.zip", buffer.getvalue(), "application/zip")},
-                data={"settings": json.dumps({"export_colmap": False, "export_ply": False})},
+                data={"settings": json.dumps({
+                    "export_colmap": False, "export_ply": False,
+                    "export_colmap_intermediate": False,
+                })},
             ),
             "Pick at least one output",
         )
@@ -538,6 +542,21 @@ class TestWhatAWorkflowDeclares(ApiTestCase):
         # rather than the tuples the dataclass holds.
         self.assertEqual(by_name["resolution"]["choices"][0], [720, 1280])
         self.assertIs(by_name["face_splat"]["advanced"], True)
+
+    def test_the_debug_bundle_is_one_of_the_declared_outputs(self):
+        # It has to draw in the Outputs box and be settable by name, which
+        # is what declaring it as an output buys — and what a client
+        # reading this schema needs in order to turn it off.
+        body = self.client.get(
+            f"{API_PREFIX}/workflows/fast_helical_native", headers=AUTH
+        ).json()
+        debug = next(o for o in body["outputs"] if o["name"] == "export_debug")
+        self.assertEqual(debug["dir"], "debug")
+        self.assertIs(debug["default"], True)
+
+    def test_switching_the_debug_bundle_off_travels_to_the_job(self):
+        self.submit_sheet(settings=json.dumps({"export_debug": False}))
+        self.assertIs(self.submitted[0].global_overrides["export_debug"], False)
 
     def test_the_outputs_are_published_with_their_directories_and_requires(self):
         body = self.client.get(

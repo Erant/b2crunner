@@ -241,7 +241,8 @@ class TestAgainstAServer(unittest.TestCase):
         with self.assertRaises(ApiError) as caught:
             self.client.submit(
                 reference_image=str(self._sheet()),
-                settings={"export_colmap": False, "export_ply": False},
+                settings={"export_colmap": False, "export_ply": False,
+                          "export_colmap_intermediate": False},
             )
         self.assertEqual(caught.exception.status, 400)
         self.assertIn("Pick at least one output", caught.exception.detail)

@@ -163,6 +163,13 @@ def _run(job: RunJob, status_path: Path) -> int:
         if "output_root" in spec.globals and "output_root" not in job.global_overrides:
             spec.globals["output_root"] = job.output_dir
 
+        # Published so packaging knows what this run was asked for — see
+        # RunState.outputs. Taken after apply_output_requirements, so a
+        # `requires:` that forced one off is reflected.
+        writer.state.outputs = {
+            output.name: bool(spec.globals.get(output.name))
+            for output in spec.outputs
+        }
         writer.state.total = len(spec.steps)
         writer.state.steps = [
             StepRecord(i, s.id, s.step, status="pending")

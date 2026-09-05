@@ -81,12 +81,23 @@ def resolve_outputs(spec: WorkflowSpec) -> Dict[str, bool]:
     Raises `SubmitError` if nothing would be exported: a run that produces no
     deliverable leaves nothing to download, and it is an hour of GPU either
     way.
+
+    The debug bundle does not count towards that. It is declared as an
+    output so it draws as a checkbox and travels as a switch, but it is not
+    something a run *produces* — `_write_run_members` refuses to build an
+    archive out of it alone, exactly as it refuses to build one out of
+    `log.txt`. Counting it would let "colmap off, ply off, debug on" past
+    this check and then hand back nothing at the end of an hour.
     """
     resolved = spec.apply_output_requirements()
-    if spec.outputs and not any(resolved.values()):
+    deliverables = {
+        name: wanted for name, wanted in resolved.items()
+        if name not in _debug_output_names(spec.name)
+    }
+    if deliverables and not any(deliverables.values()):
         raise SubmitError(
             "Pick at least one output — a run that exports nothing leaves "
-            "nothing to download."
+            "nothing to download. (The debug bundle is not one on its own.)"
         )
     return resolved
 
@@ -529,6 +540,17 @@ def result_subdirs(workflow: str = "") -> List[str]:
     """
     from .cli import available_workflows, resolve_workflow
 
+    owned = set(DEBUG_SUBDIRS.values()) | set(DEBUG_SUBDIRS)
+    return [
+        directory for directory in _output_dirs(workflow).values()
+        if directory not in owned
+    ]
+
+
+def _output_dirs(workflow: str = "") -> Dict[str, str]:
+    """{output name -> its `dir:`}, for one workflow or the union of all."""
+    from .cli import available_workflows, resolve_workflow
+
     paths = available_workflows()
     if workflow:
         try:
@@ -538,16 +560,27 @@ def result_subdirs(workflow: str = "") -> List[str]:
                 "run recorded workflow %r, which no longer resolves; packaging "
                 "against every shipped workflow's deliverables", workflow,
             )
-    names: List[str] = []
+    dirs: Dict[str, str] = {}
     for path in paths:
         try:
             spec = WorkflowSpec.from_yaml(path)
         except (OSError, ValueError, KeyError):
             continue
-        for directory in spec.output_dirs().values():
-            if directory not in names:
-                names.append(directory)
-    return names
+        for name, directory in spec.output_dirs().items():
+            dirs.setdefault(name, directory)
+    return dirs
+
+
+def _debug_output_names(workflow: str = "") -> List[str]:
+    """Declared outputs whose `dir:` is one `debug_dirs` already carries.
+
+    `export_debug` declares `dir: debug` so it draws as a checkbox and
+    reads as an output like any other — but `debug/` is packaged by the
+    debug branch, which remaps `face/` under it and deflates the text.
+    Without this the archive would carry every debug member twice.
+    """
+    owned = set(DEBUG_SUBDIRS.values()) | set(DEBUG_SUBDIRS)
+    return [name for name, directory in _output_dirs(workflow).items() if directory in owned]
 
 
 def result_dirs(run_dir: Optional[Path], workflow: str = "") -> Dict[str, Path]:
@@ -573,12 +606,19 @@ def result_dirs(run_dir: Optional[Path], workflow: str = "") -> Dict[str, Path]:
 # Run-directory subdirectories that ride into the archive under `debug/`,
 # keyed by the name they take there. `debug/` is where the workflows point
 # every step's `debug_dir` (refine_cameras' given-vs-refined camera dumps,
-# the face splat's stats and depth visualisations); `face/` is where the
-# workflow writes the face splat .ply files, the one artefact a
-# face-placement question cannot be answered without. None of
-# these is a deliverable, so they are carried beside `result_dirs`'
-# rather than declared in a workflow's `outputs:` block, and none of them
-# is large: a face splat is ~10k Gaussians.
+# the face splat's stats and depth visualisations) and, since 2026-09-05,
+# where the FIRST brush training exports `intermediate_splat.ply` — the
+# splat that drives the helical re-render, and so the first thing to look
+# at when the re-render comes out wrong. `face/` is where the workflow
+# writes the face splat .ply files, the one artefact a face-placement
+# question cannot be answered without. None of these is a deliverable, so
+# they are carried beside `result_dirs`' rather than declared in a
+# workflow's `outputs:` block.
+#
+# Most of it is small — camera dumps, a ~10k-Gaussian face cap — but the
+# intermediate splat is not: a 30,000-iteration training is hundreds of MB,
+# and it is the reason a result .zip is now noticeably bigger than the
+# deliverables alone.
 DEBUG_SUBDIRS: Dict[str, str] = {"debug": "debug", "face": "debug/face"}
 _DEBUG_TEXT_SUFFIXES = {".txt", ".json", ".log", ".csv"}
 
@@ -622,6 +662,7 @@ def _run_members(
     workflow: str = "",
     log_path: Optional[Path] = None,
     prefix: str = "",
+    debug: bool = True,
 ) -> List["tuple[str, Path, int]"]:
     """Every (arcname, source, compression) one run contributes, in order.
 
@@ -647,7 +688,7 @@ def _run_members(
                     str(base / name / path.relative_to(directory)),
                     path, zipfile.ZIP_STORED,
                 ))
-    for name, directory in sorted(debug_dirs(run_dir).items()):
+    for name, directory in sorted(debug_dirs(run_dir).items() if debug else {}.items()):
         for path in sorted(directory.rglob("*")):
             if path.is_file():
                 # Text (COLMAP models, stats) deflates ~10x; the .ply
@@ -671,6 +712,7 @@ def _write_run_members(
     workflow: str = "",
     log_path: Optional[Path] = None,
     prefix: str = "",
+    debug: bool = True,
 ) -> bool:
     """Write one run's deliverables into an already-open archive.
 
@@ -678,7 +720,7 @@ def _write_run_members(
     can never drift into carrying different things. Returns False, having
     written nothing at all, for a run with no deliverables.
     """
-    members = _run_members(run_dir, workflow, log_path, prefix)
+    members = _run_members(run_dir, workflow, log_path, prefix, debug)
     for arcname, path, compression in members:
         bundle.write(path, arcname=arcname, compress_type=compression)
     return bool(members)
@@ -699,6 +741,7 @@ def archive_is_current(
     run_dir: Path,
     workflow: str = "",
     log_path: Optional[Path] = None,
+    debug: bool = True,
 ) -> bool:
     """True when `archive` already holds this run exactly as it stands.
 
@@ -717,7 +760,9 @@ def archive_is_current(
     """
     if not archive.is_file():
         return False
-    expected = [name for name, _path, _c in _run_members(run_dir, workflow, log_path)]
+    expected = [
+        name for name, _path, _c in _run_members(run_dir, workflow, log_path, debug=debug)
+    ]
     try:
         with zipfile.ZipFile(archive) as bundle:
             if bundle.comment != ARCHIVE_FORMAT:
@@ -735,7 +780,8 @@ def archive_is_current(
         return False  # truncated, or not an archive this module wrote
     stamp = archive.stat().st_mtime
     sources = list(result_dirs(run_dir, workflow).values())
-    sources += list(debug_dirs(run_dir).values())
+    if debug:
+        sources += list(debug_dirs(run_dir).values())
     log = run_log_path(run_dir, log_path)
     if log:
         sources.append(log)
@@ -773,16 +819,18 @@ def build_result_zip(
     workflow: str = "",
     log_path: Optional[Path] = None,
     reuse: bool = False,
+    debug: bool = True,
 ) -> Optional[str]:
     """One archive holding only the deliverables: colmap/ and/or ply/.
 
     Not `shutil.make_archive` over the whole run directory, which is what
     this used to be. A run directory also holds the final Dataset's 81
-    full-resolution frames, its pointcloud, and — when the workflow trained
-    an intermediate splat — a `brush/training_<ms>/` that is scaffolding,
-    not output. Zipping all of it produced a multi-gigabyte download whose
-    top level was a b2c dataset rather than anything COLMAP-shaped, and
-    left the person on the other end to work out which parts mattered.
+    full-resolution frames and its pointcloud, and — for any brush training
+    given an `output_dir` rather than an `export_dir` — a
+    `brush/training_<ms>/` of scaffolding. Zipping all of it produced a
+    multi-gigabyte download whose top level was a b2c dataset rather than
+    anything COLMAP-shaped, and left the person on the other end to work
+    out which parts mattered.
 
     The run's log rides along as `log.txt` at the top level. It is the one
     thing outside the deliverables worth carrying: an archive that comes
@@ -814,7 +862,7 @@ def build_result_zip(
 
     archive = output_dir() / f"{Path(run_dir).name}-result.zip"
     with _archive_lock(archive):
-        if reuse and archive_is_current(archive, Path(run_dir), workflow, log_path):
+        if reuse and archive_is_current(archive, Path(run_dir), workflow, log_path, debug):
             return str(archive)
         # Beside the destination, not in TMPDIR: os.replace is only atomic
         # within one filesystem, and on a pod those are different mounts.
@@ -826,7 +874,7 @@ def build_result_zip(
             # wall clock.
             with zipfile.ZipFile(staging, "w", compression=zipfile.ZIP_STORED) as bundle:
                 bundle.comment = ARCHIVE_FORMAT
-                _write_run_members(bundle, Path(run_dir), workflow, log_path)
+                _write_run_members(bundle, Path(run_dir), workflow, log_path, debug=debug)
             os.replace(staging, archive)
         finally:
             staging.unlink(missing_ok=True)
@@ -861,7 +909,7 @@ def build_bundle_zip(states: List[RunState]) -> Optional[str]:
                         continue
                     if _write_run_members(
                         bundle, Path(state.output_dir), state.workflow, state.log_path,
-                        prefix=state.name,
+                        prefix=state.name, debug=wants_debug(state),
                     ):
                         written += 1
             if not written:
@@ -933,9 +981,28 @@ def completed_runs() -> List[RunState]:
     ]
 
 
+def wants_debug(state: RunState) -> bool:
+    """Whether this run asked for its `debug/` directory in the archive.
+
+    From what the run published, not from what is on disk: every step
+    writes its debug dumps regardless, because they are a side effect of
+    steps the run needs anyway — so the directory being there says nothing
+    about whether it was wanted.
+
+    A run that published no `outputs` at all predates the switch. It gets
+    the debug bundle, which is what those runs were packaged with, rather
+    than silently losing content on an upgrade.
+    """
+    for name in _debug_output_names(state.workflow):
+        if name in state.outputs:
+            return bool(state.outputs[name])
+    return True
+
+
 def run_contents(state: RunState) -> "tuple[str, int]":
     """One run's deliverables as a summary line and a total size in bytes."""
     parts, total = [], 0
+    debug = wants_debug(state)
     for name, path in sorted(result_dirs(state.output_dir, state.workflow).items()):
         files = [f for f in path.rglob("*") if f.is_file()]
         for f in files:
@@ -944,7 +1011,7 @@ def run_contents(state: RunState) -> "tuple[str, int]":
             except OSError:  # pruned between the walk and the stat
                 continue
         parts.append(f"{name}/ ({len(files)})")
-    if debug_dirs(state.output_dir):
+    if debug and debug_dirs(state.output_dir):
         parts.append("debug/")
     if run_log_path(state.output_dir, state.log_path):
         parts.append("log.txt")

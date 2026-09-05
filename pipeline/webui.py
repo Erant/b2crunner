@@ -101,7 +101,7 @@ from .runs import (
     BUNDLE_NAME, IMAGE_SUFFIXES, WORKFLOW_NATIVE, SubmitError,
     build_bundle_zip, build_result_zip, completed_runs, resolve_upload,
     result_dirs, result_subdirs, run_contents, run_log_path, run_recency,
-    submit_runs, workflow_param_panel,
+    submit_runs, wants_debug, workflow_param_panel,
 )
 from .step import Param
 from .workflow import WorkflowSpec, load_envs, truthy
@@ -845,6 +845,7 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
             # question.
             archive = build_result_zip(
                 Path(directory), state.workflow, state.log_path, reuse=True,
+                debug=wants_debug(state),
             )
             if run_log_path(Path(directory), state.log_path):
                 lines.append("- **`log.txt`** — the log this run wrote")
@@ -934,7 +935,7 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
                 contents, size = run_contents(state)
                 archive = build_result_zip(
                     Path(state.output_dir), state.workflow, state.log_path,
-                    reuse=True,
+                    reuse=True, debug=wants_debug(state),
                 )
                 if archive:
                     archives.append(archive)

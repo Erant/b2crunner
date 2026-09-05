@@ -22,6 +22,7 @@ import zipfile
 from pathlib import Path
 
 from pipeline import runs
+from pipeline.run_state import RunState
 
 try:
     from pipeline import webui
@@ -451,6 +452,7 @@ class TestOutputSelection(unittest.TestCase):
             [("export_colmap", "colmap"),
              ("export_ply", "ply"),
              ("export_colmap_intermediate", "colmap_intermediate"),
+             ("export_debug", "debug"),
              ("export_colmap_preupscale", "colmap_preupscale")],
         )
         self.assertTrue(all(o.label and o.help for o in outputs))
@@ -730,6 +732,63 @@ class TestTheDebugDirectoryRidesAlong(_BundleCase):
         self.assertIn("ply/scene.ply", names)
         self.assertNotIn("face/face.ply", names)
         self.assertFalse([n for n in names if n.startswith("brush/")])
+
+    def test_the_intermediate_splat_rides_along(self):
+        """The splat that drives the helical re-render is in the archive.
+
+        It used to export to `<output_root>/brush/training_<ms>/`, which
+        is on the volume and not in the .zip — so when the re-render came
+        out wrong, the first thing to look at had gone with the pod.
+        """
+        run = _run_dir(self.root, colmap=True, ply=False, name="with-intermediate")
+        _touch(run / "debug" / "intermediate_splat.ply", 4096)
+        self.assertIn(
+            "debug/intermediate_splat.ply",
+            self._names(runs.build_result_zip(run)),
+        )
+
+    def test_switching_the_debug_bundle_off_leaves_it_out(self):
+        """The switch decides packaging, not writing.
+
+        Every step writes its dumps regardless — they are a side effect of
+        steps the run needs anyway — so the directory being on disk says
+        nothing about whether it was wanted. What the run published does.
+        """
+        run = _run_dir(self.root, colmap=True, ply=False, name="no-debug")
+        self._debug_files(run)
+        _touch(run / "debug" / "intermediate_splat.ply", 4096)
+
+        names = self._names(runs.build_result_zip(run, debug=False))
+        self.assertIn("colmap/cameras.txt", names)
+        self.assertEqual([n for n in names if n.startswith("debug/")], [])
+        # The files are still on the volume; only the archive skipped them.
+        self.assertTrue((run / "debug" / "intermediate_splat.ply").is_file())
+
+    def test_a_run_that_published_no_outputs_still_gets_its_debug(self):
+        # Runs from before the switch existed. Losing content silently on
+        # an upgrade would be the worse default.
+        state = RunState(name="old", workflow="fast_helical_native", status="done")
+        self.assertTrue(runs.wants_debug(state))
+
+    def test_the_published_switch_is_what_decides(self):
+        for wanted in (True, False):
+            with self.subTest(wanted=wanted):
+                state = RunState(
+                    name="r", workflow="fast_helical_native", status="done",
+                    outputs={"export_colmap": True, "export_debug": wanted},
+                )
+                self.assertEqual(runs.wants_debug(state), wanted)
+
+    def test_debug_is_not_packaged_twice(self):
+        """`export_debug` declares `dir: debug` so it draws as a checkbox,
+        but the debug branch is what carries that directory — without
+        keeping it out of `result_subdirs` every member would appear
+        twice."""
+        self.assertNotIn("debug", runs.result_subdirs("fast_helical_native"))
+        run = _run_dir(self.root, colmap=True, ply=False, name="once")
+        self._debug_files(run)
+        names = self._names(runs.build_result_zip(run))
+        self.assertEqual(len(names), len(set(names)))
 
     def test_debug_alone_is_not_a_deliverable(self):
         run = _run_dir(self.root, colmap=False, ply=False)

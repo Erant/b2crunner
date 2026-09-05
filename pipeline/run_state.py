@@ -78,6 +78,14 @@ class RunState:
     # not by the worker itself (the worker only ever sees its own pinned
     # view, where it is always device 0).
     gpu_index: Optional[int] = None
+    # The output switches this run resolved, by name. Published because
+    # packaging cannot otherwise know them: most outputs gate a step, so
+    # their directory is simply absent when they are off — but `debug/` is
+    # written as a side effect of steps a run needs anyway, so whether to
+    # carry it into the archive is a decision only the run itself made.
+    # Empty for a run that predates this, which `runs.py` reads as "carry
+    # everything", the behaviour those runs were packaged with.
+    outputs: Dict[str, bool] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -88,6 +96,7 @@ class RunState:
             "output_dir": str(self.output_dir) if self.output_dir else None,
             "log_path": str(self.log_path) if self.log_path else None,
             "error": self.error, "gpu_index": self.gpu_index,
+            "outputs": dict(self.outputs),
         }
 
     @classmethod
@@ -101,6 +110,7 @@ class RunState:
             output_dir=Path(data["output_dir"]) if data.get("output_dir") else None,
             log_path=Path(data["log_path"]) if data.get("log_path") else None,
             error=data.get("error", ""), gpu_index=data.get("gpu_index"),
+            outputs=dict(data.get("outputs") or {}),
         )
 
 

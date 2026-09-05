@@ -156,8 +156,26 @@ class OutputSwitchTests(unittest.TestCase):
             runs.resolve_outputs(self.spec()),
             {"export_colmap": True, "export_ply": True,
              "export_colmap_intermediate": False,
+             "export_debug": True,
              "export_colmap_preupscale": False},
         )
+
+    def test_the_debug_bundle_is_not_a_deliverable_on_its_own(self):
+        """It draws as a checkbox and travels as a switch, but a run that
+        exports only `debug/` produces nothing: `_write_run_members`
+        refuses to build an archive out of it, the same way it refuses to
+        build one out of `log.txt`. Counting it here would let that past
+        and hand back nothing after an hour of GPU."""
+        with self.assertRaises(SubmitError):
+            runs.resolve_outputs(self.spec(
+                export_colmap=False, export_ply=False,
+                export_colmap_intermediate=False, export_debug=True,
+            ))
+
+    def test_switching_the_debug_bundle_off_leaves_a_run_valid(self):
+        resolved = runs.resolve_outputs(self.spec(export_debug=False))
+        self.assertIs(resolved["export_debug"], False)
+        self.assertIs(resolved["export_colmap"], True)
 
     def test_the_intermediate_colmap_is_independent_of_the_upscale(self):
         """Unlike the pre-upscale export it declares no `requires:`: the
