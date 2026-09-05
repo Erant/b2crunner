@@ -67,10 +67,18 @@ hour of GPU you do not want to spend discovering you only wanted the COLMAP
 dataset. The Results tab then offers exactly those: one .zip holding the
 `dir:` of every output that actually got written, plus the `log.txt` the run
 wrote, and nothing else.
+
+**All results** is that same archive for every run at once, and it reads the
+*volume* rather than this process: `GpuScheduler` keeps its runs in memory,
+so the Active-run picker empties on every UI restart while the runs sit in
+the output directory untouched. `discover_runs` picks them back up out of
+the status files the workers published — plus any output directory nobody
+published a status for at all, which is what a `pipeline.cli` run leaves.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import shutil
@@ -601,10 +609,89 @@ def run_log_path(run_dir: Optional[Path], log_path: Optional[Path] = None) -> Op
     return None
 
 
+def _write_run_members(
+    bundle: zipfile.ZipFile,
+    run_dir: Path,
+    workflow: str = "",
+    log_path: Optional[Path] = None,
+    prefix: str = "",
+) -> bool:
+    """Write one run's deliverables into an already-open archive.
+
+    Shared by the single-run download and the all-runs bundle, so the two
+    can never drift into carrying different things. Returns False, having
+    written nothing at all, for a run with no deliverables — which is what
+    makes "a log alone does not make an archive" true of both callers.
+    """
+    directories = result_dirs(run_dir, workflow)
+    if not directories:
+        return False
+    base = Path(prefix)
+    for name, directory in sorted(directories.items()):
+        for path in sorted(directory.rglob("*")):
+            if path.is_file():
+                bundle.write(
+                    path, arcname=str(base / name / path.relative_to(directory)))
+    for name, directory in sorted(debug_dirs(run_dir).items()):
+        for path in sorted(directory.rglob("*")):
+            if path.is_file():
+                # Text (COLMAP models, stats) deflates ~10x; the .ply
+                # and .png members are the same story as the deliverables.
+                text = path.suffix in _DEBUG_TEXT_SUFFIXES
+                bundle.write(
+                    path, arcname=str(base / name / path.relative_to(directory)),
+                    compress_type=zipfile.ZIP_DEFLATED if text else zipfile.ZIP_STORED)
+    log = run_log_path(run_dir, log_path)
+    if log:
+        # DEFLATE for this member alone: a log is text, it shrinks by
+        # ~10x, and it is small enough for the CPU cost to be nothing.
+        bundle.write(log, arcname=str(base / "log.txt"),
+                     compress_type=zipfile.ZIP_DEFLATED)
+    return True
+
+
+def archive_is_current(
+    archive: Path,
+    run_dir: Path,
+    workflow: str = "",
+    log_path: Optional[Path] = None,
+) -> bool:
+    """True when `archive` already holds this run exactly as it stands.
+
+    What makes rescanning a volume full of finished runs cheap: a run that
+    has reached a terminal status is not going to write to its directory
+    again, and the archive beside it is usually the one the Results tab
+    built the first time it was looked at. Without this, the All results
+    tab would re-copy every gigabyte on the volume on every press.
+
+    Compares modification times rather than contents — the sources are
+    hundreds of megabytes of PNG, and the only writer is a run that has
+    already finished.
+    """
+    if not archive.is_file():
+        return False
+    stamp = archive.stat().st_mtime
+    sources = list(result_dirs(run_dir, workflow).values())
+    sources += list(debug_dirs(run_dir).values())
+    log = run_log_path(run_dir, log_path)
+    if log:
+        sources.append(log)
+    for source in sources:
+        paths = [source] if source.is_file() else source.rglob("*")
+        for path in paths:
+            try:
+                if path.is_file() and path.stat().st_mtime > stamp:
+                    return False
+            except OSError:  # pruned between the walk and the stat
+                continue
+    return True
+
+
 def build_result_zip(
     run_dir: Optional[Path],
     workflow: str = "",
     log_path: Optional[Path] = None,
+    reuse: bool = False,
 ) -> Optional[str]:
     """One archive holding only the deliverables: colmap/ and/or ply/.
 
@@ -631,34 +718,122 @@ def build_result_zip(
     makes an archive on its own: a run that produced no deliverable has
     nothing to download.
     """
-    directories = result_dirs(run_dir, workflow)
-    if not directories:
+    if not result_dirs(run_dir, workflow):
         return None
 
     archive = output_dir() / f"{Path(run_dir).name}-result.zip"
+    if reuse and archive_is_current(archive, Path(run_dir), workflow, log_path):
+        return str(archive)
     # ZIP_STORED, not DEFLATE: PNGs and .ply files are already compressed or
     # nearly incompressible, and deflating ~2 GB of them on a pod's CPU
     # buys a couple of percent for minutes of wall clock.
     with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_STORED) as bundle:
-        for name, directory in sorted(directories.items()):
-            for path in sorted(directory.rglob("*")):
-                if path.is_file():
-                    bundle.write(path, arcname=str(Path(name) / path.relative_to(directory)))
-        for name, directory in sorted(debug_dirs(run_dir).items()):
-            for path in sorted(directory.rglob("*")):
-                if path.is_file():
-                    # Text (COLMAP models, stats) deflates ~10x; the .ply
-                    # and .png members are the same story as the deliverables.
-                    text = path.suffix in _DEBUG_TEXT_SUFFIXES
-                    bundle.write(
-                        path, arcname=str(Path(name) / path.relative_to(directory)),
-                        compress_type=zipfile.ZIP_DEFLATED if text else zipfile.ZIP_STORED)
-        log = run_log_path(run_dir, log_path)
-        if log:
-            # DEFLATE for this member alone: a log is text, it shrinks by
-            # ~10x, and it is small enough for the CPU cost to be nothing.
-            bundle.write(log, arcname="log.txt", compress_type=zipfile.ZIP_DEFLATED)
+        _write_run_members(bundle, Path(run_dir), workflow, log_path)
     return str(archive)
+
+
+# The combined download's name. Fixed, not timestamped: it is a copy of
+# every deliverable on the volume, and a new one per press would quietly
+# fill the disk the runs themselves need.
+BUNDLE_NAME = "all-results.zip"
+
+
+def build_bundle_zip(states: List[RunState]) -> Optional[str]:
+    """Every run's deliverables in one archive, each under its own run name.
+
+    Built from the run directories rather than by zipping up the per-run
+    archives: a zip of zips would mean a second full copy of deliverables
+    the volume is already holding twice.
+    """
+    archive = output_dir() / BUNDLE_NAME
+    written = 0
+    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_STORED) as bundle:
+        for state in states:
+            if not state.output_dir:
+                continue
+            if _write_run_members(
+                bundle, Path(state.output_dir), state.workflow, state.log_path,
+                prefix=state.name,
+            ):
+                written += 1
+    if not written:
+        archive.unlink(missing_ok=True)
+        return None
+    return str(archive)
+
+
+def _run_recency(state: RunState) -> float:
+    """When a run last mattered, for ordering the list newest-first."""
+    if state.finished or state.started:
+        return state.finished or state.started
+    try:
+        return Path(state.output_dir).stat().st_mtime if state.output_dir else 0.0
+    except OSError:
+        return 0.0
+
+
+def discover_runs() -> List[RunState]:
+    """Every run on this volume, newest first — not just this session's.
+
+    `GpuScheduler` holds its runs in memory, so the **Active run** picker
+    empties every time the UI process restarts while the runs themselves
+    are still sitting in the output directory. This reads the volume
+    instead, from two sources in descending order of what they know:
+
+      * `run_jobs/<name>.status.json` — what the run itself published as
+        it went: status, workflow, timings, step list, log path. The
+        worker writes it by atomic replace, and it outlives both the
+        worker and the UI process that spawned it.
+      * a directory in the output root nobody published a status for — a
+        `pipeline.cli` run, or one whose status file has been pruned.
+        Nothing is known about it beyond what is on disk, so it is
+        reported as `unknown` and packaged against the union of every
+        shipped workflow's deliverables (see `result_subdirs`).
+    """
+    states: Dict[str, RunState] = {}
+    for path in sorted(run_jobs_dir().glob("*.status.json")):
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue  # caught a worker mid-write, or a truncated file
+        state = RunState.from_dict(data)
+        if state.name:
+            states[state.name] = state
+    for directory in sorted(p for p in output_dir().iterdir() if p.is_dir()):
+        states.setdefault(directory.name, RunState(
+            name=directory.name, status="unknown", output_dir=directory,
+        ))
+    return sorted(states.values(), key=_run_recency, reverse=True)
+
+
+def completed_runs() -> List[RunState]:
+    """The runs on the volume that actually produced deliverables.
+
+    "Completed" is judged by what is on disk, not by the status a run
+    published: a run cancelled after its COLMAP export still has a COLMAP
+    export, and a run whose status file was pruned still has its output.
+    A run still in flight is left out — its exports are the last steps,
+    and packaging one mid-write hands back half a dataset.
+    """
+    return [
+        state for state in discover_runs()
+        if state.status not in ("queued", "running")
+        and result_dirs(state.output_dir, state.workflow)
+    ]
+
+
+def run_contents(state: RunState) -> "tuple[str, int]":
+    """One run's deliverables as a summary line and a total size in bytes."""
+    parts, total = [], 0
+    for name, path in sorted(result_dirs(state.output_dir, state.workflow).items()):
+        files = [f for f in path.rglob("*") if f.is_file()]
+        total += sum(f.stat().st_size for f in files)
+        parts.append(f"{name}/ ({len(files)})")
+    if debug_dirs(state.output_dir):
+        parts.append("debug/")
+    if run_log_path(state.output_dir, state.log_path):
+        parts.append("log.txt")
+    return ", ".join(parts), total
 
 
 def gallery_images(directory: Optional[Path]) -> List[str]:
@@ -1037,6 +1212,42 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
                 object_fit="contain",
             )
 
+        with gr.Tab("All results"):
+            gr.Markdown(
+                "**Every run on this volume that produced deliverables**, "
+                "packaged in one press — including runs from before this UI "
+                "process started, which the **Active run** picker above has "
+                "never heard of (it only holds what this process submitted). "
+                "One .zip per run, the same contents the Results tab hands "
+                "back for a single run.\n\n"
+                "_An archive that is already up to date is reused rather than "
+                "rebuilt, so a rescan after one new run costs one run's worth "
+                "of copying, not the whole volume's._"
+            )
+            with gr.Row():
+                all_refresh = gr.Button(
+                    "Scan and package everything", variant="primary", scale=2)
+                bundle_in = gr.Checkbox(
+                    value=False, label="Also build one combined .zip", scale=1,
+                    info="Every run under its own directory in a single "
+                         "archive — one download instead of N. It is a second "
+                         "full copy of the deliverables on the volume, so it "
+                         "is off unless you ask.",
+                )
+            all_info = gr.Markdown()
+            all_table = gr.Dataframe(
+                headers=["", "run", "finished", "contents", "size"],
+                datatype=["str", "str", "str", "str", "str"],
+                interactive=False, label="Completed runs",
+            )
+            all_files = gr.File(
+                label="Result archives — one per run", file_count="multiple")
+            bundle_out = gr.File(label="Everything in one .zip", visible=False)
+            all_gallery = gr.Gallery(
+                label="One frame per run", columns=6, height=300,
+                object_fit="contain",
+            )
+
         with gr.Tab("Models"):
             gr.Markdown(
                 "Checkpoints are pulled at pod start and cached on the volume, so a "
@@ -1264,6 +1475,73 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
         preview_step_in.change(
             on_preview_filter, inputs=[run_picker, preview_step_in],
             outputs=preview_gallery_out,
+        )
+
+        def on_all_results(bundle: bool):
+            """Package every finished run on the volume, streaming as it goes.
+
+            A generator for the same reason the other two tabs are: the
+            first press on a volume holding a dozen runs copies tens of
+            gigabytes, and a button that returns nothing for four minutes
+            is indistinguishable from a hung one. Each run appears in the
+            table as its archive lands.
+            """
+            icons = {"done": "✅", "failed": "❌", "cancelled": "⛔",
+                     "unknown": "•"}
+            runs = completed_runs()
+            if not runs:
+                yield ("No finished run on this volume has produced "
+                       "deliverables yet.", [], None,
+                       gr.update(visible=False, value=None), [])
+                return
+
+            rows: List[List[Any]] = []
+            archives: List[str] = []
+            thumbs: List[Any] = []
+            for index, state in enumerate(runs, 1):
+                yield (
+                    f"Packaging **{index} of {len(runs)}** — `{state.name}`…",
+                    rows, archives, gr.update(), thumbs,
+                )
+                contents, size = run_contents(state)
+                archive = build_result_zip(
+                    Path(state.output_dir), state.workflow, state.log_path,
+                    reuse=True,
+                )
+                if archive:
+                    archives.append(archive)
+                when = _run_recency(state)
+                rows.append([
+                    icons.get(state.status, "?"), state.name,
+                    time.strftime("%Y-%m-%d %H:%M", time.localtime(when)) if when else "",
+                    contents, f"{size / 1e9:.2f} GB",
+                ])
+                # One frame is enough to tell which subject a run was; the
+                # whole point of this tab is not opening each one to find out.
+                frames = gallery_images(state.output_dir)
+                if frames:
+                    thumbs.append((frames[0], state.name))
+
+            packaged = sum(Path(a).stat().st_size for a in archives)
+            info = [
+                f"**{len(archives)} of {len(runs)}** runs packaged · "
+                f"{packaged / 1e9:.2f} GB of archives in `{output_dir()}`."
+            ]
+            combined = gr.update(visible=False, value=None)
+            if bundle:
+                yield ("Building the combined .zip…", rows, archives,
+                       gr.update(), thumbs)
+                path = build_bundle_zip(runs)
+                if path:
+                    combined = gr.update(visible=True, value=path)
+                    info.append(
+                        f"`{BUNDLE_NAME}` holds all {len(archives)} under "
+                        "`<run name>/`.")
+            yield "\n\n".join(info), rows, archives, combined, thumbs
+
+        all_refresh.click(
+            on_all_results, inputs=[bundle_in],
+            outputs=[all_info, all_table, all_files, bundle_out, all_gallery],
         )
 
         def on_models():

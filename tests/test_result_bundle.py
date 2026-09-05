@@ -187,6 +187,178 @@ class TestTheLogRidesAlong(_BundleCase):
         self.assertIsNone(webui.run_log_path(None))
 
 
+class TestEveryRunOnTheVolume(_BundleCase):
+    """The All results tab: what it finds, and what it packages.
+
+    Its whole reason for existing is that `GpuScheduler` holds its run
+    list in memory — restart the UI and the Active-run picker is empty
+    while every run is still sitting in the output directory. So the
+    discovery here reads the volume, and these pin the two sources it
+    reads (a worker's status.json, and a bare output directory) and the
+    "already up to date" check that keeps a rescan from re-copying it all.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.runs = self.root / "runs"
+        self.runs.mkdir()
+        self.jobs = self.root / "run_jobs"
+        self.jobs.mkdir()
+        # discover_runs walks the output root for unpublished runs, and
+        # writes its archives into the same place; keep the two apart so a
+        # `-result.zip` is never mistaken for a run.
+        self._patched_jobs = unittest.mock.patch.object(
+            webui, "run_jobs_dir", lambda: self.jobs)
+        self._patched_jobs.start()
+        self.addCleanup(self._patched_jobs.stop)
+
+    def _status(self, run: Path, status: str = "done", finished: float = 100.0,
+                workflow: str = "") -> None:
+        import json
+
+        (self.jobs / f"{run.name}.status.json").write_text(json.dumps({
+            "name": run.name, "workflow": workflow, "status": status,
+            "started": finished - 10, "finished": finished,
+            "output_dir": str(run),
+        }))
+
+    def test_a_published_run_and_a_bare_directory_are_both_found(self):
+        published = _run_dir(self.runs, colmap=True, ply=True, name="published")
+        self._status(published)
+        # A CLI run: deliverables, no status file, nothing known about it.
+        _run_dir(self.runs, colmap=True, ply=False, name="from-the-cli")
+
+        with unittest.mock.patch.object(webui, "output_dir", lambda: self.runs):
+            found = {s.name: s for s in webui.discover_runs()}
+
+        self.assertEqual(set(found), {"published", "from-the-cli"})
+        self.assertEqual(found["published"].status, "done")
+        self.assertEqual(found["from-the-cli"].status, "unknown")
+        self.assertEqual(found["from-the-cli"].output_dir, self.runs / "from-the-cli")
+
+    def test_the_status_file_wins_over_the_bare_directory(self):
+        """Both sources see the same run; the one that knows its workflow,
+        its timings and its log path is the one that must survive."""
+        run = _run_dir(self.runs, colmap=True, ply=True, name="both")
+        self._status(run, status="cancelled", workflow="fast_helical_native")
+
+        with unittest.mock.patch.object(webui, "output_dir", lambda: self.runs):
+            found = webui.discover_runs()
+
+        self.assertEqual([s.name for s in found], ["both"])
+        self.assertEqual(found[0].status, "cancelled")
+        self.assertEqual(found[0].workflow, "fast_helical_native")
+
+    def test_runs_come_back_newest_first(self):
+        for name, finished in (("older", 100.0), ("newest", 300.0), ("middle", 200.0)):
+            self._status(_run_dir(self.runs, colmap=True, ply=False, name=name),
+                         finished=finished)
+
+        with unittest.mock.patch.object(webui, "output_dir", lambda: self.runs):
+            self.assertEqual([s.name for s in webui.discover_runs()],
+                             ["newest", "middle", "older"])
+
+    def test_a_truncated_status_file_does_not_take_the_scan_down(self):
+        """The worker replaces its status file atomically, but a pruned or
+        half-copied volume is not something a listing may die on."""
+        _run_dir(self.runs, colmap=True, ply=False, name="fine")
+        (self.jobs / "broken.status.json").write_text('{"name": "brok')
+
+        with unittest.mock.patch.object(webui, "output_dir", lambda: self.runs):
+            self.assertEqual([s.name for s in webui.discover_runs()], ["fine"])
+
+    def test_completed_means_it_produced_something_not_that_it_said_done(self):
+        """A cancelled run that got as far as its COLMAP export still has a
+        COLMAP export; a failed run with nothing in it is not offered; a
+        run still going is left alone, because its exports are last."""
+        self._status(_run_dir(self.runs, colmap=True, ply=False, name="cancelled-late"),
+                     status="cancelled")
+        self._status(_run_dir(self.runs, colmap=False, ply=False, name="failed-early"),
+                     status="failed")
+        self._status(_run_dir(self.runs, colmap=True, ply=True, name="in-flight"),
+                     status="running")
+
+        with unittest.mock.patch.object(webui, "output_dir", lambda: self.runs):
+            self.assertEqual([s.name for s in webui.completed_runs()],
+                             ["cancelled-late"])
+
+    def test_contents_names_every_part_of_the_archive(self):
+        run = _run_dir(self.runs, colmap=True, ply=True, name="described")
+        _touch(run / "face" / "face.ply", 2048)
+        (self.root / "logs" / "described.log").write_text("hello\n")
+        self._status(run)
+
+        with unittest.mock.patch.object(webui, "output_dir", lambda: self.runs):
+            state = webui.completed_runs()[0]
+        contents, size = webui.run_contents(state)
+
+        self.assertIn("colmap/ (5)", contents)
+        self.assertIn("ply/ (1)", contents)
+        self.assertIn("debug/", contents)
+        self.assertIn("log.txt", contents)
+        self.assertGreater(size, 0)
+
+    def test_one_archive_holds_every_run_under_its_own_name(self):
+        first = _run_dir(self.runs, colmap=True, ply=False, name="run-a")
+        second = _run_dir(self.runs, colmap=False, ply=True, name="run-b")
+        states = [
+            webui.RunState(name=first.name, status="done", output_dir=first),
+            webui.RunState(name=second.name, status="done", output_dir=second),
+        ]
+
+        names = self._names(webui.build_bundle_zip(states))
+
+        self.assertIn("run-a/colmap/cameras.txt", names)
+        self.assertIn("run-b/ply/scene.ply", names)
+        self.assertFalse([n for n in names if n.startswith("colmap/")])
+
+    def test_a_run_with_nothing_in_it_is_skipped_not_bundled_empty(self):
+        good = _run_dir(self.runs, colmap=True, ply=False, name="good")
+        empty = _run_dir(self.runs, colmap=False, ply=False, name="empty")
+        states = [webui.RunState(name=p.name, status="done", output_dir=p)
+                  for p in (good, empty)]
+
+        names = self._names(webui.build_bundle_zip(states))
+
+        self.assertEqual(names, ["good/colmap/cameras.txt", "good/colmap/images.txt",
+                                 "good/colmap/images/frame_00001_.png",
+                                 "good/colmap/normals/frame_00001_.png",
+                                 "good/colmap/points3D.txt"])
+
+    def test_no_run_produced_anything_means_no_bundle_and_no_stray_file(self):
+        empty = _run_dir(self.runs, colmap=False, ply=False, name="empty")
+        states = [webui.RunState(name=empty.name, status="done", output_dir=empty)]
+
+        self.assertIsNone(webui.build_bundle_zip(states))
+        self.assertFalse((self.root / "archives" / webui.BUNDLE_NAME).exists())
+
+    def test_reuse_keeps_an_up_to_date_archive_and_rebuilds_a_stale_one(self):
+        """The press that makes this tab usable: rescanning a volume of
+        finished runs must not re-copy every gigabyte on it."""
+        import os
+
+        run = _run_dir(self.runs, colmap=True, ply=True, name="reused")
+        archive = Path(webui.build_result_zip(run))
+        first = archive.stat().st_mtime
+        os.utime(archive, (first, first))
+
+        self.assertTrue(webui.archive_is_current(archive, run))
+        self.assertEqual(webui.build_result_zip(run, reuse=True), str(archive))
+        self.assertEqual(archive.stat().st_mtime, first)
+
+        # A deliverable written after the archive was built invalidates it.
+        _touch(run / "ply" / "second.ply", 1024)
+        os.utime(run / "ply" / "second.ply", (first + 60, first + 60))
+        self.assertFalse(webui.archive_is_current(archive, run))
+        webui.build_result_zip(run, reuse=True)
+        self.assertIn("ply/second.ply", self._names(str(archive)))
+
+    def test_a_missing_archive_is_never_current(self):
+        run = _run_dir(self.runs, colmap=True, ply=False, name="never-packaged")
+        self.assertFalse(
+            webui.archive_is_current(self.root / "archives" / "nope.zip", run))
+
+
 class TestOutputSelection(unittest.TestCase):
     def test_the_shipped_workflow_declares_its_deliverables(self):
         """The Outputs box IS the workflow's `outputs:` block: its labels,
