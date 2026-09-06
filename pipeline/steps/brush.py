@@ -77,6 +77,49 @@ sharpness from 143 to 161 where 9000 more iterations of one cold run reached
 137 — the restart at full mean learning rate is the effect. It costs one
 dataset reload and, on a 4070 Ti, about 2 minutes.
 
+**The alignment loop** (`align_iters`, 4 by default) is the answer to a
+measurement that says the trained splat is softer than the frames it was
+fitted to *because of the fit*: the generated views disagree with each
+other about where skin, hair and finger texture sits by 1.7-3.6 px mean
+(p90 up to 8), and a photometric loss averages that into a blurred
+consensus. So between training invocations the frames are pulled onto the
+splat's own consensus — render the current .ply at the training cameras,
+measure the optical flow from each frame to its render, smooth and cap it
+(`align_flow_sigma`/`align_flow_cap`, one entry per iteration or one for
+all of them), and Lanczos-warp the frame by it (pipeline/align.py) — and
+the training is resumed on the aligned set with growth off, exactly the way
+the polish resumes. Measured (docs/final-splat-alignment-guide.md): band-limited face
+sharpness 21.1 -> 23.8 over four iterations, +1.2/+0.6/+0.5/+0.4, and
+saturating there; novel views gain in the same ratio and fidelity RISES
+with sharpness (27.64 -> 28.41 dB), which is the signature of recovered
+rather than invented detail. It is worth as much as running brush's dense
+growth and costs a fifth of the .ply size.
+
+Three things about it are load-bearing:
+
+- **Every iteration warps the pristine originals**, never a warp of a warp.
+  That makes the loop a many-to-one contraction onto one consensus, anchored
+  because the splat must still explain the mean image; iterating
+  warps-of-warps is pairwise merging, which drifts without bound. The
+  originals are the `images`/`masks` inputs, still in memory, and each
+  iteration overwrites `images/` from them — nothing on disk is ever warped
+  twice.
+- **The gain lives in the splat, not in the images.** Each iteration's frame
+  set is only ever "originals warped once", so there is no aligned dataset
+  anywhere that carries four iterations of improvement, and none of this can
+  be exported as a better set of frames.
+- **The alignment invocations pass normal weight 0** regardless of
+  `normal_loss_strength`. The warped frames no longer agree with the
+  `normals/` sidecar beside them, and normal supervision measured as a
+  straight loss on the deliverable anyway (guide §1: -18% sharpness *and*
+  -1.8 dB fidelity).
+
+`export_evidence` then measures against the *warped* frames, since that is
+what the finished splat was fitted to — deliberate, because `render_splat`'s
+confidence mode gates on those `ev_*` properties. Supporting views are not
+warped: they are renders of a splat rather than generated frames, they are
+not what the flow was measured on, and the final training takes none.
+
 **Supporting views** (`support_*` inputs) are views the training should
 fit where they can be trusted and *ignore* everywhere else — the
 confidence-gated splat re-renders are the case this exists for. Their
@@ -149,6 +192,7 @@ from typing import Any, Dict, List, Optional, Sequence
 import cv2
 import numpy as np
 
+from ..align import BACKGROUND as ALIGN_BACKGROUND, align_views
 from ..masks import mask_to_alpha_u8
 from ..proc import (
     ProcessFailed,
@@ -159,6 +203,12 @@ from ..proc import (
 )
 from ..registry import register_step
 from ..step import Param, Step
+# The rasteriser the alignment loop renders the current splat with — the
+# same binary, the same default and the same crash reporting steps/splat.py
+# uses, rather than a second Popen of it here. Module level because it is a
+# param default; steps/splat.py imports nothing from this module, so there
+# is no cycle to defer around.
+from .splat import _RENDER_BINARY, _rasterize
 
 logger = logging.getLogger(__name__)
 
@@ -453,6 +503,54 @@ def write_loss_weights(colmap_dir: Path, image_names: Sequence[str],
     )
 
 
+def _flow_schedule(values: Sequence[float], name: str, iters: int) -> List[float]:
+    """One flow setting per alignment iteration, first to last.
+
+    A single entry holds the setting constant for the whole loop, which is
+    what both of these default to; a full-length list schedules it. The case
+    that motivates scheduling is the measured one: aligning against a
+    converged render tolerates — and rewards — a finer, longer-reaching
+    field than aligning against the blurry cold start does, so
+    `align_flow_sigma: [6, 6, 3, 3]` with `align_flow_cap: [6, 6, 12, 12]`
+    is the shape to try (FINDINGS: sigma 3 / cap 12 from an already-aligned
+    splat reads face 27.0 against 26.7, at unchanged fidelity).
+
+    Any other length is refused, and refused up front: the alternative is
+    an alignment that runs three iterations and dies on the fourth, an hour
+    of training later.
+    """
+    if len(values) not in (1, iters):
+        raise ValueError(
+            f"{name} has {len(values)} entries, but align_iters is {iters} — "
+            f"give one value per alignment iteration, or a single one to hold "
+            f"it constant for the whole loop."
+        )
+    schedule = [float(value) for value in values]
+    return schedule * iters if len(schedule) == 1 else schedule
+
+
+def _check_align_sizes(images: Sequence[np.ndarray], cameras: Sequence[Any]) -> None:
+    """Refuse an alignment whose frames and cameras describe different images.
+
+    The loop measures the flow between a training frame and a render made
+    from that frame's camera, so the two have to be the same size — and if
+    they are not, the export handed to brush was already describing its own
+    frames wrongly (the upscale rescaling the intrinsics is exactly this
+    hazard; see the workflow's stage 5). Cheap here, and invisible
+    afterwards: a mismatch would come back as an alignment that quietly made
+    the splat worse.
+    """
+    for image, camera in zip(images, cameras):
+        height, width = image.shape[:2]
+        if (width, height) != (int(camera.width), int(camera.height)):
+            raise ValueError(
+                f"align_iters is set, but a training frame is {width}x{height} "
+                f"where its camera describes {int(camera.width)}x"
+                f"{int(camera.height)}. The alignment renders each camera and "
+                f"measures the flow to its frame, which needs the two to agree."
+            )
+
+
 def _link_init_ply(colmap_dir: Path, ply_path: Path) -> None:
     """Point the export's `init.ply` at a trained splat, for a warm start.
 
@@ -549,6 +647,44 @@ class BrushStep(Step):
               "the iteration count. 0 is off, which is what a training nobody has "
               "measured it on should stay at (docs/intermediate-splat-guide.md)",
               minimum=0),
+        Param("align_iters", int, 4,
+              "Alignment iterations after the main training: render the splat at "
+              "the training cameras, warp each ORIGINAL frame onto its own render "
+              "by the smoothed optical flow between them, and resume training on "
+              "the aligned set with growth off. This is the answer to a fit that "
+              "blurs its own training data by averaging views that disagree about "
+              "where texture sits (see the module docstring). Measured 2026-09-06 "
+              "on the deliverable splat: band-limited face sharpness 21.1 -> 23.8 "
+              "over four iterations (+1.2, +0.6, +0.5, +0.4) with fidelity rising "
+              "27.64 -> 28.41 dB, and a fifth and sixth worth +0.2 each — 4 is the "
+              "saturation point. Measured on a 4070 Ti at 81 views of 1080x1920: "
+              "9 s to render, 10 s to measure and apply the flow, and the "
+              "fine-tune on top — about a minute an iteration. 0 is off "
+              "(docs/final-splat-alignment-guide.md)",
+              minimum=0),
+        Param("align_steps", int, 3000,
+              "Iterations of the growth-off fine-tune each alignment pass runs. "
+              "1000 measured identical AT THE FIXED POINT (47 s -> 15 s per "
+              "iteration), but every iteration still climbing was measured at "
+              "3000, so this is what the trajectory above was made of",
+              minimum=1, advanced=True),
+        Param("align_flow_sigma", list, [6.0],
+              "Gaussian smoothing of the flow field, in pixels — what makes the "
+              "warp a texture correction rather than a per-pixel scramble. One "
+              "entry per alignment iteration, first to last; a single entry (the "
+              "default) holds it at 6 for the whole loop, which is what the "
+              "trajectory above was measured with. Schedule it to sharpen the "
+              "field as the render it is measured against converges: [6, 6, 3, 3] "
+              "beside a cap of [6, 6, 12, 12]",
+              advanced=True),
+        Param("align_flow_cap", list, [6.0],
+              "Largest displacement the alignment applies, in pixels; beyond it "
+              "the field is scaled down with its direction kept. Same per-iteration "
+              "shape as align_flow_sigma. Raising it to 12 on its own was measured "
+              "to change nothing — the residual it would reach is views disagreeing "
+              "about hand POSE, which no image warp fixes — but 12 alongside a "
+              "sigma of 3 is the one combination that read better",
+              advanced=True),
         Param("match_alpha_weight", float, 0.1,
               "Weight of brush's L1 loss on a transparent view's alpha — how hard the "
               "silhouette is fitted to the mask. 0.1 is brush's own default; 0.5 "
@@ -572,6 +708,31 @@ class BrushStep(Step):
               "rather than a harmless rescale. Exact for a binary mask, approximate for "
               "a soft one",
               choices=("auto", "on", "off"), advanced=True),
+        Param("growth_grad_threshold", float, None,
+              "brush's densification threshold — lower grows faster. Empty leaves "
+              "brush's own 0.0025. Together with growth_select_fraction 0.4 and "
+              "growth_stop_iter 24000 this is the 'dense growth' setting measured "
+              "2026-09-06 (0.0012): +40% face sharpness on its own, +2.5 s1 on top "
+              "of the alignment loop — and 1.68M splats against 356k, a 424 MB .ply "
+              "against 84. A deliberate quality-for-size purchase, which is why it "
+              "is off (docs/final-splat-alignment-guide.md §2)",
+              minimum=0.0, advanced=True),
+        Param("growth_select_fraction", float, None,
+              "Fraction of the splats above the threshold that actually grow. "
+              "Empty leaves brush's own 0.25; the dense-growth setting is 0.4",
+              minimum=0.0, maximum=1.0, advanced=True),
+        Param("growth_stop_iter", int, None,
+              "Step at which growth stops. Empty leaves brush's own 15000; the "
+              "dense-growth setting is 24000. Growth belongs to the COLD START, "
+              "which is why the alignment and polish invocations force it to 0 "
+              "whatever this says. It does stack with alignment — an earlier "
+              "reading that it did not (21.7 with growth against 22.1 without) "
+              "turned out to be a property of the TARGET the flow was measured "
+              "against, not of resampling: growing on frames aligned to a blurry "
+              "cold-start render amplifies the noise in that flow, where frames "
+              "aligned to a converged one give 24.7 against 22.5 "
+              "(docs/final-splat-alignment-guide.md §2)",
+              minimum=0, advanced=True),
         Param("normal_loss_strength", float, 0.05,
               "Weight on the normal-map supervision loss; 0 disables it", minimum=0.0),
         Param("normal_loss_step_start", int, 5000,
@@ -611,6 +772,10 @@ class BrushStep(Step):
         Param("export_name", str, "export.ply", "Filename of the exported .ply"),
         Param("brush_path", str, "brush",
               "The brush binary, on PATH or as an absolute path", advanced=True),
+        Param("render_path", str, _RENDER_BINARY,
+              "The rasteriser the alignment loop renders the current splat with, "
+              "on PATH or as an absolute path. Same convention as brush_path, and "
+              "unused when align_iters is 0", advanced=True),
         Param("with_viewer", bool, False,
               "Let brush open its interactive viewer window; needs a display",
               advanced=True),
@@ -643,6 +808,13 @@ class BrushStep(Step):
         max_splats = params["max_splats"]
         refine_every = params["refine_every"]
         polish_steps = params["polish_steps"]
+        align_iters = params["align_iters"]
+        align_steps = params["align_steps"]
+        align_flow_sigma = params["align_flow_sigma"]
+        align_flow_cap = params["align_flow_cap"]
+        growth_grad_threshold = params["growth_grad_threshold"]
+        growth_select_fraction = params["growth_select_fraction"]
+        growth_stop_iter = params["growth_stop_iter"]
         match_alpha_weight = params["match_alpha_weight"]
         alpha_mode = _forced_alpha_mode(params["alpha_mode"])
         # Resolved here rather than at the argv, so a mistyped setting is a
@@ -657,6 +829,17 @@ class BrushStep(Step):
         evidence_prune_inmask = params["evidence_prune_inmask"]
         evidence_normal_weight = params["evidence_normal_weight"]
         with_viewer = params["with_viewer"]
+        render_path = params["render_path"]
+
+        if align_iters > 0:
+            # Both resolved here, with the size check, rather than at the
+            # iteration that reads them: a mistyped schedule should be a
+            # refusal now and not after an hour of cold-start training.
+            align_flow_sigma = _flow_schedule(
+                align_flow_sigma, "align_flow_sigma", align_iters)
+            align_flow_cap = _flow_schedule(
+                align_flow_cap, "align_flow_cap", align_iters)
+            _check_align_sizes(images, cameras)
 
         export_dir = params["export_dir"]
         if export_dir:
@@ -696,19 +879,36 @@ class BrushStep(Step):
                 # colmap_export was fixed and this was missed.
                 alpha_channel = [mask_to_alpha_u8(m) for m in masks]
 
-            for i, (img, filename) in enumerate(zip(images, image_names)):
-                if alpha_channel is not None:
-                    alpha = alpha_channel[i]
+            def training_frames() -> List[np.ndarray]:
+                """The training views exactly as they go to disk, BGR(A) uint8.
+
+                Built from the step's own inputs every time it is called, so
+                it is always the PRISTINE set — which is what the alignment
+                loop below warps from, iteration after iteration. Nothing is
+                cached: at 81 frames of 1080x1920 the RGBA copies are ~670 MB,
+                and `images` and `masks` are already in memory to build them
+                from.
+                """
+                frames = []
+                for i, img in enumerate(images):
+                    if alpha_channel is None:
+                        frames.append(img)
+                        continue
                     if img.shape[-1] == 4:
                         rgba = img.copy()
-                        rgba[..., 3] = alpha
+                        rgba[..., 3] = alpha_channel[i]
                     elif img.shape[-1] == 3:
-                        rgba = np.dstack([img, alpha])
+                        rgba = np.dstack([img, alpha_channel[i]])
                     else:
                         raise ValueError(f"Unexpected image channels: {img.shape[-1]} (expected 3 or 4)")
-                    cv2.imwrite(str(images_dir / filename), rgba)
-                else:
-                    cv2.imwrite(str(images_dir / filename), img)
+                    frames.append(rgba)
+                return frames
+
+            def write_frames(frames: Sequence[np.ndarray]) -> None:
+                for frame, filename in zip(frames, image_names):
+                    cv2.imwrite(str(images_dir / filename), frame)
+
+            write_frames(training_frames())
 
             if normal_maps is not None:
                 normals_dir = colmap_dir / "normals"
@@ -731,14 +931,23 @@ class BrushStep(Step):
             ply_path = out_root / ply_output_name
 
             def command(*, total: int, refine: int, normal_start: int,
+                        normal_weight: Optional[float] = None,
                         growth_stop: Optional[int] = None) -> List[str]:
                 """One brush invocation's argv.
 
-                A function rather than a literal because the polish run
-                below is the same command with four values changed, and
-                every one of them is a flag brush would REFUSE TWICE — clap
-                rejects a repeated `--refine-every`, so a polish argv built
-                by appending overrides to this list would not run at all.
+                A function rather than a literal because the polish and
+                alignment runs below are the same command with a handful of
+                values changed, and every one of them is a flag brush would
+                REFUSE TWICE — clap rejects a repeated `--refine-every`, so
+                an argv built by appending overrides to this list would not
+                run at all.
+
+                `normal_weight` overrides `normal_loss_strength` for the run
+                being built. The alignment iterations pass 0: their frames
+                have been resampled and no longer line up with the
+                `normals/` sidecar beside them, and unlike `normal_start`
+                there is no value of the start iteration that turns the term
+                off for a run that is only 3000 steps long.
                 """
                 cmd = [
                     brush_path,
@@ -753,8 +962,17 @@ class BrushStep(Step):
                     "--refine-every", str(refine),
                     "--match-alpha-weight", str(match_alpha_weight),
                 ]
-                if growth_stop is not None:
-                    cmd.extend(["--growth-stop-iter", str(growth_stop)])
+                # The growth block. `growth_stop` is the caller's override —
+                # the polish and alignment runs force 0 — and the params
+                # below it are brush's own defaults unless a workflow buys
+                # dense growth (see their help).
+                stop = growth_stop if growth_stop is not None else growth_stop_iter
+                if stop is not None:
+                    cmd.extend(["--growth-stop-iter", str(stop)])
+                if growth_grad_threshold is not None:
+                    cmd.extend(["--growth-grad-threshold", str(growth_grad_threshold)])
+                if growth_select_fraction is not None:
+                    cmd.extend(["--growth-select-fraction", str(growth_select_fraction)])
                 if with_viewer:
                     cmd.append("--with-viewer")
                 # Not passed unless a caller explicitly asked for one:
@@ -769,8 +987,10 @@ class BrushStep(Step):
                 if normalize_masked_loss:
                     cmd.append("--normalize-masked-loss")
                 if normal_maps is not None:
+                    weight = (normal_loss_strength if normal_weight is None
+                              else normal_weight)
                     cmd.extend([
-                        "--normal-loss-weight", str(normal_loss_strength),
+                        "--normal-loss-weight", str(weight),
                         "--normal-loss-start-iter", str(normal_start),
                         "--normal-loss-every", str(normal_loss_every),
                     ])
@@ -804,6 +1024,54 @@ class BrushStep(Step):
                 ply_path, colmap_dir=colmap_dir,
             )
 
+            # The alignment loop. Each iteration renders the splat as it
+            # stands at the training cameras, warps the ORIGINAL frames onto
+            # those renders (pipeline/align.py, and see the module
+            # docstring's invariant), and resumes training on the aligned
+            # set with growth off — the same warm start the polish makes,
+            # for a different reason.
+            #
+            # In here rather than in the workflow because the COLMAP export
+            # is this method's TemporaryDirectory: a workflow-level loop
+            # would re-export several hundred MB of frames per iteration and
+            # would have no way to hand brush an init.ply at all.
+            if align_iters > 0:
+                if support:
+                    logger.info(
+                        "brush: the %d supporting view(s) are left as they are; "
+                        "the alignment warps the %d training views only",
+                        len(support.image_names), len(image_names),
+                    )
+                for iteration in range(1, align_iters + 1):
+                    sigma = align_flow_sigma[iteration - 1]
+                    cap = align_flow_cap[iteration - 1]
+                    renders = self._render_training_views(
+                        ply_path, cameras, image_names, render_path=render_path,
+                    )
+                    frames, stats = align_views(
+                        training_frames(), renders, sigma=sigma, cap=cap,
+                    )
+                    write_frames(frames)
+                    # Both sets are on disk now, and at 81 views of
+                    # 1080x1920 they are well over a gigabyte between them —
+                    # not something to hold through a training run for no
+                    # reason, on a box that also has to fit the trainer.
+                    del renders, frames
+                    logger.info(
+                        "brush: alignment %d/%d — the training views disagreed with "
+                        "their own renders by %.2f px mean, %.2f px p90 (smoothed "
+                        "at sigma %.1f, capped at %.1f); refitting for %d steps, "
+                        "growth off",
+                        iteration, align_iters, stats.mean, stats.p90,
+                        sigma, cap, align_steps,
+                    )
+                    _link_init_ply(colmap_dir, ply_path)
+                    self._run_brush(
+                        command(total=align_steps, refine=_NO_REFINE,
+                                normal_start=0, normal_weight=0.0, growth_stop=0),
+                        ply_path, colmap_dir=colmap_dir,
+                    )
+
             # The polish: the same training resumed from its own export with
             # growth off, at full mean-LR rather than the decayed tail of the
             # first run — which is the whole effect (a plain longer cold run
@@ -831,6 +1099,35 @@ class BrushStep(Step):
             )
 
         return {"splat_path": str(ply_path.absolute())}
+
+    def _render_training_views(
+        self, ply_path: Path, cameras: Sequence[Any], image_names: Sequence[str],
+        *, render_path: str,
+    ) -> List[np.ndarray]:
+        """The splat as it stands, rendered at the training views' own cameras.
+
+        BGR uint8 composited over `align.BACKGROUND` — the same grey the
+        frames are flattened onto before the flow is measured, so the
+        silhouette edge contributes the same thing on both sides of it.
+
+        `scene=None` is safe and deliberate: `_rasterize` only serialises a
+        scene when there is no .ply on disk to render, and here there always
+        is one — the training that just finished wrote it. Loading a
+        hundreds-of-MB export into Python to hand it straight back to the
+        rasteriser would be pure cost.
+        """
+        images, _ = _rasterize(
+            scene=None,
+            splat_path=str(ply_path),
+            cameras=list(cameras),
+            image_names=list(image_names),
+            width=int(cameras[0].width),
+            height=int(cameras[0].height),
+            bg_color=ALIGN_BACKGROUND,
+            render_path=render_path,
+            confidence=None,
+        )
+        return images
 
     def _run_brush(
         self, cmd: List[str], ply_path: Path, colmap_dir: Optional[Path] = None

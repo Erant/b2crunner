@@ -310,9 +310,11 @@ class TestRequiredForSteps(unittest.TestCase):
         spec = WorkflowSpec.from_yaml(resolve_workflow("fast_helical_native"))
         spec.globals["export_colmap"] = False
         spec.globals["export_ply"] = False
-        # export_normals is the last sapiens2 use outside stage 2, so this
-        # only proves the plumbing; the assertion that matters is that the
-        # skipped steps are gone from what gets scanned at all.
+        # Nothing outside stage 2 has used sapiens2 since 2026-09-06 (the
+        # deliverable training stopped supervising on normals and its
+        # export_normals went with it), so this only proves the plumbing;
+        # the assertion that matters is that the skipped steps are gone from
+        # what gets scanned at all.
         enabled = {s.id for s in spec.enabled_steps()}
         self.assertNotIn("export_colmap", enabled)
         self.assertNotIn("train_final_splat", enabled)

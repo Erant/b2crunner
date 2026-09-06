@@ -84,7 +84,10 @@ def _runs(with_normals: bool = False, **overrides):
 
     step._run_brush = fake_run_brush
     with tempfile.TemporaryDirectory() as tmp:
-        params = step_class.resolve_params({"export_dir": tmp, **overrides})
+        # align_iters off: the alignment loop renders the splat between
+        # invocations, which needs a real rasteriser. Its own tests are in
+        # tests/test_brush_alignment.py.
+        params = step_class.resolve_params({"export_dir": tmp, "align_iters": 0, **overrides})
         step.run(_inputs(with_normals), params)
     return calls
 

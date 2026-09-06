@@ -355,11 +355,12 @@ class TestWorkflowFiles(unittest.TestCase):
         self.assertFalse(gated & {s.id for s in spec.enabled_steps()})
 
     def test_pre_upscale_colmap_is_off_by_default_and_gated_together(self):
-        """The debug stage-4b export (masks + normals + colmap) is three
-        steps, all guarded by `export_colmap_preupscale`, all skipped
-        unless it is set."""
-        preupscale = {"export_masks_preupscale", "export_normals_preupscale",
-                      "export_colmap_preupscale"}
+        """The debug stage-4b export (masks + colmap) is two steps, both
+        guarded by `export_colmap_preupscale`, both skipped unless it is
+        set. It was three until 2026-09-06: the normals were estimated for a
+        brush training that has stopped supervising on them
+        (docs/final-splat-alignment-guide.md §1)."""
+        preupscale = {"export_masks_preupscale", "export_colmap_preupscale"}
         spec = WorkflowSpec.from_yaml(str(WORKFLOW_DIR / "fast_helical_native.yaml"))
         self.assertFalse(spec.globals["export_colmap_preupscale"])
         self.assertFalse(preupscale & {s.id for s in spec.enabled_steps()})

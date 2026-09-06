@@ -372,7 +372,10 @@ class TestTheseGoStraightIntoBrush(unittest.TestCase):
             "support_cameras": out["cameras"],
         }
         with tempfile.TemporaryDirectory() as tmp:
-            step.run(inputs, step_class.resolve_params({"export_dir": tmp}))
+            # align_iters off: the alignment loop would render the splat
+            # between invocations, which needs a real rasteriser.
+            step.run(inputs, step_class.resolve_params(
+                {"export_dir": tmp, "align_iters": 0}))
 
         self.assertIn("masks/support_00001.png", seen["files"])
         self.assertIn("masks/support_00002.png", seen["files"])

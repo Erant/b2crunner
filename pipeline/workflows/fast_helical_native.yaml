@@ -222,8 +222,8 @@
 #
 # Stage 6 produces the run's deliverables under output_root:
 #
-#   colmap/              cameras.txt + images.txt + points3D.txt, images/, normals/
-#   ply/                 scene.ply — a second brush training, normal-supervised
+#   colmap/              cameras.txt + images.txt + points3D.txt, images/
+#   ply/                 scene.ply — a second brush training, flow-aligned
 #   colmap_preupscale/   debug: a COLMAP dataset from the pre-upscale frames
 #
 # plus two intermediates written on the way through:
@@ -265,7 +265,7 @@ description: >-
   From a front/back reference sheet: split it, reconstruct a body, render its
   own anchored views, then run the shared six-stage tail over that dataset —
   denoise, train+re-render a splat, mask, denoise again, upscale, export a
-  COLMAP dataset and/or a normal-supervised .ply.
+  COLMAP dataset and/or a flow-aligned .ply.
 
 settings:
   # The knobs the Run tab draws, in this order, straight from these
@@ -444,16 +444,20 @@ outputs:
     dir: colmap
     default: true
     help: >-
-      cameras.txt, images.txt and points3D.txt, plus images/ and normals/,
-      built from the frames as they finally are.
+      cameras.txt, images.txt and points3D.txt, plus images/, built from the
+      frames as they finally are. No normals/ since 2026-09-06 — the training
+      that read them stopped supervising on them.
 
   - name: export_ply
-    label: Trained .ply (normal-supervised)
+    label: Trained .ply (flow-aligned)
     dir: ply
     default: true
     help: >-
-      A second brush training over that dataset, normal-supervised, exported
-      as scene.ply. A full 30,000 iterations — roughly an hour of GPU.
+      A second brush training over that dataset, exported as scene.ply. A full
+      30,000 iterations — roughly an hour of GPU — and then four alignment
+      iterations, another ~5 minutes, which warp the frames onto the splat's
+      own renders and refit so the fit stops blurring its own training data
+      (docs/final-splat-alignment-guide.md).
 
   - name: export_colmap_intermediate
     label: Intermediate COLMAP dataset (debug)
@@ -1823,6 +1827,16 @@ steps:
       # NOT set on train_final_splat: it has never been measured there, and
       # a deliverable splat is the wrong place to find out.
       polish_steps: 9000
+      # And the mirror image of that: the alignment loop (steps/brush.py's
+      # default of 4) was measured on the DELIVERABLE training, not on this
+      # one, so this one keeps the training it was tuned as. The reasoning
+      # is not that it would not work here — the same loop on a splat five
+      # times denser followed the same curve — it is that this splat exists
+      # to drive the helical re-render, ~5 minutes is a tenth of its
+      # runtime again, and nothing has looked at what a sharper
+      # intermediate does to the second denoise pass. Flip it to 4 to find
+      # out (docs/final-splat-alignment-guide.md).
+      align_iters: 0
       # Weight on the alpha L1 — how hard the silhouette is fitted to the
       # RMBG matte. 0.5 against brush's own 0.1: measured 17% fewer dark
       # wedges (dark splats in the concave gaps between arm and torso and
@@ -2227,8 +2241,16 @@ steps:
   # comparing splat quality with and without SeedVR2. Gated by
   # export_colmap_preupscale, which the web UI only sets when run_upscale is
   # also on (with the upscale off, stage 6 already exports these same
-  # frames). rmbg + normals are recomputed here rather than reused from
-  # stage 6: those run after the upscale, on 1080x1920 frames.
+  # frames). rmbg is recomputed here rather than reused from stage 6: that
+  # one runs after the upscale, on 1080x1920 frames.
+  #
+  # No normals. This export used to carry a `normals/` sidecar estimated by
+  # sapiens2_lite, for a brush training to supervise on; normal supervision
+  # is off for the deliverable splat since 2026-09-06 — measured as a
+  # straight loss, -18% band-limited sharpness AND -1.8 dB fidelity, and
+  # recomputing the maps from better images does not rescue it
+  # (docs/final-splat-alignment-guide.md §1) — so the maps had no consumer
+  # left, at ~2 GB of host RAM and a Sapiens2 pass each.
   - id: export_masks_preupscale
     step: rmbg
     dispatch: in_process
@@ -2237,17 +2259,6 @@ steps:
       images: dataset.images
     outputs:
       masks: dataset.masks
-
-  - id: export_normals_preupscale
-    step: sapiens2_lite
-    dispatch: in_process
-    when: ${globals.export_colmap_preupscale}
-    inputs:
-      images: dataset.images
-    params:
-      batch_size: 4
-    outputs:
-      normal_maps: scene.preupscale_normal_maps
 
   - id: export_colmap_preupscale
     step: colmap_export
@@ -2259,7 +2270,6 @@ steps:
       points_3d: dataset.points_3d
       images: dataset.images
       masks: dataset.masks
-      normal_maps: scene.preupscale_normal_maps
     params:
       output_dir: ${globals.output_root}/colmap_preupscale
       layout: brush
@@ -2313,8 +2323,8 @@ steps:
       resolution: dataset.resolution
 
   # ---------------------------------------------------------------- stage 6
-  # colmap.json: background-remove, re-estimate normals against the frames
-  # as they finally are, then emit whichever deliverables were selected.
+  # colmap.json: background-remove the frames as they finally are, then emit
+  # whichever deliverables were selected.
   - id: export_masks
     step: rmbg
     dispatch: in_process
@@ -2323,23 +2333,21 @@ steps:
     outputs:
       masks: dataset.masks
 
-  # NOT the stage-2 normal maps (scene.normal_maps): those describe the
-  # pre-re-render frames, which rerender_splat replaced wholesale with a
-  # different, longer orbit — a different count, different poses, and after
-  # the upscale a different resolution. Both deliverables below want
-  # normals for *these* frames, so they are estimated again here.
-  - id: export_normals
-    step: sapiens2_lite
-    dispatch: in_process
-    inputs:
-      images: dataset.images
-    params:
-      # Smaller than the step's default of 8: at the upscaled resolution
-      # these are 1080x1920 float32 maps, and the returned list alone is
-      # ~2 GB of host RAM.
-      batch_size: 4
-    outputs:
-      normal_maps: scene.export_normal_maps
+  # There used to be a second sapiens2_lite here, estimating normals for
+  # these frames — the stage-2 maps do not describe them, since
+  # rerender_splat replaced the dataset wholesale with a longer orbit and
+  # the upscale changed the resolution — so that the deliverable training
+  # could supervise on them. It is gone with the supervision itself
+  # (2026-09-06): the normal loss measured as a straight loss on this splat,
+  # -18% band-limited sharpness AND -1.8 dB fidelity, and recomputing the
+  # maps from the aligned images rescued nothing (22.0 against 21.8, inside
+  # the noise) — the harm is the loss term, not the quality of the maps
+  # feeding it. See docs/final-splat-alignment-guide.md §1. That took ~2 GB
+  # of host RAM and a Sapiens2 pass over 81 upscaled frames with it, and
+  # both deliverables below now go without a `normals/` sidecar.
+  #
+  # This says nothing about the STAGE-2 training, where normal supervision
+  # still helps and scene.normal_maps is still computed and wired.
 
   # ------------------------------------------- refining the cameras (stage 6)
   # The same refinement again, and it is needed again for the same reason:
@@ -2385,10 +2393,12 @@ steps:
       stats: scene.camera_refinement_final
 
   # Deliverable 1: a COLMAP dataset. `layout: brush` puts the frames in
-  # images/ and the normals in normals/ beside the three .txt files —
-  # what brush itself reads, and what somebody handed this directory
-  # expects, rather than the flat frames-beside-the-txt layout the ComfyUI
-  # colmap.json stage wrote.
+  # images/ beside the three .txt files — what brush itself reads, and what
+  # somebody handed this directory expects, rather than the flat
+  # frames-beside-the-txt layout the ComfyUI colmap.json stage wrote. No
+  # normals/ since 2026-09-06 (see above): the training that read them
+  # stopped, and a sidecar nothing in this pipeline consumes is not worth a
+  # Sapiens2 pass over 81 upscaled frames.
   - id: export_colmap
     step: colmap_export
     dispatch: in_process
@@ -2399,17 +2409,22 @@ steps:
       points_3d: dataset.points_3d
       images: dataset.images
       masks: dataset.masks
-      normal_maps: scene.export_normal_maps
     params:
       output_dir: ${globals.output_root}/colmap
       layout: brush
 
-  # Deliverable 2: a trained splat, normal-supervised. This is a second
-  # full brush training — the stage-2 one exists to drive the helical
-  # re-render and predates the second denoise pass and the upscale, so it
-  # is not the splat anyone wants to keep. `export_dir` puts this one at a
-  # predictable path instead of brush/training_<ms>/, which is the whole
-  # reason the final splat can be `ply/scene.ply`.
+  # Deliverable 2: the trained splat. This is a second full brush training
+  # — the stage-2 one exists to drive the helical re-render and predates the
+  # second denoise pass and the upscale, so it is not the splat anyone wants
+  # to keep. `export_dir` puts this one at a predictable path instead of
+  # brush/training_<ms>/, which is the whole reason the final splat can be
+  # `ply/scene.ply`.
+  #
+  # It is the training the 2026-09-06 measurement session was run against
+  # (docs/final-splat-alignment-guide.md), and the two things that session
+  # found are set below: normal supervision off, and the alignment loop on.
+  # Both are steps/brush.py defaults now, so what is spelled out here is the
+  # part that would be a silent regression if it moved.
   - id: train_final_splat
     step: brush
     dispatch: in_process
@@ -2420,7 +2435,11 @@ steps:
       points_3d: dataset.points_3d
       images: dataset.images
       masks: dataset.masks
-      normal_maps: scene.export_normal_maps
+      # No normal_maps, and no step computing them any more (see above).
+      # brush only emits the normal-loss flags when this input is wired, so
+      # the absence is already the whole of "supervision off" — the explicit
+      # 0.0 below is there in case anyone wires it back.
+      #
       # NO support_* here, deliberately. The face splat's renders were
       # taken along the CIRCULAR bootstrap orbit and belong to the training
       # that ran on it; by this point the dataset is the helical re-render,
@@ -2433,6 +2452,26 @@ steps:
       # See train_splat's note. Same count; a run tuning the deliverable
       # splat alone changes it here.
       total_steps: 30000
+      # Normal supervision off, measured on THIS training (guide §1): it
+      # costs 4.7 band-limited s1 (-18%) and 1.8 dB of fidelity at once,
+      # which is the tell that it is a straight loss rather than a
+      # sharpness-for-accuracy trade. Inert while no normal_maps input is
+      # wired, and the guard if one ever is again.
+      normal_loss_strength: 0.0
+      # The alignment loop, four iterations (steps/brush.py's own default,
+      # spelled out because it is the single biggest measured lever on the
+      # deliverable and roughly 5 minutes of the run): 21.1 -> 23.8 face
+      # s1, novel views gaining in the same ratio, fidelity rising with it.
+      # Worth as much as brush's dense growth at a fifth of the .ply size,
+      # which is why the growth knobs beside it are left at brush's own
+      # defaults (guide §2 — they stack, at 4.6x the asset).
+      #
+      # align_flow_sigma/align_flow_cap take one value per iteration and are
+      # left at their default of 6 px throughout, which is what the
+      # trajectory above was measured with. The schedule to try if this is
+      # ever tuned is a finer field once the render it aligns against has
+      # converged: [6, 6, 3, 3] with a cap of [6, 6, 12, 12].
+      align_iters: 4
       export_dir: ${globals.output_root}/ply
       export_name: scene.ply
     outputs:

@@ -373,7 +373,7 @@ outputs:                     # the deliverables, and the switch each one is
     label: Trained .ply
     dir: ply                 # where it lands under output_root
     default: true
-    help: A second, normal-supervised brush training.
+    help: A second brush training, flow-aligned.
   - name: export_colmap_preupscale
     label: Pre-upscale COLMAP dataset
     dir: colmap_preupscale
@@ -994,6 +994,35 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   confidence work on `normal-map-supervision` — an older binary writes no
   `ev_*`, which the renderer reports as a warning and falls back from, so a
   mismatched image degrades loudly rather than silently.
+  **Update (2026-09-06):** `align_iters` (4 by default) makes the training a
+  loop. The measurement behind it (`docs/final-splat-alignment-guide.md`):
+  the deliverable splat is markedly softer than the frames it was fitted to
+  *because of the fit* — the generated views disagree with each other about
+  where texture sits by 1.7-3.6 px mean, and a photometric loss averages
+  that into a blurred consensus. So after the main training, each iteration
+  renders the splat at the training cameras (`brush-splat-render`, through
+  `steps/splat.py`'s `_rasterize`), warps the **pristine** frames onto those
+  renders by the smoothed, capped optical flow between them
+  (`pipeline/align.py`; `align_flow_sigma`/`align_flow_cap` take one value
+  per iteration, 6 px throughout by default), and refits from the current
+  `.ply` with growth off
+  — 21.1 -> 23.8 band-limited face sharpness over four iterations, with
+  novel views gaining in the same ratio and fidelity rising alongside
+  (27.64 -> 28.41 dB). Worth as much as brush's dense growth at a fifth of
+  the asset size; the growth knobs are exposed beside it
+  (`growth_grad_threshold`, `growth_select_fraction`, `growth_stop_iter`)
+  and left at brush's own defaults. Two invariants carry it: every iteration
+  warps the originals, never a warp of a warp, and the alignment
+  invocations pass normal weight 0 whatever the step is configured with.
+  The same session turned normal supervision **off** for the deliverable
+  (a straight loss: -18% sharpness *and* -1.8 dB fidelity, and recomputing
+  the maps does not rescue it), which took `export_normals` and its
+  pre-upscale twin out of the workflow with it — stage 2 still supervises
+  on normals. Tests in `tests/test_brush_alignment.py`; the render-and-warp
+  seam was checked against the recorded 81-view run — 1.85 px mean flow,
+  p90 3.98, inside the guide's measured range, at 8.6 s to render and 9.9 s
+  to align the whole set on a 4070 Ti — but the loop itself has not run on
+  a pod.
 - `render` — camera-path generation (circular/sinusoidal/helical,
   `override_cam_from_mesh` anchor mode) + mesh/depth/skeleton rendering +
   point-cloud sampling, ported from `nodes/render_node.py`. The geometry
