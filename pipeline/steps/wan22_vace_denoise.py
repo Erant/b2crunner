@@ -284,13 +284,16 @@ def _vace_scale_hook(step: "Wan22VaceDenoiseStep", expert: str):
     is here to name which one went wrong in the guard below.
 
     A module pre-hook specifically, NOT a wrapper around the transformer's
-    `.forward`: `enable_model_cpu_offload()` replaces `forward`, and
-    `release_vram()` makes it do so again after every pass
-    (`maybe_free_model_hooks()` removes accelerate's hooks and re-attaches
-    them), so a wrapper installed at load time would be dropped somewhere
-    between the two denoise passes and the override would silently stop
+    `.forward`: the offload machinery owns `forward`. diffusers' group
+    offloading installs itself by wrapping it through a HookRegistry, and
+    the model-level offload this replaced went further still — it replaced
+    `forward` again on every `maybe_free_model_hooks()`, i.e. after every
+    pass. Either way a wrapper installed at load time is wrapping something
+    that is not the last word, and the override would silently stop
     applying. Pre-hooks run in `Module._call_impl`, ahead of whatever
-    `forward` currently is, and nothing in that cycle touches them.
+    `forward` currently is, and nothing in that cycle touches them — which
+    also means this hook runs before the group's weights are onloaded, and
+    it must therefore not touch them. It doesn't: it rewrites one kwarg.
 
     The plan is read off the step per call rather than closed over, because
     the two passes share one resident pipeline and disagree about it.
@@ -378,8 +381,14 @@ class Wan22VaceDenoiseStep(Step):
               "Attention implementation; auto picks per GPU architecture",
               advanced=True),
         Param("cpu_offload", bool, True,
-              "Stream the two 17.58 GB transformers on and off the card per forward "
-              "instead of resident-loading them", advanced=True),
+              "Stream the weights on and off the card a block at a time instead of "
+              "resident-loading them; off needs a card that fits a whole expert "
+              "plus the activations", advanced=True),
+        Param("offload_blocks_per_group", int, 1,
+              "How many transformer blocks ride onto the card together under "
+              "cpu_offload. 1 overlaps each block's transfer with the previous "
+              "block's compute; more than 1 keeps more resident but transfers "
+              "synchronously", advanced=True, minimum=1),
         Param("device", str, "cuda", "Torch device", advanced=True),
     )
 
@@ -399,7 +408,7 @@ class Wan22VaceDenoiseStep(Step):
         "checkpoint", "fp8_repo", "fp8_checkpoint_high", "fp8_checkpoint_low",
         "fp8_config", "use_lora", "lora_repo", "lora_subfolder",
         "lora_high", "lora_low", "lora_strength_high", "lora_strength_low",
-        "attention_backend", "cpu_offload", "device",
+        "attention_backend", "cpu_offload", "offload_blocks_per_group", "device",
     )
 
     def __init__(self) -> None:
@@ -408,6 +417,7 @@ class Wan22VaceDenoiseStep(Step):
         # placement load() chose, and they need opposite treatment.
         self._device = "cuda"
         self._cpu_offload = True
+        self._blocks_per_group = 1
         # The run's VACE conditioning plan: a list of per-layer scale lists,
         # one entry per denoise step — or None when the scale is constant,
         # which is "leave the scale diffusers built alone". Written by run(),
@@ -555,12 +565,130 @@ class Wan22VaceDenoiseStep(Step):
 
         self._device = device
         self._cpu_offload = params["cpu_offload"]
+        self._blocks_per_group = params["offload_blocks_per_group"]
         if self._cpu_offload:
-            pipe.enable_model_cpu_offload()
+            self._apply_group_offload(pipe, device)
         else:
             pipe.to(device)
 
         self._pipe = pipe
+
+    def _apply_group_offload(self, pipe, device: str) -> None:
+        """Place the pipeline a block at a time, not a model at a time.
+
+        This used to be `pipe.enable_model_cpu_offload()`, which moves one
+        whole component onto the card when its forward is called and leaves
+        it there until the next component runs. That needs room for the
+        largest component plus that component's activations at once, and on
+        a 32 GB card this model does not have it. Measured, on a 5090, at
+        720x1280x81 frames:
+
+            one fp8 expert + its live LoRA        ~17.0 GiB
+            the retained VACE hints                 6.3 GiB
+            working set (hidden/control states,
+            the fp32 upcasts, the FFN intermediate) ~4   GiB
+            allocator fragmentation                 1.9 GiB
+                                                  ---------
+                                                  ~29.2 GiB  of 31.36
+
+        and the next 1.51 GiB upcast in WanVACETransformerBlock is what
+        actually raised OutOfMemoryError. Note the sequence is longer than
+        the frame count suggests: `reference_images` buys a whole extra VAE
+        temporal chunk (pipeline_wan_vace.py builds latents for
+        `num_frames + num_reference_images * 4`), so 81 frames is 22 latent
+        frames, 22 x 80 x 45 = 79,200 tokens, and an fp32 tensor over that
+        at dim 5120 is exactly the 1.51 GiB that failed.
+
+        The 6.3 GiB line is structural rather than incidental and is why
+        trimming the working set would not have been enough:
+        transformer_wan_vace.py builds `control_hidden_states_list`, one
+        full-sequence tensor per VACE injection layer — eight of them, 811
+        MiB each — before the main blocks run, and holds every one alive
+        across all 40 of them.
+
+        Group offloading takes the weights out of that sum instead. Only
+        the blocks being executed are on the card, so what stays is
+        activations plus a block or two, and the whole 17 GiB of weights
+        stops competing with them.
+
+        Verified in-image on a 4070 Ti against a scaled-down
+        WanVACETransformer3DModel (24 layers, 4 VACE layers, 489M params —
+        the real geometry, small enough to hold both placements side by
+        side). Peak allocation for one forward, and how far the output
+        moved:
+
+            resident on the card                953 MiB   (baseline)
+            blocks_per_group=1, streamed         80 MiB   0.08x, bitwise equal
+            blocks_per_group=4, no stream       183 MiB   0.19x, bitwise equal
+
+        Bitwise equal in both cases, so this is a placement change and
+        nothing else — no dtype path, no kernel, no numerics. The residual
+        80 MiB is activations; the weights are gone from the peak, which is
+        what has to happen to the 17 GiB on the real model.
+
+        **It has to go on every component.** diffusers refuses to mix this
+        with the pipeline-level offload — `enable_model_cpu_offload()`
+        opens with `_maybe_raise_error_if_group_offload_active(raise_error=
+        True)` — so there is no arrangement where the transformers are
+        group-offloaded and the text encoder keeps the old treatment. A
+        component left out of this loop would stay wherever
+        `from_pretrained` put it, which is the CPU, and fail on its first
+        forward.
+
+        The cost is that the weights now cross PCIe once per forward
+        instead of once per pass: 16.4 GiB per step rather than per expert
+        turn. That is affordable here specifically because the sequence is
+        so long. A block is ~341 MiB, which is tens of milliseconds over
+        PCIe (nearer the top of that range than the bottom, because
+        low_cpu_mem_usage below pins as it goes rather than up front),
+        against attention over 79,200 tokens at dim 5120 — order 10^14
+        FLOPs, or several hundred ms of compute — so with a stream to
+        overlap them the transfer hides behind the block in front of it
+        with an order of magnitude to spare. Do not carry that conclusion
+        to a short clip: at a
+        fraction of the sequence length the arithmetic inverts and this
+        becomes the bottleneck rather than free.
+        """
+        import torch
+        from diffusers.hooks import apply_group_offloading
+
+        # Streams and group size are not two independent knobs, whatever
+        # the signature suggests: _apply_group_offloading_block_level
+        # forces num_blocks_per_group back to 1 whenever a stream is given
+        # (prefetching the next group is the entire point of the stream) and
+        # only warns about it. So `offload_blocks_per_group` picks between
+        # them rather than setting both — 1 means "stream, one block ahead",
+        # and anything larger means "keep that many resident, transfer
+        # synchronously", which is the right trade only on a machine whose
+        # PCIe link is fast relative to its compute. This one is not.
+        blocks = self._blocks_per_group
+        use_stream = blocks == 1
+        onload = torch.device(device)
+        offload = torch.device("cpu")
+        # Walked rather than named: `pipe.components` is what diffusers
+        # itself would have hooked, so a version that gains a component
+        # gets placed too instead of being left behind on the CPU with
+        # nothing to say so until its first forward. The non-modules in
+        # there (tokenizer, scheduler) hold no weights and are skipped.
+        for module in pipe.components.values():
+            if not isinstance(module, torch.nn.Module):
+                continue
+            apply_group_offloading(
+                module,
+                onload_device=onload,
+                offload_device=offload,
+                offload_type="block_level",
+                num_blocks_per_group=blocks,
+                use_stream=use_stream,
+                # Pin on the fly rather than pre-pinning every weight. The
+                # default pre-pins, which for ~47 GB of weights already
+                # resident in host RAM means asking the host for a second,
+                # unswappable copy of all of it. diffusers warns this "may
+                # counteract the benefits of using streams"; against the
+                # compute per block measured above, it does not come close
+                # to mattering.
+                low_cpu_mem_usage=True,
+            )
 
     def unload(self) -> None:
         self._pipe = None
@@ -581,12 +709,21 @@ class Wan22VaceDenoiseStep(Step):
         The two placements load() can choose need opposite handling, which
         is why _finish_load records which one it used:
 
-        * cpu_offload (the default): accelerate owns the placement. NOT
-          `.to("cpu")` — that moves the modules out from under the hooks
-          and desyncs them. `maybe_free_model_hooks()` is diffusers' own
-          answer: it offloads every component and then re-applies the
-          hooks, leaving the pipe ready for the next call, and is a silent
-          no-op if offload was never enabled.
+        * cpu_offload (the default): there is nothing to undo. Group
+          offloading offloads each group in its own post-forward, so by the
+          time `pipe()` returns every weight is already back on the CPU and
+          all that is left on the card is the caching allocator's blocks —
+          which is what empty_cache() below is for. Emphatically NOT
+          `.to("cpu")`, which would move the modules out from under the
+          hooks and desync their bookkeeping.
+
+          This used to call `maybe_free_model_hooks()`, which was the
+          model-level offload's answer (offload everything, then re-apply
+          accelerate's hooks so the pipe stays callable). Under group
+          offloading it is a silent no-op — it returns early unless
+          `_all_hooks` exists, and only `enable_model_cpu_offload()` sets
+          that — so keeping the call would have been a comment pretending
+          to be code.
         * plain .to(device): no hooks to respect, so move it to CPU here
           and let run() put it back.
         """
@@ -594,9 +731,7 @@ class Wan22VaceDenoiseStep(Step):
             return
         import torch
 
-        if self._cpu_offload:
-            self._pipe.maybe_free_model_hooks()
-        else:
+        if not self._cpu_offload:
             self._pipe.to("cpu")
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -771,9 +906,13 @@ class Wan22VaceDenoiseStep(Step):
 # plausibly dominate:
 #
 #   encode_prompt         the T5 text encoder — 11.36 GB — coming back
-#                         over PCIe under enable_model_cpu_offload before
-#                         it runs a ~1s forward. release_vram() evicted it
-#                         after the previous job, so every pass pays this.
+#                         over PCIe under cpu_offload before it runs a ~1s
+#                         forward. It is offloaded again the moment that
+#                         forward returns, so every pass pays this whole
+#                         figure; nothing about group offloading makes it
+#                         cheaper, because T5EncoderModel exposes no
+#                         ModuleList child to group and lands in the
+#                         all-or-nothing "unmatched" group.
 #   preprocess_conditions diffusers resizing all 81 video frames AND all
 #                         81 masks to width x height. CPU only, and the
 #                         second time the frames get walked (run() already
@@ -790,9 +929,12 @@ class Wan22VaceDenoiseStep(Step):
 #                         to prove it is cheap.
 #
 # The two 17.58 GB transformers are deliberately NOT in this list: under
-# cpu_offload they upload lazily on their first forward, which is inside
-# the loop. If the gap between "0%" and "1/6" is the long one, that upload
-# is what you are looking at, not anything timed here.
+# cpu_offload they upload lazily, a block at a time, inside the loop — and
+# under group offloading they do it again on every step rather than once
+# per expert turn. If the gap between "0%" and "1/6" is the long one, those
+# uploads are what you are looking at, not anything timed here; the same
+# gap on steps 2-6 says the transfer stopped hiding behind the compute,
+# which is what `offload_blocks_per_group` exists to trade against.
 _PRE_LOOP_PHASES = (
     "encode_prompt",
     "preprocess_conditions",

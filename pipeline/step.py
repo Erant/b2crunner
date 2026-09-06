@@ -305,8 +305,12 @@ class Step(ABC):
         exactly this — it returns everything to CPU and leaves the hooks
         able to bring it back. A plain `pipe.to(device)` load has no hooks,
         so it *does* need the manual `.to("cpu")`, and its run() then has
-        to put the pipeline back on the device before using it. Which of
-        the two applies is step-specific knowledge, which is why this hook
+        to put the pipeline back on the device before using it. diffusers'
+        group offloading is a third case and the easiest one: it puts each
+        group back on the CPU in that group's own post-forward, so there is
+        nothing left to release but the caching allocator's blocks and
+        `empty_cache()` alone is the whole implementation. Which of the
+        three applies is step-specific knowledge, which is why this hook
         is here rather than being guessed at by the dispatcher.
 
         Must be idempotent: it is called after every job, including one

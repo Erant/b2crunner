@@ -9,8 +9,8 @@ time `run()` returns while its ~47 GB of weights stay in host RAM.
 No torch and no diffusers here (neither is installed outside venv_wan22), so
 the pipe and torch are stubs. That is enough: what is being asserted is
 *which* call the step makes for each placement, and picking the wrong one is
-exactly the bug — `.to("cpu")` on an accelerate-offloaded pipeline moves the
-modules out from under its hooks and desyncs them.
+exactly the bug — `.to("cpu")` on an offloaded pipeline moves the modules out
+from under its hooks and desyncs them.
 """
 
 from __future__ import annotations
@@ -53,21 +53,27 @@ def _step():
 
 
 class TestReleaseVram(unittest.TestCase):
-    def test_offloaded_pipeline_uses_diffusers_own_hook_not_to_cpu(self):
-        """With cpu_offload (the default), accelerate owns placement.
+    def test_offloaded_pipeline_is_left_alone_and_only_the_cache_is_freed(self):
+        """With cpu_offload (the default), group offloading owns placement.
 
-        `maybe_free_model_hooks()` offloads every component AND re-applies
-        the hooks, so the pipe is left ready for the next call. Moving it
-        with `.to("cpu")` instead would desync those hooks.
+        Each group is already back on the CPU by the end of its own
+        post-forward, so the card holds nothing but the caching allocator's
+        blocks and there is no placement left to undo. Moving the pipe with
+        `.to("cpu")` would desync the offload hooks' bookkeeping, and
+        `maybe_free_model_hooks()` — which the model-level offload needed —
+        is a no-op here: it returns early unless `enable_model_cpu_offload()`
+        set `_all_hooks`.
         """
         step = _step()
         pipe = _FakePipe()
         step._pipe = pipe
         step._cpu_offload = True
-        with patch.dict(sys.modules, {"torch": _fake_torch()}):
+        fake_torch = _fake_torch()
+        with patch.dict(sys.modules, {"torch": fake_torch}):
             step.release_vram()
-        self.assertEqual(pipe.freed_hooks, 1)
         self.assertEqual(pipe.moved_to, [], "must not .to() an offloaded pipeline")
+        self.assertEqual(pipe.freed_hooks, 0, "no accelerate hooks on this placement")
+        self.assertEqual(fake_torch.cuda.empty_cache_calls, 1)
 
     def test_plain_device_placement_moves_to_cpu(self):
         step = _step()
@@ -123,3 +129,107 @@ class TestLoadParams(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class _FakeModule:
+    """Stands in for torch.nn.Module — see _fake_torch_with_nn below."""
+
+
+class _OffloadPipe:
+    """A pipeline whose `components` mixes weights with the things that aren't.
+
+    `tokenizer` and `scheduler` are what WanVACEPipeline actually puts in
+    there beside the four models, and they have no `.parameters()` for an
+    offload hook to place — walking them would raise rather than quietly do
+    nothing, which is why the step filters on nn.Module.
+    """
+
+    def __init__(self):
+        self.transformer = _FakeModule()
+        self.transformer_2 = _FakeModule()
+        self.text_encoder = _FakeModule()
+        self.vae = _FakeModule()
+        self.components = {
+            "text_encoder": self.text_encoder,
+            "tokenizer": object(),
+            "transformer": self.transformer,
+            "transformer_2": self.transformer_2,
+            "vae": self.vae,
+            "scheduler": object(),
+        }
+
+
+def _fake_torch_with_nn():
+    torch = _fake_torch()
+    torch.nn = types.SimpleNamespace(Module=_FakeModule)
+    torch.device = lambda spec: f"device({spec})"
+    return torch
+
+
+def _record_group_offloading():
+    """Stub `diffusers.hooks.apply_group_offloading`, capturing every call."""
+    calls = []
+    diffusers = types.ModuleType("diffusers")
+    hooks = types.ModuleType("diffusers.hooks")
+    hooks.apply_group_offloading = lambda module, **kwargs: calls.append((module, kwargs))
+    diffusers.hooks = hooks
+    return calls, {"diffusers": diffusers, "diffusers.hooks": hooks}
+
+
+class TestGroupOffload(unittest.TestCase):
+    """Which modules get placed, and on what terms.
+
+    The failure this guards against is silent in unit tests and fatal on a
+    pod: diffusers refuses to mix group offloading with the pipeline-level
+    `enable_model_cpu_offload()`, so every component has to be placed by
+    this one loop. One left out stays on the CPU — where `from_pretrained`
+    put it — and dies on its first forward, several minutes into a run.
+    """
+
+    def _apply(self, blocks_per_group=1):
+        step = _step()
+        step._blocks_per_group = blocks_per_group
+        pipe = _OffloadPipe()
+        calls, modules = _record_group_offloading()
+        modules["torch"] = _fake_torch_with_nn()
+        with patch.dict(sys.modules, modules):
+            step._apply_group_offload(pipe, "cuda")
+        return pipe, calls
+
+    def test_every_weight_bearing_component_is_placed(self):
+        pipe, calls = self._apply()
+        placed = {id(module) for module, _ in calls}
+        self.assertEqual(
+            placed,
+            {id(m) for m in (pipe.text_encoder, pipe.transformer,
+                             pipe.transformer_2, pipe.vae)},
+            "a component left unplaced stays on the CPU and fails mid-run",
+        )
+
+    def test_one_block_per_group_streams_so_the_transfer_can_hide(self):
+        _, calls = self._apply(blocks_per_group=1)
+        for _, kwargs in calls:
+            self.assertEqual(kwargs["num_blocks_per_group"], 1)
+            self.assertTrue(kwargs["use_stream"])
+            self.assertEqual(kwargs["offload_type"], "block_level")
+            self.assertEqual(kwargs["onload_device"], "device(cuda)")
+            self.assertEqual(kwargs["offload_device"], "device(cpu)")
+
+    def test_bigger_groups_drop_the_stream_rather_than_be_overridden(self):
+        """diffusers forces num_blocks_per_group back to 1 under a stream.
+
+        `_apply_group_offloading_block_level` does it with a warning, not an
+        error, so asking for both would silently get neither: the group size
+        would be ignored and the log line lost among the others. The step
+        picks one, and >1 means the caller wants blocks resident.
+        """
+        _, calls = self._apply(blocks_per_group=8)
+        for _, kwargs in calls:
+            self.assertEqual(kwargs["num_blocks_per_group"], 8)
+            self.assertFalse(kwargs["use_stream"])
+
+    def test_weights_are_pinned_on_the_fly_not_up_front(self):
+        """Pre-pinning would ask the host for a second copy of ~47 GB."""
+        _, calls = self._apply()
+        for _, kwargs in calls:
+            self.assertTrue(kwargs["low_cpu_mem_usage"])
