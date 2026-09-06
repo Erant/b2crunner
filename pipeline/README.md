@@ -1018,7 +1018,16 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   (a straight loss: -18% sharpness *and* -1.8 dB fidelity, and recomputing
   the maps does not rescue it), which took `export_normals` and its
   pre-upscale twin out of the workflow with it — stage 2 still supervises
-  on normals. Tests in `tests/test_brush_alignment.py`; the render-and-warp
+  on normals.
+  What a run leaves behind: each iteration logs the disagreement it
+  measured, the loop closes with the whole trajectory on one line (read it
+  against the reference loop's 1.02 -> 1.18 -> 1.26 -> 1.31 px — a RISING,
+  decelerating measurement is what a working loop looks like, since a
+  sharper render gives the flow more to lock onto), a p90 at or past the cap
+  warns, and `align_debug_dir` keeps every view's own figures as JSON plus
+  one warped frame beside the render it was warped onto, per iteration, in
+  the `debug/` bundle the result .zip already carries. Tests in
+  `tests/test_brush_alignment.py`; the render-and-warp
   seam was checked against the recorded 81-view run — 1.85 px mean flow,
   p90 3.98, inside the guide's measured range, at 8.6 s to render and 9.9 s
   to align the whole set on a 4070 Ti — but the loop itself has not run on

@@ -73,17 +73,40 @@ _local = threading.local()
 
 @dataclass(frozen=True)
 class AlignStats:
-    """How far the frames were asked to move, for the run log.
+    """How far one frame was asked to move, for the run log.
 
     `mean` and `p90` are of the smoothed field *before* the cap, over the
     subject only — i.e. the disagreement that was measured, not the part of
     it that was applied. That is the quantity the guide's §0 numbers are
     (1.7-3.6 px mean, p90 up to 8), so a run can be compared against them,
-    and a p90 pinned at the cap is the sign that the cap is binding.
+    and a p90 at or above the cap is the sign that the cap is binding.
     """
 
     mean: float
     p90: float
+
+
+@dataclass(frozen=True)
+class BatchStats:
+    """The same, for a whole batch, plus each frame's own.
+
+    `mean` and `p90` average the per-frame figures rather than pooling the
+    pixels, so one view of a much larger subject cannot dominate the number
+    the log reports.
+
+    **A rising figure across iterations is not drift.** Measured over the
+    reference loop's four iterations the mean went 1.02 -> 1.18 -> 1.26 ->
+    1.31 px while sharpness rose 21.1 -> 23.8 and fidelity rose with it: a
+    sharper render gives DIS more to lock onto, so it resolves a
+    displacement a blurry one under-reports. What the measured shape does
+    is decelerate (+0.155, +0.086, +0.047), the way the sharpness curve
+    does. `views` is what makes a single bad frame findable behind either
+    figure.
+    """
+
+    mean: float
+    p90: float
+    views: List[AlignStats]
 
 
 def _dis() -> "cv2.DISOpticalFlow":
@@ -217,8 +240,8 @@ def align_views(
     pool.
 
     Returns:
-        `(warped, stats)` — the warped frames in input order, and the mean
-        and p90 of the per-frame means.
+        `(warped, stats)` — the warped frames in input order, and a
+        `BatchStats` carrying the batch's figures and every frame's own.
     """
     if len(frames) != len(renders):
         raise ValueError(
@@ -226,7 +249,7 @@ def align_views(
             f"alignment matches each view to its own camera."
         )
     if not frames:
-        return [], AlignStats(0.0, 0.0)
+        return [], BatchStats(0.0, 0.0, [])
 
     grid = pixel_grid(frames[0].shape[:2])
 
@@ -244,6 +267,9 @@ def align_views(
         results = list(pool.map(one, zip(frames, renders)))
 
     warped = [result[0] for result in results]
-    means = [result[1].mean for result in results]
-    p90s = [result[1].p90 for result in results]
-    return warped, AlignStats(mean=float(np.mean(means)), p90=float(np.mean(p90s)))
+    views = [result[1] for result in results]
+    return warped, BatchStats(
+        mean=float(np.mean([view.mean for view in views])),
+        p90=float(np.mean([view.p90 for view in views])),
+        views=views,
+    )

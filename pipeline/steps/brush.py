@@ -114,6 +114,17 @@ Three things about it are load-bearing:
   straight loss on the deliverable anyway (guide §1: -18% sharpness *and*
   -1.8 dB fidelity).
 
+What a run leaves behind is a fourth thing worth naming, because these
+runs cost an hour of GPU and everything the loop touches is transient. Each
+iteration logs the disagreement it measured, and the loop closes with the
+whole trajectory on one line — read it against the reference loop's
+1.02 -> 1.18 -> 1.26 -> 1.31 px, since a RISING, decelerating measurement is
+what a working loop looks like (a sharper render gives the flow more to lock
+onto) and not the drift it reads like. A p90 at or past the cap warns, which
+is quiet on a healthy run. `align_debug_dir` keeps the rest: every view's
+own figures as JSON, plus one warped frame and the render it was warped onto
+per iteration, which is the only way to see a tear after the fact.
+
 `export_evidence` then measures against the *warped* frames, since that is
 what the finished splat was fitted to — deliberate, because `render_splat`'s
 confidence mode gates on those `ev_*` properties. Supporting views are not
@@ -182,6 +193,7 @@ supervision inactive, not an error.
 
 from __future__ import annotations
 
+import json
 import logging
 import tempfile
 import time
@@ -503,6 +515,44 @@ def write_loss_weights(colmap_dir: Path, image_names: Sequence[str],
     )
 
 
+def _write_align_debug(
+    directory: Path, history: List[Dict[str, Any]], image_names: Sequence[str],
+    warped: np.ndarray, render: np.ndarray, sample: str,
+) -> None:
+    """Keep what an alignment iteration did, for a run nobody can repeat cheaply.
+
+    A 30,000-iteration training plus four alignment passes is an hour of
+    GPU, and everything the loop touches is transient by construction: the
+    warped frames live in the COLMAP `TemporaryDirectory` and go with it,
+    and each iteration exports over the same .ply. So a splat that comes
+    back torn or soft has, by default, nothing behind it but log lines —
+    the same hole this module's crash reports exist to close, multiplied by
+    the number of iterations.
+
+    Two things land here. `alignment.json` is the whole history, rewritten
+    (not appended to) after every iteration so it is complete even if the
+    next one dies: per iteration the settings in force, the batch figures,
+    and every view's own — which is what makes ONE bad frame findable
+    behind a batch average that looks fine. Beside it, one view's warped
+    frame and the render it was warped onto, per iteration: a tear, a
+    doubled edge or a warp that ran away are visible in that pair and in
+    nothing else. The same view every time, so the iterations compare.
+
+    Cheap on purpose — a few hundred KB of JSON and two PNGs per iteration
+    against the 84 MB the .ply would cost. Written under `align_debug_dir`,
+    which the workflow points into the `debug/` bundle the result .zip
+    already carries.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    iteration = history[-1]["iteration"]
+    payload = {"views": list(image_names), "sample_view": sample,
+               "iterations": history}
+    (directory / "alignment.json").write_text(json.dumps(payload, indent=1))
+    stem = Path(sample).stem
+    cv2.imwrite(str(directory / f"iter{iteration}_{stem}_warped.png"), warped)
+    cv2.imwrite(str(directory / f"iter{iteration}_{stem}_render.png"), render)
+
+
 def _flow_schedule(values: Sequence[float], name: str, iters: int) -> List[float]:
     """One flow setting per alignment iteration, first to last.
 
@@ -685,6 +735,17 @@ class BrushStep(Step):
               "about hand POSE, which no image warp fixes — but 12 alongside a "
               "sigma of 3 is the one combination that read better",
               advanced=True),
+        Param("align_debug_dir", str, None,
+              "Keep each alignment iteration's evidence here: alignment.json (the "
+              "settings in force, the batch figures and EVERY view's own, rewritten "
+              "after each iteration so it survives a crash in the next one) plus one "
+              "view's warped frame and the render it was warped onto. Everything the "
+              "loop touches is otherwise transient — the warped frames go with the "
+              "COLMAP temp directory and each iteration exports over the same .ply — "
+              "so without this a torn or soft result has nothing behind it but log "
+              "lines, on a run that costs an hour of GPU. A few hundred KB and two "
+              "PNGs an iteration; empty writes nothing",
+              advanced=True),
         Param("match_alpha_weight", float, 0.1,
               "Weight of brush's L1 loss on a transparent view's alpha — how hard the "
               "silhouette is fitted to the mask. 0.1 is brush's own default; 0.5 "
@@ -812,6 +873,7 @@ class BrushStep(Step):
         align_steps = params["align_steps"]
         align_flow_sigma = params["align_flow_sigma"]
         align_flow_cap = params["align_flow_cap"]
+        align_debug_dir = params["align_debug_dir"]
         growth_grad_threshold = params["growth_grad_threshold"]
         growth_select_fraction = params["growth_select_fraction"]
         growth_stop_iter = params["growth_stop_iter"]
@@ -1042,6 +1104,7 @@ class BrushStep(Step):
                         "the alignment warps the %d training views only",
                         len(support.image_names), len(image_names),
                     )
+                history: List[Dict[str, Any]] = []
                 for iteration in range(1, align_iters + 1):
                     sigma = align_flow_sigma[iteration - 1]
                     cap = align_flow_cap[iteration - 1]
@@ -1052,6 +1115,20 @@ class BrushStep(Step):
                         training_frames(), renders, sigma=sigma, cap=cap,
                     )
                     write_frames(frames)
+                    history.append({
+                        "iteration": iteration, "sigma": sigma, "cap": cap,
+                        "align_steps": align_steps,
+                        "mean": stats.mean, "p90": stats.p90,
+                        "per_view": [
+                            {"name": name, "mean": view.mean, "p90": view.p90}
+                            for name, view in zip(image_names, stats.views)
+                        ],
+                    })
+                    if align_debug_dir:
+                        _write_align_debug(
+                            Path(align_debug_dir), history, image_names,
+                            frames[0], renders[0], image_names[0],
+                        )
                     # Both sets are on disk now, and at 81 views of
                     # 1080x1920 they are well over a gigabyte between them —
                     # not something to hold through a training run for no
@@ -1065,12 +1142,49 @@ class BrushStep(Step):
                         iteration, align_iters, stats.mean, stats.p90,
                         sigma, cap, align_steps,
                     )
+                    if stats.p90 >= cap:
+                        # Mechanical, and quiet on a healthy run: the
+                        # reference loop measured a p90 of 2.5-3.3 px
+                        # against a cap of 6. At or above it, a tenth of
+                        # the average frame wanted to move further than
+                        # the clamp allows, so what the iteration applied
+                        # is the cap rather than the measurement.
+                        logger.warning(
+                            "brush: alignment %d/%d is CAP-BOUND — the measured "
+                            "disagreement (p90 %.2f px) is at or past the %.1f px "
+                            "cap, so the warp is limited by the clamp and not by "
+                            "the data. Raising the cap alone was measured not to "
+                            "help hands (their residual is pose, not texture); a "
+                            "p90 this high on the BODY is worth looking at, and "
+                            "align_debug_dir keeps the frame to look at it with.",
+                            iteration, align_iters, stats.p90, cap,
+                        )
                     _link_init_ply(colmap_dir, ply_path)
                     self._run_brush(
                         command(total=align_steps, refine=_NO_REFINE,
                                 normal_start=0, normal_weight=0.0, growth_stop=0),
                         ply_path, colmap_dir=colmap_dir,
                     )
+
+                # The trajectory in one line, because the per-iteration
+                # lines are scattered through several thousand lines of
+                # training output and the SHAPE is the thing worth seeing.
+                # Read it against the reference loop, which went
+                # 1.02 -> 1.18 -> 1.26 -> 1.31 px while sharpness rose
+                # 21.1 -> 23.8: a rising, DECELERATING measurement is what
+                # a working loop looks like — a sharper render gives DIS
+                # more to lock onto, so it resolves a displacement the
+                # blurry cold start under-reports. What that shape does not
+                # do is accelerate, and it does not run at the cap.
+                logger.info(
+                    "brush: alignment finished — measured disagreement %s px "
+                    "across %d iteration(s) (reference: 1.02 -> 1.18 -> 1.26 -> "
+                    "1.31, rising and decelerating, while sharpness rose)%s",
+                    " -> ".join(f"{entry['mean']:.2f}" for entry in history),
+                    align_iters,
+                    f"; per-view figures and a sample frame in {align_debug_dir}"
+                    if align_debug_dir else "",
+                )
 
             # The polish: the same training resumed from its own export with
             # growth off, at full mean-LR rather than the decayed tail of the

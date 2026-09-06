@@ -2472,6 +2472,14 @@ steps:
       # ever tuned is a finer field once the render it aligns against has
       # converged: [6, 6, 3, 3] with a cap of [6, 6, 12, 12].
       align_iters: 4
+      # An hour of GPU per run, and everything the loop touches is
+      # transient — the warped frames go with brush's COLMAP temp directory
+      # and every iteration exports over the same .ply. This keeps each
+      # iteration's per-view flow figures and one warped frame beside the
+      # render it was warped onto, in the debug/ bundle the result .zip
+      # already carries, so a soft or torn splat has something behind it
+      # besides log lines. A few hundred KB and two PNGs an iteration.
+      align_debug_dir: ${globals.output_root}/debug/alignment
       export_dir: ${globals.output_root}/ply
       export_name: scene.ply
     outputs:

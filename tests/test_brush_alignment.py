@@ -199,7 +199,9 @@ class _Loop:
                 out = frame.copy()
                 out[0, 0, 0] = 100 + len(self.aligned)
                 stamped.append(out)
-            return stamped, align.AlignStats(1.0, 2.0)
+            views = [align.AlignStats(1.0 + i / 10, 2.0 + i / 10)
+                     for i in range(len(frames))]
+            return stamped, align.BatchStats(1.0, 2.0, views)
 
         step._run_brush = fake_run_brush
         step._render_training_views = fake_render
@@ -400,6 +402,124 @@ class TestTheGrowthKnobs(unittest.TestCase):
         runs = _Loop(align_iters=1, growth_stop_iter=24000).runs
         self.assertEqual(_value(runs[0]["cmd"], "--growth-stop-iter"), "24000")
         self.assertEqual(_value(runs[1]["cmd"], "--growth-stop-iter"), "0")
+
+
+class TestWhatTheRunLeavesBehind(unittest.TestCase):
+    """A 30,000-iteration training plus four alignment passes is an hour of
+    GPU, and everything the loop touches is transient: the warped frames go
+    with the COLMAP temp directory and each iteration exports over the same
+    .ply. What is logged and what is kept is therefore all a bad result has
+    behind it."""
+
+    def _logs(self, **overrides):
+        with self.assertLogs("pipeline.steps.brush", level="INFO") as caught:
+            loop = _Loop(**overrides)
+        return loop, caught.output
+
+    def test_every_iteration_reports_what_it_measured(self):
+        _, logs = self._logs(align_iters=2, align_steps=1500)
+        lines = [line for line in logs if "alignment 1/2" in line
+                 or "alignment 2/2" in line]
+        self.assertEqual(len(lines), 2)
+        for line in lines:
+            self.assertIn("1.00 px mean", line)
+            self.assertIn("2.00 px p90", line)
+            self.assertIn("sigma 6.0", line)
+            self.assertIn("1500 steps", line)
+
+    def test_the_loop_closes_with_the_whole_trajectory(self):
+        """The shape is the thing worth seeing, and the per-iteration lines
+        are scattered through thousands of lines of training output."""
+        _, logs = self._logs(align_iters=3)
+        closing = [line for line in logs if "alignment finished" in line]
+        self.assertEqual(len(closing), 1)
+        self.assertIn("1.00 -> 1.00 -> 1.00", closing[0])
+        # The reference trajectory rides along, since a RISING measurement
+        # is what a working loop looks like and reads like drift otherwise.
+        self.assertIn("1.02 -> 1.18 -> 1.26 -> 1.31", closing[0])
+
+    def test_a_cap_bound_iteration_warns(self):
+        """Mechanical and quiet on a healthy run: the reference loop
+        measured a p90 of 2.5-3.3 px against a cap of 6."""
+        with self.assertLogs("pipeline.steps.brush", level="WARNING") as caught:
+            _Loop(align_iters=1, align_flow_cap=[2.0])
+        self.assertIn("CAP-BOUND", caught.output[0])
+        self.assertIn("2.0 px cap", caught.output[0])
+
+    def test_a_healthy_run_does_not_warn(self):
+        _, logs = self._logs(align_iters=2)
+        self.assertEqual([line for line in logs if "WARNING" in line], [])
+
+    def test_nothing_is_kept_unless_a_directory_is_named(self):
+        self.assertIsNone(
+            get_step_class("brush").declared_params()["align_debug_dir"].default)
+
+
+class TestTheAlignmentDebugDirectory(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name) / "alignment"
+        self.loop = _Loop(align_iters=3, align_debug_dir=str(self.dir))
+        self.addCleanup(self.tmp.cleanup)
+
+    def test_it_carries_every_view_s_own_figures(self):
+        """A batch average that looks fine can hide one bad frame."""
+        import json
+
+        record = json.loads((self.dir / "alignment.json").read_text())
+        self.assertEqual(record["views"], ["frame_00001_.png", "frame_00002_.png"])
+        self.assertEqual(len(record["iterations"]), 3)
+        first = record["iterations"][0]
+        self.assertEqual(first["sigma"], 6.0)
+        self.assertEqual(first["cap"], 6.0)
+        self.assertEqual([view["name"] for view in first["per_view"]],
+                         ["frame_00001_.png", "frame_00002_.png"])
+        self.assertEqual([view["mean"] for view in first["per_view"]], [1.0, 1.1])
+
+    def test_it_is_rewritten_each_iteration_so_a_crash_keeps_the_rest(self):
+        """Complete after every iteration, not appended at the end — the
+        iteration that dies is the one worth having the history for."""
+        import json
+
+        step_class = get_step_class("brush")
+        directory = Path(self.tmp.name) / "partial"
+        step = step_class()
+        calls = []
+
+        def die_on_the_second(cmd, ply_path, colmap_dir=None):
+            calls.append(cmd)
+            Path(ply_path).write_text("ply\n")
+            if len(calls) == 3:
+                raise RuntimeError("brush fell over")
+
+        step._run_brush = die_on_the_second
+        step._render_training_views = lambda ply, cams, names, *, render_path: [
+            np.full((c.height, c.width, 3), 128, np.uint8) for c in cams]
+        with tempfile.TemporaryDirectory() as export:
+            params = step_class.resolve_params({
+                "export_dir": export, "align_iters": 4,
+                "align_debug_dir": str(directory)})
+            with self.assertRaises(RuntimeError):
+                # The REAL warp here, not the fake the other tests patch in,
+                # so 16 px frames: DIS refuses anything under 12.
+                step.run(_inputs(size=16), params)
+
+        record = json.loads((directory / "alignment.json").read_text())
+        self.assertEqual([one["iteration"] for one in record["iterations"]], [1, 2])
+
+    def test_it_keeps_a_warped_frame_beside_the_render_it_was_warped_onto(self):
+        """The pair is the only way a tear or a runaway warp is visible
+        after the fact; the same view every iteration, so they compare."""
+        for iteration in (1, 2, 3):
+            warped = self.dir / f"iter{iteration}_frame_00001__warped.png"
+            render = self.dir / f"iter{iteration}_frame_00001__render.png"
+            self.assertTrue(warped.is_file(), warped)
+            self.assertTrue(render.is_file(), render)
+        # The warped frame is the one that went to the export, not a copy of
+        # the original: the stamp the fake writes is iteration-specific.
+        kept = cv2.imread(str(self.dir / "iter2_frame_00001__warped.png"),
+                          cv2.IMREAD_UNCHANGED)
+        self.assertEqual(kept[0, 0, 0], 102)
 
 
 if __name__ == "__main__":
