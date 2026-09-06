@@ -21,9 +21,11 @@ import unittest
 import numpy as np
 from body2colmap.camera import Camera
 
+from pipeline.steps import refine_cameras
 from pipeline.steps.refine_cameras import (
-    RefineCamerasStep, _align_to, _check, _movement, _quaternion_to_rotation,
-    _read_images_txt, _remove_common_mode, _residual_rotation, onnx_options_for,
+    ONNX_MODELS, RefineCamerasStep, _align_to, _check, ensure_onnx_model,
+    _movement, _quaternion_to_rotation, _read_images_txt, _remove_common_mode,
+    _residual_rotation, onnx_options_for,
 )
 
 TARGET = np.array([0.0, 0.9, 0.0])
@@ -349,6 +351,70 @@ class TestOnnxModelSelection(unittest.TestCase):
 
     def test_sift_extraction_needs_no_onnx_model(self):
         self.assertEqual(onnx_options_for("SIFT", "SIFT"), [])
+
+
+class TestOnnxDownloadIsConcurrencySafe(unittest.TestCase):
+    """Two downloaders at once, which a pod really does produce.
+
+    The boot prefetch and a worker's `wait_until_ready` fallback both call
+    `ensure_onnx_model`, and so do two workers reaching `refine_cameras`
+    together. When the scratch file was named after the model, the pair
+    fought over one path — the winner renamed it away, and the loser died
+    with `FileNotFoundError: aliked-lightglue.onnx.partial ->
+    aliked-lightglue.onnx` on a pod, on a download that had gone fine.
+    """
+
+    OPTION = "Test.model_path"
+    PAYLOAD = b"an onnx graph, for testing purposes"
+
+    def _download_twice(self, directory):
+        """Both threads inside `urlretrieve` at once, then both racing out."""
+        import hashlib
+        import threading
+        import urllib.request
+        from pathlib import Path
+        from unittest import mock
+
+        digest = hashlib.sha256(self.PAYLOAD).hexdigest()
+        entry = {self.OPTION: ("test.onnx", "https://example.invalid/test.onnx", digest)}
+        barrier = threading.Barrier(2, timeout=10)
+        errors = []
+
+        def fake_urlretrieve(url, filename):
+            Path(filename).write_bytes(self.PAYLOAD)
+            barrier.wait()
+            return filename, None
+
+        def download():
+            try:
+                ensure_onnx_model(self.OPTION)
+            except BaseException as exc:      # noqa: BLE001 — reported, not raised
+                errors.append(exc)
+
+        with mock.patch.dict(ONNX_MODELS, entry), \
+                mock.patch.object(refine_cameras, "_model_path",
+                                  lambda name: directory / name), \
+                mock.patch.object(urllib.request, "urlretrieve", fake_urlretrieve):
+            threads = [threading.Thread(target=download) for _ in range(2)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=20)
+        return errors
+
+    def test_two_downloads_at_once_both_succeed(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            errors = self._download_twice(directory)
+
+            self.assertEqual(errors, [])
+            self.assertEqual((directory / "test.onnx").read_bytes(), self.PAYLOAD)
+            # And nothing half-written left behind for a later run to find.
+            self.assertEqual(sorted(p.name for p in directory.iterdir()),
+                             ["test.onnx"])
 
 
 class TestRunDrivesRefine(unittest.TestCase):

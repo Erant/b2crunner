@@ -135,6 +135,7 @@ re-measured on the helical deliverable.
 from __future__ import annotations
 
 import logging
+import os
 import re
 import shutil
 import tempfile
@@ -245,7 +246,20 @@ def ensure_onnx_model(option: str) -> Path:
     # Into a sibling temp file first: a download interrupted halfway
     # through leaves a plausible-looking file at the real path otherwise,
     # and every later run then skips the fetch and fails inside ONNX.
-    scratch = path.with_suffix(path.suffix + ".partial")
+    #
+    # A name unique to this download, not one derived from the filename,
+    # because two processes do arrive here together: the boot prefetch and
+    # a worker's `wait_until_ready` fallback, or two workers reaching
+    # `refine_cameras` at once. On a shared scratch name they fight over
+    # one file — the first to finish renames it away, or unlinks it in its
+    # `finally`, and the second's own `replace` dies with FileNotFoundError
+    # on a download that was perfectly good. Unique names let both run to
+    # completion; `replace` is atomic and the bytes are digest-checked, so
+    # whoever lands second overwrites the first with the same file.
+    fd, name = tempfile.mkstemp(dir=path.parent, prefix=filename + ".",
+                                suffix=".partial")
+    os.close(fd)
+    scratch = Path(name)
     try:
         urllib.request.urlretrieve(url, str(scratch))
         digest = hashlib.sha256(scratch.read_bytes()).hexdigest()

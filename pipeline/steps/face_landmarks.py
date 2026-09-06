@@ -69,6 +69,8 @@ test run down.
 from __future__ import annotations
 
 import logging
+import os
+import tempfile
 import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -405,12 +407,28 @@ class FaceLandmarkMaskStep(Step):
 
 
 def _ensure_model(url: str, path: Path) -> Path:
-    """Download a MediaPipe model file unless it is already cached."""
+    """Download a MediaPipe model file unless it is already cached.
+
+    Into a uniquely-named sibling and then `replace`, for the reason
+    refine_cameras' `ensure_onnx_model` does the same: the prefetch and a
+    worker can be here at once, and a download written straight to the
+    cached path is visible to the other one — and to every later run —
+    while it is still half a file. `replace` is atomic, so what appears at
+    `path` is either absent or whole.
+    """
     if path.exists():
         return path
     path.parent.mkdir(parents=True, exist_ok=True)
     logger.info("detect_face_landmarks: downloading %s", path.name)
-    urllib.request.urlretrieve(url, str(path))
+    fd, name = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".",
+                                suffix=".partial")
+    os.close(fd)
+    scratch = Path(name)
+    try:
+        urllib.request.urlretrieve(url, str(scratch))
+        scratch.replace(path)
+    finally:
+        scratch.unlink(missing_ok=True)
     return path
 
 
