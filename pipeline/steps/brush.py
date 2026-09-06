@@ -66,6 +66,17 @@ both trainings — an intermediate splat that carries its evidence needs no
 second pass over the dataset to be gated, and the final .ply is a
 deliverable that is more useful with it than without.
 
+**The polish** (`polish_steps`, off by default) is a second invocation of
+brush on the same export, warm-started from the first run's .ply through an
+`init.ply` symlink, with growth off (`--growth-stop-iter 0`, `--refine-every`
+past the run's length) and the normal loss on from step 0. It exports over
+the first .ply, so nothing downstream has to know it happened. What it buys
+is not iterations: measured on the intermediate splat (2026-09-05,
+docs/intermediate-splat-guide.md) 9000 of these moved band-limited face
+sharpness from 143 to 161 where 9000 more iterations of one cold run reached
+137 — the restart at full mean learning rate is the effect. It costs one
+dataset reload and, on a 4070 Ti, about 2 minutes.
+
 **Supporting views** (`support_*` inputs) are views the training should
 fit where they can be trusted and *ignore* everywhere else — the
 confidence-gated splat re-renders are the case this exists for. Their
@@ -162,6 +173,11 @@ _COLMAP_MODEL_FILES = ("cameras.txt", "images.txt", "points3D.txt")
 _SUPPORT_NAME = "support_{:05d}.png"
 
 _NORMALIZE_CHOICES = ("auto", "on", "off")
+
+# What `--refine-every` means when the polish run wants no refinement at all.
+# brush's clap declaration takes a u32 in 1.. — there is no 0 for "never" —
+# so the interval is simply put past the run's own length.
+_NO_REFINE = 1_000_000
 
 # brush's own enum, and the whole list clap will accept. `ignore` was
 # declared here for a long time and is not one of them: it never ran only
@@ -437,6 +453,22 @@ def write_loss_weights(colmap_dir: Path, image_names: Sequence[str],
     )
 
 
+def _link_init_ply(colmap_dir: Path, ply_path: Path) -> None:
+    """Point the export's `init.ply` at a trained splat, for a warm start.
+
+    brush initialises from the `init.ply` of the dataset it is handed (its
+    `formats/mod.rs` prefers that name over any other .ply present), so
+    this — not a flag — is how a second invocation resumes from the first
+    one's export. A symlink rather than a copy: the .ply is hundreds of MB,
+    it is read once at load and the polish run's own export goes to
+    `export_dir`, not here.
+    """
+    init = colmap_dir / "init.ply"
+    if init.is_symlink() or init.exists():
+        init.unlink()
+    init.symlink_to(ply_path.absolute())
+
+
 def _sidecar_name(filename: str) -> str:
     """The `masks/` (or `normals/`) name brush will match to `filename`.
 
@@ -508,6 +540,21 @@ class BrushStep(Step):
         Param("max_resolution", int, 1920, "Longest edge brush trains at", minimum=1),
         Param("max_splats", int, 10_000_000, "Cap on the number of Gaussians", minimum=1),
         Param("refine_every", int, 200, "Densify/prune interval, in steps", minimum=1),
+        Param("polish_steps", int, 0,
+              "Iterations of a second, growth-off warm start after the main training, "
+              "exported over the same .ply. Measured 2026-09-05 on the intermediate "
+              "splat: 9000 of these moved band-limited face sharpness 143 -> 161 and "
+              "every other part with it, where 9000 extra iterations of ONE cold run "
+              "gave a third of that — the restart at full mean-LR is the effect, not "
+              "the iteration count. 0 is off, which is what a training nobody has "
+              "measured it on should stay at (docs/intermediate-splat-guide.md)",
+              minimum=0),
+        Param("match_alpha_weight", float, 0.1,
+              "Weight of brush's L1 loss on a transparent view's alpha — how hard the "
+              "silhouette is fitted to the mask. 0.1 is brush's own default; 0.5 "
+              "measured 17% fewer dark wedges (dark splats in the concave gaps a flat "
+              "orbit never sees into) at no cost in sharpness and -0.003 IoU",
+              minimum=0.0, advanced=True),
         Param("alpha_mode", str, "auto",
               "Force brush to read EVERY view's alpha channel this way, flattening any "
               "mix. auto (the default) lets brush decide per view from the export's "
@@ -595,6 +642,8 @@ class BrushStep(Step):
         max_resolution = params["max_resolution"]
         max_splats = params["max_splats"]
         refine_every = params["refine_every"]
+        polish_steps = params["polish_steps"]
+        match_alpha_weight = params["match_alpha_weight"]
         alpha_mode = _forced_alpha_mode(params["alpha_mode"])
         # Resolved here rather than at the argv, so a mistyped setting is a
         # refusal before several hundred MB of frames are written out.
@@ -680,60 +729,101 @@ class BrushStep(Step):
 
             ply_output_name = params["export_name"]
             ply_path = out_root / ply_output_name
-            cmd = [
-                brush_path,
-                str(colmap_dir),
-                "--total-train-iters", str(total_steps),
-                "--sh-degree", str(sh_degree),
-                "--export-path", str(out_root.absolute()),
-                "--export-name", ply_output_name,
-                "--export-every", str(total_steps),
-                "--max-resolution", str(max_resolution),
-                "--max-splats", str(max_splats),
-                "--refine-every", str(refine_every),
-            ]
-            if with_viewer:
-                cmd.append("--with-viewer")
-            # Not passed unless a caller explicitly asked for one:
-            # --alpha-mode is a global force, so passing it is what
-            # *prevents* the mixed run the layout above sets up. What the
-            # old unconditional `--alpha-mode transparent` bought was
-            # nothing — an RGBA frame with no sidecar already loads as
-            # transparent — which is why dropping it leaves every shipped
-            # workflow training on byte-identical data.
-            if alpha_mode:
-                cmd.extend(["--alpha-mode", alpha_mode])
-                if support:
-                    logger.warning(
-                        "brush: alpha_mode=%s forces all %d views to that mode, "
-                        "including the %d supporting view(s) whose masks/ sidecars "
-                        "would otherwise have made them masked. Leave alpha_mode "
-                        "at auto to train on the mix.",
-                        alpha_mode, len(image_names) + len(support.image_names),
-                        len(support.image_names),
-                    )
-            if normalize_masked_loss:
-                cmd.append("--normalize-masked-loss")
-            if normal_maps is not None:
-                cmd.extend([
-                    "--normal-loss-weight", str(normal_loss_strength),
-                    "--normal-loss-start-iter", str(normal_loss_step_start),
-                    "--normal-loss-every", str(normal_loss_every),
-                ])
-            # The evidence block. Only the LOD-0 final export carries it,
-            # which is this step's case (no --lod-levels is passed, so brush
-            # exports one level). --evidence-prune-inmask implies the
-            # measurement, but --export-evidence is passed anyway when both
-            # are set: the flag is what says the properties end up IN the
-            # .ply, and the two are independent on the brush side.
-            if export_evidence:
-                cmd.append("--export-evidence")
-            if evidence_prune_inmask is not None:
-                cmd.extend(["--evidence-prune-inmask", str(evidence_prune_inmask)])
-            if evidence_normal_weight > 0:
-                cmd.extend(["--evidence-normal-weight", str(evidence_normal_weight)])
 
-            self._run_brush(cmd, ply_path, colmap_dir=colmap_dir)
+            def command(*, total: int, refine: int, normal_start: int,
+                        growth_stop: Optional[int] = None) -> List[str]:
+                """One brush invocation's argv.
+
+                A function rather than a literal because the polish run
+                below is the same command with four values changed, and
+                every one of them is a flag brush would REFUSE TWICE — clap
+                rejects a repeated `--refine-every`, so a polish argv built
+                by appending overrides to this list would not run at all.
+                """
+                cmd = [
+                    brush_path,
+                    str(colmap_dir),
+                    "--total-train-iters", str(total),
+                    "--sh-degree", str(sh_degree),
+                    "--export-path", str(out_root.absolute()),
+                    "--export-name", ply_output_name,
+                    "--export-every", str(total),
+                    "--max-resolution", str(max_resolution),
+                    "--max-splats", str(max_splats),
+                    "--refine-every", str(refine),
+                    "--match-alpha-weight", str(match_alpha_weight),
+                ]
+                if growth_stop is not None:
+                    cmd.extend(["--growth-stop-iter", str(growth_stop)])
+                if with_viewer:
+                    cmd.append("--with-viewer")
+                # Not passed unless a caller explicitly asked for one:
+                # --alpha-mode is a global force, so passing it is what
+                # *prevents* the mixed run the layout above sets up. What the
+                # old unconditional `--alpha-mode transparent` bought was
+                # nothing — an RGBA frame with no sidecar already loads as
+                # transparent — which is why dropping it leaves every shipped
+                # workflow training on byte-identical data.
+                if alpha_mode:
+                    cmd.extend(["--alpha-mode", alpha_mode])
+                if normalize_masked_loss:
+                    cmd.append("--normalize-masked-loss")
+                if normal_maps is not None:
+                    cmd.extend([
+                        "--normal-loss-weight", str(normal_loss_strength),
+                        "--normal-loss-start-iter", str(normal_start),
+                        "--normal-loss-every", str(normal_loss_every),
+                    ])
+                # The evidence block. Only the LOD-0 final export carries it,
+                # which is this step's case (no --lod-levels is passed, so brush
+                # exports one level). --evidence-prune-inmask implies the
+                # measurement, but --export-evidence is passed anyway when both
+                # are set: the flag is what says the properties end up IN the
+                # .ply, and the two are independent on the brush side.
+                if export_evidence:
+                    cmd.append("--export-evidence")
+                if evidence_prune_inmask is not None:
+                    cmd.extend(["--evidence-prune-inmask", str(evidence_prune_inmask)])
+                if evidence_normal_weight > 0:
+                    cmd.extend(["--evidence-normal-weight", str(evidence_normal_weight)])
+                return cmd
+
+            if alpha_mode and support:
+                logger.warning(
+                    "brush: alpha_mode=%s forces all %d views to that mode, "
+                    "including the %d supporting view(s) whose masks/ sidecars "
+                    "would otherwise have made them masked. Leave alpha_mode "
+                    "at auto to train on the mix.",
+                    alpha_mode, len(image_names) + len(support.image_names),
+                    len(support.image_names),
+                )
+
+            self._run_brush(
+                command(total=total_steps, refine=refine_every,
+                        normal_start=normal_loss_step_start),
+                ply_path, colmap_dir=colmap_dir,
+            )
+
+            # The polish: the same training resumed from its own export with
+            # growth off, at full mean-LR rather than the decayed tail of the
+            # first run — which is the whole effect (a plain longer cold run
+            # gives a third of it). brush picks the initial splats up from an
+            # `init.ply` sitting in the dataset directory, so the link below
+            # is the entire handover; the export path is unchanged, so the
+            # polished .ply lands over the first one and every reader
+            # downstream — including the evidence the confidence render gates
+            # on — sees only the finished splat.
+            if polish_steps > 0:
+                _link_init_ply(colmap_dir, ply_path)
+                logger.info(
+                    "brush: polishing for %d more iterations from %s, growth off",
+                    polish_steps, ply_path.name,
+                )
+                self._run_brush(
+                    command(total=polish_steps, refine=_NO_REFINE,
+                            normal_start=0, growth_stop=0),
+                    ply_path, colmap_dir=colmap_dir,
+                )
 
         if not ply_path.exists():
             raise RuntimeError(

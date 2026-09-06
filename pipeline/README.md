@@ -624,16 +624,25 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   **Update (2026-08-30):** superseded, and kept anyway. `render_splat`'s
   `confidence` mode makes the same fringe decision properly — once, in 3-D,
   from each Gaussian's multi-view evidence rather than from accumulated
-  alpha per pixel per frame — so all three workflows now run this step as
-  `mode: passthrough` behind a gated render, and running the old alpha cut
-  on top of one would be wrong rather than merely redundant (it would
-  re-composite the grey frames over black and smear the gate's soft edge).
-  Passthrough is not a no-op: the step's *other* job, replacing the
-  per-pixel splat alpha in `dataset.masks` with the per-frame all-1.0 VACE
-  batch, is still what `denoise_pass2` reads and `inject_anchor` writes its
-  0.0 into — which is also why the step stays, along with the ordering it
-  anchors and the `mode: threshold` path that keeps the recorded run
-  reproducible for an A/B. See `docs/spatial-reinforcement.md`.
+  alpha per pixel per frame — so the shipped workflow runs this step behind
+  a gated render with the cut turned off, and running the old alpha cut on
+  top of one would be wrong rather than merely redundant (it would
+  re-composite the frames and smear the gate's soft edge). That is not a
+  no-op: the step's *other* job, replacing the per-pixel mask in
+  `dataset.masks` with the per-frame all-1.0 VACE batch, is still what
+  `denoise_pass2` reads and `inject_anchor` writes its 0.0 into — which is
+  also why the step stays, along with the ordering it anchors and the
+  `mode: threshold` path that keeps the recorded run reproducible for an
+  A/B.
+  **Update (2026-09-05):** `mode: composite`, which is the third mode and
+  the one now shipped. The re-render culls to BLACK and the matte that
+  decides what is subject comes from `rmbg` run over those frames rather
+  than from the render's own alpha, so what is left for this step is the
+  compositing the threshold path used to end with: the subject laid over
+  `bg_color` (0.5 grey, the colour the warped anchor photo is bordered
+  with) with a soft edge, no threshold and no bilateral filter.
+  `mode: passthrough` is the same step with the compositing dropped too.
+  See `docs/spatial-reinforcement.md`.
 - `views` (`drop_views`/`filter_fov`/`rotate_views`/`replace_views`/
   `merge_datasets`) — verified against `cyber_6f`'s real 81-camera helical
   orbit rather than synthetic data, which matters because the
@@ -933,16 +942,18 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   (`export_evidence`), replacing the `mask_splat` stage that used to
   threshold rendered alpha afterwards. It changes the binary's output
   contract, which is the part to be careful with: the RGB is composited
-  over `cull_color` (0.5 grey) rather than `bg_color`, `--background` is
-  ignored and therefore not passed, and the alpha that comes back is the
-  gate `smoothstep(gate_lo, gate_hi, C)` rather than accumulated opacity.
+  over `cull_color` (0.5 grey by default; `fast_helical_native` sets black)
+  rather than `bg_color`, `--background` is ignored and therefore not
+  passed, and the alpha that comes back is the gate
+  `smoothstep(gate_lo, gate_hi, C)` rather than accumulated opacity.
   Downstream nothing changes — foreground is still 1 — but a transparent
-  pixel is grey, not black, so the mode must stay OFF for any render that
+  pixel is the cull colour, so the mode must stay OFF for any render that
   feeds `select_support_views` (which enforces premultiplied-over-black and
   refuses it; the `+splat` compositing passes its own background and cannot
   be got wrong this way). `confidence_sidecar` keeps the raw per-pixel confidence
   under the log dir for tuning; `conf_args` passes `--conf-*` flags
-  through verbatim. Argv-level tests only (`tests/test_splat.py`,
+  through verbatim — `fast_helical_native` sends `--conf-tau 0.3
+  --conf-angle-margin 45`, both measured (`docs/intermediate-splat-guide.md`). Argv-level tests only (`tests/test_splat.py`,
   `tests/test_workflows.py`) — the gating itself is the renderer's, and
   has not been through this pipeline on a pod.
 

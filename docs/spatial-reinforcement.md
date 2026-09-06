@@ -4,12 +4,23 @@
 > prepare has happened: the decision now lives in the rasteriser, where
 > the per-Gaussian evidence is. `brush --export-evidence` writes it into
 > the .ply and `brush-splat-render --confidence` gates on it, so
-> `rerender_splat` sets `confidence: true` and `mask_splat_fringes` runs
-> as `mode: passthrough` in all three workflows. **Sections 1-3 below
-> describe the OLD pair**, which is still reachable (`mode: threshold`
-> plus `confidence: false`) and still the only thing verified against a
+> `rerender_splat` sets `confidence: true` and `mask_splat_fringes` no
+> longer thresholds anything. **Sections 1-3 below describe the OLD
+> pair**, which is still reachable (`mode: threshold` plus
+> `confidence: false`) and still the only thing verified against a
 > recorded run. What replaced it, and what changed downstream, is at the
 > end under "What the confidence gate does instead".
+>
+> **And amended 2026-09-05**, after the gate was measured on a real run
+> (`docs/intermediate-splat-guide.md`): the evidence itself was wrong —
+> two bugs in the in-mask denominator had it culling 30% of the subject,
+> including 69% of the face — and with brush `a9405881` and
+> `--conf-tau 0.3 --conf-angle-margin 45` it culls 6.4%. The colour
+> arrangement changed with it: the render is made on **black** again, the
+> matte that cuts the background out is **rmbg's** rather than the gate's
+> alpha, and `mask_splat_fringes` composites over 0.5 grey (`mode:
+> composite`). The gate says what is missing; rmbg says what is subject.
+> Section 3 below is the current description.
 
 Between training a splat and handing its re-render to the second denoise
 pass, the pipeline throws away every pixel the splat is not confident
@@ -24,10 +35,14 @@ document is what has to be reproduced before that move.
 ## Where it sits
 
 ```
-denoise_pass1 -> colmap_export -> brush (train, --export-evidence)
+denoise_pass1 -> colmap_export -> brush (train, --export-evidence,
+                                          + a growth-off polish)
               -> rerender_splat   (render_splat, helical, 81 frames,
-                                   confidence: true, cull 0.5 grey)
-              -> mask_splat_fringes   (mode: passthrough)
+                                   confidence: true, cull BLACK,
+                                   --conf-tau 0.3 --conf-angle-margin 45)
+              -> resplat_foreground_masks  (rmbg — the matte, replacing
+                                            the render's own alpha)
+              -> mask_splat_fringes   (mode: composite, over 0.5 grey)
               -> reinject_anchor
               -> denoise_pass2   (strength 0.8)
 ```
@@ -212,16 +227,17 @@ be careful about:
 | alpha | accumulated splat opacity `a` | the **gate** `g` |
 | `--background` | used | ignored; `--cull-color` is the background |
 
-So a rejected pixel is the cull colour (0.5 grey by default), *not*
-black, and a fully transparent pixel is not black either. Two
-consequences that are wired into the workflows:
+So a rejected pixel is the cull colour, *not* the `--background`, and a
+fully transparent pixel is not black either unless the cull colour is.
+Two consequences that are wired into the workflows:
 
 - **`mask_splat` must not run its threshold path on this.** Thresholding
-  the alpha, dilating and bilateral-filtering would re-composite grey
-  frames over black and smear the gate's soft edge. It runs as
-  `mode: passthrough`, which keeps only the half that is still needed —
-  replacing the per-pixel alpha with the per-frame all-1.0 VACE batch
-  (section 3 above is unchanged, and so is the ordering it forces).
+  the alpha, dilating and bilateral-filtering would re-composite the
+  frames and smear the gate's soft edge. It runs as `mode: composite`
+  (`passthrough` before 2026-09-05), which keeps only the half that is
+  still needed — replacing the per-pixel matte with the per-frame all-1.0
+  VACE batch (section 3 above is unchanged, and so is the ordering it
+  forces) — plus the flat colour the batch is grounded on.
 - **Keep confidence OFF for the face-view cap renders** that feed
   `select_support_views` in both bootstrap workflows. That step divides the
   colour back out by alpha and enforces premultiplied-over-black
@@ -242,14 +258,26 @@ confidence work on `Erant/brush`'s `normal-map-supervision`.
 
 ### 3. What `denoise_pass2` sees now
 
-A subject cut out of **0.5 grey** rather than black, with a soft
-(≈ two-value) edge from the smoothstep rather than a bilateral-filtered
-hard cut, and no halo at all: the render is composited over the same grey
-it culls to, so partial coverage fades toward the cull colour instead of
-toward a contrasting one. The per-frame VACE mask is unchanged (all 1.0
-except the anchor), and `inject_anchor` is untouched — the anchor frame is
-still `anchor.png` verbatim at alpha 0. **If the prompt or any negative
-prompt mentions a black background, revisit it.**
+A subject laid over **0.5 grey**, cut out by an RMBG matte measured
+against these very frames, with that matte's own soft edge. Inside the
+silhouette, wherever the gate rejected, the pixels are **black** — the
+colour the render was made on and the colour brush trains against — so a
+place the training views never constrained arrives as a hole in the
+subject rather than as background showing through it.
+
+Two colours, because there are two questions, and until 2026-09-05 one
+colour answered both: the render culled to the same 0.5 grey it composited
+over, which left no halo but also made a missing Gaussian indistinguishable
+from empty space. The halo argument still holds and is now rmbg's to
+carry: partial coverage fades toward black, and the matte is what decides
+where the frame stops being subject.
+
+The per-frame VACE mask is unchanged (all 1.0 except the anchor), and
+`inject_anchor` is untouched — the anchor frame is still `anchor.png`
+verbatim at alpha 0, bordered in the same 0.5 grey. **If the prompt or any
+negative prompt mentions a black background, revisit it**; the negative's
+整体发灰 ("an overall grey cast") is the standing question in the other
+direction.
 
 ### 4. Tuning
 
@@ -263,6 +291,16 @@ elevation extremes is trusted — 15° chewed patches out of a jacket at the
 top of the helix, 30° keeps the body and trims only the grazing fringe.
 `--conf-facing` and `--evidence-normal-weight` exist, are untuned, and are
 left off.
+
+Both knobs are now SET rather than left at the binary's defaults, and both
+were measured on a real run's .ply with the fixed evidence (2026-09-05):
+`--conf-tau 0.3`, because 0.08 is too tight for a view-dependent material
+and culled a silver top outright (67% of its pixels), and
+`--conf-angle-margin 45`, because the face cap's views sit in a 30° disc
+while this helix travels to ±30° of elevation, so the default margin culled
+the face at the extremes. `gate_lo`/`gate_hi` are **not** the lever and
+stay at 0.45/0.65: 0.55/0.75 culls 43% of the subject to remove a quarter
+of the dark-fringe pixels, and no lo/hi separates fringe from subject.
 
 ### 5. Known limits
 

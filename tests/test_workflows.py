@@ -506,7 +506,15 @@ class TestWorkflowFiles(unittest.TestCase):
         Fixed by moving inject_anchor after mask_splat — the assertion
         below holds either by the gap being empty or by a step in it
         reading what it overwrites.
+
+        `rmbg` is the exception, and it is the reason the guard is worded as
+        "nothing CLOBBERS it" rather than "nothing writes it": since
+        2026-09-05 the matte mask_splat composites with is deliberately not
+        the render's alpha but one measured against the frames themselves.
+        Replacing it is that step's whole job, so a step that has no other,
+        and it cannot read what it replaces.
         """
+        deliberate = {"rmbg"}
         for path in _workflows():
             spec = WorkflowSpec.from_yaml(str(path))
             if not any(s.step == "mask_splat" for s in spec.steps):
@@ -515,6 +523,8 @@ class TestWorkflowFiles(unittest.TestCase):
             start = _splat_alpha_producer(self, path, spec, end)
             for step in spec.steps[start + 1:end]:
                 if "dataset.masks" not in step.outputs.values():
+                    continue
+                if step.step in deliberate:
                     continue
                 with self.subTest(workflow=path.name, step=step.id):
                     self.assertIn(
@@ -644,18 +654,24 @@ class TestWorkflowFiles(unittest.TestCase):
                         f"origin, ~10x the match tolerance",
                     )
 
-    def test_a_confidence_render_is_paired_with_a_passthrough_mask_splat(self):
+    def test_a_confidence_render_is_not_thresholded_again(self):
         """The two halves of one decision, and running both is worse than
         running either.
 
         `render_splat`'s `confidence` gates on per-Gaussian multi-view
-        evidence and hands back the gate as the frame's alpha, composited
-        over the cull colour. `mask_splat`'s threshold path then thresholds
-        that alpha, composites the grey frames over BLACK and bilateral-
-        filters the gate's soft edge — the old cut applied to output that
-        already made the decision. Conversely a passthrough mask_splat with
-        no confidence render above it drops the fringe stage altogether and
+        evidence and hands back the gate as the frame's alpha, already
+        applied to the RGB. `mask_splat`'s threshold path then thresholds
+        that alpha, composites over BLACK and bilateral-filters the gate's
+        soft edge — the old cut applied to output that already made the
+        decision. Conversely a mask_splat that does NOT threshold with no
+        confidence render above it drops the fringe stage altogether and
         hands denoise_pass2 the raw splat alpha's mush.
+
+        Which of the two non-thresholding modes a gated render is paired
+        with is a separate question — `passthrough` leaves the frames on the
+        cull colour, `composite` lays them over `bg_color` with whatever
+        matte reached `dataset.masks` — and not one this can settle from the
+        wiring alone.
         """
         for path in _workflows():
             spec = WorkflowSpec.from_yaml(str(path))
@@ -665,9 +681,10 @@ class TestWorkflowFiles(unittest.TestCase):
             producer = spec.steps[_splat_alpha_producer(self, path, spec, mask_at)]
             gated = bool(producer.params.get("confidence"))
             mode = spec.steps[mask_at].params.get("mode", "threshold")
+            thresholds = mode == "threshold"
             with self.subTest(workflow=path.name):
                 self.assertEqual(
-                    mode, "passthrough" if gated else "threshold",
+                    thresholds, not gated,
                     f"{path.name}: '{producer.id}' renders with confidence="
                     f"{gated} but '{spec.steps[mask_at].id}' runs in "
                     f"'{mode}' — the fringe decision is made twice, or not "
@@ -1239,10 +1256,16 @@ class TestWorkflowFiles(unittest.TestCase):
 
         Why it has to hold: the renders feeding the two denoise passes share
         a batch, so a subject whose room changes between
-        them is a subject that has been teleported. The one render that must
-        NOT have a backdrop states that with `background: ""` and is exempt
-        here — `select_support_views` divides the alpha back out of its
-        frames and would recover the room as the face's own colour.
+        them is a subject that has been teleported. A render that must NOT
+        have a backdrop states that with `background: ""` and is exempt here
+        — `select_support_views` divides the alpha back out of its frames
+        and would recover the room as the face's own colour.
+
+        No render drawing one at all satisfies this the other way, and is
+        what fast_helical_native has done since 2026-09-05: the grid came
+        off the first denoise's frames on 09-04 and off the re-render the
+        day after, so the passes agree on emptiness. The invariant is that
+        the rooms agree, not that there is a room.
         """
         for path in _workflows():
             spec = WorkflowSpec.from_yaml(str(path))
@@ -1253,9 +1276,8 @@ class TestWorkflowFiles(unittest.TestCase):
                 for step in spec.steps
                 if step.params.get("background")
             }
-            self.assertTrue(rooms, f"{path.name}: no render sets a backdrop")
             distinct = {repr(room) for room in rooms.values()}
-            self.assertEqual(
+            self.assertLessEqual(
                 len(distinct), 1,
                 f"{path.name}: renders disagree about the room — {rooms}",
             )

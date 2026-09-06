@@ -13,6 +13,36 @@
 # and reads the .ply optionally, so the branch being off leaves it with
 # nothing to composite rather than nothing to resolve.
 #
+# WHAT CHANGED (2026-09-05, last): **the intermediate splat was measured,
+# and five things moved with the answer** (docs/intermediate-splat-guide.md,
+# measured against the 81 novel helical cameras the second denoise sees):
+#
+#   * the evidence gate stops culling the subject — brush a9405881 fixed two
+#     bugs in the in-mask denominator, and `rerender_splat` now passes
+#     `--conf-tau 0.3 --conf-angle-margin 45`. 30% of the subject culled
+#     (69% of the face, 67% of the silver top) -> 6.4%, IoU 0.70 -> 0.92.
+#     This is the big one; everything else here is worth less than it.
+#   * `stage1_support_views` defaults OFF. The chalky streaks it was built
+#     against did not reproduce with the face cap and the gate in place, and
+#     the shells measured as a net loss: less sharp, 2.6x the splats, twice
+#     the training time.
+#   * `train_splat` gains `polish_steps: 9000` — a growth-off warm start
+#     from its own export, which is worth more than any other knob tried
+#     (face 143 -> 161) — and `match_alpha_weight: 0.5`.
+#   * the re-render is made on BLACK again (`cull_color`), the room is off
+#     there too (`background: ""`), and the frames the second denoise sees
+#     are cut with an RMBG matte (`resplat_foreground_masks`) and laid over
+#     0.5 grey by `mask_splat_fringes` in its new `composite` mode. The gate
+#     decides what is missing; rmbg decides what is subject.
+#   * `select_support_views` cleans the cap's mask before brush sees it
+#     (`min_alpha` 0.004 -> 0.15, a 5x5 closing) — hygiene, measured
+#     neutral, against the floater it would become on another subject.
+#
+# What was measured and deliberately NOT done: an optical-flow alignment
+# loop at stage 1 (the unwarped control beat it), inline alignment during
+# growth, dense growth, SH degree 1, `--evidence-prune-inmask`, and turning
+# normal supervision off (it helps here, whatever the final training says).
+#
 # WHAT CHANGED (2026-09-04, last): **the shell experiment is over.**
 # fast_helical_shell.yaml is gone, and with it everything only it used:
 # `refine_pose_to_splat` (steps/pose_refine.py), `inject_shell_views`, the
@@ -320,23 +350,31 @@ settings:
   - name: stage1_support_views
     label: Stage-1 supporting views
     type: bool
-    default: true
+    default: false
     help: >-
       Whether the stage-1 body shells run: Sapiens2's pointmap head over every
       Nth denoised frame, a Gaussian shell built from each one, and two renders
       of that shell taken above and below the frame's own camera. They reach the
       FIRST brush training as supporting views — evidence it fits where their
-      mask says to and ignores everywhere else — alongside the face cap. The
-      point is the circular orbit's zero parallax: every training frame shares
+      mask says to and ignores everywhere else — alongside the face cap. It is a
+      monocular DEPTH PRIOR, not new appearance: the source frames are the
+      training's own.
+      OFF since 2026-09-05, and this is a reversal. What they were built
+      against is the circular orbit's zero parallax — every training frame on
       one great circle, so the fit has nothing to triangulate off the path and
-      novel elevations smear into chalky streaks. Note what this is NOT: unlike
-      the face cap it injects no new appearance, since the source frames are the
-      training's own frames. It is a monocular DEPTH PRIOR, and it is the change
-      in this file most able to make the deliverable worse rather than better —
-      see docs/stage1-support-views-implementation.md for the A/B it was
-      measured with. Costs one pointmap forward and one brush-splat-render
-      launch per shell (~2 s and a few seconds each), and the views themselves
-      cost the training roughly 5 minutes and 2.5x the splat count.
+      novel elevations smear into chalky streaks
+      (docs/stage1-support-views-implementation.md, measured before the face cap
+      and before the evidence gate). Re-measured with both in place, at the 81
+      helical cameras the second denoise actually sees, the streaks did not
+      reproduce: shells off rendered as cleanly at the +-30 degree extremes,
+      SHARPER everywhere (face 132 -> 143 band-limited), more confident under
+      the gate, on 284k splats instead of 735k and half the training time
+      (docs/intermediate-splat-guide.md). What they still do is fill some
+      concave gaps — dark wedges 3.7% of the silhouette with them against 4.4%
+      without — which the gate removes about half of anyway. The switch stays
+      for a subject that does show streaks; turning it back on costs a Sapiens2
+      pointmap pass, 9 shell builds and 18 renders per run, and roughly 5
+      minutes of training.
 
   - name: stage1_support_every_n
     label: Stage-1 shell spacing (every Nth frame)
@@ -892,11 +930,12 @@ steps:
       # the ruling in frame frontal / 66-72% three-quarter, against 22% / 44%
       # at 2). This file at `542eb79` has both arguments in full.
       #
-      # NOTE that the two renders feeding a denoise pass no longer agree
-      # about the room: `rerender_splat` below is still `grid`. That is what
-      # was asked for — the FIRST pass only — but it is exactly the
-      # invariant steps/backdrop.py's docstring names, so read that before
-      # assuming pass 2 wants the same treatment.
+      # NOTE that `rerender_splat` below followed on 2026-09-05: neither
+      # render draws a room now, so the two denoise passes agree again. What
+      # they do NOT agree with is their own prompt, whose 场景 slot still
+      # describes the gridded room in both passes — see the note on that
+      # string below, and steps/backdrop.py's docstring for the argument
+      # that the room should come back rather than the prompt go.
       background: ""
       # Every frame whose view of the head is within this of the
       # photograph's takes the layer; past it the 2.5-D shell's open rim is
@@ -1770,6 +1809,30 @@ steps:
       # sh_degree, max_splats, refine_every, the normal-loss group — sits at
       # that step's declared defaults.
       total_steps: 30000
+      # And then 9000 more, from a warm start with growth off — the single
+      # biggest quality lever measured on this training after the evidence
+      # fix (2026-09-05): band-limited face sharpness 143 -> 161, hands 49
+      # -> 55, shoes 31 -> 36, all of it on the splat the helical re-render
+      # below is made from. It is the RESTART that does it, not the extra
+      # iterations: 39000 in one cold run reached a third of the same gain.
+      # ~2 minutes on a 4070 Ti. steps/brush.py links the first export in as
+      # the dataset's init.ply and exports the polished splat over it, so
+      # nothing downstream — including the evidence rerender_splat gates on
+      # — sees anything but the finished .ply.
+      #
+      # NOT set on train_final_splat: it has never been measured there, and
+      # a deliverable splat is the wrong place to find out.
+      polish_steps: 9000
+      # Weight on the alpha L1 — how hard the silhouette is fitted to the
+      # RMBG matte. 0.5 against brush's own 0.1: measured 17% fewer dark
+      # wedges (dark splats in the concave gaps between arm and torso and
+      # between fingers, which this flat orbit cannot see into and which
+      # open up at the +-30 degree elevations the re-render travels to) at
+      # no cost in band-limited sharpness and -0.003 IoU. It matters more
+      # since 2026-09-05 than when it was measured: the re-render is made on
+      # BLACK now, so a dark wedge is a dark smudge on the frames the second
+      # denoise sees rather than something that blends into a grey cull.
+      match_alpha_weight: 0.5
       # Also steps/brush.py's default, and spelled out for the same reason:
       # the next-but-one step depends on it. It writes each Gaussian's
       # multi-view evidence into the exported .ply (ev_* properties), which
@@ -1883,41 +1946,93 @@ steps:
       # Gate the render on the evidence train_splat wrote into the .ply,
       # which is what makes mask_splat's thresholding stage unnecessary
       # below. The alpha that comes back is the gate, not accumulated
-      # opacity, and the RGB is composited over `cull_color` — so these
-      # frames are a subject cut out of 0.5 grey with a soft edge, not out
-      # of black with a hard one. `bg_color` is ignored in this mode and is
-      # therefore not set here. See docs/spatial-reinforcement.md.
+      # opacity, and the RGB is composited over `cull_color`. `bg_color` is
+      # ignored in this mode and is therefore not set here. See
+      # docs/spatial-reinforcement.md.
       confidence: true
-      cull_color: [0.5, 0.5, 0.5]
-      # A room here, and NO room on render_initial_views since 2026-09-04,
-      # so the two denoise passes now disagree about it. That is deliberate
-      # — the FIRST pass is the one that was asked to lose the grid — but it
-      # breaks the agreement the note above that render's `background: ""`
-      # and steps/backdrop.py's docstring both name, so know what it means
-      # before reading a result: pass 1 denoises a subject standing in
-      # nothing, the splat trains on whatever room the PROMPT talked the
-      # model into painting (the 场景 slot still describes the gridded room,
-      # unchanged), and then this render composites a real grid behind it.
-      # If pass 2 comes back with two rooms disagreeing with each other, or
-      # a subject relit between the passes, this line is the first suspect
-      # and `background: ""` here is the matching change.
+      # BLACK, not the step's 0.5 grey default, since 2026-09-05 — and this
+      # is a return, not a new idea: black is what this render was made on
+      # before the gate existed, what brush TRAINS on (--background-color's
+      # default, which steps/brush.py leaves alone) and what mask_splat's
+      # threshold path composited to. The grey was the gate's own argument
+      # — one colour for both the reject and the background, so partial
+      # coverage fades toward the value the gate rejects to and leaves no
+      # halo to filter — and it stops applying here for two reasons:
       #
-      # Mechanically it is unchanged: brush-splat-render draws one flat
-      # colour and knows nothing of environments, so steps/backdrop.py
-      # un-composites `cull_color` back out and re-composites over the
-      # backdrop; exact wherever the gate culled, which is everywhere the
-      # backdrop is actually visible.
+      #   * the background is not this render's job any more. The matte that
+      #     decides what is subject comes from `resplat_foreground_masks`
+      #     below (rmbg, measured against these frames) rather than from the
+      #     gate's own alpha, and `mask_splat_fringes` lays the result over
+      #     0.5 grey. The colour the frames end on is set there.
+      #   * with the two colours separated, black is what the culled pixels
+      #     should be. A gap in the gate is a hole in the SUBJECT — a place
+      #     the training views never constrained — and rendering it as the
+      #     background colour would hand the second denoise a subject with
+      #     the backdrop showing through it. Black reads as missing.
       #
-      # THE FADE IS NOT REPEATED, and this is the one place the two rooms are
-      # allowed to differ. `render_splat` does not declare the fade params at
-      # all, so there is nothing to turn off here. Two reasons, and both hold:
-      # the shell is an ellipsoid fitted to MESH VERTICES and a .ply has none;
-      # and the fade's whole job was to stop the room pinning hair and
-      # clothing to a bare-mesh outline, which is spent by now — this render's
-      # silhouette comes off a splat fitted to the DENOISED subject, so it is
-      # already the right shape and a clear zone would only cost rotation cue.
-      background: grid
-      background_base_color: [0.5, 0.5, 0.5]
+      # What it costs is what the grey bought: partial coverage now fades
+      # toward black, so the silhouette's soft edge is dark. That is the
+      # halo the note above warns about, and rmbg's matte is what cuts it —
+      # its edge, not the fringe's, is what the composite blends on.
+      cull_color: [0.0, 0.0, 0.0]
+      # Tuning for the confidence measure itself, passed verbatim to
+      # brush-splat-render. Both were measured on a real run's .ply with the
+      # fixed evidence (brush a9405881; docs/intermediate-splat-guide.md):
+      #
+      #   --conf-tau 0.3      the `agree` term's tolerance. The default 0.08
+      #                       is too tight for a view-dependent material and
+      #                       culled the subject's specular top outright
+      #                       (67% of its pixels); 0.3 keeps it, 0.16 is a
+      #                       middle if something over-survives.
+      #   --conf-angle-margin 45
+      #                       the `coverage` term's slack. The face cap's
+      #                       views sit in a 30-degree disc, and this helix
+      #                       travels to +-30 of elevation, so the default
+      #                       margin culled the face at the extremes; 45
+      #                       lets the whole helix through, 60 keeps a
+      #                       little more face and a little more fringe.
+      #
+      # Together with the evidence fix they take the culled fraction of the
+      # subject from 30% to 6.4% and the silhouette IoU from 0.70 to 0.92.
+      # `gate_lo`/`gate_hi` are NOT the lever and stay at the step's
+      # 0.45/0.65: 0.55/0.75 culls 43% of the subject to remove a quarter of
+      # the dark-fringe pixels, and no lo/hi separates fringe from subject.
+      conf_args: ["--conf-tau", "0.3", "--conf-angle-margin", "45"]
+      # NO room here either, as of 2026-09-05 — the two denoise passes agree
+      # again, and they agree on nothing. render_initial_views lost the grid
+      # on 2026-09-04 to isolate one variable and this render kept it for a
+      # day, which left pass 1 denoising a subject standing in emptiness and
+      # pass 2 seeing that same subject composited onto a real ruled room.
+      # One line is the cheaper ablation, and both passes off is the
+      # baseline nothing on this pipeline has been compared against.
+      #
+      # THE PROMPT STAYS AS IT IS. Both denoise passes still describe the
+      # gridded room in their 场景 slot, deliberately: the prompt is what the
+      # model paints a background out of when the control frames show none,
+      # and the lighting claims that make the shading world-fixed
+      # ("灯光属于房间本身", a point on the distant wall) lean on a room
+      # existing. It is a contradiction — frames with no room, a prompt with
+      # one — and it is the same one pass 1 has carried since 2026-09-04,
+      # now stated in both places rather than one. If the rooms the model
+      # invents disagree between the passes, or the subject is relit between
+      # them, this is the pair to settle, and steps/backdrop.py's docstring
+      # is the argument for putting the grid back rather than the prompt's
+      # room out.
+      #
+      # What this line was, and how to put it back: `background: grid` with
+      # `background_base_color: [0.5, 0.5, 0.5]`. Mechanically the backdrop
+      # is composited by steps/backdrop.py rather than by the rasteriser —
+      # it un-composites `cull_color` back out and re-composites over the
+      # environment — so it would now be un-compositing BLACK, which is
+      # exact wherever the gate culled and would put the room inside the
+      # subject's own holes. Restoring the room means restoring the grey
+      # cull colour above and the grey composite below with it; the three
+      # were one decision.
+      #
+      # The fade is not part of any of this: `render_splat` does not declare
+      # the fade params at all, and never did. The shell it fades against is
+      # an ellipsoid fitted to MESH VERTICES, and a .ply has none.
+      background: ""
     outputs:
       images: dataset.images
       masks: dataset.masks
@@ -1930,29 +2045,66 @@ steps:
       anchor_frame_index: dataset.extras.anchor_frame_index
 
   # ---------------------------------------------------------------- stage 3
+  # The matte the frames below are cut with. It REPLACES the splat render's
+  # own alpha in dataset.masks, which is the one place in this file a step
+  # overwrites that field on purpose (tests/test_workflows.py knows about
+  # this one by name).
+  #
+  # Why not the render's alpha, which is right there and free: it is the
+  # confidence gate, and the gate is a statement about the TRAINING — which
+  # Gaussians the views constrained — not about where the subject is in
+  # this frame. Its edge is the fringe of an under-observed Gaussian, and
+  # holes in it are places the fit is unsure of, which is exactly what the
+  # second denoise is being asked to repaint. Cutting the background with
+  # it would cut those holes out of the frame instead, and feather the
+  # silhouette wherever the splat is thin. rmbg answers the other question
+  # — measured against these pixels, this frame, nothing else — and it is
+  # the same matte brush was trained on at `foreground_masks`, one denoise
+  # pass earlier.
+  #
+  # The gate is not wasted: it has already been applied, to the RGB, by the
+  # render above. Culled pixels come through BLACK, and black on a grey
+  # composite is a hole in the subject rather than a hole in the frame.
+  - id: resplat_foreground_masks
+    step: rmbg
+    dispatch: in_process
+    inputs:
+      images: dataset.images
+    outputs:
+      masks: dataset.masks
+
   # This used to be the stage that dropped the splat's low-confidence
   # fringes: threshold the render's alpha at 239/255, dilate by 2,
   # composite over black, bilateral-filter (`mask_splat.json`'s subgraph,
   # at `fast helical.yaml`'s 6/2). rerender_splat's `confidence` above
-  # decides the same thing better — once, in 3-D, from what the training
-  # views actually constrained rather than from accumulated alpha per pixel
-  # per frame — so running the old cut on top of it is now WRONG rather
-  # than merely redundant: it would re-composite the grey frames over black
-  # and smear the gate's soft edge.
+  # decides that better — once, in 3-D, from what the training views
+  # actually constrained rather than from accumulated alpha per pixel per
+  # frame — so the cut is gone and what is left of the old subgraph is the
+  # COMPOSITE: the subject laid over 0.5 grey with the matte the step above
+  # produced, softness and all, no threshold and no bilateral filter to
+  # smear an edge that is already right.
   #
-  # The step stays, in passthrough, because its other half is still needed:
-  # replacing the per-pixel splat alpha in dataset.masks with the per-frame
-  # all-1.0 VACE batch that denoise_pass2 reads and reinject_anchor writes
-  # its 0.0 into. Ordering is unchanged and still load-bearing (see below).
-  # To A/B against the recorded ComfyUI run, set `mode: threshold` and turn
-  # rerender_splat's `confidence` off — 6/2 is that step's own default.
+  # 0.5 grey, and the render it composites is black (see rerender_splat's
+  # `cull_color`), which is the whole shape of this stage: black is what the
+  # splat was trained on and what a missing Gaussian resolves to, grey is
+  # what the batch is handed to the denoise on — the same 0.5 the warped
+  # anchor photo's border is filled with, so the one real frame in the batch
+  # does not arrive as the odd one out.
+  #
+  # The step's other half is unchanged and still needed: replacing the
+  # per-pixel matte in dataset.masks with the per-frame all-1.0 VACE batch
+  # that denoise_pass2 reads and reinject_anchor writes its 0.0 into.
+  # Ordering is unchanged and still load-bearing (see below). To A/B against
+  # the recorded ComfyUI run, set `mode: threshold` and turn rerender_splat's
+  # `confidence` off — 6/2 is that step's own default.
   - id: mask_splat_fringes
     step: mask_splat
     dispatch: in_process
     inputs:
       dataset: dataset
     params:
-      mode: passthrough
+      mode: composite
+      bg_color: [0.5, 0.5, 0.5]
     outputs:
       dataset: dataset
 
@@ -2011,16 +2163,17 @@ steps:
       height: ${globals.resolution.1}
       # Same as denoise_pass1 — see the note there. Only `strength` differs.
       #
-      # UNREVIEWED against the confidence render above (2026-08-30): these
-      # frames are now a subject cut out of 0.5 GREY rather than black, and
-      # the negative prompt still asks against 整体发灰 ("an overall grey
-      # cast"). Neither prompt mentions a black background, so nothing here
-      # is knowably wrong — but this is the pair to look at first if
-      # denoise_pass2's output changed character with the gate. Left alone
-      # deliberately: a prompt edit is a quality decision for a real run to
-      # make, not a side effect of the render change. (With `background` on,
-      # the grey is behind the room anyway — rerender_splat above draws the
-      # same backdrop, so these frames match what the prompt now describes.)
+      # UNREVIEWED against the render above (2026-08-30, still true): these
+      # frames are a subject cut out of 0.5 GREY — by rmbg's matte since
+      # 2026-09-05, over a render made on black — and the negative prompt
+      # still asks against 整体发灰 ("an overall grey cast"). Neither prompt
+      # mentions a background at all, so nothing here is knowably wrong, but
+      # this is the pair to look at first if denoise_pass2's output changed
+      # character. Left alone deliberately: a prompt edit is a quality
+      # decision for a real run to make, not a side effect of a render
+      # change. The other half of the same question is the 场景 slot, which
+      # describes a room neither pass's control frames now show — see
+      # denoise_pass1.
       steps: 6
       cfg: 1.0
       seed: ${globals.seed}

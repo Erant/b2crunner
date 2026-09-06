@@ -118,8 +118,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # the training views. An older brush would IGNORE the sidecar and train the
 # frames at full weight over the face — silently, which is why the pin must
 # move with the step.
+# 2026-09-05: `a9405881` fixes the EVIDENCE DENOMINATOR — a masked view's
+# out-of-mask region counted as "drawn over background" in w_all, and the
+# weights/ sidecar scaled w_in but not w_all, so the face cap and the
+# face-priority weights each dragged the confidence of everything they did
+# not cover toward zero. Measured on a real run's .ply, the gate this
+# pipeline renders through culled 30% of the subject (69% of the face, 67%
+# of the top) before the fix and 6% after, at the tau/margin
+# rerender_splat now passes. An older brush trains a splat whose ev_* block
+# says the subject is not there.
 ARG BRUSH_BRANCH=normal-map-supervision
-ARG BRUSH_REF=debff989bb4588bd16b549dbf9caf45cd8529767
+ARG BRUSH_REF=a94058814531bb932228e626e7ed271292cfb7ea
 RUN git clone --depth 1 --branch ${BRUSH_BRANCH} \
         https://github.com/Erant/brush.git /src/brush \
     && cd /src/brush \

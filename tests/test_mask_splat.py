@@ -184,5 +184,78 @@ class TestMaskSplatPassthrough(unittest.TestCase):
         )
 
 
+class TestMaskSplatComposite(unittest.TestCase):
+    """`mode: composite` — the shipped mode since 2026-09-05.
+
+    The re-render is made on BLACK now and the matte comes from rmbg rather
+    than from the render's own alpha, so the two halves of the old subgraph
+    have separated: the confidence gate decides what is MISSING (culled
+    pixels come through black, a hole in the subject the next denoise
+    repaints) and this decides what is SUBJECT, laying it over the mid grey
+    the rest of the batch — the warped anchor photo's border included —
+    grounds on.
+
+    Synthetic rather than golden: there is no recorded ComfyUI run of a
+    stage that did not exist there.
+    """
+
+    def _dataset(self, mask):
+        image = np.zeros((4, 4, 3), dtype=np.uint8)
+        image[:] = (20, 60, 200)
+        return Dataset(
+            images=[image], image_names=["frame_00001_.png"], cameras=[None],
+            points_3d=None, resolution=(4, 4), masks=[mask],
+        )
+
+    def _run(self, mask, **params):
+        dataset = self._dataset(mask)
+        return run_step(
+            "mask_splat", {"dataset": dataset}, {"mode": "composite", **params}
+        )["dataset"]
+
+    def test_the_background_becomes_the_flat_colour(self):
+        mask = np.zeros((4, 4), dtype=np.float32)
+        mask[1:3, 1:3] = 1.0
+        out = self._run(mask)
+        np.testing.assert_array_equal(out.images[0][0, 0], (128, 128, 128))
+
+    def test_the_subject_is_left_alone(self):
+        mask = np.zeros((4, 4), dtype=np.float32)
+        mask[1:3, 1:3] = 1.0
+        out = self._run(mask)
+        np.testing.assert_array_equal(out.images[0][1, 1], (20, 60, 200))
+
+    def test_a_soft_edge_blends_rather_than_cuts(self):
+        """The whole reason for using a matte measured against the frames:
+        its edge is already right, so there is nothing to threshold and
+        nothing to bilateral-filter back into shape."""
+        mask = np.full((4, 4), 0.5, dtype=np.float32)
+        out = self._run(mask)
+        np.testing.assert_array_equal(out.images[0][0, 0], (74, 94, 164))
+
+    def test_the_colour_is_bgr_the_way_the_frames_are(self):
+        """`bg_color` is RGB in [0,1], like every other step's, and the
+        frames are cv2 BGR — a swap here would tint every background."""
+        out = self._run(np.zeros((4, 4), dtype=np.float32), bg_color=[1.0, 0.0, 0.0])
+        np.testing.assert_array_equal(out.images[0][0, 0], (0, 0, 255))
+
+    def test_the_masks_are_still_the_vace_batch(self):
+        """Same as every other mode: in as a matte, out as the per-frame
+        'synthetic, regenerate this' flag denoise_pass2 reads."""
+        out = self._run(np.zeros((4, 4), dtype=np.float32))
+        self.assertTrue(np.all(out.masks[0] == 1.0))
+        self.assertEqual(out.masks[0].shape, (4, 4))
+
+    def test_it_refuses_a_dataset_with_no_matte(self):
+        """Unlike passthrough, this mode has nothing to do without one, and
+        silently compositing over an implicit all-1.0 would emit the frames
+        unchanged — passthrough under another name."""
+        dataset = self._dataset(np.zeros((4, 4), dtype=np.float32))
+        dataset.masks = None
+        with self.assertRaises(ValueError) as caught:
+            run_step("mask_splat", {"dataset": dataset}, {"mode": "composite"})
+        self.assertIn("composite", str(caught.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

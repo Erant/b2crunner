@@ -49,11 +49,19 @@ def _cameras(count: int):
     ]
 
 
+# Big enough that the default 5x5 alpha closing is an identity on the block
+# below: dilation grows it to 12x12 and erosion takes it back, with room to
+# spare before the frame's own edge (where cv2's erode treats the border as
+# opaque and would keep what the dilation put there).
+_SIZE = 24
+_BLOCK = slice(8, 16)
+
+
 def _render(alpha_value: float, colour: int = 200):
     """One splat render on black: colour premultiplied by its own alpha."""
-    alpha = np.zeros((8, 8), dtype=np.float32)
-    alpha[2:6, 2:6] = alpha_value
-    image = (np.full((8, 8, 3), colour, dtype=np.float32) * alpha[..., None])
+    alpha = np.zeros((_SIZE, _SIZE), dtype=np.float32)
+    alpha[_BLOCK, _BLOCK] = alpha_value
+    image = (np.full((_SIZE, _SIZE, 3), colour, dtype=np.float32) * alpha[..., None])
     return image.astype(np.uint8), alpha
 
 
@@ -220,20 +228,20 @@ class TestUnpremultiply(unittest.TestCase):
         """The render is colour*a on black; brush's masked mode wants the
         straight colour, with the softness carried by the mask alone."""
         image, alpha = _render(0.5, colour=200)
-        self.assertEqual(int(image[4, 4, 0]), 100)
+        self.assertEqual(int(image[12, 12, 0]), 100)
         out = _run({"images": [image], "masks": [alpha], "cameras": _cameras(1)})
-        self.assertEqual(int(out["images"][0][4, 4, 0]), 200)
+        self.assertEqual(int(out["images"][0][12, 12, 0]), 200)
 
     def test_an_opaque_interior_is_untouched(self):
         image, alpha = _render(1.0, colour=200)
         out = _run({"images": [image], "masks": [alpha], "cameras": _cameras(1)})
-        self.assertEqual(int(out["images"][0][4, 4, 0]), 200)
+        self.assertEqual(int(out["images"][0][12, 12, 0]), 200)
 
     def test_it_can_be_turned_off(self):
         image, alpha = _render(0.5, colour=200)
         out = _run({"images": [image], "masks": [alpha], "cameras": _cameras(1)},
                    unpremultiply=False)
-        self.assertEqual(int(out["images"][0][4, 4, 0]), 100)
+        self.assertEqual(int(out["images"][0][12, 12, 0]), 100)
 
     def test_transparent_pixels_stay_black(self):
         """1/255 divided by an alpha of 0.002 is noise amplified 500x, and
@@ -254,6 +262,79 @@ class TestUnpremultiply(unittest.TestCase):
         with self.assertRaises(ValueError) as caught:
             _run({"images": [image], "masks": [alpha], "cameras": _cameras(1)})
         self.assertIn("select_support_views", str(caught.exception))
+
+
+class TestTheMaskIsCleaned(unittest.TestCase):
+    """The fringe and the checkerboard — hygiene against a floater.
+
+    Un-premultiplying is what makes the mask dirty, and both defects were
+    measured on a real cap render (2026-09-05): a staircase of colour noise
+    along the outline sitting INSIDE the mask at small but nonzero weight
+    (|rgb - median5| of 16.5 below alpha 0.05, 3.1 from 0.05 to 0.15,
+    against 0.4 in the core), and a one-Gaussian-per-pixel checkerboard
+    inside it dipping to 0.90. Training on cleaned masks measured the same
+    as training on dirty ones, so this is not a quality lever — it is here
+    for the subject whose fringe is not so quiet.
+    """
+
+    def test_the_fringe_is_cut_rather_than_handed_over_at_low_weight(self):
+        """A pixel at alpha 0.1 is 1/10th of a vote for whatever the
+        un-premultiply amplified its noise into. It is not evidence."""
+        image, alpha = _render(1.0, colour=200)
+        alpha[4, 4] = 0.1
+        image[4, 4] = 20
+        out = _run({"images": [image], "masks": [alpha], "cameras": _cameras(1)})
+        self.assertEqual(float(out["masks"][0][4, 4]), 0.0)
+        self.assertEqual(int(out["images"][0][4, 4, 0]), 0)
+
+    def test_a_pixel_the_step_still_trusts_survives(self):
+        """0.15 is the cut, and the band just above it is a real soft edge —
+        this is not a threshold to opacity."""
+        image, alpha = _render(0.5, colour=200)
+        out = _run({"images": [image], "masks": [alpha], "cameras": _cameras(1)})
+        self.assertAlmostEqual(float(out["masks"][0][12, 12]), 0.5, places=5)
+
+    def test_the_checkerboard_inside_the_matte_is_filled(self):
+        """One dipped pixel is the rasteriser landing between splats, not a
+        hole in the face."""
+        image, alpha = _render(1.0, colour=200)
+        alpha[12, 12] = 0.9
+        out = _run({"images": [image], "masks": [alpha], "cameras": _cameras(1)})
+        self.assertAlmostEqual(float(out["masks"][0][12, 12]), 1.0, places=5)
+
+    def test_the_closing_does_not_move_the_silhouette(self):
+        """Dilate-then-erode: it fills holes, it does not grow the matte.
+        A mask that grew would have brush fit the cull colour as face."""
+        image, alpha = _render(1.0, colour=200)
+        out = _run({"images": [image], "masks": [alpha], "cameras": _cameras(1)})
+        np.testing.assert_array_equal(out["masks"][0] > 0, alpha > 0)
+
+    def test_the_colour_is_divided_by_the_alpha_it_was_premultiplied_by(self):
+        """Not by the closed one. A pixel the closing lifted from 0.9 to 1.0
+        was still drawn at 0.9, and dividing by the number it should have
+        had would leave it 10% dark."""
+        image, alpha = _render(1.0, colour=200)
+        alpha[12, 12] = 0.9
+        image[12, 12] = 180
+        out = _run({"images": [image], "masks": [alpha], "cameras": _cameras(1)})
+        self.assertEqual(int(out["images"][0][12, 12, 0]), 200)
+
+    def test_the_closing_can_be_turned_off(self):
+        image, alpha = _render(1.0, colour=200)
+        alpha[12, 12] = 0.9
+        out = _run({"images": [image], "masks": [alpha], "cameras": _cameras(1)},
+                   alpha_closing=0)
+        self.assertAlmostEqual(float(out["masks"][0][12, 12]), 0.9, places=5)
+
+    def test_a_soft_render_is_still_read_as_premultiplied_over_black(self):
+        """The cut is at 0.15 and the black-background check is not: at an
+        alpha of 0.1 a correct render is legitimately 25/255 bright, so a
+        check sharing the step's `min_alpha` would refuse every render there
+        is."""
+        image, alpha = _render(0.1, colour=250)
+        self.assertEqual(int(image[12, 12, 0]), 25)
+        out = _run({"images": [image], "masks": [alpha], "cameras": _cameras(1)})
+        self.assertEqual(len(out["images"]), 1)
 
 
 class TestTheseGoStraightIntoBrush(unittest.TestCase):

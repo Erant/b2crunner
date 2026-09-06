@@ -20,17 +20,27 @@ interior (plus a small dilated margin) and blacking out the rest gives the
 denoiser a clean, hard-edged subject to work from.
 
 **Superseded, and kept anyway.** `render_splat`'s `confidence` mode does
-this job properly — it gates on each Gaussian's multi-view evidence, in
-3-D and once, rather than on accumulated alpha per pixel per frame — and
-every shipped workflow now runs this step as `mode: passthrough` behind
-one. Passthrough is not a no-op: it still does the step's *other* job,
-replacing the per-pixel splat alpha in `dataset.masks` with the per-frame
-all-1.0 VACE batch, which is what `denoise_pass2` reads and what
-`inject_anchor` writes its 0.0 into. That is also why the step stays here
-rather than being deleted: the ordering it anchors ("inject_anchor must run
-AFTER mask_splat", see steps/anchor_stub.py) still holds, and `mode:
-threshold` keeps the recorded run reproducible for an A/B. See
-docs/spatial-reinforcement.md.
+the culling properly — it gates on each Gaussian's multi-view evidence, in
+3-D and once, rather than on accumulated alpha per pixel per frame — so the
+threshold path is not what any shipped workflow runs. What it left behind
+was the *compositing*, and `mode: composite` (2026-09-05) is that half on
+its own: the frames alpha-blended over `bg_color` with whatever matte
+`dataset.masks` arrives carrying. In fast_helical_native that matte is
+rmbg's, run over the re-render, rather than the render's own alpha —
+a matte measured against the frames beats one accumulated from the
+Gaussians that drew them, and the re-render is now made on black so the
+gate's rejects read as holes in the subject rather than as a second
+background colour.
+
+`mode: passthrough` is the same step with the compositing dropped too, for
+a re-render that already ends on the colour the denoise wants. Neither is
+a no-op: both still do the step's *other* job, replacing the per-pixel
+splat alpha in `dataset.masks` with the per-frame all-1.0 VACE batch,
+which is what `denoise_pass2` reads and what `inject_anchor` writes its 0.0
+into. That is also why the step stays here rather than being deleted: the
+ordering it anchors ("inject_anchor must run AFTER mask_splat", see
+steps/anchor_stub.py) still holds, and `mode: threshold` keeps the recorded
+run reproducible for an A/B. See docs/spatial-reinforcement.md.
 
 **Mask conventions.** ComfyUI's MASK is inverted (1.0 = background), so the
 graph binarises the *background* and inverts it. This pipeline's convention
@@ -106,23 +116,41 @@ class MaskSplatStep(Step):
     dilation=0 is a valid no-dilate case and is handled.
 
     `mode: passthrough` skips all of that and emits the frames unchanged,
-    for the shipped case where the render upstream was already
-    confidence-gated (`render_splat`'s `confidence` param). The masks are
-    replaced either way — that half is the step's real remaining job — and
-    passthrough does not need `dataset.masks` at all, since it reads no
+    for a render upstream that was already confidence-gated onto the colour
+    the next pass wants (`render_splat`'s `confidence` param). It is the
+    one mode that does not need `dataset.masks` at all, since it reads no
     alpha.
+
+    `mode: composite` keeps only the compositing: the frames laid over
+    `bg_color` with the matte in `dataset.masks`, softness and all. It is
+    for the gated render made on BLACK — where the cull colour is the
+    subject's own missing pixels rather than a background — with a matte
+    from rmbg rather than from the render.
+
+    The masks are replaced in every mode; that half is the step's real
+    remaining job.
     """
 
     # threshold/sigma_* are advanced because they are not free choices: they
     # were fitted against the recorded ComfyUI run this step reproduces (see
     # the module docstring), and moving them breaks that agreement.
     PARAMS = (
-        Param("mode", str, "threshold", choices=("threshold", "passthrough"),
+        Param("mode", str, "threshold",
+              choices=("threshold", "passthrough", "composite"),
               help="threshold: the recorded ComfyUI subgraph — alpha cut, dilate, "
                    "composite over black, bilateral filter. passthrough: leave the "
                    "frames exactly as they arrived, because render_splat already "
-                   "gated them on per-Gaussian confidence; the masks are still "
-                   "replaced by the all-1.0 VACE batch either way"),
+                   "gated them on per-Gaussian confidence. composite: alpha-blend "
+                   "the frames over `bg_color` using dataset.masks as they arrive, "
+                   "for a matte that came from somewhere better than the render's "
+                   "own alpha (rmbg). The masks are replaced by the all-1.0 VACE "
+                   "batch in every mode"),
+        Param("bg_color", list, [0.5, 0.5, 0.5],
+              "composite mode only: the RGB in [0,1] the subject is laid over. Mid "
+              "grey, which is what the denoise pass downstream has always been "
+              "handed — the renders it sees elsewhere ground on #7F7F7F — and what "
+              "the warped anchor photo's border is filled with, so the injected "
+              "real frame does not arrive as the one bright thing in the batch"),
         Param("filter_size", int, 6, "Bilateral filter diameter", minimum=0),
         Param("dilation", int, 2, "Grow the kept region back out by this many pixels; "
               "0 is a valid no-dilate case", minimum=0),
@@ -145,7 +173,24 @@ class MaskSplatStep(Step):
         sigma_color = params["sigma_color"]
         sigma_space = params["sigma_space"]
 
-        if mode == "threshold":
+        if mode == "composite":
+            if dataset.masks is None:
+                raise ValueError(
+                    "mask_splat's composite mode needs dataset.masks — the matte to "
+                    "lay the subject over `bg_color` with. Wire the step that "
+                    "produces it (rmbg) above this one."
+                )
+            bg_color = tuple(params["bg_color"])
+            images = [
+                _composite_one(img, mask, bg_color)
+                for img, mask in zip(dataset.images, dataset.masks)
+            ]
+            logger.info(
+                "mask_splat: %d frames composited over %s with the matte they "
+                "arrived with. Masks replaced by the all-1.0 VACE batch.",
+                len(images), bg_color,
+            )
+        elif mode == "threshold":
             if dataset.masks is None:
                 raise ValueError(
                     "mask_splat needs dataset.masks (the splat render's alpha). "
@@ -198,6 +243,30 @@ class MaskSplatStep(Step):
             extras=dict(dataset.extras),
         )
         return {"dataset": out}
+
+
+def _composite_one(img: np.ndarray, mask: np.ndarray,
+                   bg_color: tuple) -> np.ndarray:
+    """The subject alpha-blended over a flat colour, softness and all.
+
+    No threshold, no dilation, no bilateral filter: the matte handed in is
+    already a decision about what the subject is, and the three stages that
+    make up the `threshold` mode exist to rescue a matte that is not — the
+    splat render's own accumulated alpha. Blending soft is the point of
+    using a better one: an anti-aliased edge over the same grey the rest of
+    the batch grounds on leaves the denoise nothing to sharpen into a halo.
+    """
+    bgr = img[:, :, :3] if img.ndim == 3 and img.shape[2] == 4 else img
+    fg = normalize_mask(mask)[:, :, None]
+    flat = np.array([c * 255.0 for c in reversed(bg_color)], dtype=np.float32)
+    blended = bgr.astype(np.float32) * fg + flat * (1.0 - fg)
+    # Rounded, not truncated: 0.5 grey has to land on 128, which is where
+    # `generate_firstlast` (round) puts the border of the warped anchor
+    # photo that is injected into this same batch a step later. Truncating
+    # would put the background at 127 and the one real frame's border at
+    # 128 — a difference nothing would ever see, until a diffusion pass
+    # decides the anchor frame is the odd one out.
+    return np.clip(np.rint(blended), 0, 255).astype(np.uint8)
 
 
 def _mask_one(

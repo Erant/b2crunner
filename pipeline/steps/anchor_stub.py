@@ -149,6 +149,11 @@ from ..step import Param, Step
 
 logger = logging.getLogger(__name__)
 
+# Alpha below which a splat render has no colour of its own at all — one
+# 8-bit level. This is the "was it drawn on black?" test's threshold, and
+# deliberately not any step's `min_alpha`: see _check_premultiplied.
+_FULLY_TRANSPARENT = 1.0 / 255.0
+
 
 @register_step("generate_firstlast")
 class GenerateFirstLastStep(Step):
@@ -419,6 +424,19 @@ class SelectSupportViewsStep(Step):
     colour. Only the soft rim differs — inside the matte alpha is 1 and the
     two are identical — but the rim is exactly where a face splat's
     silhouette is decided.
+
+    **And the rim is also where the mask is cleaned** (`min_alpha`,
+    `alpha_closing`), because un-premultiplying is what dirties it. Measured
+    on a real cap render (2026-09-05): a staircase of noise runs along the
+    outline — |rgb - median5| of 16.5 where alpha < 0.05 and 3.1 from 0.05
+    to 0.15, against 0.4 in the core — and those pixels reach brush INSIDE
+    the mask at a small but nonzero weight, which is the shape a floater
+    starts as. Inside the matte there is a second defect, a
+    one-Gaussian-per-pixel checkerboard dipping to 0.90, which a grey
+    closing fills without moving the boundary. Training on cleaned masks
+    measured the same as training on dirty ones on the subject this was
+    fitted to, so this is hygiene rather than a quality lever — it is here
+    for the subject where the fringe is not so quiet.
     """
 
     PARAMS = (
@@ -436,11 +454,21 @@ class SelectSupportViewsStep(Step):
               "into the straight-alpha frame brush's masked mode expects. Off leaves "
               "the render as it came, which darkens the soft silhouette",
               advanced=True),
-        Param("min_alpha", float, 0.004,
-              "Alpha at or below this is treated as fully transparent: the colour "
-              "there is not recoverable by dividing and the mask weights it at zero "
-              "anyway. The same default the compositing uses",
+        Param("min_alpha", float, 0.15,
+              "Alpha below this is cut: the colour there is not recoverable by "
+              "dividing and the mask would hand brush a nearly-weightless pixel of "
+              "amplified noise. 0.15 rather than the 1/255 this started at because "
+              "the fringe was measured (2026-09-05): |rgb - median5| is 16.5 where "
+              "alpha < 0.05 and 3.1 between 0.05 and 0.15, against 0.4 in the core "
+              "— a staircase of un-premultiplied noise sitting INSIDE the mask at "
+              "small but nonzero weight, which is what becomes a floater",
               minimum=0.0, maximum=1.0, advanced=True),
+        Param("alpha_closing", int, 5,
+              "Close the alpha with a square kernel this wide before cutting it, "
+              "filling the one-Gaussian-per-pixel checkerboard the cap render leaves "
+              "inside the matte (dips to 0.90). A grey closing, so it fills the dips "
+              "without moving the boundary. 0 leaves the alpha as it came",
+              minimum=0, advanced=True),
     )
 
     def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
@@ -450,6 +478,7 @@ class SelectSupportViewsStep(Step):
         path_cameras = inputs.get("path_cameras")
         min_path_angle = params["min_path_angle_deg"]
         min_alpha = params["min_alpha"]
+        alpha_closing = params["alpha_closing"]
 
         if not (len(images) == len(masks) == len(cameras)):
             raise ValueError(
@@ -487,6 +516,14 @@ class SelectSupportViewsStep(Step):
         out_images, out_masks, out_cameras = [], [], []
         for index in keep:
             alpha = np.asarray(masks[index], dtype=np.float32)
+            # The mask brush is handed, and the cut: a grey closing over the
+            # checkerboard, then everything under min_alpha to zero. The
+            # render's OWN alpha stays the divisor below — it is the factor
+            # the colour was actually premultiplied by, and a pixel whose
+            # coverage the closing lifted from 0.90 to 1.0 would come back
+            # 10% dark if it were divided by the number it should have had.
+            coverage = _close_alpha(alpha, alpha_closing)
+            keep_px = coverage >= min_alpha
             layer = images[index]
             # The same requirement steps/render.py's `+splat` compositing
             # has, for a different reason: dividing by alpha only recovers
@@ -494,15 +531,15 @@ class SelectSupportViewsStep(Step):
             # black. There the background is passed by the code, so it
             # cannot be got wrong; here it comes off a workflow's wiring.
             _check_premultiplied(
-                layer, alpha, index, min_alpha, where="select_support_views",
+                layer, alpha, index, where="select_support_views",
                 because="Un-premultiplying (rgb / a) only recovers the straight "
                         "colour these views are supposed to carry for",
             )
             out_images.append(
-                _unpremultiply(layer, alpha, min_alpha)
+                _unpremultiply(layer, alpha, min_alpha, keep_px)
                 if params["unpremultiply"] else layer
             )
-            out_masks.append(np.where(alpha < min_alpha, 0.0, alpha))
+            out_masks.append(np.where(keep_px, coverage, 0.0))
             out_cameras.append(cameras[index])
 
         logger.info(
@@ -635,19 +672,39 @@ def _nearest_path_angle_deg(direction: np.ndarray,
     return float(np.degrees(np.arccos(cosines.max())))
 
 
-def _unpremultiply(layer: np.ndarray, alpha: np.ndarray, min_alpha: float) -> np.ndarray:
+def _close_alpha(alpha: np.ndarray, size: int) -> np.ndarray:
+    """A grey morphological closing of the render's alpha.
+
+    The cap renders come back with a one-Gaussian-per-pixel checkerboard
+    inside the matte — isolated pixels dipping to ~0.90 where the
+    rasteriser landed between splats. A closing fills those without moving
+    the silhouette: dilate then erode returns any boundary that is not a
+    hole to where it was.
+    """
+    if size <= 0:
+        return alpha
+    return cv2.morphologyEx(
+        alpha, cv2.MORPH_CLOSE, np.ones((size, size), np.uint8)
+    )
+
+
+def _unpremultiply(layer: np.ndarray, alpha: np.ndarray, min_alpha: float,
+                   keep: np.ndarray) -> np.ndarray:
     """`colour*a` back to `colour`, black where there is no colour to recover.
 
-    Below `min_alpha` the division is both unstable and meaningless — a
-    value of 1/255 divided by an alpha of 0.002 is noise amplified 500x —
-    and the mask hands those pixels a weight of zero regardless, so they
-    are left at black rather than reconstructed.
+    `keep` is the mask's own verdict — the closed alpha against `min_alpha`
+    — and `alpha` is what the colour was premultiplied by. Outside `keep`
+    the division is both unstable and meaningless (a value of 1/255 divided
+    by an alpha of 0.002 is noise amplified 500x) and the mask hands those
+    pixels a weight of zero regardless, so they are left at black rather
+    than reconstructed. Inside it the divisor is floored at `min_alpha`,
+    which only bites where the closing lifted a pixel the render itself
+    left nearly transparent.
     """
     rgb = layer[..., :3].astype(np.float32)
-    safe = alpha >= min_alpha
-    divisor = np.where(safe, alpha, 1.0)[..., None]
+    divisor = np.where(keep, np.maximum(alpha, min_alpha), 1.0)[..., None]
     straight = np.clip(rgb / divisor, 0, 255)
-    return np.where(safe[..., None], straight, 0.0).astype(np.uint8)
+    return np.where(keep[..., None], straight, 0.0).astype(np.uint8)
 
 
 def _composite_pivot(inputs: Dict[str, Any],
@@ -677,7 +734,7 @@ def _composite_pivot(inputs: Dict[str, Any],
 
 
 def _check_premultiplied(layer: np.ndarray, alpha: np.ndarray, index: int,
-                         min_alpha: float, *, where: str, because: str) -> None:
+                         *, where: str, because: str) -> None:
     """Refuse a splat render that was not made on a black background.
 
     Only one direction of this is provable from the images alone: where
@@ -692,8 +749,14 @@ def _check_premultiplied(layer: np.ndarray, alpha: np.ndarray, index: int,
     `render_splat_layers` passes the background itself, so a render it did
     not make on black cannot exist. This one survives because
     select_support_views takes a render a *workflow* wired to it.
+
+    `_FULLY_TRANSPARENT` and not the step's `min_alpha`: the two ask
+    different questions. `min_alpha` is where the caller stops trusting a
+    pixel — 0.15, well up the fringe — and premultiplied colour at an alpha
+    of 0.1 is legitimately up to 25/255 bright, so testing there would
+    refuse every correct render there is.
     """
-    transparent = alpha < min_alpha
+    transparent = alpha < _FULLY_TRANSPARENT
     if not transparent.any():
         return
     worst = int(layer[transparent].max())
