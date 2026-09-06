@@ -910,6 +910,86 @@ def _drive_render(*, bg_color=(0.0, 0.0, 0.0), confidence=None, cameras=1):
         }
 
 
+def _drive_layers(*, alpha=255, min_alpha=None, cameras=1):
+    """Run `render_splat_layers` against the stub binary, as `render` does.
+
+    The straight-alpha recovery lives between `_rasterize` and the caller
+    and had no test at all, which is how it came to be calling
+    `_unpremultiply` with the wrong number of arguments: the helper it
+    shares with select_support_views grew a `keep` argument and only the
+    other call site was updated. A run died on a pod for it.
+    """
+    from body2colmap.camera import Camera
+
+    from pipeline.steps import splat as splat_module
+
+    camera_list = [
+        Camera(
+            focal_length=(4.0, 4.0),
+            image_size=(4, 4),
+            principal_point=(2.0, 2.0),
+            position=np.array([0.0, 0.0, float(i + 1)], dtype=np.float32),
+            rotation=np.eye(3, dtype=np.float32),
+        )
+        for i in range(cameras)
+    ]
+    scene = _synthetic_scene()
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        ply = root / "s.ply"
+        run_step("save_splat", {"splat_scene": scene}, {"filepath": str(ply)})
+        binary = stub_render_binary(root, alpha=alpha)
+        kwargs = {} if min_alpha is None else {"min_alpha": min_alpha}
+        return splat_module.render_splat_layers(
+            scene=scene,
+            splat_path=str(ply),
+            cameras=camera_list,
+            width=4,
+            height=4,
+            render_path=binary,
+            **kwargs,
+        )
+
+
+class TestRenderSplatLayers(unittest.TestCase):
+    """The RGBA overlay layers `steps/render.py`'s `+splat` modes composite.
+
+    What is under test is the one thing this function does beyond the
+    rasterisation: the binary renders premultiplied over black, and
+    `Renderer._composite_splat` blends `layer*a + base*(1-a)`, so the colour
+    has to be divided back out here or every semi-transparent pixel of the
+    overlay lands twice as dark as the surface it stands for.
+    """
+
+    def test_a_layer_comes_back_rgba_and_straight(self):
+        """A half-covered pixel rendered at 100 over black was 199 before it
+        was premultiplied, and that is what the compositor has to be given."""
+        layers = _drive_layers(alpha=128)
+        layer = layers[0]
+        self.assertEqual(layer.shape, (4, 4, 4))
+        self.assertEqual(layer.dtype, np.uint8)
+        np.testing.assert_array_equal(layer[..., 3], 128)
+        np.testing.assert_array_equal(layer[..., :3], round(100 / (128 / 255)))
+
+    def test_an_opaque_layer_is_left_alone(self):
+        """Dividing by one is the case that hides a broken divisor, so it is
+        the one worth pinning next to the half-covered frame."""
+        layer = _drive_layers(alpha=255)[0]
+        np.testing.assert_array_equal(layer[..., :3], 100)
+        np.testing.assert_array_equal(layer[..., 3], 255)
+
+    def test_below_min_alpha_the_pixel_is_dropped_rather_than_amplified(self):
+        """The long transparent tail: cut from the colour and the alpha
+        together, not divided out into noise."""
+        layer = _drive_layers(alpha=8, min_alpha=0.5)[0]
+        np.testing.assert_array_equal(layer[..., :3], 0)
+        np.testing.assert_array_equal(layer[..., 3], 0)
+
+    def test_one_layer_per_camera_in_order(self):
+        self.assertEqual(len(_drive_layers(cameras=3)), 3)
+
+
 def _captured_render_argv(**kwargs):
     return _drive_render(**kwargs)["argv"]
 

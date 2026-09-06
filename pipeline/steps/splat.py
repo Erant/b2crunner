@@ -714,8 +714,14 @@ def render_splat_layers(
 
     layers: List[np.ndarray] = []
     for bgr, alpha in zip(images, masks):
-        alpha = np.where(alpha < min_alpha, 0.0, alpha).astype(np.float32)
-        rgb = _unpremultiply(bgr[..., ::-1], alpha, min_alpha)
+        alpha = np.asarray(alpha, dtype=np.float32)
+        # No closing to reconcile here, unlike `select_support_views`: the
+        # mask is the render's own alpha, so the pixels worth recovering are
+        # exactly the ones at or above `min_alpha`, and the transparent tail
+        # is cut from the colour and the alpha together.
+        keep = alpha >= min_alpha
+        alpha = np.where(keep, alpha, 0.0)
+        rgb = _unpremultiply(bgr[..., ::-1], alpha, min_alpha, keep)
         layers.append(np.dstack(
             [rgb, np.clip(alpha * 255.0, 0, 255).astype(np.uint8)]
         ))
