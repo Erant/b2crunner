@@ -1,5 +1,13 @@
 # Improving the intermediate splat: findings and implementation guide
 
+> **SUPERSEDED IN ONE PLACE, 2026-09-07: the polish is off.** Every number
+> below was measured on the Erant/brush fork, which the pipeline no longer
+> uses — b2ctrain replaced it (docs/docker.md). Re-measured there, the
+> growth-off 9000-step warm start that §2 and §4 call the biggest lever
+> does not improve quality, so `fast_helical_native` sets `polish_steps: 0`
+> on both trainings. Everything else in this guide still describes what
+> ships.
+
 > **Landed 2026-09-05** (§6's list, all of it, plus the optional item 7).
 > brush was already committed and pushed as `a9405881`; `BRUSH_REF` moved
 > with it. Three deviations from §6, all deliberate and all asked for:

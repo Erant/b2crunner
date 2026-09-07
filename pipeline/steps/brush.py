@@ -92,12 +92,20 @@ deliverable that is more useful with it than without.
 brush on the same export, warm-started from the first run's .ply through an
 `init.ply` symlink, with growth off (`--growth-stop-iter 0`, `--refine-every`
 past the run's length) and the normal loss on from step 0. It exports over
-the first .ply, so nothing downstream has to know it happened. What it buys
-is not iterations: measured on the intermediate splat (2026-09-05,
+the first .ply, so nothing downstream has to know it happened. What it bought
+was not iterations: measured on the intermediate splat (2026-09-05,
 docs/intermediate-splat-guide.md) 9000 of these moved band-limited face
 sharpness from 143 to 161 where 9000 more iterations of one cold run reached
-137 — the restart at full mean learning rate is the effect. It costs one
+137 — the restart at full mean learning rate was the effect. It costs one
 dataset reload and, on a 4070 Ti, about 2 minutes.
+
+Past tense on purpose: **no shipped workflow polishes any more.** Every one
+of those figures is brush's, and re-measured on b2ctrain (2026-09-07, both
+trainings) the polish did not improve quality — so `fast_helical_native`
+sets `polish_steps: 0` on both. The machinery stays because the finding is
+about a trainer rather than about the idea: a trainer whose schedule leaves
+headroom at the end of a cold run can still be worth restarting, and this is
+how you would find out.
 
 **The alignment loop** (`align_iters`, 4 by default) is the answer to a
 measurement that says the trained splat is softer than the frames it was

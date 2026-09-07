@@ -57,7 +57,8 @@
 #     the training time.
 #   * `train_splat` gains `polish_steps: 9000` — a growth-off warm start
 #     from its own export, which is worth more than any other knob tried
-#     (face 143 -> 161) — and `match_alpha_weight: 0.5`.
+#     (face 143 -> 161) — and `match_alpha_weight: 0.5`. (The polish went
+#     back off on 2026-09-07: re-measured on b2ctrain it buys nothing.)
 #   * the re-render is made on BLACK again (`cull_color`), the room is off
 #     there too (`background: ""`), and the frames the second denoise sees
 #     are cut with an RMBG matte (`resplat_foreground_masks`) and laid over
@@ -1656,20 +1657,22 @@ steps:
       # sh_degree, max_splats, refine_every, the normal-loss group — sits at
       # that step's declared defaults.
       total_steps: 30000
-      # And then 9000 more, from a warm start with growth off — the single
-      # biggest quality lever measured on this training after the evidence
-      # fix (2026-09-05): band-limited face sharpness 143 -> 161, hands 49
-      # -> 55, shoes 31 -> 36, all of it on the splat the helical re-render
-      # below is made from. It is the RESTART that does it, not the extra
-      # iterations: 39000 in one cold run reached a third of the same gain.
-      # ~2 minutes on a 4070 Ti. steps/brush.py links the first export in as
-      # the dataset's init.ply and exports the polished splat over it, so
-      # nothing downstream — including the evidence rerender_splat gates on
-      # — sees anything but the finished .ply.
+      # NO POLISH, on either training (2026-09-07). This carried
+      # `polish_steps: 9000` from 2026-09-05 to 2026-09-07, on brush, where
+      # a growth-off warm start from the first export was the single
+      # biggest quality lever measured on this training: band-limited face
+      # sharpness 143 -> 161, hands 49 -> 55, shoes 31 -> 36, and the
+      # RESTART was what did it rather than the extra iterations (39000 in
+      # one cold run reached a third of the same gain).
       #
-      # NOT set on train_final_splat: it has never been measured there, and
-      # a deliverable splat is the wrong place to find out.
-      polish_steps: 9000
+      # Re-measured on b2ctrain, it buys nothing — so it is off, and spelled
+      # out here rather than left to the step's default of 0 because this
+      # line is where the old finding was. The likely reason is that the
+      # lever was never really "more iterations": it was the restart at full
+      # mean learning rate, and this trainer's schedule does not leave the
+      # same headroom on the table at 30000. It also gives ~2 minutes of a
+      # 4070 Ti back per run.
+      polish_steps: 0
       # And the mirror image of that: the alignment loop (steps/brush.py's
       # default of 4) was measured on the DELIVERABLE training, not on this
       # one, so this one keeps the training it was tuned as. The reasoning
@@ -2337,6 +2340,12 @@ steps:
       align_debug_dir: ${globals.output_root}/debug/alignment
       export_dir: ${globals.output_root}/ply
       export_name: scene.ply
+      # No polish here either — the step's default, spelled out because
+      # this training used to carry the note that a polish had never been
+      # measured on a deliverable splat. It has now (2026-09-07, on
+      # b2ctrain, both stages): it does not improve quality, so neither
+      # training runs one. See train_splat.
+      polish_steps: 0
       # See train_splat for the trainer. The one part of it that is not a
       # drop-in is the alignment loop above: b2ctrain runs it INSIDE the
       # training (steps/brush.py's `align_backend: auto` asks the binary),

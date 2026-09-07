@@ -114,9 +114,10 @@ renders through the same shim and is the A/B reference the loop was tuned
 against.
 
 Measured on an RTX 4070 Ti through this very step class, same argv: stage 2
-(135 views, 720p) 2m29s against brush's 9m41s at 37.0 vs 35.8 dB, and 3m44s
-for the whole step with its 9000-step polish (that one timed on the fp16-SH
-build, so read it as a floor); stage 5 (81 views, 1080p) 1m40s
+(135 views, 720p) 2m29s against brush's 9m41s at 37.0 vs 35.8 dB (the step
+was timed at 3m44s with the 9000-step polish it carried until 2026-09-07;
+that polish is off now — re-measured on this trainer it bought nothing);
+stage 5 (81 views, 1080p) 1m40s
 against 6m47s at equal or better PSNR, and ~2m50s for the whole step
 including four in-trainer alignment iterations against 5m30s for the same
 loop driven from the pipeline. Splat counts are within 4%. The in-trainer
