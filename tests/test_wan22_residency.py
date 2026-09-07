@@ -249,8 +249,18 @@ class TestGroupOffload(unittest.TestCase):
                     "a stream silently defeats the offload for torchao weights",
                 )
 
-    def test_weights_are_pinned_on_the_fly_not_up_front(self):
-        """Pre-pinning would ask the host for a second copy of ~47 GB."""
+    def test_the_host_is_never_asked_for_a_second_copy_of_the_weights(self):
+        """~47 GB is already resident in DRAM; a pinned duplicate is fatal.
+
+        Kept passing `low_cpu_mem_usage=True` even though it is inert with
+        the stream off — diffusers only builds the pinned `cpu_param_dict`
+        the flag guards inside `if self.stream is not None`, so unstreamed
+        onloads copy straight from the module's own pageable storage and
+        cache nothing. It stays because it is the flag that would matter
+        again the moment anything reintroduces a stream, and because the
+        assertion states the constraint whether or not today's code path
+        happens to consult it.
+        """
         _, calls = self._apply()
         for _, kwargs in calls:
             self.assertTrue(kwargs["low_cpu_mem_usage"])

@@ -706,13 +706,15 @@ class Wan22VaceDenoiseStep(Step):
                 offload_type="block_level",
                 num_blocks_per_group=blocks,
                 use_stream=False,
-                # Pin on the fly rather than pre-pinning every weight. The
-                # default pre-pins, which for ~47 GB of weights already
-                # resident in host RAM means asking the host for a second,
-                # unswappable copy of all of it. diffusers warns this "may
-                # counteract the benefits of using streams"; against the
-                # compute per block measured above, it does not come close
-                # to mattering.
+                # Inert with the stream off — diffusers builds the pinned
+                # `cpu_param_dict` this guards only inside `if self.stream
+                # is not None`, so an unstreamed onload copies from the
+                # module's own pageable storage and caches nothing. Kept
+                # because the constraint it states is permanent: the
+                # default pre-pins, and for ~47 GB already resident in
+                # host RAM that is a second, unswappable copy of all of
+                # it. Anything that reintroduces a stream needs this flag
+                # already set.
                 low_cpu_mem_usage=True,
             )
 
