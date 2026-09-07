@@ -802,11 +802,20 @@ COPY --from=python-builder /opt/vendor /opt/vendor
 # work rebased on top of the fade, so d084702 became 637a6a6), which is why
 # this pin finally names a commit on main rather than a topic branch.
 #
+# 60d169e ("SplatScene: carry extra vertex properties through the PLY round
+# trip", 2026-09-07) keeps brush's ev_* evidence block across a
+# SplatScene.from_ply/to_ply round trip. Any step that stages a scene in
+# memory before a `confidence: true` render used to lose it, and the gate
+# then degenerated to plain alpha behind a one-line warning. The workflow
+# hands rerender_splat the trained file directly since 1547a4a, so an older
+# commit is a degraded render rather than an error — which is exactly why
+# the pin, not an assert, is what carries it.
+#
 # Failing the build is deliberate: an image built against an older commit
 # would install cleanly and then raise on the first render_splat of a real
 # run, an hour into a pod booking. The last four asserts below are what stop it.
 RUN /opt/venv_base/bin/pip install --force-reinstall --no-deps \
-        'body2colmap @ git+https://github.com/Erant/body2colmap.git@af480294326c8e8ad4841f855a9dd838f7b76a42' \
+        'body2colmap @ git+https://github.com/Erant/body2colmap.git@60d169e900e86abe08a1605a22750b1757a3f7dd' \
     && /opt/venv_base/bin/python -c "\
 import inspect; \
 import body2colmap.face as f; \
