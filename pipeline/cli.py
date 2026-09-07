@@ -19,8 +19,8 @@ downloads the result. It talks to `pipeline.api` over HTTP and needs only
 `requests`, so it runs from a laptop that could not host the pipeline
 itself. See `pipeline/api_cli.py`.
 
-`doctor` is the one to reach for on a fresh pod: it answers whether Vulkan,
-EGL, the venvs, the brush binaries and the HF token are all actually usable,
+`doctor` is the one to reach for on a fresh pod: it answers whether EGL,
+the venvs, the trainer binaries and the HF token are all actually usable,
 which is otherwise only discoverable by starting a 40-minute run and
 watching where it dies.
 """

@@ -138,12 +138,14 @@ for env_name in sam3dbody wan22 seedvr2; do
     deactivate
 done
 
-# brush is intentionally NOT built here. It needs OS-level Vulkan/graphics
-# capability — confirmed on a real bare RunPod pod that this isn't present
-# by default (NVIDIA_DRIVER_CAPABILITIES only exposed compute,utility) and
-# isn't fixable by installing anything, on any dispatch, into an
-# already-running pod — it has to be baked into the pod's own image at
-# creation time. See docker/Dockerfile (which does build brush) and
-# docs/docker.md; this bare-pod bootstrap script can't help here at all.
+# The splat trainer (b2ctrain, which is also the rasteriser) is
+# intentionally NOT built here. It needs a CUDA 13 toolkit and a C++
+# compiler to build, which is exactly what the image's own builder stage
+# is for; a bare pod has neither, and the `render` step still needs an
+# OS-level graphics capability that cannot be installed into an
+# already-running pod at all — confirmed on a real bare RunPod pod
+# (NVIDIA_DRIVER_CAPABILITIES exposed compute,utility only). It has to be
+# baked into the pod's own image at creation time. See docker/Dockerfile
+# (which does build the trainer) and docs/docker.md.
 
 echo "=== pod_bootstrap.sh complete ==="

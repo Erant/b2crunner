@@ -112,8 +112,8 @@ serve_ui() {
     start_sshd
 
     # A summary sweep, not the full one: it costs a couple of seconds and
-    # puts the pod's actual capabilities (Vulkan for brush, EGL for render,
-    # the venvs, the HF token) in the log *before* anyone starts a run that
+    # puts the pod's actual capabilities (EGL for render, the trainer
+    # binaries, the venvs, the HF token) in the log *before* anyone starts a run that
     # depends on them. Non-blocking on purpose — a WARN or even a FAIL is
     # still worth having a UI to look at.
     log "preflight:"

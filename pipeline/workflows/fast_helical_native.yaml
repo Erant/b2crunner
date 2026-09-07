@@ -13,7 +13,21 @@
 # and reads the .ply optionally, so the branch being off leaves it with
 # nothing to composite rather than nothing to resolve.
 #
-# WHAT CHANGED (2026-09-06, last): **the stage-1 supporting views are gone
+# WHAT CHANGED (2026-09-07, last): **both trainings run a different
+# trainer, and one of them runs the alignment loop somewhere else.** The
+# `brush` step now drives **b2ctrain** (Erant/b2ctrain: brush's CLI,
+# dataset layout and .ply contract, in C++/CUDA, ~4x faster at equal or
+# better quality), which REPLACED the Rust brush in the image — the
+# `brush-splat-render` every splat render here goes through is the same
+# binary behind a shim. Nothing in this file had to change for that: the
+# step's `brush_path` default names it, and every flag, sidecar and ev_*
+# property is what it always was. The one visible difference is in
+# `train_final_splat`: b2ctrain carries the alignment loop in-process, so
+# the four iterations are one invocation now instead of five, and the
+# per-iteration render process and Python flow are gone. See the comments
+# on the two trainings below, and docs/docker.md.
+#
+# WHAT CHANGED (2026-09-06): **the stage-1 supporting views are gone
 # from this workflow.** `stage1_support_views`, `stage1_support_every_n` and
 # `stage1_support_elevation_deg` are no longer declared, and with them the
 # three steps they gated — `stage1_view_splats` (pointmap_elevation_views),
@@ -1706,6 +1720,18 @@ steps:
       # camera dumps and a ~10k-Gaussian face cap.
       export_dir: ${globals.output_root}/debug
       export_name: intermediate_splat.ply
+      # The trainer is not named here because there is only one: b2ctrain,
+      # steps/brush.py's `brush_path` default since 2026-09-07 — a CUDA
+      # trainer with brush's CLI, dataset layout and .ply contract, which
+      # REPLACED the Rust brush in the image rather than joining it. On
+      # this training's own argv and dataset shape (135 views at 720p,
+      # masked supporting views, normals, weights) it measured 2m29s
+      # against brush's 9m41s on a 4070 Ti, 871k splats to 837k, 37.0 dB to
+      # 35.8 (mask-weighted, against the training frames); with the polish
+      # below, 3m44s for the step — that one timed on the fp16-SH build the
+      # trainer briefly defaulted to, so read it as a floor. Every flag
+      # emitted here is accepted, and the export carries the same ev_*
+      # block rerender_splat gates on.
     outputs:
       splat_path: dataset.splat_path
 
@@ -2311,6 +2337,29 @@ steps:
       align_debug_dir: ${globals.output_root}/debug/alignment
       export_dir: ${globals.output_root}/ply
       export_name: scene.ply
+      # See train_splat for the trainer. The one part of it that is not a
+      # drop-in is the alignment loop above: b2ctrain runs it INSIDE the
+      # training (steps/brush.py's `align_backend: auto` asks the binary),
+      # so this is one invocation — the renders, flow and warps on the GPU
+      # against the frames it already holds, the four refits in the same
+      # process. What that removes per iteration is a brush-splat-render
+      # process, a Python DIS flow over 81 frames and a re-invocation that
+      # reloads the dataset and the .ply: ~2m50s for the whole step against
+      # 5m30s for the same loop driven from here (`align_backend:
+      # pipeline`, which still works and is the A/B reference), and the
+      # cold run alone is 1m40s against brush's 6m47s on this dataset's
+      # shape (81 views, 1080p), 364k splats to 356k, at equal or better
+      # PSNR. alignment.json and the sample frames under align_debug_dir
+      # are written by the trainer in the same layout.
+      #
+      # NOT yet checked in-trainer: the band-limited face sharpness the
+      # loop's settings were tuned on (docs/final-splat-alignment-guide.md).
+      # PSNR of the finished splat against the pristine frames (32.24 dB
+      # against the pipeline loop's 32.29), the trajectory shape (1.47 ->
+      # 1.83 px, rising and decelerating) and the flow's batch mean (1.48
+      # against DIS's 1.47) all match; sharpness is the metric this
+      # pipeline judges by, and it has only been read off the pipeline
+      # loop's result.
     outputs:
       # Overwrites the stage-2 intermediate, so Dataset.to_disk's splat.ply
       # and the CLI's closing "splat:" line both name the final one.

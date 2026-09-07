@@ -142,13 +142,13 @@ class TestDockerfile(unittest.TestCase):
         re-executed RUN layers cannot — their output is not
         byte-reproducible — so a 1.25 GB apt layer goes up the wire again.
 
-        And it has to sit ABOVE the brush COPYs, which is the other half:
-        below them, a bumped BRUSH_REF would invalidate this apt RUN and
-        push its ~450 MB with every brush bump.
+        And it has to sit ABOVE the trainer COPYs, which is the other half:
+        below them, a bumped B2CTRAIN_REF would invalidate this apt RUN and
+        push its ~450 MB with every trainer bump.
         """
         colmap_pkg = "libceres4t64"
         venv_base = "COPY --from=python-builder /opt/venv_base"
-        brush_copy = "COPY --from=brush-builder /out-brush /usr/local/bin/brush"
+        brush_copy = "COPY --from=b2ctrain-builder /out-b2ctrain /usr/local/bin/b2ctrain"
 
         for marker in (colmap_pkg, venv_base, brush_copy):
             self.assertIn(marker, self.text)
@@ -161,8 +161,8 @@ class TestDockerfile(unittest.TestCase):
         )
         self.assertLess(
             self.text.index(colmap_pkg), self.text.index(brush_copy),
-            "COLMAP's apt packages moved below the brush COPYs — a BRUSH_REF "
-            "bump would now invalidate them and re-push ~450 MB",
+            "COLMAP's apt packages moved below the trainer COPYs — a "
+            "B2CTRAIN_REF bump would now invalidate them and re-push ~450 MB",
         )
 
     def test_the_onnx_runtime_colmap_gets_matches_the_image_s_cuda(self):
@@ -262,7 +262,9 @@ class TestCompose(unittest.TestCase):
         )
 
     def test_it_grants_the_graphics_driver_capability(self):
-        """Without `graphics`, vulkaninfo finds no driver and brush cannot run."""
+        """Without `graphics` the toolkit wires up no EGL ICD, and the pyrender
+        `render` step falls back to OSMesa or dies. It used to gate brush's
+        Vulkan too; the trainer and the splat rasteriser are CUDA now."""
         compose = yaml.safe_load(COMPOSE.read_text())
         environment = compose["services"]["pipeline"]["environment"]
         capabilities = next(

@@ -729,9 +729,9 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
 
         with gr.Tab("Doctor"):
             gr.Markdown(
-                "Checks the things that break a run 40 minutes in: Vulkan (brush), EGL "
-                "(render), the per-step venvs, the brush binaries' fork-specific flags, "
-                "the HF token's access to the two gated checkpoints, and free space."
+                "Checks the things that break a run 40 minutes in: EGL (render), "
+                "the per-step venvs, the trainer binaries' flags, the HF token's "
+                "access to the two gated checkpoints, and free space."
             )
             doctor_btn = gr.Button("Run checks", variant="primary")
             doctor_out = gr.Code(label="Report", lines=30)

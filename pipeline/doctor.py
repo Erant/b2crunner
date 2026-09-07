@@ -5,12 +5,14 @@ Every check here corresponds to something that has already gone wrong once,
 on a real machine, in a way that cost an hour to diagnose from the failure
 alone:
 
-  * `vulkaninfo` finding no driver because NVIDIA_DRIVER_CAPABILITIES lacked
-    `graphics` — surfaces as brush exiting mid-run, 40 minutes in.
   * `libEGL.so.1` missing, so pyrender silently fell back to OSMesa (or to
-    nothing) — surfaces as `render` producing black frames or dying.
-  * `brush` built from the wrong branch, missing `--normal-loss-weight` —
-    surfaces as brush rejecting its argv, and only when a workflow that
+    nothing) — surfaces as `render` producing black frames or dying. (Its
+    sibling, `vulkaninfo` finding no driver because
+    NVIDIA_DRIVER_CAPABILITIES lacked `graphics`, was the brush check until
+    2026-09-07; b2ctrain and its rasteriser are CUDA, so nothing in the
+    image is a Vulkan client any more and that check is gone.)
+  * a trainer built from the wrong branch, missing `--normal-loss-weight` —
+    surfaces as it rejecting its argv, and only when a workflow that
     passes normal supervision runs.
   * a child venv that can't `import torch` because its .pth into venv_base
     didn't survive a stage copy.
@@ -166,119 +168,24 @@ def check_torch() -> Check:
     return Check("torch", OK, f"{torch.__version__} / cu{torch.version.cuda}", lines)
 
 
-def _vulkan_chain() -> List[str]:
-    """Why Vulkan failed, link by link. See scripts/vulkan_probe.sh for the
-    full version — this is the subset cheap enough to run at every start."""
-    import ctypes
-    import glob
-    import re
-
-    lines = []
-
-    # Link 1: did nvidia-container-toolkit mount an ICD manifest at all? If
-    # not, either `graphics` was missing from the capabilities OR the host's
-    # driver install has no graphics userspace to mount. Neither is fixable
-    # from inside the image.
-    manifests = sorted(
-        glob.glob("/usr/share/vulkan/icd.d/*nvidia*.json")
-        + glob.glob("/etc/vulkan/icd.d/*nvidia*.json")
-    )
-    if manifests:
-        lines.append(f"ICD manifest: {', '.join(manifests)}")
-    else:
-        lines.append("ICD manifest: ABSENT — the toolkit mounted no NVIDIA ICD.")
-        lines.append(f"  NVIDIA_DRIVER_CAPABILITIES={os.environ.get('NVIDIA_DRIVER_CAPABILITIES', '(unset)')}")
-        lines.append("  It must include 'graphics', and it is read at container-CREATION")
-        lines.append("  time — setting it inside a running pod does nothing. If it is")
-        lines.append("  already set, the HOST driver has no graphics userspace to inject.")
-
-    # Link 2: the driver's own libraries. libnvidia-gpucomp is the shader
-    # compiler, split out of glcore in the 550+ drivers; a libnvidia-container
-    # older than 1.17 does not know to inject it, which breaks Vulkan on
-    # newer-driver hosts only.
-    for pattern, label in (
-        ("libGLX_nvidia.so*", "libGLX_nvidia (the ICD itself)"),
-        ("libnvidia-glcore.so.*", "libnvidia-glcore"),
-        ("libnvidia-gpucomp.so*", "libnvidia-gpucomp (driver >= 550)"),
-    ):
-        found = glob.glob(f"/usr/lib/x86_64-linux-gnu/{pattern}") + glob.glob(f"/usr/lib64/{pattern}")
-        lines.append(f"{label}: {', '.join(sorted(found)) if found else 'ABSENT'}")
-
-    # The version string's position in this line moves between driver
-    # branches (the open-kernel-module builds insert "Open" and "for"), so
-    # match the number rather than a field index.
-    try:
-        text = Path("/proc/driver/nvidia/version").read_text()
-        match = re.search(r"\b(\d+\.\d+(?:\.\d+)?)\b", text)
-        if match:
-            lines.append(f"kernel module driver version: {match.group(1)}")
-            lines.append("  every injected .so above must carry this exact version")
-    except OSError:
-        pass
-
-    # Link 3: the dependency that has already caught this project once. The
-    # NVIDIA ICD runs a GLVND self-registration during vkCreateInstance that
-    # needs libEGL.so.1 resolvable, even though Vulkan never calls EGL.
-    # Without it vk_icdGetInstanceProcAddr returns NULL for vkCreateInstance,
-    # with no error, and the loader falls back to llvmpipe.
-    for lib in ("libEGL.so.1", "libGLdispatch.so.0", "libXext.so.6"):
-        try:
-            ctypes.CDLL(lib)
-            lines.append(f"{lib}: loads")
-        except OSError as exc:
-            lines.append(f"{lib}: FAILS TO LOAD — {exc}")
-
-    return lines
-
-
-def check_vulkan() -> Check:
-    """Gates `brush`. See docs/docker.md's NVIDIA_DRIVER_CAPABILITIES note."""
-    if not shutil.which("vulkaninfo"):
-        return Check("vulkan", WARN, "vulkaninfo not installed; cannot verify brush's backend")
-    try:
-        result = _run(["vulkaninfo", "--summary"], timeout=60)
-    except subprocess.TimeoutExpired:
-        return Check("vulkan", FAIL, "vulkaninfo timed out")
-
-    output = result.stdout + result.stderr
-    lines = [
-        line.rstrip() for line in output.splitlines()
-        if "deviceName" in line or "driverName" in line or "deviceType" in line
-    ]
-
-    # A software fallback is the failure mode this check exists to catch, and
-    # it is NOT a non-zero exit: when the NVIDIA ICD declines to create an
-    # instance the loader quietly enumerates llvmpipe and vulkaninfo succeeds.
-    # Matching on "a deviceName line exists" would pass that. Require a real
-    # GPU device type instead.
-    gpu = "PHYSICAL_DEVICE_TYPE_DISCRETE_GPU" in output or "PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU" in output
-    software = "llvmpipe" in output.lower() or "PHYSICAL_DEVICE_TYPE_CPU" in output
-
-    if result.returncode != 0 or "ERROR_INCOMPATIBLE_DRIVER" in output or not lines:
-        return Check(
-            "vulkan", FAIL, "no Vulkan device at all — brush cannot run",
-            [*_vulkan_chain(), "", "full walk: bash scripts/vulkan_probe.sh", *output.splitlines()[:10]],
-        )
-    if not gpu:
-        detail = "Vulkan found only a software rasteriser — brush would run on the CPU" if software \
-            else "Vulkan found no GPU device — brush would run on the CPU"
-        return Check(
-            "vulkan", FAIL, detail,
-            [*lines, "", *_vulkan_chain(), "", "full walk: bash scripts/vulkan_probe.sh"],
-        )
-    return Check("vulkan", OK, lines[0].strip(), lines)
-
-
 def check_egl() -> Check:
-    """Gates `render` (pyrender). EGL is the GPU path; OSMesa is the slow one."""
+    """Gates `render` (pyrender), and since 2026-09-07 it is the ONLY thing
+    the driver's graphics capability still gates here — the splat trainer
+    and rasteriser are CUDA. So this is where a missing `graphics` in
+    NVIDIA_DRIVER_CAPABILITIES now surfaces, and `bash
+    scripts/vulkan_probe.sh` is the link-by-link walk of why.
+
+    EGL is the GPU path; OSMesa is the slow one.
+    """
     import ctypes
 
-    lines = []
+    lines = ["full walk of the graphics chain: bash scripts/vulkan_probe.sh"]
     try:
         ctypes.CDLL("libEGL.so.1")
         lines.append("libEGL.so.1 loads")
     except OSError as exc:
-        return Check("egl", FAIL, "libEGL.so.1 missing — `render` falls back to software or dies", [str(exc)])
+        return Check("egl", FAIL, "libEGL.so.1 missing — `render` falls back to software or dies",
+                     [*lines, str(exc)])
 
     try:
         import pyrender  # noqa: F401
@@ -302,25 +209,27 @@ def check_egl() -> Check:
         return Check("egl", FAIL, f"could not create an offscreen GL context: {exc}", lines)
 
 
-def check_brush_binaries() -> Check:
-    """Both binaries present, and `brush` carrying the fork's own flags.
+def check_trainer_binaries() -> Check:
+    """Both binaries present, and the trainer carrying the flags this argv needs.
 
-    The flag diff is the check docker/Dockerfile's brush stage describes in
-    prose: Erant/brush's `main` merely tracks upstream, so a clone of the
-    default branch builds a binary that runs fine and then rejects the argv
-    steps/brush.py constructs. Verified here instead of at minute 40 of a
-    training run.
+    `b2ctrain` is the trainer (steps/brush.py's `brush_path` default) and,
+    through the shim the image installs as `brush-splat-render`, the
+    rasteriser as well — two names for the one binary since 2026-09-07,
+    when it replaced the Rust brush. The flag list below is brush's, and
+    stays brush's: b2ctrain reproduces that CLI, so a build whose `--help`
+    is missing an entry is a build steps/brush.py cannot drive, whichever
+    of the two is on PATH.
 
-    It catches a stale fork build too, not just a `main` one:
-    `--normal-loss-every` only landed on normal-map-supervision on
-    2026-08-25, `--export-evidence` and `--normalize-masked-loss` on
-    2026-08-30, and the Dockerfile's `git clone` is cached on the RUN text
-    rather than on remote git state. Rebuilding does not reliably shake
-    that loose — `--no-cache-filter brush-builder` re-runs the stage but
-    the runtime stage's `COPY --from=brush-builder` still matches its old
-    cache record, so the fresh binary is built and discarded; the
-    consuming stage has to be named too. See docs/docker-build-notes.md's
-    2026-08-25 update.
+    The flag diff is the check docker/Dockerfile's trainer stage describes
+    in prose. It started as a guard against a brush cloned from the wrong
+    branch, and it catches the same class of thing here: a pin that moved
+    without the image being rebuilt for it. The Dockerfile's `git clone` is
+    cached on the RUN text rather than on remote git state, and rebuilding
+    does not reliably shake that loose — `--no-cache-filter
+    b2ctrain-builder` re-runs the stage but the runtime stage's `COPY
+    --from=b2ctrain-builder` still matches its old cache record, so the
+    fresh binary is built and discarded; the consuming stage has to be
+    named too. See docs/docker-build-notes.md's 2026-08-25 update.
     """
     required_flags = [
         "--normal-loss-weight", "--normal-loss-start-iter",
@@ -330,7 +239,7 @@ def check_brush_binaries() -> Check:
     ]
     lines, status = [], OK
 
-    for binary in ("brush", "brush-splat-render"):
+    for binary in ("b2ctrain", "brush-splat-render"):
         path = shutil.which(binary)
         if not path:
             lines.append(f"{binary}: NOT FOUND on PATH")
@@ -343,23 +252,36 @@ def check_brush_binaries() -> Check:
             status = FAIL
             continue
         lines.append(f"{binary}: {path}")
-        if binary == "brush":
+        if binary == "b2ctrain":
             help_text = result.stdout + result.stderr
             missing = [flag for flag in required_flags if flag not in help_text]
             if missing:
                 lines.append(
-                    f"  MISSING FLAGS {', '.join(missing)} — this binary was built from "
-                    f"Erant/brush's `main`, or from a normal-map-supervision checkout "
-                    f"older than the flags above. Rebuild with "
-                    f"`--no-cache-filter brush-builder,runtime`: naming brush-builder "
-                    f"alone rebuilds the binary but the runtime stage's COPY keeps "
-                    f"serving the cached one."
+                    f"  MISSING FLAGS {', '.join(missing)} — this b2ctrain is older "
+                    f"than the pin in docker/Dockerfile (or is a brush older than "
+                    f"the flags above, if brush_path was pointed back at one). "
+                    f"Rebuild with `--no-cache-filter b2ctrain-builder,runtime`: "
+                    f"naming b2ctrain-builder alone rebuilds the binary but the "
+                    f"runtime stage's COPY keeps serving the cached one."
                 )
                 status = FAIL
             else:
-                lines.append(f"  all {len(required_flags)} fork-specific flags present")
+                lines.append(f"  all {len(required_flags)} flags the argv needs are present")
+            if "--align-iters" not in help_text:
+                # Not a failure: steps/brush.py's `align_backend: auto`
+                # falls back to its own render/warp/re-invoke loop, which
+                # is the same alignment at four times the wall time. Worth
+                # saying, because the difference is otherwise only visible
+                # as a slow stage-5 training.
+                lines.append(
+                    "  no --align-iters — the alignment loop will run in the "
+                    "pipeline (one render process, one Python flow and one "
+                    "re-invocation per iteration) instead of in the trainer"
+                )
+                if status == OK:
+                    status = WARN
 
-    return Check("brush binaries", status, "", lines)
+    return Check("trainer binaries", status, "", lines)
 
 
 def check_colmap() -> Check:
@@ -802,9 +724,8 @@ def run_checks(envs: Optional[Dict[str, Dict[str, Any]]] = None) -> List[Check]:
         ("nvidia-smi", check_nvidia_smi),
         ("torch", check_torch),
         ("host RAM", check_host_ram),
-        ("vulkan", check_vulkan),
         ("egl", check_egl),
-        ("brush binaries", check_brush_binaries),
+        ("trainer binaries", check_trainer_binaries),
         ("colmap", check_colmap),
         ("step venvs", lambda: check_step_venvs(envs or {})),
         ("attention", lambda: check_attention(envs or {})),

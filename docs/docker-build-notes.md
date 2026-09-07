@@ -14,6 +14,19 @@ The original text is left in place as written, because the reasoning behind
 each choice is still what you need when a layer breaks; the RESULT blocks
 say which of those guesses survived contact.
 
+> **2026-09-07: brush is gone from the image.** Everything below about the
+> `brush-builder` stage, `cargo build`, the Rust toolchain and brush's
+> Vulkan backend is history — the trainer is now **b2ctrain** (a C++/CUDA
+> build with brush's CLI, dataset layout and .ply contract; see
+> `docs/docker.md`), its `render` subcommand is `brush-splat-render`
+> through a shim, and the Vulkan loader packages and the doctor's `vulkan`
+> check went with the fork. The graphics-capability sections still matter,
+> but only for `render`'s EGL. What the b2ctrain stage inherits from the
+> brush one is the pin discipline: `git clone --branch` bakes no remote
+> state into the RUN text, so `B2CTRAIN_REF` is checked in the stage, and
+> a bumped pin needs `--no-cache-filter b2ctrain-builder,runtime` to reach
+> the runtime stage's COPY.
+
 `docs/docker.md` remains the narrative for *why one image*; this file is
 about *getting the thing to build*.
 

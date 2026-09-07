@@ -1,5 +1,5 @@
 # Single image for a RunPod (or any GPU-rental) deployment: every step's
-# venv plus the brush binary, in one container. A pod IS a single container
+# venv plus the b2ctrain binary, in one container. A pod IS a single container
 # with no nested Docker daemon (confirmed on a real pod: no
 # /var/run/docker.sock, no `docker` binary), so everything has to live here
 # — see docs/docker.md's "Why one image".
@@ -24,7 +24,11 @@
 # layer fails. Nothing in this file has been built yet.
 #
 # Four stages:
-#   brush-builder   Rust toolchain -> the brush binary, nothing else.
+#   b2ctrain-builder  CUDA *devel* base -> the b2ctrain binary, nothing
+#                   else: the Gaussian-splat trainer AND, through its
+#                   `render` subcommand, the rasteriser every splat render
+#                   in this pipeline goes through. Replaced the Rust brush
+#                   (and its whole toolchain stage) on 2026-09-07.
 #   colmap-builder  CUDA *devel* base -> the `colmap` binary, for the camera
 #                   refinement (pipeline/steps/refine_cameras.py). CUDA is
 #                   on so ALIKED and LightGlue run on the ONNX CUDA
@@ -32,7 +36,7 @@
 #   python-builder  CUDA *devel* base. Compiles detectron2's CUDA kernels,
 #                   which is the only reason nvcc is needed at all.
 #   runtime         CUDA *runtime* base. Receives the finished venvs and
-#                   binaries; carries no nvcc and no Rust. It does carry
+#                   binaries; carries no nvcc and no C++ compiler. It does carry
 #                   gcc, which is NOT an oversight — Triton (and so
 #                   every SageAttention backend) JIT-builds a CPython
 #                   extension at runtime. See the runtime apt layer.
@@ -53,129 +57,64 @@
 
 
 # =============================================================================
-# Stage 1: brush
+# Stage 1: b2ctrain
 # =============================================================================
-# Erant/brush specifically — this fork adds normal-map supervision flags
-# upstream ArthurBrussee/brush doesn't have (--normal-loss-weight,
-# --normal-loss-start-iter, --alpha-mode, --export-name; see
-# pipeline/steps/brush.py).
+# Erant/b2ctrain — a from-scratch C++/CUDA trainer with brush's CLI, dataset
+# layout and .ply contract (docs/STATUS.md in that repo has the measured
+# numbers: ~3.9x brush's wall time at equal or better PSNR and splat count on
+# both example datasets, verified against the fork on an RTX 4070 Ti, and
+# through this pipeline's own step class on both trainings' argv). It is
+# what fast_helical_native.yaml's two trainings run since 2026-09-07, and
+# its `render` subcommand is what answers to `brush-splat-render` in the
+# runtime stage below.
 #
-# Built on bookworm (glibc 2.36) against a noble (glibc 2.39) runtime:
-# older-to-newer is the safe direction for a dynamically linked binary.
+# It REPLACED the Rust brush rather than joining it: there is no
+# brush-builder stage any more, no `brush` binary, no Vulkan rasteriser and
+# no Vulkan loader in the runtime stage. `git log -S brush-builder -- \
+# docker/Dockerfile` is where that stage went if it is ever wanted back;
+# the fork itself is unchanged at Erant/brush's normal-map-supervision
+# branch (`a9405881`, the pin this image shipped), and steps/brush.py still
+# drives brush's argv, so restoring it is re-adding the stage.
 #
-# rustc >= 1.95 is REQUIRED, and this is the floor the dependency tree sets,
-# not a preference: the first build attempt used rust:1.88 and cargo refused
-# to resolve, naming rerun@0.36.0 and sysinfo@0.39.6 as needing 1.95 (plus
-# safe_arch/wide needing 1.89). 1.98 is current stable; bump rather than
-# pin dependencies back.
+# The same devel base as colmap-builder and python-builder, so it is one
+# more stage on an image already being pulled rather than a new one. The
+# binary links the CUDA runtime statically, so the runtime stage needs only
+# the driver (>= 580 for a CUDA 13 build) and nothing from this stage but
+# the file. Built for sm_89 (Ada: L40S, RTX 40xx) and sm_120 (Blackwell:
+# RTX 50xx, RTX PRO) plus compute_120 PTX for whatever comes after.
 #
-# brush is wgpu/Vulkan, NOT CUDA — no CUDA toolkit needed to build it, and
-# ash dlopen's libvulkan.so.1 at runtime, so no Vulkan dev packages here
-# either. Only the loader, in the runtime stage.
-FROM rust:1.98-slim-bookworm AS brush-builder
+# Pinned the way brush was, and for the same reason: `git clone --branch`
+# bakes no remote state into the RUN text, so without the check a moved
+# branch would keep serving the cached binary — and a COPY out of this
+# stage keys on the stage's cache key rather than on what it produced, so
+# a bumped pin needs `--no-cache-filter b2ctrain-builder,runtime` to reach
+# the runtime stage. Move B2CTRAIN_REF when the trainer moves, and re-run
+# `pipeline.cli doctor` — check_trainer_binaries greps its --help for the
+# eight flags steps/brush.py's argv depends on.
+FROM nvidia/cuda:13.0.2-cudnn-devel-ubuntu24.04 AS b2ctrain-builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        git ca-certificates pkg-config libssl-dev cmake build-essential \
+        git ca-certificates cmake ninja-build g++ \
     && rm -rf /var/lib/apt/lists/*
 
-# The fork's work lives on the `normal-map-supervision` branch, NOT on
-# `main`. Erant/brush's main merely tracks upstream ArthurBrussee/brush, so
-# cloning the default branch silently builds a binary WITHOUT the two
-# normal-supervision flags the step relies on (--normal-loss-weight,
-# --normal-loss-start-iter). It compiles and runs; it just rejects that argv
-# at runtime.
-#
-# Caught by diffing the built binary's `--help` against the argv
-# pipeline/steps/brush.py constructs. Worth redoing whenever this pin moves:
-#   docker run --rm --entrypoint /bin/sh b2c/brush-builder -c '/out-brush --help' > help.txt
-#   grep -oE '"--[a-z-]+"' pipeline/steps/brush.py | sort -u | tr -d '"' \
-#     | while read f; do grep -q -- "$f" help.txt || echo "MISSING $f"; done
-#
-# That diff also turned up a third flag, --total-steps, which is absent from
-# BOTH branches: upstream renamed it --total-train-iters and the fork carries
-# the rename. Fixed on the Python side in steps/brush.py, not here.
-#
-# BRUSH_REF is the commit that branch tip is expected to be, and it is not
-# decoration: it is what makes a moved pin invalidate this stage's cache.
-# `git clone --depth 1 --branch X` bakes no remote state into the RUN text,
-# so Docker matches its old cache record however far the branch has moved —
-# which is how `erantimus/b2crunner:c35b577` shipped a brush two commits
-# behind and nothing caught it (docs/docker-build-notes.md, the 2026-08-25
-# update). `--no-cache-filter brush-builder` does not fix that on its own:
-# the stage re-executes, and the runtime stage's `COPY --from=brush-builder`
-# still reports CACHED and keeps the old binary, because a COPY's cache key
-# comes from the producing stage's *key*, not from what it produced. An ARG
-# referenced in the RUN below is part of that key, so moving this line is
-# what correctly invalidates both.
-#
-# It is also checked, which is the half `--no-cache-filter brush-builder,runtime`
-# never gave: if the branch has moved past the pin, the build FAILS here
-# rather than producing an image whose brush is a surprise. Moving the pin is
-# a one-line edit; reconstructing which commit a shipped binary came from
-# meant diffing its `--help` against the branch's history.
-# 2026-09-02: `ccf38dbf` adds the `weights/` sidecar (per-pixel loss
-# weights, brush's docs/loss-weights.md) that steps/brush.py now writes for
-# the training views. An older brush would IGNORE the sidecar and train the
-# frames at full weight over the face — silently, which is why the pin must
-# move with the step.
-# 2026-09-05: `a9405881` fixes the EVIDENCE DENOMINATOR — a masked view's
-# out-of-mask region counted as "drawn over background" in w_all, and the
-# weights/ sidecar scaled w_in but not w_all, so the face cap and the
-# face-priority weights each dragged the confidence of everything they did
-# not cover toward zero. Measured on a real run's .ply, the gate this
-# pipeline renders through culled 30% of the subject (69% of the face, 67%
-# of the top) before the fix and 6% after, at the tau/margin
-# rerender_splat now passes. An older brush trains a splat whose ev_* block
-# says the subject is not there.
-ARG BRUSH_BRANCH=normal-map-supervision
-ARG BRUSH_REF=a94058814531bb932228e626e7ed271292cfb7ea
-RUN git clone --depth 1 --branch ${BRUSH_BRANCH} \
-        https://github.com/Erant/brush.git /src/brush \
-    && cd /src/brush \
+ARG B2CTRAIN_REPO=https://github.com/Erant/b2ctrain.git
+ARG B2CTRAIN_BRANCH=main
+ARG B2CTRAIN_REF=d86164af58f1fc5d87eaa67d2777464e1d985ee6
+RUN git clone --depth 1 --branch ${B2CTRAIN_BRANCH} ${B2CTRAIN_REPO} /src/b2ctrain \
+    && cd /src/b2ctrain \
     && head="$(git rev-parse HEAD)" \
-    && if [ "$head" != "${BRUSH_REF}" ]; then \
-           echo "brush ${BRUSH_BRANCH} is at $head, not the pinned ${BRUSH_REF}." >&2; \
-           echo "Either the branch moved (update BRUSH_REF, and check steps/brush.py" >&2; \
-           echo "and steps/splat.py still match its CLI) or --build-arg BRUSH_REF is stale." >&2; \
+    && if [ "$head" != "${B2CTRAIN_REF}" ]; then \
+           echo "b2ctrain ${B2CTRAIN_BRANCH} is at $head, not the pinned ${B2CTRAIN_REF}." >&2; \
+           echo "Either the branch moved (update B2CTRAIN_REF, and check steps/brush.py" >&2; \
+           echo "and steps/splat.py still match its CLI) or --build-arg B2CTRAIN_REF is stale." >&2; \
            exit 1; \
        fi
-WORKDIR /src/brush
-
-# Two binaries out of this one clone: `brush` (apps/brush-app, training +
-# viewer) and `brush-splat-render` (crates/brush-splat-render, a standalone
-# CLI that rasterises a trained .ply against an explicit camera list — see
-# docs/splat-render.md in the brush repo). `brush-splat-render` is what
-# replaces gsplat as render_splat's backend (see "gsplat: dropped" in
-# docs/docker-build-notes.md): gsplat published no wheel past torch
-# 2.4/cu124 and needed nvcc at runtime; this binary is wgpu/Vulkan, same as
-# `brush` itself, so no CUDA toolchain is needed for either.
-#
-# `-p brush-app -p brush-splat-render` rather than a bare `cargo build`:
-# the workspace's `default-members` is just `apps/brush-app`, so a bare
-# build would silently skip brush-splat-render (it's a workspace member,
-# not a default one). `-p` also avoids `--workspace`, which would pull in
-# unrelated members this image doesn't need (brush-js, brush-c, the wasm
-# bindings).
-#
-# Both halves have to come from the SAME build, and from one past the
-# confidence work on this branch (2026-08-30). `brush` writes per-Gaussian
-# multi-view evidence into the exported .ply (--export-evidence) and
-# `brush-splat-render --confidence` gates a render on it — that pair is
-# what replaced the pipeline's mask_splat stage, so an image built from an
-# older tip renders frames nothing downstream then filters. It degrades
-# loudly rather than silently: an old renderer rejects --confidence
-# outright, and a new renderer against an old training's .ply warns that it
-# found no ev_* block and falls back to plain alpha.
-#
-# 2026-08-30: and past the MIXED ALPHA MODES commit (8eed7a61), which is
-# what BRUSH_REF above pins. steps/brush.py stopped passing --alpha-mode so
-# that a run can mix masked and transparent views, and passes
-# --normalize-masked-loss when it does; both are that commit's. An older
-# binary rejects the second flag outright and silently flattens the mix on
-# the first, so the pin is the check that they arrive together.
-RUN cargo build --release -p brush-app -p brush-splat-render \
-    && install -m 0755 target/release/brush /out-brush \
-    && install -m 0755 target/release/brush-splat-render /out-brush-splat-render
+WORKDIR /src/b2ctrain
+RUN cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_CUDA_ARCHITECTURES="89-real;120-real;120-virtual" \
+    && cmake --build build --target b2ctrain \
+    && install -m 0755 build/b2ctrain /out-b2ctrain \
+    && install -m 0755 docker/brush-splat-render /out-brush-splat-render-shim
 
 
 # =============================================================================
@@ -315,8 +254,8 @@ RUN mkdir -p /src/colmap && cd /src/colmap \
 #
 # ~340 MB of it is the ONNX Runtime (256 MB CUDA provider plus three
 # hardlink-less copies of the 27 MB core, which is what COLMAP's
-# install(FILES) rules make of its .so symlink chain). Comparable to the
-# brush binaries and worth knowing before wondering where the image grew.
+# install(FILES) rules make of its .so symlink chain). The single biggest
+# binary in the image, and worth knowing before wondering where it grew.
 #
 # CMAKE_CUDA_ARCHITECTURES has to be explicit: there is no GPU during a
 # docker build, so COLMAP's default cannot be detected. The list mirrors
@@ -488,11 +427,12 @@ RUN chmod +x /usr/local/bin/make-child-venv
 # gsplat is deliberately NOT installed. It was the only reason this image
 # needed nvcc at runtime: it publishes no wheel past torch 2.4/cu124, so on
 # a modern stack it JIT-compiles its CUDA kernels on first use.
-# render_splat now shells out to the brush-splat-render binary instead (see
-# the brush-builder stage above), which is Vulkan — the capability this
-# image already has to provide for brush itself.
+# render_splat now shells out to the brush-splat-render binary instead —
+# which is b2ctrain's `render` subcommand behind a shim (see the
+# b2ctrain-builder stage above), so it is CUDA on the driver this image
+# already requires, with no graphics userspace of its own.
 #
-# plyfile stays: load_splat/save_splat need it, and brush emits .ply.
+# plyfile stays: load_splat/save_splat need it, and the trainer emits .ply.
 RUN make-child-venv /opt/venv_main \
     && /opt/venv_main/bin/pip install \
         kornia timm \
@@ -760,17 +700,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         # docker build does not have.
         gcc python3-dev \
         ca-certificates \
-        # Vulkan loader for brush. The ICD/driver is injected by
-        # nvidia-container-toolkit; the image supplies only the loader.
-        # vulkan-tools gives `vulkaninfo` for checking that separately from
-        # debugging a brush failure.
-        libvulkan1 vulkan-tools \
-        # GL/EGL loaders for pyrender (the `render` step). Same split as
-        # Vulkan: libglvnd provides libEGL.so.1, the driver ICD comes from
-        # the toolkit. An earlier version of this file shipped the Vulkan
-        # loader but not this one, so `render` could never have worked — it
-        # tries libEGL.so.1, falls back to OSMesa, and neither was present.
-        # libosmesa6 is that software fallback.
+        # GL/EGL loaders for pyrender (the `render` step). The image
+        # supplies only the loaders; the driver ICD comes from
+        # nvidia-container-toolkit. An earlier version of this file shipped
+        # the Vulkan loader but not this one, so `render` could never have
+        # worked — it tries libEGL.so.1, falls back to OSMesa, and neither
+        # was present. libosmesa6 is that software fallback. (The Vulkan
+        # loader that sat here went with brush on 2026-09-07: b2ctrain and
+        # its rasteriser are CUDA, and nothing else in the image is a
+        # Vulkan client.)
         libegl1 libgl1 libglvnd0 libgles2 libosmesa6 \
         libglib2.0-0 libsm6 libxext6 libxrender1 libgomp1 \
         ffmpeg \
@@ -814,7 +752,7 @@ COPY --from=python-builder /opt/vendor /opt/vendor
 # BuildKit caches that layer: a rebuild that changes only application code
 # ships whatever commit venv_base first resolved (the `COPY --from` keys on
 # python-builder's cache key, not on what it produced — the same trap the
-# brush notes describe). Pull the intended commit forward here in a cheap
+# b2ctrain pin notes describe). Pull the intended commit forward here in a cheap
 # late layer so the image can track it without a full python-builder
 # rebuild. The child venvs see it through their .pth into venv_base.
 # --no-deps: body2colmap's deps (numpy, pyrender, trimesh, opencv-python)
@@ -899,7 +837,7 @@ print('body2colmap eye_style default:', f.DEFAULT_EYE_STYLE)"
 WORKDIR /opt/b2c_runner
 
 # Last, and in its own layer, so editing pipeline code invalidates neither
-# the venv layers nor the brush build. Every venv needs the package:
+# the venv layers nor the trainer build. Every venv needs the package:
 # `python -m pipeline.worker` must be importable inside each isolated env,
 # not just the orchestrator's.
 COPY . /opt/b2c_runner
@@ -942,25 +880,26 @@ COPY docker/entrypoint.sh /usr/local/bin/b2c-entrypoint
 RUN chmod +x /usr/local/bin/b2c-entrypoint
 
 # ---------------------------------------------------------------------------
-# The brush binaries. LAST OF THE FILESYSTEM LAYERS ON PURPOSE — same
+# The trainer binary. LAST OF THE FILESYSTEM LAYERS ON PURPOSE — same
 # reasoning as the ENV block below, and measured on the same kind of build.
 # ---------------------------------------------------------------------------
 # These used to sit at the top of the stage, immediately above the five
 # `COPY --from=python-builder /opt/venv_*` lines. Invalidation cascades
-# forward within a stage, so bumping BRUSH_REF — 321 MB of binaries — re-ran
+# forward within a stage, so bumping the trainer's pin — then 321 MB of
+# Rust binaries — re-ran
 # every venv copy, the body2colmap pull-forward, and the application copy
 # behind it. What saved that build was the registry rather than the
 # Dockerfile: a re-executed COPY of unchanged bytes produces the same blob
 # digest, so the venvs all came back "Layer already exists" and only the
 # binaries went up the wire. A re-executed RUN has no such property — its
 # output is not byte-reproducible — which is exactly why the 2026-08-25
-# `--no-cache-filter brush-builder,runtime` build pushed 7 GB while a
-# BRUSH_REF bump pushes ~321 MB.
+# `--no-cache-filter brush-builder,runtime` build pushed 7 GB while a pin
+# bump pushed ~321 MB.
 #
 # So the dedup was luck of the layer types, and it runs out the moment a RUN
-# lands between the brush COPY and the end of the stage. Down here nothing
-# does: a brush bump now invalidates these two layers, the ENV/LABEL metadata
-# below (no filesystem layers at all), and nothing else.
+# lands between this COPY and the end of the stage. Down here nothing
+# does: a B2CTRAIN_REF bump now invalidates these layers, the ENV/LABEL
+# metadata below (no filesystem layers at all), and nothing else.
 #
 # Nothing earlier in the build needs the binaries — the step-registry smoke
 # test above imports Python modules, and `pipeline/doctor.py` checks the
@@ -972,13 +911,13 @@ RUN chmod +x /usr/local/bin/b2c-entrypoint
 # there re-ran all six `COPY --from=python-builder /opt/venv_*` lines, the
 # body2colmap layer and the application copy behind it. The COPYs dedupe at
 # the registry (unchanged bytes, same blob digest — the note below says so
-# for brush), but the re-executed RUN layers do not: their output is not
+# for the trainer), but the re-executed RUN layers do not: their output is not
 # byte-reproducible, so the 1.25 GB apt layer went up the wire as a new
 # blob. Down here, changing this list costs this layer and nothing else.
 #
-# ABOVE the two brush COPYs rather than below them, which is the other half
-# of the same reasoning: a bumped BRUSH_REF must not invalidate an
-# apt RUN, or every brush bump would push these ~450 MB again.
+# ABOVE the b2ctrain COPYs rather than below them, which is the other half
+# of the same reasoning: a bumped B2CTRAIN_REF must not invalidate an
+# apt RUN, or every trainer bump would push these ~450 MB again.
 #
 # The list is COLMAP's own docker/Dockerfile runtime stage, minus the qt6
 # entries the GUI would want (GUI_ENABLED=OFF) — same ubuntu24.04 as the
@@ -1003,8 +942,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libomp5 libopengl0 libglew2.2 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=brush-builder /out-brush /usr/local/bin/brush
-COPY --from=brush-builder /out-brush-splat-render /usr/local/bin/brush-splat-render
+# b2ctrain (see its stage above): the trainer steps/brush.py runs, and —
+# via the one-line shim installed under the name every renderer in this
+# pipeline resolves (steps/splat.py's _RENDER_BINARY, body2colmap's
+# BINARY_NAME, `pipeline.cli doctor`) — the rasteriser.
+# `brush-splat-render` execs `b2ctrain render "$@"`: same argv, same
+# cameras.json, same frame naming, same --confidence gate, output matching
+# the Rust renderer it replaced to 1/255. Two names, one binary, and
+# nothing left in the image that needs Vulkan.
+#
+# `--help` on both here is the cheapest possible smoke test: no GPU is
+# needed for it, and it proves the binary loads in THIS stage's userspace
+# (it links only libstdc++/libm/libc — the CUDA runtime is static) and
+# that the shim finds b2ctrain on PATH. It is a RUN below a COPY, which
+# the note above warns about — harmless here only because it writes
+# nothing: the layer it makes is empty, so a re-execution has no bytes to
+# push.
+COPY --from=b2ctrain-builder /out-b2ctrain /usr/local/bin/b2ctrain
+COPY --from=b2ctrain-builder /out-brush-splat-render-shim /usr/local/bin/brush-splat-render
+RUN b2ctrain --help > /dev/null && brush-splat-render --help > /dev/null
 
 # COLMAP, whole prefix, for the same reasons and in the same place: it is
 # ~400 MB of filesystem layer that has nothing behind it to invalidate.
@@ -1071,7 +1027,11 @@ COPY --from=colmap-builder /opt/colmap /opt/colmap
 # confirmed on a real RunPod pod, where vulkaninfo failed with
 # ERROR_INCOMPATIBLE_DRIVER under the default compute,utility set.
 #
-# This gates BOTH brush (Vulkan) and render (EGL). Whether RunPod honours
+# This gates the pyrender `render` step (EGL) and nothing else since
+# 2026-09-07: the trainer and the splat rasteriser are both b2ctrain, which
+# is CUDA and wants only `compute`. A pod that exposes compute,utility
+# alone therefore trains and renders splats fine, and fails at `render`
+# instead of 40 minutes into a training. Whether RunPod honours
 # an image-level ENV for it is unresolved; setting it in the pod template's
 # own environment variables is the more reliable path, since that is
 # applied at creation time. See docs/docker-build-notes.md.

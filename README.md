@@ -42,8 +42,9 @@ pip install -r requirements.txt
 ```
 
 The Gaussian-splat steps additionally need `plyfile` for PLY I/O, and
-`render_splat` needs the `brush-splat-render` binary on `PATH` (built
-alongside `brush` in `docker/Dockerfile`) — see `requirements.txt`.
+`render_splat` needs the `brush-splat-render` binary on `PATH` — in the
+image that name is a shim over `b2ctrain render`, the CUDA trainer both
+trainings run (`docker/Dockerfile`, docs/docker.md) — see `requirements.txt`.
 Face-landmark detection needs `mediapipe` (CPU-only); no shipped workflow
 uses it any more — `fast_helical_native`'s face splat replaced it — but the
 step and its `render` params are still there. The `pointmap_splat` family
@@ -120,7 +121,8 @@ timestamped log under `$B2C_LOG_DIR`. See [pipeline/paths.py](pipeline/paths.py)
 
 ## Deploying
 
-One image holds every step's venv plus the `brush` binaries, and serves the
+One image holds every step's venv plus the `b2ctrain` binary (the splat
+trainer, and the rasteriser through a `brush-splat-render` shim), and serves the
 web UI and the HTTP API by default, on one port. [docs/runpod.md](docs/runpod.md)
 has the pod template settings, the `B2C_API_TOKEN` both are guarded by, the
 curl recipes under **Automating it**, and the debugging recipes;

@@ -1,33 +1,51 @@
-"""Gaussian-splat training via the Erant/brush CLI (a Rust binary on `PATH`,
-never a Python binding — built into docker/Dockerfile).
+"""Gaussian-splat training via a trainer CLI on `PATH` (a binary, never a
+Python binding — built into docker/Dockerfile).
+
+The binary is **b2ctrain** (Erant/b2ctrain, and `brush_path`'s default
+since 2026-09-07): a C++/CUDA trainer that takes brush's argv, brush's
+dataset layout (`init.ply`, `masks/`, `normals/`, `weights/`) and writes
+brush's .ply with the same `ev_*` evidence block, at roughly a quarter of
+the wall time and the same quality and splat count (its docs/STATUS.md has
+the measurements against the fork). It REPLACED the Erant/brush fork this
+module was written against, which is no longer built into the image at
+all — so everything below that says "brush" is the CLI contract rather
+than the implementation: the argv, the polish, the crash handling and the
+names (`brush_path`, `brush-splat-render`, this module) are unchanged
+because that contract is exactly what the new trainer answers to. Pointing
+`brush_path` back at a brush binary still works if one is on PATH.
+
+The one thing that is NOT a drop-in is the **alignment loop**. b2ctrain
+carries it in-process (`--align-iters`), so with `align_backend: auto`
+this step passes the loop's settings on the cold run's argv and makes one
+invocation instead of one render, one flow and one re-invocation per
+iteration — see `_use_trainer_alignment`. The loop below is the same
+alignment done from here; it is what runs under `align_backend: pipeline`,
+against any trainer, and it is the reference the loop's settings were
+measured on.
 
 Dispatch: `in_process`, not `docker` — targeting RunPod specifically, where
 a pod is a single container with no nested Docker daemon to run a separate
 brush image in (confirmed on a real pod: no /var/run/docker.sock, no
 `docker` binary at all). This Step's own Python code has no conflicting
 dependencies either way — subprocess.Popen'ing a CLI binary doesn't need
-venv isolation — so `in_process` is fine for the Python side; what's
-*unresolved* is brush's OS-level Vulkan/graphics requirement, since a
-default RunPod pod's `NVIDIA_DRIVER_CAPABILITIES` only exposed
-`compute,utility` on a real pod tested this session (`vulkaninfo` failed
-with `ERROR_INCOMPATIBLE_DRIVER` even with the driver's Vulkan libraries
-physically present). docker/Dockerfile bakes
-`compute,utility,graphics,display` into the image itself, which is
-necessary but not yet confirmed sufficient for how RunPod provisions a pod
-from a custom image — see that file's comment and docs/docker.md. If this
-never gets resolved for RunPod, `dispatch: docker` (this pipeline still
-supports it — `pipeline/dispatch/docker.py`'s own docstring names brush as
-its motivating case) is the fallback for any other target that does expose
-a Docker daemon.
+venv isolation — so `in_process` is fine for the Python side. The
+OS-level requirement that used to sit here went with brush: that trainer
+was wgpu/Vulkan, and a default RunPod pod's `NVIDIA_DRIVER_CAPABILITIES`
+exposes `compute,utility` only, which is why docker/Dockerfile bakes
+`compute,utility,graphics,display` into the image and why
+`pipeline.cli doctor` had a `vulkan` check. b2ctrain is CUDA: it needs
+nothing from the driver that the denoise steps do not already need (a
+>= 580 driver for its CUDA 13 build), and neither does the rasteriser the
+alignment loop calls, which is the same binary. `dispatch: docker` remains
+supported (`pipeline/dispatch/docker.py`'s own docstring names brush as its
+motivating case) for any target that does expose a Docker daemon.
 
 Port of nodes/brush_node.py's Body2COLMAP_RunBrush, minus everything that
 was only there to unwrap ComfyUI's list-batched inputs (this pipeline's
-Steps already take plain lists). UNVERIFIED end to end: brush itself was
-never actually built or run in this session (see docs/docker.md's "Open
-items" — the Vulkan/system-deps list there is researched, not confirmed by
-a build), so treat this module the same way as the pod-untested steps
-(sam3d_body, seedvr2) even though its logic is a close port of code that
-does run in production via ComfyUI.
+Steps already take plain lists). What HAS been run: both of the shipped
+workflow's trainings, with their real argv and dataset shapes, driven
+through this very Step class on a 4070 Ti (bench/b2crunner_step.py in the
+b2ctrain repo). What has not: any of it on a pod, or from the image.
 
 **A non-zero exit is not automatically a failed training.** brush has been
 seen taking SIGSEGV (exit code -11) during shutdown, *after* it has already
@@ -37,7 +55,11 @@ own: if the export exists, is non-empty, and was written by this run (its
 mtime changed, so a stale .ply left in an `export_dir` from a previous run
 cannot stand in for a crashed one), the run is treated as successful and the
 whole failure — exit code and output tail — is logged at WARNING. Any other
-non-zero exit still raises, as does one that left no export behind.
+non-zero exit still raises, as does one that left no export behind. (That
+shutdown crash was brush's; b2ctrain has not been seen doing it. The
+tolerance stays because judging a training by the artefact it wrote is the
+right rule either way, and it is what keeps an hour of GPU when a trainer
+dies on the way out.)
 
 **And a crash saves more than its exit code.** The COLMAP export brush
 trains from is built into a `TemporaryDirectory` and deleted on the way out
@@ -195,6 +217,7 @@ from __future__ import annotations
 
 import json
 import logging
+import subprocess
 import tempfile
 import time
 from dataclasses import dataclass
@@ -245,6 +268,58 @@ _NO_REFINE = 1_000_000
 # declared here for a long time and is not one of them: it never ran only
 # because nothing ever set it.
 _ALPHA_MODES = ("transparent", "masked")
+
+# Where the alignment loop runs. `trainer` is b2ctrain's in-process loop
+# (--align-iters): the renders, the flow and the warps happen on the GPU
+# against the frames it already holds, and the refits continue in the same
+# process — no .ply export/reload, no frames rewritten to disk, no
+# brush-splat-render invocation per iteration. `pipeline` is this step's own
+# loop below (pipeline/align.py, one invocation per iteration), which works
+# against any trainer with this CLI and is the A/B reference the loop's
+# settings were measured on — the two agree on PSNR and on the shape of the
+# trajectory, and it is the in-trainer loop that has NOT been through the
+# band-limited sharpness metric the settings were tuned with
+# (docs/final-splat-alignment-guide.md). `auto` asks the binary, which is
+# also what keeps an image whose trainer predates --align-iters working.
+_ALIGN_BACKENDS = ("auto", "trainer", "pipeline")
+
+#: Whether a trainer binary carries the in-process alignment loop, by path.
+#: Probed once per path: a --help is cheap but not free, and run() is called
+#: twice per workflow.
+_ALIGN_PROBE: Dict[str, bool] = {}
+
+
+def _trainer_aligns(brush_path: str) -> bool:
+    """True if `brush_path --help` lists --align-iters, else False.
+
+    A binary that cannot be run at all is a False here rather than an error:
+    the missing-binary failure belongs to `_run_brush`, with its hint, and
+    not to a probe that only decides which of two working paths to take.
+    """
+    cached = _ALIGN_PROBE.get(brush_path)
+    if cached is not None:
+        return cached
+    try:
+        result = subprocess.run(
+            [brush_path, "--help"], capture_output=True, text=True, timeout=30,
+        )
+        supported = "--align-iters" in (result.stdout + result.stderr)
+    except (OSError, subprocess.SubprocessError):
+        supported = False
+    _ALIGN_PROBE[brush_path] = supported
+    return supported
+
+
+def _use_trainer_alignment(backend: str, brush_path: str) -> bool:
+    if backend not in _ALIGN_BACKENDS:
+        raise ValueError(
+            f"align_backend must be one of {', '.join(_ALIGN_BACKENDS)}, not {backend!r}"
+        )
+    if backend == "trainer":
+        return True
+    if backend == "pipeline":
+        return False
+    return _trainer_aligns(brush_path)
 
 
 def _forced_alpha_mode(setting: Optional[str]) -> Optional[str]:
@@ -735,6 +810,15 @@ class BrushStep(Step):
               "about hand POSE, which no image warp fixes — but 12 alongside a "
               "sigma of 3 is the one combination that read better",
               advanced=True),
+        Param("align_backend", str, "auto",
+              "Where the alignment loop runs: `trainer` (b2ctrain's in-process loop — "
+              "one invocation; renders, flow and warps on the GPU against the frames it "
+              "already holds, refits in the same process; ~0.7 s per pass instead of a "
+              "render process, a Python flow and a re-invocation), `pipeline` (this "
+              "step's loop: brush-splat-render + pipeline/align.py + one invocation per "
+              "iteration — trainer-agnostic, and the reference the loop's settings were "
+              "measured on), or `auto` (trainer when the binary's --help lists "
+              "--align-iters)", advanced=True),
         Param("align_debug_dir", str, None,
               "Keep each alignment iteration's evidence here: alignment.json (the "
               "settings in force, the batch figures and EVERY view's own, rewritten "
@@ -831,14 +915,20 @@ class BrushStep(Step):
               "Export straight into this directory instead, for a training whose .ply "
               "is a deliverable and needs a predictable path. Wins over output_dir"),
         Param("export_name", str, "export.ply", "Filename of the exported .ply"),
-        Param("brush_path", str, "brush",
-              "The brush binary, on PATH or as an absolute path", advanced=True),
+        Param("brush_path", str, "b2ctrain",
+              "The trainer binary, on PATH or as an absolute path. `b2ctrain` is "
+              "what the image ships and this default names; any binary with "
+              "brush's CLI works, including the Erant/brush fork it replaced",
+              advanced=True),
         Param("render_path", str, _RENDER_BINARY,
               "The rasteriser the alignment loop renders the current splat with, "
               "on PATH or as an absolute path. Same convention as brush_path, and "
-              "unused when align_iters is 0", advanced=True),
+              "unused when align_iters is 0 or the loop runs inside the trainer, "
+              "which renders with its own", advanced=True),
         Param("with_viewer", bool, False,
-              "Let brush open its interactive viewer window; needs a display",
+              "Pass --with-viewer, which opened brush's interactive viewer window "
+              "and needs a display. b2ctrain accepts the flag and ignores it — it "
+              "has no viewer — so this does nothing on the shipped trainer",
               advanced=True),
     )
 
@@ -874,6 +964,7 @@ class BrushStep(Step):
         align_flow_sigma = params["align_flow_sigma"]
         align_flow_cap = params["align_flow_cap"]
         align_debug_dir = params["align_debug_dir"]
+        align_backend = params["align_backend"]
         growth_grad_threshold = params["growth_grad_threshold"]
         growth_select_fraction = params["growth_select_fraction"]
         growth_stop_iter = params["growth_stop_iter"]
@@ -994,7 +1085,8 @@ class BrushStep(Step):
 
             def command(*, total: int, refine: int, normal_start: int,
                         normal_weight: Optional[float] = None,
-                        growth_stop: Optional[int] = None) -> List[str]:
+                        growth_stop: Optional[int] = None,
+                        align: Optional[List[str]] = None) -> List[str]:
                 """One brush invocation's argv.
 
                 A function rather than a literal because the polish and
@@ -1068,6 +1160,11 @@ class BrushStep(Step):
                     cmd.extend(["--evidence-prune-inmask", str(evidence_prune_inmask)])
                 if evidence_normal_weight > 0:
                     cmd.extend(["--evidence-normal-weight", str(evidence_normal_weight)])
+                # The in-trainer alignment loop (b2ctrain): the same
+                # iterations, steps and flow schedule the loop below would
+                # run, carried on the cold run's own argv.
+                if align:
+                    cmd.extend(align)
                 return cmd
 
             if alpha_mode and support:
@@ -1080,9 +1177,49 @@ class BrushStep(Step):
                     len(support.image_names),
                 )
 
+            in_trainer = align_iters > 0 and _use_trainer_alignment(align_backend, brush_path)
+            align_flags: Optional[List[str]] = None
+            if in_trainer:
+                align_flags = [
+                    "--align-iters", str(align_iters),
+                    "--align-steps", str(align_steps),
+                    "--align-flow-sigma", ",".join(str(v) for v in align_flow_sigma),
+                    "--align-flow-cap", ",".join(str(v) for v in align_flow_cap),
+                ]
+                if align_debug_dir:
+                    align_flags.extend(["--align-debug-dir", str(align_debug_dir)])
+                logger.info(
+                    "brush: the alignment loop (%d iteration(s) of %d steps) runs "
+                    "inside the trainer — it renders, flows and warps the views it "
+                    "already holds and refits in the same process; alignment.json "
+                    "and the sample frames%s are written by the trainer",
+                    align_iters, align_steps,
+                    f" under {align_debug_dir}" if align_debug_dir else "",
+                )
+                if polish_steps > 0:
+                    # The one place the two backends genuinely differ, and
+                    # it is silent: the pipeline loop leaves its last
+                    # iteration's warped frames in the export's `images/`,
+                    # so the polish below resumes on the frames the splat
+                    # was aligned to. The trainer's warps never touch disk
+                    # — they live in its GPU views — so a polish after it
+                    # is a resume on the PRISTINE originals, which pulls
+                    # the fit back toward the disagreement the alignment
+                    # just removed. No shipped workflow asks for both
+                    # (stage 2 polishes and does not align, stage 5 aligns
+                    # and does not polish); if one ever does, run the loop
+                    # with `align_backend: pipeline` or polish first.
+                    logger.warning(
+                        "brush: polish_steps is %d and the alignment loop runs "
+                        "inside the trainer, so the polish will resume on the "
+                        "UNWARPED original frames — the trainer's warps are never "
+                        "written to the dataset. Set align_backend: pipeline if the "
+                        "polish should see the aligned frames.",
+                        polish_steps,
+                    )
             self._run_brush(
                 command(total=total_steps, refine=refine_every,
-                        normal_start=normal_loss_step_start),
+                        normal_start=normal_loss_step_start, align=align_flags),
                 ply_path, colmap_dir=colmap_dir,
             )
 
@@ -1097,7 +1234,7 @@ class BrushStep(Step):
             # is this method's TemporaryDirectory: a workflow-level loop
             # would re-export several hundred MB of frames per iteration and
             # would have no way to hand brush an init.ply at all.
-            if align_iters > 0:
+            if align_iters > 0 and not in_trainer:
                 if support:
                     logger.info(
                         "brush: the %d supporting view(s) are left as they are; "
@@ -1269,9 +1406,10 @@ class BrushStep(Step):
                 cmd,
                 log_name="brush",
                 not_found_hint=(
-                    "It is built into the image at /usr/local/bin/brush; on a bare "
-                    "machine, build it from Erant/brush's normal-map-supervision "
-                    "branch or point the step's brush_path param at it."
+                    "The trainer is built into the image at /usr/local/bin/b2ctrain; "
+                    "on a bare machine, build Erant/b2ctrain (cmake -S . -B build "
+                    "-DCMAKE_BUILD_TYPE=Release && cmake --build build) or point the "
+                    "step's brush_path param at a binary with brush's CLI."
                 ),
             )
         except ProcessFailed as exc:

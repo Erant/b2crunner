@@ -29,7 +29,7 @@ has and hasn't been verified on real hardware.
 | Variable | Value | Notes |
 |---|---|---|
 | `HF_TOKEN` | `hf_...` | **Required.** From an account that has accepted the licences for `briaai/RMBG-2.0` and `facebook/sam-3d-body-dinov3`; both are gated and a human has to click through each one. `doctor` reports whether the token can actually reach them. |
-| `NVIDIA_DRIVER_CAPABILITIES` | `compute,utility,graphics,display` | **Set this here even though the image also sets it.** It is read by nvidia-container-toolkit at container-*creation* time, and whether RunPod honours an image-level `ENV` for it is unresolved. Without `graphics`, `vulkaninfo` finds no driver, and `brush` (Vulkan) and `render` (EGL) both fail — 40 minutes into a run, not at startup. |
+| `NVIDIA_DRIVER_CAPABILITIES` | `compute,utility,graphics,display` | **Set this here even though the image also sets it.** It is read by nvidia-container-toolkit at container-*creation* time, and whether RunPod honours an image-level `ENV` for it is unresolved. Without `graphics` the toolkit wires up no EGL ICD and `render` fails — 40 minutes into a run, not at startup. It used to gate the splat training too; since 2026-09-07 the trainer and the rasteriser are b2ctrain, which is CUDA and needs only `compute`. |
 | `B2C_API_TOKEN` | a long random string | **Set this.** It turns on the HTTP API at `/api/v1` (as a bearer token) *and* puts the web UI behind a login form that takes it as the password, username `b2c`. Without it the API is not served at all and the UI is open to anyone who can guess the pod id — the proxy URL below is public. Generate one with `openssl rand -hex 24`. |
 | `PUBLIC_KEY` | your SSH public key | RunPod usually injects this. The entrypoint starts `sshd` only when it is present. |
 | `B2C_SHUTDOWN_COMMAND` | `runpodctl stop pod $RUNPOD_POD_ID` | What to do about the *host* when `POST /api/v1/shutdown` stops the container. Optional, and empty by default: the container knows how to stop itself, but it cannot know whether that ends a bill — see [Stopping when you are done](#stopping-when-you-are-done). Needs `runpodctl` on the pod (**it is not in the image**) and `RUNPOD_API_KEY` / `RUNPOD_POD_ID` set. |
@@ -59,16 +59,15 @@ log answers "can this machine actually run the pipeline" before you submit
 anything. Look for:
 
 ```
-✓ OK    vulkan           deviceName = NVIDIA ...        <- brush can run
 ✓ OK    egl              NVIDIA ... /PCIe/SSE2          <- render can run
-✓ OK    brush binaries   all 5 fork-specific flags present
+✓ OK    trainer binaries all 8 flags the argv needs are present
 ✓ OK    colmap           COLMAP 4.2.0 ... with CUDA     <- the pose refinement
 ✓ OK    step venvs       3 configured
 ✓ OK    attention        _sage_qk_int8_pv_fp16_triton   <- the denoise kernel
 ✓ OK    huggingface      accessible / accessible        <- both gated repos
 ```
 
-A `FAIL` on `vulkan` almost always means `NVIDIA_DRIVER_CAPABILITIES` was
+A `FAIL` on `egl` almost always means `NVIDIA_DRIVER_CAPABILITIES` was
 not set on the template. A `WARN` on `huggingface` means the token is
 missing or has not accepted a licence — every model step will 401. A `WARN`
 on `colmap` saying `built WITHOUT CUDA` is not a correctness problem: the
@@ -593,9 +592,9 @@ interpreter:
 **Check the graphics stack separately from a failing step.**
 
 ```bash
-vulkaninfo --summary          # brush's backend
-brush --help                  # does this binary have the fork's flags?
-nvidia-smi
+b2ctrain --help               # does this binary have the flags the step passes?
+brush-splat-render --help     # the same binary, through its shim
+nvidia-smi                    # the driver has to be >= 580 for its CUDA 13 build
 ```
 
 **Raise the log level.** `B2C_DEBUG=1` sets DEBUG everywhere, including

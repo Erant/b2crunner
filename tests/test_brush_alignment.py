@@ -162,6 +162,13 @@ class _Loop:
     """
 
     def __init__(self, inputs=None, **overrides):
+        # `pipeline` unless a test says otherwise: the shipped default is
+        # `auto`, which asks the trainer binary whether it carries the loop
+        # — a real b2ctrain on PATH would then take half these tests down
+        # the other branch, and which loop runs would depend on the machine
+        # the suite runs on. The backends are covered explicitly in
+        # TestTheTrainerBackend.
+        overrides.setdefault("align_backend", "pipeline")
         step_class = get_step_class("brush")
         step = step_class()
         self.runs = []
@@ -520,6 +527,86 @@ class TestTheAlignmentDebugDirectory(unittest.TestCase):
         kept = cv2.imread(str(self.dir / "iter2_frame_00001__warped.png"),
                           cv2.IMREAD_UNCHANGED)
         self.assertEqual(kept[0, 0, 0], 102)
+
+
+class TestTheTrainerBackend(unittest.TestCase):
+    """The trainer carries the loop itself (--align-iters): the renders, the
+    flow and the warps happen on the GPU against the frames it already
+    holds, and the refits continue in the same process. From here that is
+    ONE invocation with the loop's settings on its argv, and none of the
+    round trips the pipeline loop makes — no re-invocation, no render, no
+    warp, no init.ply."""
+
+    def test_it_is_one_invocation_carrying_the_loop_settings(self):
+        loop = _Loop(align_iters=3, align_backend="trainer",
+                     align_flow_sigma=[6, 6, 3], align_flow_cap=[6, 6, 12])
+        self.assertEqual(len(loop.runs), 1)
+        self.assertEqual(loop.renders, [])
+        self.assertEqual(loop.aligned, [])
+        cmd = loop.runs[0]["cmd"]
+        self.assertEqual(_value(cmd, "--align-iters"), "3")
+        self.assertEqual(_value(cmd, "--align-steps"), "3000")
+        self.assertEqual(_value(cmd, "--align-flow-sigma"), "6.0,6.0,3.0")
+        self.assertEqual(_value(cmd, "--align-flow-cap"), "6.0,6.0,12.0")
+        self.assertNotIn("--align-debug-dir", cmd)
+        # The cold run is still the cold run: growth is the workflow's, and
+        # nothing was warm-started.
+        self.assertFalse(loop.runs[0]["init"])
+        self.assertEqual(_value(cmd, "--total-train-iters"), "30000")
+
+    def test_the_debug_dir_reaches_the_trainer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            loop = _Loop(align_iters=2, align_backend="trainer",
+                         align_debug_dir=tmp)
+        self.assertEqual(_value(loop.runs[0]["cmd"], "--align-debug-dir"), tmp)
+
+    def test_zero_iterations_passes_nothing(self):
+        loop = _Loop(align_iters=0, align_backend="trainer")
+        self.assertEqual(len(loop.runs), 1)
+        self.assertNotIn("--align-iters", loop.runs[0]["cmd"])
+
+    def test_the_pipeline_backend_keeps_the_loop_here(self):
+        loop = _Loop(align_iters=3, align_backend="pipeline")
+        self.assertEqual(len(loop.runs), 4)
+        self.assertEqual(len(loop.renders), 3)
+        for run in loop.runs:
+            self.assertNotIn("--align-iters", run["cmd"])
+
+    def test_auto_is_the_default_and_asks_the_binary(self):
+        params = get_step_class("brush").declared_params()
+        self.assertEqual(params["align_backend"].default, "auto")
+        # And the binary it asks is the trainer the image ships, so on a
+        # real run `auto` resolves to the in-trainer loop.
+        self.assertEqual(params["brush_path"].default, "b2ctrain")
+        with mock.patch("pipeline.steps.brush._trainer_aligns", return_value=True):
+            self.assertEqual(len(_Loop(align_iters=3, align_backend="auto").runs), 1)
+        with mock.patch("pipeline.steps.brush._trainer_aligns", return_value=False):
+            self.assertEqual(len(_Loop(align_iters=3, align_backend="auto").runs), 4)
+
+    def test_a_binary_that_cannot_run_is_the_pipeline_loop_not_an_error(self):
+        from pipeline.steps import brush as brush_step
+        brush_step._ALIGN_PROBE.pop("/nonexistent/trainer", None)
+        self.assertFalse(brush_step._trainer_aligns("/nonexistent/trainer"))
+
+    def test_an_unknown_backend_is_refused(self):
+        with self.assertRaises(ValueError):
+            _Loop(align_iters=1, align_backend="somewhere")
+
+    def test_a_polish_after_a_trainer_aligned_run_says_what_it_resumes_on(self):
+        """The one place the backends differ. The pipeline loop leaves its
+        last warp in the export's `images/`, so a polish resumes on the
+        frames the splat was aligned to; the trainer's warps never reach
+        disk, so the same polish resumes on the pristine originals and
+        pulls the fit back toward the disagreement the loop just removed.
+        No shipped workflow asks for both, and if one ever does this has to
+        be in the log rather than in the wall time."""
+        with self.assertLogs("pipeline.steps.brush", level="WARNING") as logs:
+            loop = _Loop(align_iters=2, align_backend="trainer", polish_steps=500)
+        self.assertEqual(len(loop.runs), 2)  # the aligned cold run, then the polish
+        self.assertTrue(
+            any("UNWARPED" in line for line in logs.output),
+            f"no warning about what the polish resumes on: {logs.output}",
+        )
 
 
 if __name__ == "__main__":

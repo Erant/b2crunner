@@ -31,8 +31,8 @@ Two phases, not one loop
 Every shell is built first with the pointmap head resident, the plys are
 written, the head is unloaded; only *then* is each ply rendered. Otherwise
 the 6.5 GB fp32 head would sit on the card while `brush-splat-render`
-(wgpu/Vulkan) is launched seventeen times — a co-residency nothing else in
-this pipeline has. The plys are kept either way, so the split costs
+(its own process, and its own GPU allocation) is launched seventeen times —
+a co-residency nothing else in this pipeline has. The plys are kept either way, so the split costs
 nothing and buys a bad run that can be inspected.
 
 Do the shells agree?

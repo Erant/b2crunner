@@ -17,12 +17,14 @@ Real, buildable artifacts live in `docker/`:
 - `docker/Dockerfile` — one image, everything: the orchestrator
   (`python -m pipeline.cli`), one venv per `subprocess`-dispatch step
   (`wan22`, `sam3dbody`, `seedvr2`), one `venv_main` for
-  `in_process`-dispatch steps, and the `brush` binary. Since the rewrite
+  `in_process`-dispatch steps, and the `b2ctrain` binary (the trainer and
+  the splat rasteriser; see below). Since the rewrite
   these venvs are **children of a shared `/opt/venv_base`** created with
   `--system-site-packages`, so one copy of torch and the CUDA wheels
   serves all four (~10 GB saved) while each venv can still shadow anything
-  it needs a different version of. brush is built in a separate Rust stage
-  and only the binary is copied, so the toolchain is not shipped.
+  it needs a different version of. b2ctrain is built in a separate CUDA
+  devel stage and only the binary is copied, so the toolchain is not
+  shipped.
 - `docker/envs.docker.yaml` — the container's env registry, copied over
   `pipeline/envs/envs.yaml` during the build. The repo's own copy keeps
   describing a bare pod; the two named different paths before, which would
@@ -77,6 +79,49 @@ The previous entrypoint was `python -m pipeline.cli` with no arguments,
 which meant a pod started with no start command printed an argparse usage
 error and exited. A pod whose container exits is a dead pod: no UI, no SSH,
 and the only diagnosis available is that same usage error.
+
+## b2ctrain replaced brush entirely (2026-09-07)
+
+Both trainings in `fast_helical_native.yaml` — and every splat render in
+the pipeline — run **b2ctrain**: a C++/CUDA trainer with brush's CLI,
+dataset layout (`init.ply`, `masks/`, `normals/`, `weights/`) and .ply
+contract (the `ev_*` evidence block included), built in its own
+`b2ctrain-builder` stage from github.com/Erant/b2ctrain and pinned by
+commit (`B2CTRAIN_REF`) the way brush was. Its `render` subcommand is
+installed as `/usr/local/bin/brush-splat-render` through a one-line shim,
+which is the name every renderer here resolves (`steps/splat.py`'s
+`_RENDER_BINARY`, body2colmap's `BINARY_NAME`, the doctor) — its output
+matches the Rust rasteriser to 1/255.
+
+**The Rust brush is gone from this image**, and with it: the
+`brush-builder` stage and its Rust toolchain, `/usr/local/bin/brush`, the
+Vulkan `brush-splat-render`, the `libvulkan1`/`vulkan-tools` packages and
+`pipeline.cli doctor`'s `vulkan` check. Nothing in the pipeline uses
+Vulkan any more, so the `NVIDIA_DRIVER_CAPABILITIES` question below is off
+the splat path entirely — `graphics` is still needed, but only for the
+pyrender `render` step's EGL. b2ctrain links the CUDA runtime statically
+(built for sm_89 and sm_120 plus compute_120 PTX) and needs driver >= 580
+on the pod. `pipeline.cli doctor`'s trainer check greps its `--help` for
+the same eight flags it used to grep brush's for.
+
+b2ctrain also carries the stage-5 alignment loop in-process
+(`--align-iters`; `steps/brush.py`'s `align_backend: auto` asks the binary
+and passes the loop's settings on the cold run's argv), so the
+per-iteration render process, Python DIS flow and re-invocation are gone.
+That is the one part of the swap that is not a drop-in, which is why the
+step's own loop is still there behind `align_backend: pipeline` — it
+renders through the same shim and is the A/B reference the loop was tuned
+against.
+
+Measured on an RTX 4070 Ti through this very step class, same argv: stage 2
+(135 views, 720p) 2m29s against brush's 9m41s at 37.0 vs 35.8 dB, and 3m44s
+for the whole step with its 9000-step polish (that one timed on the fp16-SH
+build, so read it as a floor); stage 5 (81 views, 1080p) 1m40s
+against 6m47s at equal or better PSNR, and ~2m50s for the whole step
+including four in-trainer alignment iterations against 5m30s for the same
+loop driven from the pipeline. Splat counts are within 4%. The in-trainer
+loop's trajectory rises and decelerates like the pipeline loop's, and its
+flow batch mean matches DIS's to 1%.
 
 ## Why one image, not brush split out
 
@@ -148,13 +193,13 @@ real inference on an L40S RunPod pod — see `pipeline/README.md`'s
 
 Not yet verified — best-guess, flagged as such in `docker/Dockerfile`'s
 comments too:
-- The brush build section in its entirety — brush has never actually been
-  compiled in this project, on a pod or in a container. The Vulkan fix
-  above is real (confirmed the underlying OS-level problem), but "does
-  `cargo build --release` succeed with just `libvulkan1`/`vulkan-tools`, or
-  does it need `vulkan-sdk` too" is still open. Also open: whether RunPod's
-  pod-creation path honors the image-level `NVIDIA_DRIVER_CAPABILITIES` at
-  all (see "Why one image" above).
+- The `b2ctrain-builder` stage — b2ctrain builds and runs on the 4070 Ti
+  box (that is where the numbers above come from), but it has never been
+  compiled *inside Docker*: the stage needs CUDA 13 at build time and a
+  driver >= 580 at run time, and neither has been exercised by a real
+  image build. Also open: whether RunPod's pod-creation path honors the
+  image-level `NVIDIA_DRIVER_CAPABILITIES` at all (see "Why one image"
+  above) — which now only gates the pyrender `render` step.
 - `wan22_vace_denoise` now loads a **pre-quantized fp8 checkpoint** and no
   longer downloads bf16 weights, fuses a LoRA into them, or quantizes
   anything — `fused_cache_dir` and the cache it managed are gone. 47 GB per

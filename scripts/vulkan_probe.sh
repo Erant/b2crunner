@@ -1,5 +1,17 @@
 #!/usr/bin/env bash
-# Walk brush's Vulkan chain link by link and say which one broke.
+# Walk the driver's graphics chain link by link and say which one broke.
+#
+# NOTHING IN THIS PIPELINE IS A VULKAN CLIENT ANY MORE: brush went on
+# 2026-09-07 and b2ctrain, which trains and rasterises in its place, is
+# CUDA. What is left needing the `graphics` capability is pyrender's EGL in
+# the `render` step, and it fails for the same reasons through the same
+# links — the ICD manifests, the injected driver libraries and their
+# version match are shared, and section 6's libEGL check is the one that
+# actually caught this project out. So the Vulkan sections below are kept
+# as the more sensitive probe of the same injection: if vulkaninfo sees the
+# GPU, `graphics` was granted. `vulkaninfo` itself is no longer installed
+# in the image (the loader went with brush), so on a pod expect section 7
+# to say so and read sections 0-6 instead.
 #
 # `vulkaninfo` answers "is there a GPU" with a single yes/no, and every way
 # of failing it looks identical from the outside: it enumerates llvmpipe and

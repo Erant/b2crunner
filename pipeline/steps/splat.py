@@ -18,12 +18,13 @@ Every ComfyUI pipeline YAML is built on that loop —
 **Rasterisation is `brush-splat-render`, not gsplat.** gsplat publishes no
 wheel past torch 2.4/cu124, so on a modern stack it JIT-compiles its CUDA
 kernels on first use and needs nvcc at *runtime* — the reason the image had
-to ship a CUDA devel base at all. `brush-splat-render` is a standalone Rust
-CLI (`crates/brush-splat-render` in the Erant/brush fork, built into
-docker/Dockerfile right alongside the `brush` training binary) that loads a
-trained `.ply` and rasterises an explicit camera list via the same
-wgpu/Vulkan renderer `brush` itself uses. This step shells out to it the
-same way `steps/brush.py` shells out to `brush`. See
+to ship a CUDA devel base at all. `brush-splat-render` is a CLI that loads
+a trained `.ply` and rasterises an explicit camera list, and this step
+shells out to it the same way `steps/brush.py` shells out to the trainer.
+Since 2026-09-07 the two are the same binary: the image installs the name
+as a one-line shim over `b2ctrain render` (a CUDA rasteriser, output
+matching the Rust `crates/brush-splat-render` it replaced to 1/255), so
+nothing here needs Vulkan any more. See
 `~/Projects/brush/docs/splat-render.md` for the CLI, the `cameras.json`
 schema, and — the part that is easy to get wrong silently — the coordinate
 conversion between body2colmap's OpenGL-convention `Camera` and brush's
@@ -82,7 +83,7 @@ temp directory `render_many` deletes on the way out, exception or not —
 which is how one brush-splat-render crash on a pod ended up with nothing
 to diagnose. `on_fault` is called while that directory still exists;
 `_save_render_crashlog` copies the camera list, a per-frame manifest, the
-argv, the output and the Vulkan/driver environment into
+argv, the output and the driver environment into
 `paths.crash_dir()` before it goes. It fires for a render that lost frames
 *and* for one that wrote everything and then died anyway, because the
 second is only probably the known crash.

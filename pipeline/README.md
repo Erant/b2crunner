@@ -122,10 +122,12 @@ pipeline/
 │   ├── rmbg.py          real, verified (single-image + batch paths)
 │   ├── wan22_vace_denoise.py  real, verified against real inference
 │   ├── sapiens2.py      real, verified (single-image + batch paths)
-│   ├── brush.py         real, UNVERIFIED — dispatch: in_process (see
-│                      docker/Dockerfile's comment on why brush is baked
-│                      into the same image, targeting RunPod), never
-│                      actually built/run
+│   ├── brush.py         real, run on a 4070 Ti but never on a pod —
+│                      dispatch: in_process (see docker/Dockerfile's
+│                      comment on why the trainer is baked into the same
+│                      image, targeting RunPod). The trainer it drives is
+│                      b2ctrain, which replaced the Rust brush on
+│                      2026-09-07 by answering to the same CLI
 │   ├── sam3d_body.py    real, verified against real inference
 │   ├── seedvr2.py       real, verified against real inference; also
 │                      rescales the dataset's camera intrinsics to match
@@ -242,8 +244,9 @@ pipeline/
                            since it is gitignored local reference data.
 ```
 
-Brush has no `pipeline/envs/brush/` directory — it's a Rust CLI baked
-directly into `docker/Dockerfile`, not a Python env with a
+The `brush` step has no `pipeline/envs/brush/` directory — the trainer it
+drives (`b2ctrain`, which is also the `brush-splat-render` rasteriser) is a
+CLI binary baked directly into `docker/Dockerfile`, not a Python env with a
 `requirements.txt`/`setup.sh` of its own.
 
 ## Core concepts

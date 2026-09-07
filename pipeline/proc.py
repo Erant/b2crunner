@@ -64,12 +64,12 @@ _BUCKET_REFILL_PER_SEC = 0.5
 
 _ERROR_TAIL_LINES = 60
 
-# Frozen into every crash report. Both binaries are wgpu/Vulkan, and their
-# one known-unresolved deployment question is whether a RunPod pod exposes
-# the graphics capability at all (see steps/brush.py's docstring and
-# docker/Dockerfile) — so the environment that decides that is the first
-# thing you want to read off a crash, and the last thing you can recover
-# once the pod is gone.
+# Frozen into every crash report. Which devices a pod exposed, and how, is
+# the first thing you want to read off a crash and the last thing you can
+# recover once the pod is gone. The Vulkan/wgpu variables are kept although
+# the trainer and the rasteriser stopped being wgpu clients in 2026-09:
+# they cost nothing, `render` still needs the graphics capability, and a
+# crash report is read long after the run it came from.
 _CRASH_ENV_VARS = (
     "NVIDIA_DRIVER_CAPABILITIES", "NVIDIA_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES",
     "VK_ICD_FILENAMES", "VK_DRIVER_FILES", "VK_LOADER_LAYERS_ENABLE",
