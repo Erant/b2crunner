@@ -6,11 +6,20 @@ they are easy to get wrong in a way nothing catches until a pod run OOMs:
 between the two denoise passes, so the pipeline must be off the card by the
 time `run()` returns while its ~47 GB of weights stay in host RAM.
 
-No torch and no diffusers here (neither is installed outside venv_wan22), so
-the pipe and torch are stubs. That is enough: what is being asserted is
+Most of this stubs torch and diffusers, because neither is installed outside
+venv_wan22, and for most of it that is enough: what is being asserted is
 *which* call the step makes for each placement, and picking the wrong one is
 exactly the bug — `.to("cpu")` on an offloaded pipeline moves the modules out
 from under its hooks and desyncs them.
+
+TestGroupOffloadFreesFp8Weights at the bottom is the exception and has to
+be. Its subject is what diffusers does to a torchao `Float8Tensor`, which
+no stub can model, and skipping it is how `6597daa` shipped an offload that
+freed nothing: that change was verified against a stand-in with the real
+geometry but ordinary weights, so the branch it depended on never ran. It
+skips unless a real torch, torchao, diffusers and CUDA card are all present
+— i.e. it runs in-image on a GPU box, which is the only place it means
+anything.
 """
 
 from __future__ import annotations
@@ -206,30 +215,168 @@ class TestGroupOffload(unittest.TestCase):
             "a component left unplaced stays on the CPU and fails mid-run",
         )
 
-    def test_one_block_per_group_streams_so_the_transfer_can_hide(self):
+    def test_one_block_per_group_is_the_least_resident_placement(self):
         _, calls = self._apply(blocks_per_group=1)
         for _, kwargs in calls:
             self.assertEqual(kwargs["num_blocks_per_group"], 1)
-            self.assertTrue(kwargs["use_stream"])
             self.assertEqual(kwargs["offload_type"], "block_level")
             self.assertEqual(kwargs["onload_device"], "device(cuda)")
             self.assertEqual(kwargs["offload_device"], "device(cpu)")
 
-    def test_bigger_groups_drop_the_stream_rather_than_be_overridden(self):
-        """diffusers forces num_blocks_per_group back to 1 under a stream.
+    def test_the_stream_is_off_at_every_group_size(self):
+        """Streaming offloads NOTHING for the fp8 weights this step loads.
 
-        `_apply_group_offloading_block_level` does it with a warning, not an
-        error, so asking for both would silently get neither: the group size
-        would be ignored and the log line lost among the others. The step
-        picks one, and >1 means the caller wants blocks resident.
+        wan_fp8.py builds torchao `Float8Tensor` params, and diffusers'
+        streamed path restores them from a `cpu_param_dict` the onload's
+        `swap_tensors` has already replaced with device data — so
+        `ModuleGroup.offload_` runs `cuda:0 -> cuda:0` and the whole
+        expert stays resident. It shipped that way in `6597daa` and the
+        5090 OOMed again with the offload active.
+
+        Not a tuning choice and not a size to avoid: it cannot complete a
+        run on any card, because the same corrupted cache makes the second
+        forward raise `cannot pin 'CUDAFloat8_e4m3fnType'`. The group size
+        is now free to mean only what it says, so assert the stream is off
+        on both sides of the old branch.
         """
-        _, calls = self._apply(blocks_per_group=8)
-        for _, kwargs in calls:
-            self.assertEqual(kwargs["num_blocks_per_group"], 8)
-            self.assertFalse(kwargs["use_stream"])
+        for blocks in (1, 8):
+            _, calls = self._apply(blocks_per_group=blocks)
+            self.assertTrue(calls)
+            for _, kwargs in calls:
+                self.assertEqual(kwargs["num_blocks_per_group"], blocks)
+                self.assertFalse(
+                    kwargs["use_stream"],
+                    "a stream silently defeats the offload for torchao weights",
+                )
 
     def test_weights_are_pinned_on_the_fly_not_up_front(self):
         """Pre-pinning would ask the host for a second copy of ~47 GB."""
         _, calls = self._apply()
         for _, kwargs in calls:
             self.assertTrue(kwargs["low_cpu_mem_usage"])
+
+
+def _real_stack_or_skip():
+    """torch + torchao + diffusers + a CUDA card, or None.
+
+    Everything above this point stubs torch, because neither torch nor
+    diffusers is installed outside venv_wan22. This one cannot: what it
+    asserts is what the real libraries do to a real tensor subclass, which
+    is exactly the part a stub cannot model and exactly where `6597daa`
+    went wrong. It runs in-image on a GPU box and skips everywhere else.
+    """
+    try:
+        import torch
+        from torchao.quantization import Float8Tensor
+        import diffusers.hooks  # noqa: F401 - the step imports it lazily
+    except ImportError:
+        return None
+    if not torch.cuda.is_available():
+        return None
+    return torch, Float8Tensor
+
+
+class TestGroupOffloadFreesFp8Weights(unittest.TestCase):
+    """The offload has to move the bytes, not just the wrapper.
+
+    A torchao `Float8Tensor` is a `_make_wrapper_subclass` with no storage
+    of its own — every byte lives in its `.qdata`/`.scale` attributes. An
+    offload that replaces the wrapper and leaves those behind reports
+    success, frees nothing, and shows up hours later as an OOM on a pod.
+    Peak allocation does not catch it either: the weights are resident for
+    the whole forward, so the peak looks like a normal one. The device of
+    `.qdata` after the forward is the assertion that catches it.
+    """
+
+    BLOCKS = 4
+    DIM = 1024
+
+    def _model(self, torch, Float8Tensor):
+        dim = self.DIM
+
+        def fp8_weight():
+            qdata = torch.randint(
+                0, 200, (dim, dim), dtype=torch.uint8
+            ).view(torch.float8_e4m3fn)
+            scale = torch.full((dim, 1), 0.01, dtype=torch.float32)
+            # The same construction as pipeline/wan_fp8.py's _build_float8.
+            return Float8Tensor(qdata=qdata, scale=scale, block_size=[1, dim],
+                                dtype=torch.bfloat16)
+
+        class Block(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.lin = torch.nn.Linear(dim, dim, bias=False,
+                                           dtype=torch.bfloat16)
+                self.lin.weight = torch.nn.Parameter(fp8_weight(),
+                                                     requires_grad=False)
+
+            def forward(self, x):
+                return self.lin(x)
+
+        class Model(torch.nn.Module):
+            def __init__(self, n):
+                super().__init__()
+                # A top-level ModuleList is what block_level offloading
+                # groups on, and what the real transformer exposes.
+                self.blocks = torch.nn.ModuleList([Block() for _ in range(n)])
+
+            def forward(self, x):
+                for block in self.blocks:
+                    x = block(x)
+                return x
+
+        return Model(self.BLOCKS)
+
+    def _place(self, model):
+        """Route the model through the step's own placement call.
+
+        Not `apply_group_offloading` directly: the argument this is
+        defending is the step's, so the step has to be the one that makes
+        the call.
+        """
+        step = _step()
+        step._blocks_per_group = 1
+        step._apply_group_offload(
+            types.SimpleNamespace(components={"transformer": model}), "cuda"
+        )
+
+    def test_every_fp8_weight_is_back_on_the_cpu_after_a_forward(self):
+        stack = _real_stack_or_skip()
+        if stack is None:
+            self.skipTest("needs torch + torchao + diffusers + CUDA")
+        torch, Float8Tensor = stack
+
+        model = self._model(torch, Float8Tensor)
+        self._place(model)
+
+        x = torch.randn(1, 32, self.DIM, dtype=torch.bfloat16, device="cuda")
+        with torch.no_grad():
+            model(x)
+        torch.cuda.synchronize()
+
+        left = [str(b.lin.weight.qdata.device) for b in model.blocks]
+        self.assertEqual(
+            left, ["cpu"] * self.BLOCKS,
+            "the offload moved the wrapper and left the weight on the card",
+        )
+
+    def test_a_second_forward_still_works(self):
+        """Denoise step 2. The streamed path raised here, not at step 1."""
+        stack = _real_stack_or_skip()
+        if stack is None:
+            self.skipTest("needs torch + torchao + diffusers + CUDA")
+        torch, Float8Tensor = stack
+
+        model = self._model(torch, Float8Tensor)
+        self._place(model)
+
+        x = torch.randn(1, 32, self.DIM, dtype=torch.bfloat16, device="cuda")
+        for _ in range(2):
+            with torch.no_grad():
+                model(x)
+        torch.cuda.synchronize()
+        self.assertEqual(
+            [str(b.lin.weight.qdata.device) for b in model.blocks],
+            ["cpu"] * self.BLOCKS,
+        )

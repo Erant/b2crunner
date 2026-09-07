@@ -386,9 +386,9 @@ class Wan22VaceDenoiseStep(Step):
               "plus the activations", advanced=True),
         Param("offload_blocks_per_group", int, 1,
               "How many transformer blocks ride onto the card together under "
-              "cpu_offload. 1 overlaps each block's transfer with the previous "
-              "block's compute; more than 1 keeps more resident but transfers "
-              "synchronously", advanced=True, minimum=1),
+              "cpu_offload. 1 holds the least and is the default; raising it "
+              "trades VRAM for fewer, larger transfers", advanced=True,
+              minimum=1),
         Param("device", str, "cuda", "Torch device", advanced=True),
     )
 
@@ -611,20 +611,51 @@ class Wan22VaceDenoiseStep(Step):
         activations plus a block or two, and the whole 17 GiB of weights
         stops competing with them.
 
-        Verified in-image on a 4070 Ti against a scaled-down
-        WanVACETransformer3DModel (24 layers, 4 VACE layers, 489M params —
-        the real geometry, small enough to hold both placements side by
-        side). Peak allocation for one forward, and how far the output
-        moved:
+        **`use_stream` must stay off, and that is not a tuning choice.**
+        The first attempt at this streamed — one block ahead, group size
+        forced to 1 — and shipped as `6597daa`, and the next 5090 run OOMed
+        in the same place with the offload demonstrably active. Streaming
+        offloads *nothing at all* when the weights are torchao tensors,
+        which ours are: wan_fp8.py builds real `Float8Tensor` params, so
+        `_is_torchao_tensor` is true and `_offload_to_memory` takes its
+        `_restore_torchao_tensor` branch, which under a stream restores
+        from a `cpu_param_dict` the onload's `swap_tensors` has already
+        turned into CUDA data. `ModuleGroup.offload_` logs
+        `['cuda:0'] -> ['cuda:0']`; the wrapper is a
+        `_make_wrapper_subclass` with no storage of its own, so the
+        `.qdata`/`.scale` holding every byte never leave the card. The pod
+        ledger reads back exactly that: 23.05 GiB allocated, being one
+        resident expert plus the 6.3 GiB of hints.
 
-            resident on the card                953 MiB   (baseline)
-            blocks_per_group=1, streamed         80 MiB   0.08x, bitwise equal
-            blocks_per_group=4, no stream       183 MiB   0.19x, bitwise equal
+        It is not merely a sizing problem either — streaming cannot
+        complete a run on any card. That same corrupted cache means the
+        SECOND forward, denoise step 2, raises `cannot pin
+        'CUDAFloat8_e4m3fnType'`. The 5090 only ran out of memory first.
 
-        Bitwise equal in both cases, so this is a placement change and
-        nothing else — no dtype path, no kernel, no numerics. The residual
-        80 MiB is activations; the weights are gone from the peak, which is
-        what has to happen to the 17 GiB on the real model.
+        Measured in-image on a 4070 Ti, 8 blocks of Float8Tensor weights
+        built the way wan_fp8.py builds them, 128 MiB of fp8 in total:
+
+            blocks_per_group=1, use_stream=True   128.0 MiB LEFT ON GPU,
+                                                  forward 2 raises
+            blocks_per_group=1, no stream           0.0 MiB left, peak 185 MiB
+            blocks_per_group=2, no stream           0.0 MiB left, peak 201 MiB
+            blocks_per_group=4, no stream           0.0 MiB left, peak 233 MiB
+
+        Unstreamed group size 1 is the best of them on both axes at once,
+        which is why it is the default: it frees everything and it holds
+        the least. Bigger groups only trade VRAM away for fewer, larger
+        transfers.
+
+        The placement itself was verified in-image on a 4070 Ti against a
+        scaled-down WanVACETransformer3DModel (24 layers, 4 VACE layers,
+        489M params — the real geometry) at 953 MiB resident vs 183 MiB
+        grouped, bitwise equal output. That check used ORDINARY weights,
+        which is precisely why it missed the above: it exercised the real
+        shapes but not the real weight representation, and the torchao
+        branch it depended on never ran. A stand-in for this model needs
+        `Float8Tensor` params, and the assertion that matters is
+        `weight.qdata.device` after a forward — not peak allocation, which
+        a leak this shape flatters.
 
         **It has to go on every component.** diffusers refuses to mix this
         with the pipeline-level offload — `enable_model_cpu_offload()`
@@ -637,32 +668,27 @@ class Wan22VaceDenoiseStep(Step):
 
         The cost is that the weights now cross PCIe once per forward
         instead of once per pass: 16.4 GiB per step rather than per expert
-        turn. That is affordable here specifically because the sequence is
-        so long. A block is ~341 MiB, which is tens of milliseconds over
-        PCIe (nearer the top of that range than the bottom, because
-        low_cpu_mem_usage below pins as it goes rather than up front),
-        against attention over 79,200 tokens at dim 5120 — order 10^14
-        FLOPs, or several hundred ms of compute — so with a stream to
-        overlap them the transfer hides behind the block in front of it
-        with an order of magnitude to spare. Do not carry that conclusion
-        to a short clip: at a
-        fraction of the sequence length the arithmetic inverts and this
-        becomes the bottleneck rather than free.
+        turn, and with no stream to hide it behind the compute, all of it
+        exposed. At a warm x16 link that is order a second per step —
+        against a denoise pass that takes minutes, and against a run that
+        does not finish at all otherwise. It is affordable here
+        specifically because the sequence is so long: a block is ~341 MiB
+        of transfer against attention over 79,200 tokens at dim 5120,
+        order 10^14 FLOPs. Do not carry that conclusion to a short clip;
+        at a fraction of the sequence length the arithmetic inverts and
+        this becomes the bottleneck rather than a rounding error.
         """
         import torch
         from diffusers.hooks import apply_group_offloading
 
-        # Streams and group size are not two independent knobs, whatever
-        # the signature suggests: _apply_group_offloading_block_level
-        # forces num_blocks_per_group back to 1 whenever a stream is given
-        # (prefetching the next group is the entire point of the stream) and
-        # only warns about it. So `offload_blocks_per_group` picks between
-        # them rather than setting both — 1 means "stream, one block ahead",
-        # and anything larger means "keep that many resident, transfer
-        # synchronously", which is the right trade only on a machine whose
-        # PCIe link is fast relative to its compute. This one is not.
+        # No stream, ever — see the docstring. It is not a knob because
+        # there is no setting of it that works: streaming is what makes
+        # diffusers restore a torchao weight from a cache the onload has
+        # already overwritten with device data, which offloads nothing and
+        # then dies on the second forward. `offload_blocks_per_group` is
+        # therefore a plain residency dial, low is good, and 1 is both the
+        # least resident and the fastest to free.
         blocks = self._blocks_per_group
-        use_stream = blocks == 1
         onload = torch.device(device)
         offload = torch.device("cpu")
         # Walked rather than named: `pipe.components` is what diffusers
@@ -679,7 +705,7 @@ class Wan22VaceDenoiseStep(Step):
                 offload_device=offload,
                 offload_type="block_level",
                 num_blocks_per_group=blocks,
-                use_stream=use_stream,
+                use_stream=False,
                 # Pin on the fly rather than pre-pinning every weight. The
                 # default pre-pins, which for ~47 GB of weights already
                 # resident in host RAM means asking the host for a second,
@@ -931,10 +957,11 @@ class Wan22VaceDenoiseStep(Step):
 # The two 17.58 GB transformers are deliberately NOT in this list: under
 # cpu_offload they upload lazily, a block at a time, inside the loop — and
 # under group offloading they do it again on every step rather than once
-# per expert turn. If the gap between "0%" and "1/6" is the long one, those
-# uploads are what you are looking at, not anything timed here; the same
-# gap on steps 2-6 says the transfer stopped hiding behind the compute,
-# which is what `offload_blocks_per_group` exists to trade against.
+# per expert turn, unstreamed and so fully exposed. If the gap between "0%"
+# and "1/6" is the long one, those uploads are what you are looking at, not
+# anything timed here — and expect that gap on every step, not just the
+# first. `offload_blocks_per_group` is the only lever over it, and it buys
+# fewer, larger transfers with VRAM.
 _PRE_LOOP_PHASES = (
     "encode_prompt",
     "preprocess_conditions",
