@@ -13,7 +13,9 @@ step they all spoke at the same volume:
   * the **stage-1 shells** — `pointmap_elevation_views` + `stage1_support_band`,
     Sapiens2 depth shells of every Nth denoised frame rendered from an
     elevation offset. Masked supporting views whose appearance is the
-    denoised frame's, face included.
+    denoised frame's, face included. Gone from the workflow since
+    2026-09-06, and with them this step's second call site; the masked
+    path below still works, and is what a re-added shell would use.
 
 brush weights a masked view by its mask and a transparent view not at all,
 so wherever the cap's renders and a denoised frame both cover the face the

@@ -918,11 +918,14 @@ class TestWorkflowFiles(unittest.TestCase):
 
     def test_the_frames_yield_to_the_face_cap_in_the_stage_2_training_only(self):
         """The face cap wins: `face_priority` turns the refined face splat's
-        coverage into per-pixel loss weights for the training views, and
-        `face_priority_shells` folds the same yield into the stage-1
-        shells' masks. All wiring, and all of it silent if wrong: an
-        optional read of a path nothing writes trains at full weight, the
-        old behaviour, with nothing in the log to say so.
+        coverage into per-pixel loss weights for the training views. All
+        wiring, and all of it silent if wrong: an optional read of a path
+        nothing writes trains at full weight, the old behaviour, with
+        nothing in the log to say so.
+
+        (The stage-1 shells had a `face_priority_shells` twin folding the
+        same yield into their masks; both went with the shells on
+        2026-09-06.)
         """
         for path in _workflows():
             spec = WorkflowSpec.from_yaml(str(path))
@@ -970,31 +973,14 @@ class TestWorkflowFiles(unittest.TestCase):
                     "nothing for its frames to yield to",
                 )
 
-                shells = by_id["face_priority_shells"]
-                band = by_id["stage1_support_band"]
-                self.assertEqual(shells.step, "face_priority_weights")
-                self.assertEqual(shells.when, band.when,
-                                 "gated on the shells, not the face: with the face "
-                                 "off it passes the masks through")
-                self.assertEqual(shells.inputs["cameras"], band.outputs["cameras"])
-                self.assertEqual(shells.inputs["masks"], band.outputs["masks"])
-                self.assertEqual(shells.inputs["splat_path"],
-                                 refined.outputs["splat_path"] + "?")
-                merge = by_id["merge_support_views"]
-                self.assertEqual(merge.inputs["b_images"], band.outputs["images"] + "?")
-                self.assertEqual(
-                    merge.inputs["b_masks"], shells.outputs["masks"] + "?",
-                    "merge_support_views must read the FOLDED masks, not the band's",
-                )
-                self.assertEqual(merge.inputs["b_cameras"], band.outputs["cameras"] + "?")
-
     def test_the_cameras_are_refined_before_anything_reads_them(self):
         """Camera refinement lands ahead of every consumer of a pose.
 
         Three orderings, and each one is a silent failure rather than a
         loud one if it slips.
 
-        `pointmap_elevation_views` is the sharp one: it places a Gaussian
+        `pointmap_elevation_views` is the sharp one, and the check stays
+        for it though no workflow places one today: it puts a Gaussian
         shell on each frame's own camera ray and renders it from a camera
         derived from that pose, so a refinement running after it leaves the
         supporting views built on poses the training no longer uses — they

@@ -11,6 +11,11 @@ and until 2026-09-02 brush heard them at the same volume:
 | the **denoised frames** | `denoise_pass1`'s output, the training views proper | transparent training views | 1, every pixel |
 | the **stage-1 shells** | `pointmap_elevation_views` + `stage1_support_band`: Sapiens2 depth shells of every Nth denoised frame, from ±elevation | masked supporting views | their matte (≈1) |
 
+> The shells were switched off on 2026-09-05 and removed from the workflow
+> on 2026-09-06, taking `face_priority_shells` with them. Two sources
+> describe the face now; everything below about the shells is a record of
+> what the change did, not of what runs.
+
 The cap is the only one carrying the photograph. The frames carry the
 diffusion model's idea of the face, which is what the cap exists to
 overrule, and the shells carry the frames' appearance again. Wherever two
@@ -65,7 +70,8 @@ Two steps in the shared tail, both `face_priority_weights`:
   `export_colmap_intermediate` read optionally as `weights`; steps/brush.py
   writes them as `weights/<stem>.png`. With `face_splat: false` nothing
   writes the path and brush trains on byte-identical data to before.
-- **`face_priority_shells`** (after `stage1_support_band`, gated on
+- **`face_priority_shells`** (removed 2026-09-06 with the shells; after
+  `stage1_support_band`, gated on
   `stage1_support_views`): the shells' cameras and masks in, the same
   splat optionally (`?`). A shell is masked already, so the weight is
   folded INTO its mask (`scene.body_support_views.masks_deferring_to_face`),
