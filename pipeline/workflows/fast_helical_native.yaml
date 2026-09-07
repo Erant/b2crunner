@@ -1798,6 +1798,15 @@ steps:
     dispatch: in_process
     inputs:
       splat_scene: scene.splat
+      # The trained .ply itself, so the render reads it where it lies. Without
+      # this the step stages `splat_scene` through SplatScene.to_ply, which
+      # writes the standard 3DGS columns only: the ev_* block train_splat
+      # exported is dropped on the floor, brush-splat-render warns
+      # "--confidence without evidence", and the gate below silently
+      # degenerates to plain alpha. Found 2026-09-07 on the first b2ctrain
+      # run; the gap predates the trainer swap. Wiring the path also skips
+      # serialising ~900k Gaussians to a temp dir before every render.
+      splat_path: dataset.splat_path
       dataset: dataset
     params:
       width: ${globals.resolution.0}
