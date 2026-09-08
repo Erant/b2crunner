@@ -107,6 +107,10 @@ class _FakeScheduler:
         self.lower_order_nums = 0
         self.last_sample = None
         self._step_index = None
+        # Which sampler took each step, in order — what a mixed run is read
+        # off. The euler steps append themselves from `_euler_step`'s side
+        # effect on `_step_index`, so this records only UniPC's own.
+        self.stepped = []
 
     def register_to_config(self, **kwargs):
         for key, value in kwargs.items():
@@ -122,6 +126,25 @@ class _FakeScheduler:
         self.timesteps = [s * self.config.num_train_timesteps for s in shifted]
         # diffusers' `final_sigmas_type: zero`: the step sigmas plus a 0.
         self.sigmas = shifted + [0.0]
+        # As UniPCMultistepScheduler.set_timesteps does: a new schedule has
+        # taken no steps yet.
+        self._step_index = None
+
+    def _init_step_index(self, timestep):
+        """UniPC's own: the position of this timestep in the schedule."""
+        value = float(timestep)
+        self._step_index = min(
+            range(len(self.timesteps)), key=lambda i: abs(self.timesteps[i] - value)
+        )
+
+    def step(self, model_output, timestep, sample, return_dict=True):
+        """UniPC's step as far as these tests read it: it advances the index
+        and says it ran. The solver arithmetic is diffusers', not this."""
+        if self._step_index is None:
+            self._init_step_index(timestep)
+        self.stepped.append(("uni_pc", self._step_index))
+        self._step_index += 1
+        return (sample,) if not return_dict else types.SimpleNamespace(prev_sample=sample)
 
 
 def _conditioning_scale(*args):
@@ -663,6 +686,54 @@ class TestSamplerSchedule(unittest.TestCase):
         with self.assertRaises(ValueError):
             _comfy_beta_sigmas(0)
 
+    def test_the_simple_schedule_is_comfyuis_strided_table_walk(self):
+        """comfy/samplers.py's `simple_scheduler`: sigmas[-(1 + int(x * ss))]
+        with ss = len(sigmas) / steps, which at 6 strides 166 indices."""
+        from pipeline.steps.wan22_vace_denoise import _comfy_simple_sigmas
+
+        sigmas = _comfy_simple_sigmas(6)
+        index = [999 - int(x * (1000 / 6)) for x in range(6)]
+        self.assertEqual(index, [999, 833, 666, 499, 333, 166])
+        for sigma, i in zip(sigmas, index):
+            self.assertAlmostEqual(sigma, (i + 1) / 1000)
+
+    def test_simple_is_linspace_to_within_the_stride_truncation(self):
+        """The reason to reach for `linspace` instead: the two schedules
+        agree exactly where the step count divides the table, and by under
+        a timestep in 1000 where it does not."""
+        from pipeline.steps.wan22_vace_denoise import _comfy_simple_sigmas
+
+        for n in (4, 8, 20):  # divides 1000
+            linspace = [1.0 - (1.0 - 1.0 / n) * i / (n - 1) for i in range(n)]
+            for a, b in zip(_comfy_simple_sigmas(n), linspace):
+                self.assertAlmostEqual(a, b)
+        for n in (6, 12):  # does not
+            linspace = [1.0 - (1.0 - 1.0 / n) * i / (n - 1) for i in range(n)]
+            gaps = [abs(a - b) for a, b in zip(_comfy_simple_sigmas(n), linspace)]
+            self.assertLess(max(gaps), 1 / 1000)
+            self.assertGreater(max(gaps), 0.0)
+
+    def test_the_simple_schedule_descends_from_one(self):
+        from pipeline.steps.wan22_vace_denoise import _comfy_simple_sigmas
+
+        for n in (1, 2, 4, 6, 8):
+            sigmas = _comfy_simple_sigmas(n)
+            self.assertEqual(len(sigmas), n)
+            self.assertEqual(sigmas[0], 1.0)
+            self.assertEqual(sigmas, sorted(sigmas, reverse=True))
+
+    def test_a_simple_schedule_that_repeats_a_timestep_is_refused(self):
+        from pipeline.steps.wan22_vace_denoise import _comfy_simple_sigmas
+
+        with self.assertRaises(ValueError):
+            _comfy_simple_sigmas(6, num_train_timesteps=4)
+
+    def test_no_simple_steps_at_all_is_refused(self):
+        from pipeline.steps.wan22_vace_denoise import _comfy_simple_sigmas
+
+        with self.assertRaises(ValueError):
+            _comfy_simple_sigmas(0)
+
     def test_shifted_by_eight_it_is_the_reference_graphs_timesteps(self):
         """The two numbers together, through the stub's flow-sigma branch:
         what the reference graph's KSamplers actually stepped through."""
@@ -699,6 +770,17 @@ class TestSamplerReachesTheScheduler(_RunsTheStep, unittest.TestCase):
         self.assertEqual(scheduler.shift, 3.0)
         self.assertEqual(
             [round(t) for t in scheduler.timesteps], [1000, 938, 857, 750, 600, 375]
+        )
+
+    def test_simple_spreads_the_steps_the_beta_run_crowded(self):
+        """`simple` through the same wrapper: an even walk, so the run keeps
+        steps at the low-noise end instead of spending four above t=750."""
+        step, _ = self._run(sigma_schedule="simple")
+        scheduler = step._pipe.scheduler
+        self.assertEqual(scheduler.shift, 8.0)
+        self.assertEqual(
+            [round(t, 1) for t in scheduler.timesteps],
+            [1000.0, 975.7, 941.3, 888.9, 800.5, 616.0],
         )
 
     def test_the_schedule_is_read_per_call_so_two_passes_can_differ(self):
@@ -916,6 +998,112 @@ class TestSolverAndHandoff(_RunsTheStep, unittest.TestCase):
         self.assertIn("restarts", line)
 
 
+class TestSamplerPerExpert(_RunsTheStep, unittest.TestCase):
+    """`sampler_high` / `sampler_low`: which sampler takes each phase's steps.
+
+    The scheduler the pipeline was loaded with is UniPC and stays UniPC —
+    it owns the sigmas, the timesteps and the expert boundary — so `euler`
+    is a substitution inside `step()`, installed by the same kind of
+    instance wrapper the schedule uses. These pin the split (by step index,
+    the same one the experts split on), the arithmetic, and the one place
+    the choice changes something else: bh1's terminal sigma, which exists
+    for UniPC's last step and not for Euler's.
+    """
+
+    def _drive(self, step, sample=1.0, velocity=1.0):
+        """Take the run's steps the way the denoise loop does, and hand back
+        the sample after each."""
+        scheduler = step._pipe.scheduler
+        samples = []
+        for timestep in list(scheduler.timesteps):
+            sample = scheduler.step(velocity, timestep, sample, return_dict=False)[0]
+            samples.append(sample)
+        return samples
+
+    def test_euler_is_the_flow_matching_step_on_the_schedulers_own_sigmas(self):
+        from pipeline.steps.wan22_vace_denoise import _euler_step
+
+        scheduler = _FakeScheduler(shift=8.0)
+        scheduler.set_timesteps(6)
+        sigmas = list(scheduler.sigmas)
+        sample = _euler_step(scheduler, 2.0, scheduler.timesteps[0], 5.0, False)[0]
+        self.assertAlmostEqual(sample, 5.0 + (sigmas[1] - sigmas[0]) * 2.0)
+        self.assertEqual(scheduler._step_index, 1)
+
+    def test_the_default_run_takes_every_step_on_unipc(self):
+        step, _ = self._run()
+        self._drive(step)
+        self.assertEqual(
+            step._pipe.scheduler.stepped, [("uni_pc", i) for i in range(6)]
+        )
+
+    def test_euler_on_the_high_expert_leaves_the_low_ones_on_unipc(self):
+        """The split is `steps_high`, the same index the experts split on."""
+        step, _ = self._run(sampler_high="euler")
+        self._drive(step)
+        self.assertEqual(
+            step._pipe.scheduler.stepped, [("uni_pc", 2), ("uni_pc", 3),
+                                           ("uni_pc", 4), ("uni_pc", 5)]
+        )
+
+    def test_euler_on_the_low_expert_leaves_the_high_ones_on_unipc(self):
+        step, _ = self._run(sampler_low="euler")
+        self._drive(step)
+        self.assertEqual(
+            step._pipe.scheduler.stepped, [("uni_pc", 0), ("uni_pc", 1)]
+        )
+
+    def test_euler_throughout_never_reaches_the_scheduler_step(self):
+        step, _ = self._run(sampler_high="euler", sampler_low="euler")
+        samples = self._drive(step, sample=0.0, velocity=1.0)
+        self.assertEqual(step._pipe.scheduler.stepped, [])
+        # Six first-order steps down the sigma ladder, ending at sigma 0:
+        # x0 = x + sum(d sigma) * v, which from 0 is -sigmas[0] = -1.
+        self.assertAlmostEqual(samples[-1], -1.0)
+
+    def test_bh1s_terminal_sigma_is_left_off_when_euler_takes_the_last_step(self):
+        """COMFY_TERMINAL_SIGMA is there because diffusers' bh1 update is
+        non-finite at sigma 0. An Euler step is not, and 0.001 would leave
+        the last of the noise in."""
+        step, _ = self._run(sampler_low="euler")
+        self.assertEqual(step._pipe.scheduler.sigmas[-1], 0.0)
+        step, _ = self._run()
+        self.assertEqual(step._pipe.scheduler.sigmas[-1], 0.001)
+
+    def test_a_high_only_run_puts_its_last_step_on_the_high_sampler(self):
+        """With no low-noise steps the high sampler takes the run, so it is
+        the one the terminal sigma answers to."""
+        step, _ = self._run(steps_high=6, steps_low=0, strength=[1.0],
+                            sampler_high="euler")
+        self.assertEqual(step._pipe.scheduler.sigmas[-1], 0.0)
+
+    def test_the_wrapper_goes_on_once_per_scheduler(self):
+        step, _ = self._run()
+        scheduler = step._pipe.scheduler
+        installed = scheduler.step
+        step._configure_sampler(
+            step._pipe, step.resolve_params({"width": 16, "height": 16, "seed": 0})
+        )
+        self.assertIs(scheduler.step, installed)
+        self.assertIs(step._sampled, scheduler)
+
+    def test_the_sampler_is_read_per_call_so_two_passes_can_differ(self):
+        """One resident pipeline, one wrapper: the second pass's choice must
+        win without reinstalling anything."""
+        step, _ = self._run()
+        scheduler = step._pipe.scheduler
+        step._sampler_high = step._sampler_low = "euler"
+        self._drive(step)
+        self.assertEqual(scheduler.stepped, [])
+
+    def test_the_run_logs_which_sampler_took_which_phase(self):
+        with self.assertLogs("pipeline.steps.wan22_vace_denoise", level="INFO") as caught:
+            self._run(sampler_high="euler")
+        line = next(m for m in caught.output if "sampler:" in m)
+        self.assertIn("Euler high", line)
+        self.assertIn("UniPC bh1", line)
+
+
 class TestReferenceFit(_RunsTheStep, unittest.TestCase):
     """`reference_fit`: ComfyUI's centre-crop-and-fill versus diffusers'
     letterbox-on-white.
@@ -986,13 +1174,16 @@ class TestDeclaration(unittest.TestCase):
         from pipeline.steps.wan22_vace_denoise import Wan22VaceDenoiseStep
 
         for name in ("strength", "strength_layers", "sigma_schedule", "sampler_shift",
-                     "solver_variant", "solver_order", "handoff_reset", "reference_fit"):
+                     "sampler_high", "sampler_low", "solver_variant", "solver_order",
+                     "handoff_reset", "reference_fit"):
             self.assertNotIn(name, Wan22VaceDenoiseStep.LOAD_PARAMS)
 
     def test_the_declared_sampler_is_the_whole_reference_graph(self):
         from pipeline.steps.wan22_vace_denoise import Wan22VaceDenoiseStep
 
         declared = {param.name: param for param in Wan22VaceDenoiseStep.PARAMS}
+        self.assertEqual(declared["sampler_high"].default, "uni_pc")
+        self.assertEqual(declared["sampler_low"].default, "uni_pc")
         self.assertEqual(declared["solver_variant"].default, "bh1")
         self.assertEqual(declared["solver_order"].default, 3)
         self.assertTrue(declared["handoff_reset"].default)

@@ -161,6 +161,21 @@ method itself with a step count and nothing else, so there is no argument
 to pass a schedule through. `linspace` leaves the call alone and is the
 pre-2026-09-07 run at `sampler_shift: 3.0`.
 
+Beta's shape is a choice about where the steps go, and at six it is a
+lopsided one: four of them land above t=750 and the fifth drops to 448, so
+most of the run is spent on noise levels the drawing has already decided
+and the low-noise end gets one step. ComfyUI's `simple` is the even
+alternative — walk the same sigma table from the top in strides of
+`1000 / steps` — and it is diffusers' `linspace` to within that stride's
+truncation (identical where the count divides 1000; under a timestep apart
+at 6, two at 12, either shift). Both are here because the ComfyUI name is
+worth being able to write, but `linspace` is the one to reach for: it needs
+neither scipy nor the `sigmas` argument older diffusers lacks.
+
+    beta      shift 8  t = 1000, 988.4 | 955.1, 888.9, 752.6, 448.4
+    simple    shift 8  t = 1000, 975.7 | 941.3, 888.9, 800.5, 616.0
+    linspace  shift 8  t = 1000, 975.6 | 941.2, 888.9, 800.0, 615.4
+
 One consequence: the expert split is why `steps_high`/`steps_low` are
 counts rather than the checkpoint's `boundary_ratio` of 0.875. At shift 8
 that threshold would put FOUR of six steps on the high-noise expert (1000,
@@ -168,8 +183,27 @@ that threshold would put FOUR of six steps on the high-noise expert (1000,
 (`KSamplerAdvanced`'s end_at_step) — the count is what the graph said, so
 the count is what is set.
 
+**Which sampler takes which steps** is two per-call params of its own,
+`sampler_high` and `sampler_low`, both defaulting to `uni_pc` — the
+reference graph's, and what this step has always run. `euler` is the plain
+first-order flow-matching step (`_euler_step`), and it is per EXPERT
+because that is where the two halves of the run differ: the opening steps
+have almost no multistep history to extrapolate from and hand over to a
+different network, the closing ones have a full one and a network that
+stays put.
+
+It is a substitution inside the scheduler's `step()` (`_install_sampler`),
+not a second scheduler object: the pipeline builds its timesteps, its
+sigmas and its expert boundary around the one scheduler it was loaded
+with, and only the update differs. An Euler step reads no multistep
+history and leaves none, so a UniPC phase after one starts at first order
+and ramps up — the same state `handoff_reset` arranges by hand. The one
+thing the choice changes elsewhere is bh1's terminal-sigma substitution,
+which applies only when UniPC takes the run's last step.
+
 **The solver and the hand-off** are matched too, by three more per-call
-params, all defaulting to the graph's behaviour (2026-09-08):
+params, all defaulting to the graph's behaviour (2026-09-08). They are
+UniPC's, and inert on a phase running `euler`:
 
   * `solver_variant` / `solver_order`: ComfyUI's `uni_pc` sampler is
     UniPC's bh1 variant; the repo's scheduler config is bh2 at order 2.
@@ -405,6 +439,59 @@ def _expert_boundary_ratio(
     return ((last_high + first_low) / 2.0) / num_train_timesteps
 
 
+def _sigmas_from_indices(index, num_train_timesteps: int, schedule: str) -> list:
+    """Turn ComfyUI sigma-table indices into the unshifted sigmas diffusers
+    wants, and refuse a schedule that lands twice on the same index.
+
+    ComfyUI reads `model_sampling.sigmas[index]`, and for a Wan model that
+    table is `shift((index + 1) / 1000)` (comfy/model_sampling.py,
+    `ModelSamplingDiscreteFlow.set_parameters`) — so the unshifted value at
+    an index is `(index + 1) / num_train_timesteps`, and the shift is left
+    to the scheduler these are handed to: diffusers' flow-sigma branch
+    applies `flow_shift` to custom sigmas, the same order ComfyUI does it in.
+
+    ComfyUI silently drops a repeated index, which shortens the run. That is
+    refused here instead: everything else in this step plans against the
+    step count it was given (`strength` has one entry per step, the expert
+    split is placed by count), and a run of fewer steps than planned would
+    misplace both.
+    """
+    if len(np.unique(index)) != len(index):
+        raise ValueError(
+            f"wan22_vace_denoise: {len(index)} steps on the {schedule} schedule "
+            "put two steps on the same timestep, which ComfyUI would silently "
+            "drop; use fewer steps, or sigma_schedule: linspace"
+        )
+    return [float(value) for value in (np.asarray(index) + 1.0) / num_train_timesteps]
+
+
+def _comfy_simple_sigmas(
+    n_steps: int,
+    num_train_timesteps: int = 1000,
+) -> list:
+    """The sigmas ComfyUI's `simple` scheduler picks for an `n_steps` run,
+    BEFORE the model's shift.
+
+    comfy/samplers.py's `simple_scheduler`, line for line: walk the model's
+    sigma table from the noisy end in strides of `len(sigmas) / n_steps`,
+    truncating each stride to an index (`sigmas[-(1 + int(x * ss))]`).
+    ComfyUI's trailing 0.0 is left off, as it is for `beta`: diffusers
+    appends its own terminal sigma (`final_sigmas_type`).
+
+    This is diffusers' `linspace` to within that truncation — both walk the
+    range evenly — and where `n_steps` divides the table they are the same
+    numbers. Where it does not, the stride truncates and the two disagree by
+    under a timestep in 1000 (0.6 at 6 steps, 2.1 at 12, either shift).
+    `simple` is the arithmetic ComfyUI would have run; `linspace` is the
+    schedule diffusers computes for itself, and needs no scipy or wrapper.
+    """
+    if n_steps < 1:
+        raise ValueError("wan22_vace_denoise: a schedule needs at least one step")
+    stride = num_train_timesteps / n_steps
+    index = [num_train_timesteps - 1 - int(x * stride) for x in range(n_steps)]
+    return _sigmas_from_indices(index, num_train_timesteps, "simple")
+
+
 def _comfy_beta_sigmas(
     n_steps: int,
     num_train_timesteps: int = 1000,
@@ -417,23 +504,12 @@ def _comfy_beta_sigmas(
     comfy/samplers.py's `beta_scheduler`, line for line: `n_steps` quantile
     levels descending from 1 (`1 - linspace(0, 1, n, endpoint=False)`), each
     mapped through the Beta(alpha, beta) quantile function, scaled to the
-    last index of the model's 1000-entry sigma table and rounded. ComfyUI
-    then reads `model_sampling.sigmas[index]`, and for a Wan model that
-    table is `shift((index + 1) / 1000)` (comfy/model_sampling.py,
-    `ModelSamplingDiscreteFlow.set_parameters`) — so the unshifted value at
-    an index is `(index + 1) / num_train_timesteps`, and the shift is left
-    to the scheduler these are handed to: diffusers' flow-sigma branch
-    applies `flow_shift` to custom sigmas, the same order ComfyUI does it in.
+    last index of the model's 1000-entry sigma table and rounded, then read
+    off that table by `_sigmas_from_indices`.
 
     scipy for the quantile function because ComfyUI uses scipy's, and
     matching its rounding to the index is the whole point. venv_wan22 sees
     venv_base's copy (docker/make-child-venv.sh).
-
-    ComfyUI silently drops a repeated index, which shortens the run. That is
-    refused here instead: everything else in this step plans against the
-    step count it was given (`strength` has one entry per step, the expert
-    split is placed by count), and a run of fewer steps than planned would
-    misplace both.
     """
     try:
         from scipy.stats import beta as beta_distribution
@@ -449,13 +525,13 @@ def _comfy_beta_sigmas(
     index = np.rint(
         beta_distribution.ppf(levels, alpha, beta) * (num_train_timesteps - 1)
     )
-    if len(np.unique(index)) != len(index):
-        raise ValueError(
-            f"wan22_vace_denoise: {n_steps} steps on the beta schedule put two "
-            "steps on the same timestep, which ComfyUI would silently drop; use "
-            "fewer steps, or sigma_schedule: linspace"
-        )
-    return [float(value) for value in (index + 1.0) / num_train_timesteps]
+    return _sigmas_from_indices(index, num_train_timesteps, "beta")
+
+
+# The schedules computed here and handed to `set_timesteps` as custom
+# sigmas. `linspace` is absent on purpose: it is diffusers' own spacing, so
+# that run passes no sigmas at all and the wrapper leaves the call alone.
+_SIGMA_SCHEDULES = {"beta": _comfy_beta_sigmas, "simple": _comfy_simple_sigmas}
 
 
 def _install_sigma_schedule(step: "Wan22VaceDenoiseStep", scheduler) -> None:
@@ -466,8 +542,9 @@ def _install_sigma_schedule(step: "Wan22VaceDenoiseStep", scheduler) -> None:
     before the pass; neither hands sigmas across. diffusers does accept
     them — `set_timesteps(..., sigmas=...)` is its documented way to run a
     custom schedule — so the one seam is the call, and this wraps it on the
-    instance: a `beta` run computes ComfyUI's sigmas and passes them in, a
-    `linspace` run passes nothing and diffusers spaces the steps itself.
+    instance: a `beta` or `simple` run computes ComfyUI's sigmas and passes
+    them in, a `linspace` run passes nothing and diffusers spaces the steps
+    itself.
     Both then go through diffusers' own shift, eps and final-sigma handling.
 
     The schedule is read off the step per call (`_sigma_schedule`), the way
@@ -489,17 +566,19 @@ def _install_sigma_schedule(step: "Wan22VaceDenoiseStep", scheduler) -> None:
 
     @functools.wraps(original)
     def set_timesteps(num_inference_steps=None, device=None, sigmas=None, **kwargs):
-        if sigmas is None and step._sigma_schedule == "beta":
-            sigmas = _comfy_beta_sigmas(
+        builder = _SIGMA_SCHEDULES.get(step._sigma_schedule)
+        if sigmas is None and builder is not None:
+            sigmas = builder(
                 int(num_inference_steps), int(scheduler.config.num_train_timesteps)
             )
         if sigmas is not None:
             if not accepts_sigmas:
                 raise RuntimeError(
                     "wan22_vace_denoise: this diffusers' UniPCMultistepScheduler."
-                    "set_timesteps takes no `sigmas`, so the beta schedule cannot "
-                    "reach it; upgrade diffusers (0.36.0 lacks it) or set "
-                    "sigma_schedule: linspace, which only needs the shift"
+                    f"set_timesteps takes no `sigmas`, so the "
+                    f"{step._sigma_schedule} schedule cannot reach it; upgrade "
+                    "diffusers (0.36.0 lacks it) or set sigma_schedule: linspace, "
+                    "which only needs the shift"
                 )
             # An array, whatever the signature says (`list[float]`): the
             # flow-sigma branch does `flow_shift * sigmas / (...)` on it
@@ -511,7 +590,8 @@ def _install_sigma_schedule(step: "Wan22VaceDenoiseStep", scheduler) -> None:
         # only where the last step lands changes, from 0 to 0.001.
         sigmas_out = getattr(scheduler, "sigmas", None)
         if (
-            step._solver_variant == "bh1"
+            step._last_sampler() == "uni_pc"
+            and step._solver_variant == "bh1"
             and sigmas_out is not None
             and len(sigmas_out)
             and float(sigmas_out[-1]) == 0.0
@@ -576,6 +656,85 @@ def _phase_order(order_cap: int, phase_steps: int) -> int:
     return max(1, min(int(order_cap), int(phase_steps) - 1))
 
 
+def _timestep_value(timestep) -> float:
+    """The one number in a timestep, whichever shape it arrives in.
+
+    A pre-hook sees the tensor the pipeline expanded to one value per frame;
+    `scheduler.step` sees the loop's scalar `t`, and a test hands a plain
+    float. All three are the same step of the schedule.
+    """
+    flatten = getattr(timestep, "flatten", None)
+    return float(flatten()[0]) if flatten is not None else float(timestep)
+
+
+def _euler_step(scheduler, model_output, timestep, sample, return_dict: bool = True):
+    """One flow-matching Euler step, taken on the scheduler's own sigmas.
+
+    diffusers' FlowMatchEulerDiscreteScheduler.step, which for the default
+    (no stochasticity) is the whole of it: `sample + (sigma_next - sigma) *
+    model_output`, in float32, back to the model's dtype. The sigmas are the
+    ones `set_timesteps` already laid down — the schedule and the shift are
+    the sampler's input, not its business — so `sigma_schedule` and
+    `sampler_shift` mean the same thing here as under UniPC.
+
+    It is a different sampler substituted into UniPC's seam rather than a
+    different scheduler object because the pipeline builds its boundary,
+    its timesteps and its step count around the one scheduler it was
+    loaded with, and only `step()` differs. Nothing multistep is touched:
+    an Euler step reads no history and leaves none, which is exactly what
+    a UniPC phase after it should see — `lower_order_nums` stays where it
+    was, so the next UniPC step starts at first order and ramps up, the
+    same as after a hand-off restart.
+    """
+    if getattr(scheduler, "_step_index", None) is None:
+        scheduler._init_step_index(timestep)
+    index = scheduler._step_index
+    sigma = float(scheduler.sigmas[index])
+    sigma_next = float(scheduler.sigmas[index + 1])
+    dtype = getattr(sample, "dtype", None)
+    upcast = getattr(sample, "to", None)
+    if upcast is not None:
+        import torch
+
+        sample = upcast(torch.float32)
+        model_output = model_output.to(torch.float32)
+    prev_sample = sample + (sigma_next - sigma) * model_output
+    if upcast is not None and dtype is not None:
+        prev_sample = prev_sample.to(dtype)
+    scheduler._step_index += 1
+    if not return_dict:
+        return (prev_sample,)
+    from diffusers.schedulers.scheduling_utils import SchedulerOutput
+
+    return SchedulerOutput(prev_sample=prev_sample)
+
+
+def _install_sampler(step: "Wan22VaceDenoiseStep", scheduler) -> None:
+    """Route each phase of the run to the sampler it was given.
+
+    `sampler_high` / `sampler_low` are per-call, like everything else about
+    the sampler, so this wraps `step()` on the scheduler instance and reads
+    the choice per call — the same seam and the same reason as
+    `_install_sigma_schedule`. `uni_pc` calls the scheduler's own method and
+    is untouched, including all of its config; `euler` takes the step here.
+
+    Which phase a call belongs to is read off the timestep, not counted, for
+    the reason `_step_index` gives: classifier-free guidance and the two
+    passes of a resident worker both break a counter, and the timestep is
+    already the run's own index.
+    """
+    original = scheduler.step
+
+    @functools.wraps(original)
+    def sampler_step(model_output, timestep, sample, *args, **kwargs):
+        if step._sampler_at(scheduler, timestep) != "euler":
+            return original(model_output, timestep, sample, *args, **kwargs)
+        return_dict = kwargs.get("return_dict", args[0] if args else True)
+        return _euler_step(scheduler, model_output, timestep, sample, return_dict)
+
+    scheduler.step = sampler_step
+
+
 def _nearest_step(scheduler, timestep) -> Optional[int]:
     """Which step of the live schedule `timestep` is, by nearest value —
     the lookup `_step_index` does, without its plan bookkeeping."""
@@ -584,7 +743,7 @@ def _nearest_step(scheduler, timestep) -> Optional[int]:
     timesteps = [float(value) for value in scheduler.timesteps]
     if not timesteps:
         return None
-    value = float(timestep.flatten()[0])
+    value = _timestep_value(timestep)
     return min(range(len(timesteps)), key=lambda index: abs(timesteps[index] - value))
 
 
@@ -604,7 +763,7 @@ def _phase_end_hook(step: "Wan22VaceDenoiseStep"):
     """
 
     def hook(module, args, kwargs):
-        if not step._handoff_pending:
+        if not step._handoff_pending or step._sampler_high != "uni_pc":
             return None
         scheduler = step._pipe.scheduler
         index = _nearest_step(scheduler, kwargs.get("timestep"))
@@ -780,10 +939,16 @@ class Wan22VaceDenoiseStep(Step):
         Param("sigma_schedule", str, "beta",
               "How the denoise steps are spaced before the shift. `beta` is "
               "ComfyUI's beta scheduler — Beta(0.6, 0.6) quantiles of the "
-              "training index, what the reference graph sampled on; `linspace` "
-              "is diffusers' own even spacing, what this step ran before "
-              "2026-09-07",
-              choices=("beta", "linspace")),
+              "training index, what the reference graph sampled on, and it "
+              "crowds a short run into the noisy end (at 6 steps and shift 8 it "
+              "spends four steps above t=750 and then jumps to 448). `simple` "
+              "is ComfyUI's even walk down the same table and `linspace` is "
+              "diffusers' own even spacing — the same schedule to under a "
+              "timestep in 1000, and what this step ran before 2026-09-07 "
+              "(beta's 1000, 988 | 955, 889, 753, 448 becomes 1000, 976 | 941, "
+              "889, 800, 616). Prefer `linspace`: it needs neither scipy nor the "
+              "`sigmas` argument older diffusers lacks",
+              choices=("beta", "simple", "linspace")),
         Param("sampler_shift", float, COMFY_WAN_SHIFT,
               "Flow-matching sigma shift — how far the steps crowd toward the "
               "noisy end. 8.0 is what ComfyUI gives a Wan 2.2 model with no "
@@ -792,16 +957,35 @@ class Wan22VaceDenoiseStep(Step):
               "2026-09-07. With the beta schedule at 6 steps: 8 -> t = 1000, "
               "988 | 955, 889, 753, 448; 3 -> 1000, 968 | 888, 751, 534, 233",
               minimum=1.0),
+        Param("sampler_high", str, "uni_pc",
+              "The sampler the HIGH-noise expert's steps are taken with. "
+              "`uni_pc` is the reference graph's, a multistep solver that "
+              "extrapolates from previous steps; `euler` is the plain "
+              "first-order flow-matching step, which reads no history and "
+              "leaves none — worth a look on the opening steps, where the "
+              "multistep history is barely warm and a wrong extrapolation "
+              "across the expert hand-off is what `handoff_reset` exists to "
+              "undo. Both sample the schedule `sigma_schedule` lays down",
+              choices=("uni_pc", "euler")),
+        Param("sampler_low", str, "uni_pc",
+              "The sampler the LOW-noise expert's steps are taken with — the "
+              "closing steps, where UniPC's extrapolation has a full history "
+              "to work from and usually earns its keep. Same choices as "
+              "sampler_high; set both to the same thing for a run with one "
+              "sampler throughout",
+              choices=("uni_pc", "euler")),
         Param("solver_variant", str, "bh1",
-              "UniPC's B(h) variant. ComfyUI's uni_pc sampler is bh1, which "
-              "the reference graph ran; the HF scheduler config says bh2",
+              "UniPC's B(h) variant, for whichever phases run `uni_pc`. "
+              "ComfyUI's uni_pc sampler is bh1, which the reference graph "
+              "ran; the HF scheduler config says bh2",
               choices=("bh1", "bh2")),
         Param("solver_order", int, 3,
               "UniPC's multistep order cap — how many previous model outputs a "
               "step may extrapolate from. With handoff_reset on, each expert's "
               "sampler runs at min(cap, its steps - 1) as ComfyUI's uni_pc does: "
               "1 for the 2-step high-noise sampler, 3 for the 4-step low-noise "
-              "one. The HF scheduler config says 2, flat",
+              "one. The HF scheduler config says 2, flat. Inert on a phase "
+              "running `euler`, which is first-order by construction",
               minimum=1, maximum=3),
         Param("handoff_reset", bool, True,
               "Run the two experts as the reference graph's two KSamplerAdvanced "
@@ -880,7 +1064,8 @@ class Wan22VaceDenoiseStep(Step):
     #
     # The per-call params are deliberately ABSENT: `strength`,
     # `strength_layers`, `steps_high`, `steps_low`, `sigma_schedule`,
-    # `sampler_shift`, `solver_variant`, `solver_order`, `handoff_reset`,
+    # `sampler_shift`, `sampler_high`, `sampler_low`, `solver_variant`,
+    # `solver_order`, `handoff_reset`,
     # `reference_fit`, `cfg`, `seed`, `prompt`, `negative_prompt`, `width`,
     # `height`, `subject_desc`. That is the whole point —
     # fast_helical_native's two passes differ only by `strength`, so listing
@@ -925,6 +1110,12 @@ class Wan22VaceDenoiseStep(Step):
         self._steps_low = 0
         self._solver_order = 3
         self._solver_variant = "bh1"
+        # The sampler each expert's steps are taken with, read per call by
+        # the wrapper _install_sampler puts on the scheduler's `step`;
+        # `_sampled` is the scheduler that wrapper is on.
+        self._sampler_high = "uni_pc"
+        self._sampler_low = "uni_pc"
+        self._sampled = None
 
     def load(self, params: Dict[str, Any]) -> None:
         """Build the pipeline around the pre-quantized fp8 transformers.
@@ -1317,16 +1508,36 @@ class Wan22VaceDenoiseStep(Step):
             key=lambda index: abs(self._timesteps[index] - value),
         )
 
-    def _configure_sampler(self, pipe, params: Dict[str, Any]) -> None:
-        """Point the scheduler at this run's step spacing and shift.
+    def _sampler_at(self, scheduler, timestep) -> str:
+        """Which sampler this step belongs to: the high-noise expert's up to
+        `steps_high`, the low-noise expert's after it.
 
-        Both are per-call. The shift is a config value diffusers reads
+        The split is the same one `_set_expert_split` places, by step index,
+        so the sampler a step takes and the expert that takes it never
+        disagree. A timestep that is not on the schedule at all (no
+        timesteps yet) falls to the low sampler, which is the one a
+        single-phase run has."""
+        index = _nearest_step(scheduler, timestep)
+        if index is not None and index < self._steps_high:
+            return self._sampler_high
+        return self._sampler_low
+
+    def _last_sampler(self) -> str:
+        """The sampler the run's final step is taken with — the low-noise
+        expert's, unless it takes none."""
+        return self._sampler_low if self._steps_low > 0 else self._sampler_high
+
+    def _configure_sampler(self, pipe, params: Dict[str, Any]) -> None:
+        """Point the scheduler at this run's step spacing, shift and samplers.
+
+        All per-call. The shift is a config value diffusers reads
         inside `set_timesteps` (`flow_shift`, in its flow-sigma branch), so
         it is written to the config the way `_set_expert_split` writes the
         boundary; the spacing is read off the step by the wrapper
-        `_install_sigma_schedule` puts on that method. Neither touches a
-        weight, so the resident worker serves both passes from one pipeline,
-        exactly as it does for `strength`.
+        `_install_sigma_schedule` puts on that method, and each phase's
+        sampler by the one `_install_sampler` puts on `step()`. None of them
+        touches a weight, so the resident worker serves both passes from one
+        pipeline, exactly as it does for `strength`.
 
         Refuses a scheduler that is not on flow sigmas: the shift is only
         read there, and custom sigmas are only accepted there, so on any
@@ -1344,6 +1555,8 @@ class Wan22VaceDenoiseStep(Step):
         variant, order = params["solver_variant"], int(params["solver_order"])
         high, low = int(params["steps_high"]), int(params["steps_low"])
         self._sigma_schedule = params["sigma_schedule"]
+        self._sampler_high = params["sampler_high"]
+        self._sampler_low = params["sampler_low"]
         self._solver_order = order
         self._solver_variant = variant
         self._steps_high, self._steps_low = high, low
@@ -1369,9 +1582,20 @@ class Wan22VaceDenoiseStep(Step):
         if self._scheduled is not scheduler:
             _install_sigma_schedule(self, scheduler)
             self._scheduled = scheduler
+        if self._sampled is not scheduler:
+            _install_sampler(self, scheduler)
+            self._sampled = scheduler
+        solver = f"UniPC {variant} order {order} (opening at {opening})"
+        if self._sampler_high == self._sampler_low:
+            sampler = solver if self._sampler_low == "uni_pc" else "Euler"
+        else:
+            sampler = "%s high / %s low" % (
+                solver if self._sampler_high == "uni_pc" else "Euler",
+                solver if self._sampler_low == "uni_pc" else "Euler",
+            )
         logger.info(
-            "  sampler: UniPC %s order %d (opening at %d), %s schedule, shift %.1f, hand-off %s",
-            variant, order, opening, self._sigma_schedule, shift,
+            "  sampler: %s, %s schedule, shift %.1f, hand-off %s",
+            sampler, self._sigma_schedule, shift,
             "restarts the history" if self._handoff_pending else "carries it across",
         )
 
