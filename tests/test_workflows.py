@@ -1233,6 +1233,38 @@ class TestWorkflowFiles(unittest.TestCase):
                         self.assertLess(float(c), 1.0)
 
 
+    def test_a_splat_render_marks_the_splat_as_real_content(self):
+        """`splat_inactive_mask` is ON in the workflow, though the step
+        declares it off.
+
+        The step's default has to stay off — nothing downstream is obliged
+        to consume the batch, and a `+splat` render that produced it
+        unasked would be publishing an output for nobody. In THIS workflow
+        it has a reader (`reinject_anchor_initial` passes it through to the
+        denoise) and 2026-09-08's sweep measured it worth having, so every
+        reference run in docs/vace-denoise-findings-2026-09-07.md carries
+        it. It spent a week as a per-run `--param`, which is the wrong
+        place for something that works: forgetting it costs a whole pod
+        run, and the run looks fine.
+
+        Asserted on every render that composites a splat, so a new one
+        cannot be added without the batch — that is the shape that
+        silently reverts.
+        """
+        for path in _workflows():
+            spec = WorkflowSpec.from_yaml(str(path))
+            for step in spec.steps:
+                mode = str(step.params.get("render_mode", ""))
+                if step.step != "render" or "splat" not in mode:
+                    continue
+                with self.subTest(workflow=path.name, step=step.id):
+                    self.assertIs(
+                        step.params.get("splat_inactive_mask"), True,
+                        f"'{step.id}' composites a splat ({mode}) but does not "
+                        f"set splat_inactive_mask, so the denoise is not told "
+                        f"which pixels are already a real photograph",
+                    )
+
     def test_denoise_prompts_are_identical_in_every_pass(self):
         """See DENOISE_PROMPT's comment: the way this breaks is whitespace,
         so compare the whole string rather than eyeballing the YAML. (It

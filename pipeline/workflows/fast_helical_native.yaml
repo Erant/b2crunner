@@ -902,6 +902,18 @@ steps:
       # and `outline_strength` sets how dark the fill is — left at its
       # default, which lands the fill on #6F6F6F, just off the ground.
       render_mode: outline+skeleton+splat
+      # Tell the denoise which pixels are already real: 0.0 where the face
+      # splat covers the frame, 1.0 everywhere else, in
+      # wan22_vace_denoise's `control_masks` convention. ON here although
+      # the step declares it OFF — the step's default has to stay off
+      # because nothing downstream is *obliged* to consume the batch, but
+      # in this workflow reinject_anchor_initial reads it, and the mask was
+      # measured to earn its place: every reference run of the 2026-09-08
+      # skeleton-leak sweep carries it (section 1a of
+      # docs/vace-denoise-findings-2026-09-07.md). It was a per-run
+      # `--param` for a week, and forgetting it costs a whole pod run —
+      # the wrong way round for something that works.
+      splat_inactive_mask: true
       # The skeleton overlay's drawing convention. `dwpose` is the step
       # default and what these frames want: the same convention Wan 2.2
       # VACE's own pose maps are drawn in, measured against
@@ -999,9 +1011,10 @@ steps:
     outputs:
       images: dataset.images
       masks: dataset.masks
-      # None unless `splat_inactive_mask` above is on, which is what makes
-      # the optional read on reinject_anchor_initial below a no-op by
-      # default. See that step's note for what turning it on changes.
+      # Populated, because `splat_inactive_mask` above is on — so the
+      # optional read on reinject_anchor_initial below finds a batch here
+      # rather than manufacturing its own. Turn that param off and this
+      # goes back to None. See that step's note.
       inactive_masks: scene.inactive_masks
       cameras: dataset.cameras
       image_names: dataset.image_names
@@ -1051,19 +1064,20 @@ steps:
       cameras: dataset.cameras
       anchor_position: dataset.extras.anchor_position
       anchor_image: dataset.anchor_image
-      # Empty by default, and then this step manufactures the batch itself:
-      # wan22_vace_denoise's per-frame VACE mask — 1.0 "synthetic, denoise
-      # it" for the renders, 0.0 "a real photo, keep it" at the injected
-      # anchor. See steps/anchor_stub.py.
+      # Filled by the render step's `splat_inactive_mask`, which is the
+      # ONLY thing that fills it and which this workflow turns ON — so the
+      # batch arriving here is per-PIXEL: 1.0 over the drawings, 0.0 over
+      # the face splat, the one region of a skeleton+splat frame that is a
+      # real photograph and not an annotation of one.
       #
-      # It is wired at all for the render step's `splat_inactive_mask`,
-      # which is the ONLY thing that fills it. Turn that on and the batch
-      # arriving here is per-PIXEL rather than per-frame: still 1.0 over the
-      # drawings, but 0.0 over the face splat — the one region of a
-      # skeleton+splat frame that is a real photograph and not an
-      # annotation of one. inject_anchor passes a supplied batch through
-      # untouched and only overwrites the anchor frame, so the two marks
-      # compose rather than fight.
+      # Left empty — turn that param off — and this step manufactures the
+      # batch itself instead: wan22_vace_denoise's per-FRAME VACE mask,
+      # 1.0 "synthetic, denoise it" for the renders, 0.0 "a real photo,
+      # keep it" at the injected anchor. See steps/anchor_stub.py.
+      #
+      # Either way inject_anchor passes a supplied batch through untouched
+      # and only overwrites the anchor frame, so the two marks compose
+      # rather than fight.
       #
       # Worth knowing what that changes: WITHOUT it, pass 1 is told the
       # whole frame is synthetic and free to repaint the face the splat
@@ -1252,6 +1266,18 @@ steps:
       # and `outline_strength` sets how dark the fill is — left at its
       # default, which lands the fill on #6F6F6F, just off the ground.
       render_mode: outline+skeleton+splat
+      # Tell the denoise which pixels are already real: 0.0 where the face
+      # splat covers the frame, 1.0 everywhere else, in
+      # wan22_vace_denoise's `control_masks` convention. ON here although
+      # the step declares it OFF — the step's default has to stay off
+      # because nothing downstream is *obliged* to consume the batch, but
+      # in this workflow reinject_anchor_initial reads it, and the mask was
+      # measured to earn its place: every reference run of the 2026-09-08
+      # skeleton-leak sweep carries it (section 1a of
+      # docs/vace-denoise-findings-2026-09-07.md). It was a per-run
+      # `--param` for a week, and forgetting it costs a whole pod run —
+      # the wrong way round for something that works.
+      splat_inactive_mask: true
       # The skeleton overlay's drawing convention. `dwpose` is the step
       # default and what these frames want: the same convention Wan 2.2
       # VACE's own pose maps are drawn in, measured against
