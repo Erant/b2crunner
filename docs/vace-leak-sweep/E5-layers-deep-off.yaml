@@ -1,0 +1,55 @@
+# E5 — is the ink in the DEEP layers?
+#
+# The depth axis, one end. Every experiment so far has traded ink against
+# pose along the TIME axis, where the two are coupled — 1a measured
+# Spearman 0.89 between leak and silhouette IoU across the strength
+# ablation. Depth is the only axis that could break that curve: if pose
+# enters shallow and texture deep, this removes ink at full pose
+# authority, which no amount of time-axis tapering can.
+#
+# Pair with E6, which tapers the other end. If neither moves the leak off
+# B's 16.62, the depth axis is dead and never needs another run.
+#
+# Base B = run 467c17 (2026-09-08): leak 16.62, yoke 55.61, flow 1.039,
+# IoU 0.8501. Every line below reproduces B; strength_layers is the only
+# addition, so this run's numbers minus B's are the layer taper's effect.
+# denoise_pass2 is left alone for the same reason as the A family: the
+# number is read off pass 1's output.
+
+settings:
+  # export_colmap_intermediate defaults FALSE and is the one output the
+  # leak metric reads (pass 1's frames). export_debug carries
+  # debug/denoise_pass1_input, the control side of the same measurement.
+  # The other three only match what the 2026-09-08 reference runs
+  # exported, so the archives stay comparable.
+  export_colmap: true
+  export_colmap_intermediate: true
+  export_colmap_preupscale: true
+  export_debug: true
+  export_ply: true
+
+step_params:
+  denoise_pass1:
+    sampler_high: euler
+    sampler_shift: 3
+    # SIX entries at 1.0, not the shorter [1]: a single-entry strength
+    # bypasses _vace_scale_hook entirely and hands diffusers the per-layer
+    # list directly. That is a different code path as well as a different
+    # taper, and B went through the hook.
+    strength: [1, 1, 1, 1, 1, 1]
+    # ADDED — None in all eleven runs of 1a. One multiplier per VACE
+    # injection layer, shallow to deep: vace_layers = 0, 5, 10, 15, 20,
+    # 25, 30, 35. Eight entries, or the step refuses before it touches
+    # weights.
+    strength_layers: [1, 1, 1, 0.75, 0.5, 0.25, 0, 0]
+  denoise_pass2:
+    sampler_high: euler
+    # sampler_shift left unset — B ran pass 2 at the workflow default 8.
+    strength: [0.8, 0.8, 0.8, 0.8, 0.8, 0.8]
+  render_initial_views:
+    # B's own reference ran 10, marginally fainter than the workflow
+    # default 12.6% (fill 114 against 111). The A-family files leave it
+    # unset because A did. 1a measured the SKELETON to be pixel-identical
+    # either way, so this only matters for keeping each family's delta
+    # single-variable.
+    outline_strength: 10

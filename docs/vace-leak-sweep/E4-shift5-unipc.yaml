@@ -1,0 +1,45 @@
+# E4 — both, and 9e315f run to completion
+#
+# The fourth corner of the 2x2, which is also the interaction term: if
+# neither E2 nor E3 reproduces 9e315f's zero leak but this does, the two
+# knobs only work together.
+#
+# It doubles as the replication 9e315f never got — that run has no ply/,
+# no colmap/ and no alignment.json, so this is the first complete archive
+# of the only configuration known to produce clean frames.
+#
+# NOTE: 9e315f also had splat_inactive_mask OFF, which was the param's
+# default at the time and is now on in the workflow. If E2, E3 and E4 all
+# come back flat, that mask is what is left to explain 9e315f, and it is
+# the seventh run.
+#
+# Base A = run 31a008 (2026-09-08): leak 1.74, yoke 14.54, flow 0.986, IoU
+# 0.8525. Every line below reproduces A except the ones marked CHANGED, so
+# this run's numbers minus A's are the effect of that change and nothing
+# else. denoise_pass2 is deliberately NOT touched: the leak is measured on
+# colmap_intermediate, which is pass 1's output, so mirroring a pass-1
+# knob onto pass 2 would move the archive's other frames without moving
+# the number being read.
+
+settings:
+  # export_colmap_intermediate defaults FALSE and is the one output the
+  # leak metric reads (pass 1's frames). export_debug carries
+  # debug/denoise_pass1_input, the control side of the same measurement.
+  # The other three only match what the 2026-09-08 reference runs
+  # exported, so the archives stay comparable.
+  export_colmap: true
+  export_colmap_intermediate: true
+  export_colmap_preupscale: true
+  export_debug: true
+  export_ply: true
+
+step_params:
+  denoise_pass1:
+    # CHANGED from A: both of 9e315f's denoise knobs at once.
+    sampler_high: uni_pc
+    sampler_shift: 5
+    strength: [1, 1, 0.5, 0.5, 0.5, 0.5]
+  denoise_pass2:
+    sampler_high: euler
+    sampler_shift: 2.5
+    strength: [0.8, 0.8, 0.8, 0.8, 0.8, 0.8]
