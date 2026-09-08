@@ -59,7 +59,8 @@
 #     from its own export, which is worth more than any other knob tried
 #     (face 143 -> 161) — and `match_alpha_weight: 0.5`. (The polish went
 #     back off on 2026-09-07: re-measured on b2ctrain it buys nothing.)
-#   * the re-render is made on BLACK again (`cull_color`), the room is off
+#   * the re-render was made on BLACK again (`cull_color`; back to 0.5 grey
+#     on 2026-09-07, see rerender_splat), the room is off
 #     there too (`background: ""`), and the frames the second denoise sees
 #     are cut with an RMBG matte (`resplat_foreground_masks`) and laid over
 #     0.5 grey by `mask_splat_fringes` in its new `composite` mode. The gate
@@ -1046,7 +1047,14 @@ steps:
       # 1.0, seed 0. These happen to equal the step's own declared defaults;
       # spelled out anyway so the two passes read identically and every knob
       # a run tunes is visible in the step's params block.
-      steps: 6
+      #
+      # The 6 is written as the two experts' shares because that is what it
+      # always meant: the graph's `steps: 6`, split at the checkpoint's
+      # boundary, gave the high-noise expert 2 and the low-noise one 4, and
+      # nothing said so. Their sum is the run's step count, and it is the
+      # length `strength` below must have.
+      steps_high: 2
+      steps_low: 4
       cfg: 1.0
       seed: ${globals.seed}
       # How hard the control video pushes, one scale per denoise step, first
@@ -1837,31 +1845,24 @@ steps:
       # ignored in this mode and is therefore not set here. See
       # docs/spatial-reinforcement.md.
       confidence: true
-      # BLACK, not the step's 0.5 grey default, since 2026-09-05 — and this
-      # is a return, not a new idea: black is what this render was made on
-      # before the gate existed, what brush TRAINS on (--background-color's
-      # default, which steps/brush.py leaves alone) and what mask_splat's
-      # threshold path composited to. The grey was the gate's own argument
-      # — one colour for both the reject and the background, so partial
-      # coverage fades toward the value the gate rejects to and leaves no
-      # halo to filter — and it stops applying here for two reasons:
-      #
-      #   * the background is not this render's job any more. The matte that
-      #     decides what is subject comes from `resplat_foreground_masks`
-      #     below (rmbg, measured against these frames) rather than from the
-      #     gate's own alpha, and `mask_splat_fringes` lays the result over
-      #     0.5 grey. The colour the frames end on is set there.
-      #   * with the two colours separated, black is what the culled pixels
-      #     should be. A gap in the gate is a hole in the SUBJECT — a place
-      #     the training views never constrained — and rendering it as the
-      #     background colour would hand the second denoise a subject with
-      #     the backdrop showing through it. Black reads as missing.
-      #
-      # What it costs is what the grey bought: partial coverage now fades
-      # toward black, so the silhouette's soft edge is dark. That is the
-      # halo the note above warns about, and rmbg's matte is what cuts it —
-      # its edge, not the fringe's, is what the composite blends on.
-      cull_color: [0.0, 0.0, 0.0]
+      # 0.5 GREY again (the step's default), as of 2026-09-07. It was black
+      # from 2026-09-05: the argument was that a culled pixel is a hole in
+      # the SUBJECT and should read as missing rather than as backdrop,
+      # since the matte comes from `resplat_foreground_masks` and
+      # `mask_splat_fringes` lays the result over grey anyway. What that
+      # bought turned out to be the artifact: culled pixels showed up as
+      # black speckles along the face cap's rim and as patches on the
+      # specular top, and a black hole inside a face is a defect the second
+      # denoise faithfully keeps. The culls themselves came from the
+      # evidence's view count (b2ctrain bf0bab5: `ev_views` was a
+      # thresholded count that gave fine splats zero support; now an
+      # effective count), which removes nearly all of them — and what
+      # little the gate still rejects is better filled with the colour the
+      # frames end on than with a black mark. One colour for the reject and
+      # the composite also means partial coverage fades toward the value
+      # the pixel resolves to, so there is no dark halo at the silhouette
+      # for rmbg's matte to cut.
+      cull_color: [0.5, 0.5, 0.5]
       # Tuning for the confidence measure itself, passed verbatim to
       # brush-splat-render. Both were measured on a real run's .ply with the
       # fixed evidence (brush a9405881; docs/intermediate-splat-guide.md):
@@ -1971,12 +1972,13 @@ steps:
   # produced, softness and all, no threshold and no bilateral filter to
   # smear an edge that is already right.
   #
-  # 0.5 grey, and the render it composites is black (see rerender_splat's
-  # `cull_color`), which is the whole shape of this stage: black is what the
-  # splat was trained on and what a missing Gaussian resolves to, grey is
-  # what the batch is handed to the denoise on — the same 0.5 the warped
-  # anchor photo's border is filled with, so the one real frame in the batch
-  # does not arrive as the odd one out.
+  # 0.5 grey, the same colour the render above culls to (rerender_splat's
+  # `cull_color`, grey again since 2026-09-07 — it was black for two days,
+  # and the black culls inside the subject were the face-rim speckles): a
+  # culled pixel and the background resolve to the one value the batch is
+  # handed to the denoise on — the same 0.5 the warped anchor photo's
+  # border is filled with, so the one real frame in the batch does not
+  # arrive as the odd one out.
   #
   # The step's other half is unchanged and still needed: replacing the
   # per-pixel matte in dataset.masks with the per-frame all-1.0 VACE batch
@@ -2061,7 +2063,8 @@ steps:
       # change. The other half of the same question is the 场景 slot, which
       # describes a room neither pass's control frames now show — see
       # denoise_pass1.
-      steps: 6
+      steps_high: 2
+      steps_low: 4
       cfg: 1.0
       seed: ${globals.seed}
       # Pass 1's fade, every entry scaled by this pass's 0.8: 0.8 down
