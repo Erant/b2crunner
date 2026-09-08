@@ -1468,6 +1468,59 @@ class TestTheIntermediateSplatIsKept(unittest.TestCase):
         self.assertEqual(len(exports), len(set(exports)), f"two trainings share a path: {exports}")
 
 
+class TestTheFirstDenoiseInputIsKept(unittest.TestCase):
+    """The control video pass 1 is handed lands in the debug bundle.
+
+    Everything else a run exports describes frames from AFTER a denoise —
+    `colmap_intermediate/` is pass 1's output, `colmap/` is pass 2's. The
+    drawings that caused them lived in memory only, so "was the skeleton
+    too much ink", "did the face splat land on the face" and "does the
+    anchor frame carry the photograph" could be asked of a finished run
+    only by re-running the first fourteen steps from the same upload — and
+    not at all once the upload was gone.
+    """
+
+    def _spec(self):
+        from pipeline.cli import resolve_workflow
+        from pipeline.workflow import WorkflowSpec
+
+        return WorkflowSpec.from_yaml(resolve_workflow("fast_helical_native"))
+
+    def test_the_dataset_is_saved_under_debug(self):
+        from pipeline.templating import resolve
+
+        spec = self._spec()
+        scope = {"globals": dict(spec.globals, output_root="/out")}
+        saves = {
+            step.id: resolve(step.params, scope)["directory"]
+            for step in spec.steps if step.step == "save_dataset"
+        }
+        self.assertIn("dump_denoise_input", saves)
+        self.assertEqual(saves["dump_denoise_input"], "/out/debug/denoise_pass1_input")
+        for step_id, directory in saves.items():
+            self.assertTrue(
+                directory.startswith("/out/debug/"),
+                f"{step_id} writes to {directory!r}, which the result .zip never sees")
+        self.assertEqual(len(set(saves.values())), len(saves))
+
+    def test_it_saves_what_the_denoise_reads(self):
+        """After the anchor injection, before pass 1 — so the frames on disk
+        carry the warped photograph and the 0.0 VACE mask at the anchor,
+        which is the half of the input a mesh render cannot be re-derived
+        into."""
+        spec = self._spec()
+        order = [step.id for step in spec.steps]
+        self.assertLess(order.index("reinject_anchor_initial"), order.index("dump_denoise_input"))
+        self.assertLess(order.index("dump_denoise_input"), order.index("denoise_pass1"))
+        dump = next(s for s in spec.steps if s.id == "dump_denoise_input")
+        denoise = next(s for s in spec.steps if s.id == "denoise_pass1")
+        self.assertEqual(dump.inputs["dataset"], "dataset")
+        # The frames and their masks are what the dump is for; both reach
+        # the denoise from the same dataset the dump wrote.
+        self.assertEqual(denoise.inputs["control_video"], "dataset.images")
+        self.assertEqual(denoise.inputs["control_masks"], "dataset.masks")
+
+
 class TestDeclaredSettings(unittest.TestCase):
     """The `settings:` and `outputs:` blocks, which are the whole UI.
 

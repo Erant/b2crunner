@@ -191,9 +191,15 @@ unchecked step does not run:
   silently give you that instead, under a name that says otherwise.
 - **Debug bundle** (on by default) — the `debug/` directory in the result
   `.zip`: refine_cameras' given-vs-refined camera models, the face splat's
-  stats and depth visualisations, the face `.ply` files, and
+  stats and depth visualisations, the face `.ply` files,
+  `denoise_pass1_input/` — the control video the **first** denoise is
+  handed, its 81 frames carrying the VACE mask in their alpha channel,
+  beside the reference sheet, the warped anchor photograph, the prompt and
+  the cameras, in `load_dataset`'s own format — and
   `intermediate_splat.ply` — the splat the helical re-render is built from,
   and therefore the first thing to look at when that re-render is wrong.
+  The dataset dump is the only look at the drawings a run was denoised
+  *from*: every other export describes frames from after a denoise.
   Unlike every other switch here it skips no work: those dumps are a side
   effect of steps the run needs anyway, so they are written to the volume
   either way and this decides only whether they are packaged. Worth turning

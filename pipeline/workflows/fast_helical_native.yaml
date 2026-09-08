@@ -449,11 +449,14 @@ outputs:
     help: >-
       The `debug/` directory: refine_cameras' given-vs-refined camera models
       and their stats, the face splat's stats and depth visualisations, the
-      face .ply files, and — the big one — `intermediate_splat.ply`, the
-      splat the helical re-render is built from. This is what a misplaced
-      face or a drifted camera is diagnosed from after the pod is gone, and
-      it is why the 2026-09-04 face-cap offset had to be triangulated back
-      out of exported renders instead of read off the splat that caused it.
+      face .ply files, `denoise_pass1_input/` — the control video the first
+      denoise is handed, frames with their VACE mask in alpha beside the
+      reference, the anchor photo and the cameras — and, the big one,
+      `intermediate_splat.ply`, the splat the helical re-render is built
+      from. This is what a misplaced face or a drifted camera is diagnosed
+      from after the pod is gone, and it is why the 2026-09-04 face-cap
+      offset had to be triangulated back out of exported renders instead of
+      read off the splat that caused it.
       Unlike the switches above it does not skip any work — every step still
       writes its dumps to the volume, because they are a side effect of
       steps the run needs anyway. It decides only whether they are packaged,
@@ -1026,6 +1029,36 @@ steps:
     outputs:
       images: dataset.images
       masks: dataset.masks
+
+  # The control video pass 1 is about to be handed, written to the debug
+  # bundle: the 81 frames with their VACE mask in the alpha channel, the
+  # reference sheet, the warped anchor photo, the prompt, and the cameras
+  # in metadata.json. Nothing downstream reads it — `directory_path` is
+  # published only so the run's log records where it went.
+  #
+  # Why it is worth the tens of MB — cyber_6f/initial, the same shape, is
+  # 12 MB for 81 drawings, and the room backdrop makes these bigger.
+  # Every export a run produces describes frames from AFTER a denoise;
+  # the drawings that caused them existed only in memory, so a question
+  # about the input — is the skeleton too much ink, is the face splat
+  # where it belongs, does the anchor frame carry the photograph — had to
+  # be answered by re-running the first fourteen steps locally from the
+  # same upload (the recipe in docs/vace-denoise-findings-2026-09-07.md),
+  # and could not be answered at all about a run whose upload is gone.
+  #
+  # It is written in `save_dataset`'s own format, which is `load_dataset`'s:
+  # the directory is a drop-in for `cyber_6f/initial` in a probe workflow,
+  # so a denoise A/B can be re-run against this exact input without the
+  # rest of the pipeline.
+  - id: dump_denoise_input
+    step: save_dataset
+    dispatch: in_process
+    inputs:
+      dataset: dataset
+    params:
+      directory: ${globals.output_root}/debug/denoise_pass1_input
+    outputs:
+      directory_path: scene.denoise_pass1_input_dir
 
   # ================================================================
   # From here down: the tail — the native port of the ComfyUI pipeline.
