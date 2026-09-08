@@ -80,6 +80,19 @@ def _describe(value) -> str:
     if shape is not None:
         return f"array{tuple(shape)} {getattr(value, 'dtype', '')}".strip()
     if isinstance(value, (list, tuple)):
+        # A short list of scalars is spelled out, not summarised by its
+        # first element. The summary form exists for the big ones (81
+        # frames of an array), and describing `[1, 0.5, 1, 1, 1, 1]` as
+        # "list[6] of 1" is worse than saying nothing: wan22_vace_denoise's
+        # `strength` is exactly this shape, and the resolved-params block is
+        # the log's record of what a run actually did. A sweep over it on
+        # 2026-09-08 read back as six identical runs.
+        if value and all(
+            isinstance(v, (int, float, str, bool, type(None))) for v in value
+        ) and len(value) <= 16:
+            text = repr(list(value))
+            if len(text) <= 60:
+                return text
         inner = _describe(value[0]) if value else "empty"
         return f"{type(value).__name__}[{len(value)}] of {inner}"
     if isinstance(value, dict):

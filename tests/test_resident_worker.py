@@ -515,5 +515,34 @@ class TestWiring(unittest.TestCase):
         )
 
 
+class TestParamDescriptions(unittest.TestCase):
+    """The resolved-params block is the log's record of what a run did.
+
+    A strength sweep on 2026-09-08 read back as six identical runs because
+    `_describe` summarised every list by its first element.
+    """
+
+    def test_a_short_scalar_list_is_spelled_out(self):
+        from pipeline.worker import _describe
+
+        self.assertEqual(_describe([1, 0.5, 1, 1, 1, 1]), "[1, 0.5, 1, 1, 1, 1]")
+
+    def test_a_long_list_is_still_summarised(self):
+        from pipeline.worker import _describe
+
+        self.assertEqual(_describe([0.0] * 81), "list[81] of 0.0")
+
+    def test_a_list_of_arrays_is_still_summarised_by_its_first(self):
+        from pipeline.worker import _describe
+
+        class _Fake:
+            shape = (1280, 720, 3)
+            dtype = "uint8"
+
+        self.assertEqual(
+            _describe([_Fake()] * 81), "list[81] of array(1280, 720, 3) uint8"
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
