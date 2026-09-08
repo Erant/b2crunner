@@ -733,6 +733,19 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   buys the views least like the photograph (the ones
   `select_support_views` supervises) at the price of that rim.
 
+  `splat_inactive_mask` (off) publishes a second mask batch beside the
+  coverage one, marking the composited splat as the region a denoise pass
+  must not repaint — 0.0 over it, 1.0 elsewhere, which is
+  `wan22_vace_denoise`'s `control_masks` polarity exactly. It goes to
+  `scene.inactive_masks`, which `reinject_anchor_initial` reads optionally;
+  with the flag off that read is None and `inject_anchor` manufactures its
+  all-1.0 batch as before. **Off is what every run to date did**, and what
+  it means is that pass 1 was told the whole frame is synthetic — the face
+  splat included. The mask is body2colmap's `InactiveMaskOptions`
+  (`81a0e1b`) at its defaults; that library writes it into the frame's alpha
+  and loses the silhouette doing it, which this pipeline does not have to,
+  because images and masks travel as separate lists here.
+
   **Until 2026-08-31 this was a pair of b2crunner steps** —
   `render_face_views` (a `render_splat`) plus `composite_splat_views` in
   `anchor_stub.py` — because body2colmap's mode rasterised through gsplat,

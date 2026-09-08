@@ -953,6 +953,10 @@ steps:
     outputs:
       images: dataset.images
       masks: dataset.masks
+      # None unless `splat_inactive_mask` above is on, which is what makes
+      # the optional read on reinject_anchor_initial below a no-op by
+      # default. See that step's note for what turning it on changes.
+      inactive_masks: scene.inactive_masks
       cameras: dataset.cameras
       image_names: dataset.image_names
       points_3d: dataset.points_3d
@@ -1001,10 +1005,24 @@ steps:
       cameras: dataset.cameras
       anchor_position: dataset.extras.anchor_position
       anchor_image: dataset.anchor_image
-    # No `masks` input: the batch this writes is manufactured by the step,
-    # and it is wan22_vace_denoise's per-frame VACE mask — 1.0 "synthetic,
-    # denoise it" for the renders, 0.0 "a real photo, keep it" at the
-    # injected anchor. See steps/anchor_stub.py.
+      # Empty by default, and then this step manufactures the batch itself:
+      # wan22_vace_denoise's per-frame VACE mask — 1.0 "synthetic, denoise
+      # it" for the renders, 0.0 "a real photo, keep it" at the injected
+      # anchor. See steps/anchor_stub.py.
+      #
+      # It is wired at all for the render step's `splat_inactive_mask`,
+      # which is the ONLY thing that fills it. Turn that on and the batch
+      # arriving here is per-PIXEL rather than per-frame: still 1.0 over the
+      # drawings, but 0.0 over the face splat — the one region of a
+      # skeleton+splat frame that is a real photograph and not an
+      # annotation of one. inject_anchor passes a supplied batch through
+      # untouched and only overwrites the anchor frame, so the two marks
+      # compose rather than fight.
+      #
+      # Worth knowing what that changes: WITHOUT it, pass 1 is told the
+      # whole frame is synthetic and free to repaint the face the splat
+      # exists to carry. That has been true of every run to date.
+      masks: scene.inactive_masks?
     outputs:
       images: dataset.images
       masks: dataset.masks

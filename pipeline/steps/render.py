@@ -315,6 +315,40 @@ def _resolve_splat_layers(
     return layers
 
 
+def _inactive_masks(
+    splat_layers: List[Optional[np.ndarray]], *, width: int, height: int,
+) -> List[np.ndarray]:
+    """The conditioning mask marking the splat as already-real, per frame.
+
+    0.0 where the splat covers ("a real photograph, keep it") and 1.0
+    everywhere else ("synthetic, denoise it") — `wan22_vace_denoise`'s
+    `control_masks` convention, which is the polarity body2colmap's
+    `InactiveMaskOptions` already writes, only in 8-bit
+    (`REACTIVE`=255 / `INACTIVE`=0). So this rescales and does not invert.
+
+    **Why `build()` and not `apply()`.** body2colmap puts this mask in the
+    frame's alpha channel, and says so at length: its CLI writes PNGs, and a
+    PNG's alpha is the only place a mask can ride. The cost it names is that
+    alpha stops meaning subject coverage, so one run yields either this or a
+    3DGS training mask. This pipeline does not pay that: images and masks are
+    separate lists here (see the module docstring's output convention), so the
+    composite's alpha stays the silhouette in `masks` and the conditioning
+    mask comes out beside it. Same mask either way — `Renderer._composite_splat`
+    calls `apply()` on the very layer this passes to `build()`.
+
+    A frame past `splat_max_angle_deg` has no layer and comes out wholly
+    reactive rather than absent, so the batch stays aligned frame-for-frame
+    with the images it describes.
+    """
+    from body2colmap.splat_renderer import InactiveMaskOptions
+
+    options = InactiveMaskOptions()
+    return [
+        options.build(layer, (width, height)).astype(np.float32) / 255.0
+        for layer in splat_layers
+    ]
+
+
 @register_step("render")
 class RenderStep(Step):
     """Render a camera-path orbit of a SAM-3D-Body mesh/skeleton.
@@ -341,7 +375,11 @@ class RenderStep(Step):
              unioned in, because it is real subject surface exactly as the
              mesh silhouette is, and `Renderer._composite_splat` unions it
              for that reason. The skeleton stays out: it is an annotation,
-             not geometry), "cameras": List[Camera],
+             not geometry), "inactive_masks": Optional[List[np.ndarray]] —
+             the conditioning mask under `splat_inactive_mask`, 0.0 over the
+             splat and 1.0 elsewhere, and None when that flag is off (see
+             `_inactive_masks`; it is a SECOND batch, not a reinterpretation
+             of "masks"), "cameras": List[Camera],
              "image_names": List[str], "points_3d": (positions, colors),
              "resolution": (width, height), "orbit_target" (np.ndarray(3,)),
              "forward_azimuth_deg" (float), "focal_length_mm" (float),
@@ -401,6 +439,19 @@ class RenderStep(Step):
               "nobody denoises afterwards should be held to (see "
               "select_support_views' own, tighter cull). 0 disables the "
               "compositing", minimum=0.0, maximum=180.0),
+        Param("splat_inactive_mask", bool, False,
+              "The `+splat` modes only: also publish an `inactive_masks` batch "
+              "marking the splat as the one part of the frame a denoise pass "
+              "must NOT repaint — 0.0 where the splat covers, 1.0 everywhere "
+              "else, which is wan22_vace_denoise's `control_masks` convention "
+              "exactly. Off by default because nothing downstream is obliged "
+              "to read it: with it off the output is None and inject_anchor "
+              "goes on manufacturing its all-1.0 batch, which is what every "
+              "run before this did. The mask is body2colmap's "
+              "`InactiveMaskOptions` (81a0e1b), at its defaults — a pixel "
+              "counts as covered at splat alpha >= 0.9, and a frame the angle "
+              "cull dropped comes out wholly reactive rather than carrying no "
+              "mask at all"),
         Param("framing", str, "full", "How much of the body fills the frame",
               choices=("full", "torso", "bust", "head")),
         Param("eye_style", str, "shape",
@@ -536,6 +587,18 @@ class RenderStep(Step):
         want_splat = render_mode.endswith("+splat")
         base_render_mode = render_mode[: -len("+splat")] if want_splat else render_mode
         fill_ratio = params["fill_ratio"]
+
+        # Refused rather than answered with a uniform batch, which is
+        # body2colmap's own rule for the flag (its cli.py checks the render
+        # modes before the orbit runs). The mask says where the splat is; a
+        # mode that draws no splat puts it nowhere, and "1.0 everywhere" is
+        # indistinguishable from the batch inject_anchor makes for free.
+        if params["splat_inactive_mask"] and not want_splat:
+            raise ValueError(
+                f"splat_inactive_mask marks the splat overlay, and render_mode "
+                f"{render_mode!r} does not composite one. Use a `...+splat` "
+                f"mode, or leave the mask off."
+            )
 
         if override_cam_from_mesh and pattern not in ("circular", "helical"):
             raise ValueError(
@@ -854,6 +917,20 @@ class RenderStep(Step):
         images = [rgba[..., [2, 1, 0]] for rgba in rendered_images]  # RGB -> BGR
         masks = [rgba[..., 3].astype(np.float32) / 255.0 for rgba in rendered_images]
 
+        # None, not an all-1.0 batch, when the flag is off: the consumer
+        # reads it optionally and treats None as "not given", which leaves
+        # every run that does not ask for the mask exactly where it was.
+        inactive_masks = (
+            _inactive_masks(splat_layers, width=width, height=height)
+            if params["splat_inactive_mask"] else None
+        )
+        if inactive_masks is not None:
+            covered = sum(int((mask < 0.5).any()) for mask in inactive_masks)
+            logger.info(
+                "render: %d/%d frames carry an inactive region marking the "
+                "splat as real content", covered, len(inactive_masks),
+            )
+
         # The orbit azimuth that corresponds to the front of the skeleton.
         # In override mode that is wherever the original camera ended up;
         # otherwise auto-orient has already turned the skeleton to face -Z
@@ -873,6 +950,7 @@ class RenderStep(Step):
         result: Dict[str, Any] = {
             "images": images,
             "masks": masks,
+            "inactive_masks": inactive_masks,
             "cameras": cameras,
             "image_names": image_names,
             "points_3d": (points, colors),

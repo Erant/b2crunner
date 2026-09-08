@@ -811,11 +811,17 @@ COPY --from=python-builder /opt/vendor /opt/vendor
 # commit is a degraded render rather than an error — which is exactly why
 # the pin, not an assert, is what carries it.
 #
+# 81a0e1b ("Mark the splat as inactive in the frame's alpha", 2026-09-07)
+# adds `InactiveMaskOptions`, the mask steps/render.py's `splat_inactive_mask`
+# publishes: 0 over the face splat ("already real, keep it") against 1
+# everywhere else. An older commit is an ImportError inside the render step,
+# but only for a run that switched the flag on — it defaults off.
+#
 # Failing the build is deliberate: an image built against an older commit
 # would install cleanly and then raise on the first render_splat of a real
-# run, an hour into a pod booking. The last four asserts below are what stop it.
+# run, an hour into a pod booking. The last five asserts below are what stop it.
 RUN /opt/venv_base/bin/pip install --force-reinstall --no-deps \
-        'body2colmap @ git+https://github.com/Erant/body2colmap.git@60d169e900e86abe08a1605a22750b1757a3f7dd' \
+        'body2colmap @ git+https://github.com/Erant/body2colmap.git@81a0e1b066618519903f96d1a1522ce9ca2fd4ac' \
     && /opt/venv_base/bin/python -c "\
 import inspect; \
 import body2colmap.face as f; \
@@ -834,6 +840,10 @@ assert 'style' in inspect.signature(Renderer.render_skeleton).parameters, \
     'bump the body2colmap pin: steps/render.py needs skeleton style=dwpose'; \
 assert 'fade' in inspect.signature(Background.create).parameters, \
     'bump the body2colmap pin: steps/backdrop.py needs Background.create(fade=...)'; \
+assert (sr.INACTIVE, sr.REACTIVE) == (0, 255) \
+    and sr.InactiveMaskOptions().threshold == 0.9, \
+    'bump the body2colmap pin: steps/render.py needs InactiveMaskOptions, and ' \
+    'documents its polarity and 0.9 threshold as the ones it publishes'; \
 print('body2colmap eye_style default:', f.DEFAULT_EYE_STYLE)"
 
 # NOT /workspace/b2c_runner, which is where this used to live. RunPod's
