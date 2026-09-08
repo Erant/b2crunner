@@ -117,6 +117,25 @@ residual beside it — 19 px is the number that would have named this run.
 `max_common_mode_rotation_deg` refuses a mean of several degrees, which
 is a broken solve rather than a drifting one.
 
+Trap 5 — the input model's image ids have to be the database's
+---------------------------------------------------------------
+COLMAP's `point_triangulator` maps the model's images onto the database's
+by NAME, rewriting the model's image ids to the database's — but a model
+written without frames.txt was given a frame per image at read time,
+numbered by the image id, and that rewrite reaches the ids inside the
+frames and not the frame ids. The database's frames are numbered in the
+order the extractor's writer thread received the images, which is
+completion order across its threads, not read order. When that order
+differs from the model's, `Reconstruction::Load` finds model frame k
+holding image j != k and aborts (reconstruction.cc:328, exit -6), and
+this step refuses the solve. Seen on 9 of the 11 pod runs of 2026-09-07/08
+— always the final refinement, where the writer happened to reorder (run
+467c17 wrote frame_00012 third) — so the deliverable's poses were never
+refined. The model is therefore written AFTER the extractor, in the
+database's image order (`_database_image_order`), which makes the rewrite
+the identity. Reading the poses back is by name, so the order is invisible
+downstream.
+
 What the ceiling is
 -------------------
 Mean reprojection error 1.630 -> 1.579 px, median 1.485 -> 1.416. It bottoms
@@ -138,6 +157,7 @@ import logging
 import os
 import re
 import shutil
+import sqlite3
 import tempfile
 import urllib.request
 from pathlib import Path
@@ -496,10 +516,15 @@ class RefineCamerasStep(Step):
             mask_dir.mkdir()
             self._write_masks(masks, image_names, mask_dir)
 
-        self._write_input_model(cameras, image_names, sparse_in)
-
         try:
             self._extract(colmap, work, images_dir, mask_dir, cameras[0], params)
+            # The input model is written AFTER the extractor, in the order the
+            # database numbered the images — trap 5. Written first, in the
+            # dataset's order, it aborts point_triangulator whenever the
+            # extractor's writer thread received the frames out of order.
+            order = self._database_image_order(work / "database.db", image_names, label)
+            self._write_input_model([cameras[i] for i in order],
+                                    [image_names[i] for i in order], sparse_in)
             self._match(colmap, work, params)
             model, reprojection = self._triangulate_and_adjust(
                 colmap, work, images_dir, params, label)
@@ -645,6 +670,56 @@ class RefineCamerasStep(Step):
         ColmapExporter(cameras=list(cameras), image_names=list(image_names),
                        points_3d=None).export(output_dir=sparse_in)
         (sparse_in / "points3D.txt").write_text("")
+
+    @staticmethod
+    def _database_image_order(database: Path, image_names: Sequence[str],
+                              label: str) -> List[int]:
+        """Indices into `image_names` in the database's image_id order, which
+        is the order the input model has to be written in (trap 5).
+
+        `point_triangulator` reads the model and then rewrites every image
+        id to the database's id for that NAME
+        (`Reconstruction::TranscribeImageIdsToDatabase`). A model with no
+        frames.txt was given one frame per image at read time, numbered by
+        the image id, and the transcription rewrites the ids INSIDE those
+        frames but not the frame ids themselves. The database's own frames
+        are numbered in the order the extractor's writer thread received
+        the images — completion order across its resizer/extractor threads,
+        not read order. Whenever the two orders differ, `Reconstruction::Load`
+        finds model frame k holding image j != k and aborts
+        (`existing_frame.DataIds() == frame.DataIds()`, reconstruction.cc:328,
+        SIGABRT, exit -6): run 467c17's final stage wrote frame_00012 as its
+        third image, and its refinement was refused — as was every other
+        2026-09-08 run's. Writing the model in the database's order makes the
+        transcription the identity and the frames agree by construction. The
+        exporter numbers 1..N in list order, so the check that the database
+        did too is what makes the two the same numbering.
+        """
+        if not database.exists():
+            raise BadSolve(
+                f"{label}: the feature extractor left no database at {database}")
+        with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as connection:
+            rows = connection.execute(
+                "SELECT image_id, name FROM images ORDER BY image_id").fetchall()
+        connection.close()
+        index_of = {name: i for i, name in enumerate(image_names)}
+        in_database = {name for _, name in rows}
+        missing = [name for name in image_names if name not in in_database]
+        unknown = [name for _, name in rows if name not in index_of]
+        if missing or unknown:
+            raise BadSolve(
+                f"{label}: the feature extractor's database does not describe this "
+                f"dataset — {len(missing)} of {len(image_names)} frames missing from "
+                f"it (first: {missing[0] if missing else '-'}), {len(unknown)} rows "
+                f"in it that are not frames (first: {unknown[0] if unknown else '-'})"
+            )
+        ids = [int(image_id) for image_id, _ in rows]
+        if ids != list(range(1, len(ids) + 1)):
+            raise BadSolve(
+                f"{label}: the database numbers its {len(ids)} images {ids[:4]}..., "
+                f"not 1..{len(ids)}; the input model's numbering would not match it"
+            )
+        return [index_of[name] for _, name in rows]
 
     # ------------------------------------------------------------------
     # driving COLMAP

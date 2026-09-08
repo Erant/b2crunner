@@ -17,13 +17,14 @@ scaled, rotated and translated, and has to undo precisely that.
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 
 import numpy as np
 from body2colmap.camera import Camera
 
 from pipeline.steps import refine_cameras
 from pipeline.steps.refine_cameras import (
-    ONNX_MODELS, RefineCamerasStep, _align_to, _check, ensure_onnx_model,
+    ONNX_MODELS, BadSolve, RefineCamerasStep, _align_to, _check, ensure_onnx_model,
     _movement, _quaternion_to_rotation, _read_images_txt, _remove_common_mode,
     _residual_rotation, onnx_options_for,
 )
@@ -465,6 +466,10 @@ class TestRunDrivesRefine(unittest.TestCase):
             def _extract(self, *a, **k):
                 pass
 
+            @staticmethod
+            def _database_image_order(database, image_names, label):
+                return list(range(len(image_names)))
+
             def _match(self, *a, **k):
                 pass
 
@@ -482,6 +487,84 @@ class TestRunDrivesRefine(unittest.TestCase):
         # given orbit — read out of the ALIGNED list, not the given one.
         np.testing.assert_allclose(result["anchor_position"], given[5].position,
                                    atol=1e-6)
+
+
+class TestDatabaseImageOrder(unittest.TestCase):
+    """Trap 5: the input model is written in the DATABASE's image order.
+
+    COLMAP rewrites the model's image ids to the database's by name but
+    leaves a legacy model's frame ids alone, so a model numbered in any
+    other order aborts point_triangulator as soon as the extractor's writer
+    thread has reordered the frames (run 467c17: frame_00012 written third).
+    """
+
+    @staticmethod
+    def _database(directory, rows):
+        import sqlite3
+
+        path = Path(directory) / "database.db"
+        with sqlite3.connect(path) as connection:
+            connection.execute(
+                "CREATE TABLE images (image_id INTEGER PRIMARY KEY, "
+                "name TEXT NOT NULL UNIQUE, camera_id INTEGER NOT NULL)")
+            connection.executemany("INSERT INTO images VALUES (?, ?, 1)", rows)
+        connection.close()
+        return path
+
+    def test_the_model_is_written_in_the_databases_order(self):
+        import tempfile
+
+        names = [f"frame_{i:05d}.png" for i in range(1, 7)]
+        cameras = _orbit(6)
+        # What 467c17's extractor did: the third frame the writer received
+        # was not the third file.
+        database_order = [names[0], names[1], names[5], names[3], names[4], names[2]]
+        with tempfile.TemporaryDirectory() as tmp:
+            database = self._database(tmp, list(enumerate(database_order, start=1)))
+            order = RefineCamerasStep._database_image_order(database, names, "t")
+            self.assertEqual([names[i] for i in order], database_order)
+
+            model = Path(tmp) / "sparse_in"
+            model.mkdir()
+            RefineCamerasStep._write_input_model(
+                [cameras[i] for i in order], [names[i] for i in order], model)
+
+            written = {}
+            for line in (model / "images.txt").read_text().splitlines():
+                fields = line.split()
+                if fields and not line.startswith("#") and fields[-1].endswith(".png"):
+                    written[int(fields[0])] = fields[-1]
+            # IMAGE_ID k names what the database calls image k ...
+            self.assertEqual(written, dict(enumerate(database_order, start=1)))
+            # ... and each name still carries its own camera's pose.
+            for name, (quaternion, translation) in _read_images_txt(model / "images.txt").items():
+                r_w2c = _quaternion_to_rotation(quaternion)
+                np.testing.assert_allclose(
+                    -r_w2c.T @ translation, cameras[names.index(name)].position, atol=1e-4)
+
+    def test_a_frame_the_extractor_dropped_is_refused(self):
+        import tempfile
+
+        names = [f"frame_{i:05d}.png" for i in range(1, 5)]
+        with tempfile.TemporaryDirectory() as tmp:
+            database = self._database(tmp, [(1, names[0]), (2, names[1]), (3, names[3])])
+            with self.assertRaises(BadSolve) as caught:
+                RefineCamerasStep._database_image_order(database, names, "t")
+            self.assertIn(names[2], str(caught.exception))
+
+    def test_ids_that_are_not_one_to_n_are_refused(self):
+        import tempfile
+
+        names = [f"frame_{i:05d}.png" for i in range(1, 4)]
+        with tempfile.TemporaryDirectory() as tmp:
+            database = self._database(tmp, [(1, names[0]), (2, names[1]), (4, names[2])])
+            with self.assertRaises(BadSolve):
+                RefineCamerasStep._database_image_order(database, names, "t")
+
+    def test_a_missing_database_is_refused(self):
+        with self.assertRaises(BadSolve):
+            RefineCamerasStep._database_image_order(
+                Path("/nonexistent/database.db"), ["a"], "t")
 
 
 class TestTheDebugDump(unittest.TestCase):
@@ -526,6 +609,10 @@ class TestTheDebugDump(unittest.TestCase):
         class Solving(RefineCamerasStep):
             def _extract(self, *a, **k):
                 pass
+
+            @staticmethod
+            def _database_image_order(database, image_names, label):
+                return list(range(len(image_names)))
 
             def _match(self, *a, **k):
                 pass

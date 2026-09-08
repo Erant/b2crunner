@@ -49,10 +49,10 @@ def _rs_params(params):
     return get_step_class("render_splat").resolve_params(params)
 
 
-def _resolve_cameras(*, scene, dataset, params, width, height):
+def _resolve_cameras(*, scene, dataset, params, width, height, **inputs):
     return _resolve_cameras_raw(
         scene=scene, dataset=dataset, params=_rs_params(params),
-        width=width, height=height,
+        width=width, height=height, **inputs,
     )
 
 
@@ -146,13 +146,14 @@ class TestRenderSplatCameras(unittest.TestCase):
         cls.ds = Dataset.from_disk(require_stage("initial"))
         cls.scene = _synthetic_scene()
 
-    def _resolve(self, params, dataset=None):
+    def _resolve(self, params, dataset=None, **inputs):
         return _resolve_cameras(
             scene=self.scene,
             dataset=self.ds if dataset is None else dataset,
             params=params,
             width=params.get("width", 720),
             height=params.get("height", 1280),
+            **inputs,
         )
 
     def test_reuses_dataset_cameras_without_a_pattern(self):
@@ -318,6 +319,97 @@ class TestRenderSplatCameras(unittest.TestCase):
         self.assertEqual(anchor, 0)
         recorded = np.asarray(self.ds.extras["anchor_position"], dtype=np.float32)
         np.testing.assert_allclose(cameras[0].position, recorded, atol=1e-5)
+
+    _HELIX = {
+        "pattern": "helical", "n_frames": 81, "n_loops": 1,
+        "amplitude_deg": 30.0, "override_cam_from_mesh": True,
+    }
+
+    def _refined_dataset(self, rotation, translation):
+        """self.ds with its anchor camera moved by the world motion
+        (rotation, translation) — what refine_cameras leaves behind — and
+        the anchor camera as it was, which is what image_warp.camera holds."""
+        import copy
+
+        from body2colmap.camera import Camera
+        from pipeline.steps.pointmap_splat import camera_pose
+
+        index = int(self.ds.extras["anchor_frame_index"])
+        given = self.ds.cameras[index]
+        r, p = camera_pose(given)
+        ds = copy.copy(self.ds)
+        ds.cameras = list(self.ds.cameras)
+        ds.cameras[index] = Camera(
+            focal_length=(given.fx, given.fy), image_size=(given.width, given.height),
+            principal_point=(given.cx, given.cy),
+            position=rotation @ p + translation, rotation=rotation @ r,
+        )
+        return ds, given, index
+
+    @staticmethod
+    def _small_motion():
+        import cv2
+
+        rotation, _ = cv2.Rodrigues(np.radians(np.array([0.4, 1.2, -0.2])))
+        return rotation.astype(np.float64), np.array([0.041, -0.034, 0.021])
+
+    def test_anchored_path_carries_the_anchors_refinement(self):
+        """After refine_cameras the splat was trained with the photograph's
+        camera OFF the origin; the re-render's anchor frame has to go there
+        too, or the injected photo and the renders beside it disagree by
+        the anchor's delta (8-10 px at the subject, 2026-09-08). Carried
+        rigidly: the anchor lands on the refined camera exactly, and every
+        other camera moves by the same motion, so the path keeps its shape."""
+        rotation, translation = self._small_motion()
+        as_built, _, _, anchor = self._resolve(self._HELIX)
+        ds, given, index = self._refined_dataset(rotation, translation)
+
+        carried, _, _, anchor_after = self._resolve(
+            self._HELIX, dataset=ds, given_anchor_camera=given)
+
+        self.assertEqual(anchor_after, anchor)
+        refined = ds.cameras[index]
+        np.testing.assert_allclose(carried[anchor].position, refined.position, atol=1e-5)
+        np.testing.assert_allclose(carried[anchor].rotation, refined.rotation, atol=1e-5)
+        self.assertEqual(len(carried), len(as_built))
+        for before, after in zip(as_built, carried):
+            np.testing.assert_allclose(
+                after.position, rotation @ before.position + translation, atol=1e-5)
+            np.testing.assert_allclose(after.rotation, rotation @ before.rotation, atol=1e-5)
+            self.assertEqual((after.fx, after.fy, after.cx, after.cy, after.width, after.height),
+                             (before.fx, before.fy, before.cx, before.cy, before.width, before.height))
+
+    def test_anchored_path_stays_put_without_a_given_anchor(self):
+        """No given_anchor_camera: the pre-2026-09-08 behaviour, the path as
+        the solver built it, even on a dataset whose anchor was refined."""
+        rotation, translation = self._small_motion()
+        as_built, _, _, anchor = self._resolve(self._HELIX)
+        ds, _given, _index = self._refined_dataset(rotation, translation)
+        cameras, _, _, _ = self._resolve(self._HELIX, dataset=ds)
+        for before, after in zip(as_built, cameras):
+            np.testing.assert_allclose(after.position, before.position, atol=1e-6)
+            np.testing.assert_allclose(after.rotation, before.rotation, atol=1e-6)
+
+    def test_an_unrefined_anchor_carries_nothing(self):
+        """given_anchor_camera equal to the dataset's own anchor camera —
+        refine_cameras off, or a refusal — is a no-op, not a tiny drift."""
+        index = int(self.ds.extras["anchor_frame_index"])
+        as_built, _, _, _ = self._resolve(self._HELIX)
+        cameras, _, _, _ = self._resolve(
+            self._HELIX, given_anchor_camera=self.ds.cameras[index])
+        for before, after in zip(as_built, cameras):
+            np.testing.assert_allclose(after.position, before.position, atol=0)
+            np.testing.assert_allclose(after.rotation, before.rotation, atol=0)
+
+    def test_given_anchor_camera_needs_an_anchor_frame_index(self):
+        import copy
+
+        plain = copy.copy(self.ds)
+        plain.extras = {k: v for k, v in self.ds.extras.items() if k != "anchor_frame_index"}
+        with self.assertRaises(ValueError) as ctx:
+            self._resolve(self._HELIX, dataset=plain,
+                          given_anchor_camera=self.ds.cameras[0])
+        self.assertIn("anchor_frame_index", str(ctx.exception))
 
     def test_override_rejects_camera_reuse(self):
         with self.assertRaises(ValueError) as ctx:

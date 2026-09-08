@@ -110,6 +110,26 @@ too: `refine_cameras` publishes the refined anchor's position
 writes it over `dataset.extras.anchor_position`. `given_cameras` is no
 longer published; nothing needs the old poses.
 
+The **helical re-render** is the third thing (2026-09-08). `rerender_splat`
+builds its helix the way `render` built the ring — the photograph's camera
+at the origin, `look_at`-turned — and `reinject_anchor` puts the photograph
+on that frame. But the splat it renders was trained on the refined
+cameras, in which the photograph's camera is 41-68 mm / 0.9-1.6 deg off
+the origin (every run since 2026-09-04; 467c17: 57.7 mm, 1.29 deg), and
+that delta is 8-10 px vertically at the subject — measured by projecting
+a body-sized proxy at the orbit target through the given and refined
+anchor poses of runs 467c17, fd852e and fa59e5. Rendered from the origin
+the splat's subject sits ~8 px above the injected photograph, which is the
+first pass's seam handed to the second. So the re-render takes
+`given_anchor_camera: scene.image_warp.camera` and moves its WHOLE helix
+by T = refined ∘ given⁻¹ (`_carry_anchor_refinement` in steps/splat.py):
+the anchor frame lands on the refined anchor camera exactly, the injected
+photo agrees with the renders either side of it, the path keeps its shape
+(moving the anchor frame alone would kink the video by the delta at the
+one real frame), and the warp stays valid because the anchor's tilt
+relative to the photograph is untouched. The position it publishes is the
+moved one, so the injection still matches at d = 0.
+
 The stage-1 shells always had this wiring: they are built *after* the
 refinement, from the poses it produced. The rule is about order, not about
 the face, and `tests/test_workflows.py` asserts it that way — and asserts
@@ -313,6 +333,30 @@ correction now shows. A uniform pitch goes exactly; a single camera's
 correction keeps all but its 1/N share; a rigid motion never reaches it.
 `max_common_mode_rotation_deg` (3) refuses a mean that says BA lost the
 scene rather than drifted along the valley.
+
+## Trap 5 — the input model's image ids have to be the database's
+
+`point_triangulator` maps the model's images onto the database's by name
+and rewrites the model's image ids to the database's
+(`Reconstruction::TranscribeImageIdsToDatabase`). A model written without
+`frames.txt` got one frame per image at read time, numbered by the image
+id, and the rewrite reaches the ids inside those frames but not the frame
+ids. The database's frames are numbered in the order the extractor's
+writer thread received the images — completion order across its threads,
+not read order — so whenever that order differs from the model's,
+`Reconstruction::Load` finds model frame k holding image j != k and aborts
+(`existing_frame.DataIds() == frame.DataIds()`, reconstruction.cc:328,
+SIGABRT). The step then refuses the solve and keeps the given poses.
+
+Seen on 9 of the 11 pod runs of 2026-09-07/08, every time in the final
+refinement (run 467c17's extractor wrote frame_00012 as its third image),
+never in the first — the deliverable's poses were not refined in any of
+them, and nothing but the "refusing" line said so. Fix: write the input
+model AFTER the extractor, in the database's image order
+(`_database_image_order`), which makes the rewrite the identity and the
+frames agree by construction. The poses are read back by name, so the
+order is invisible downstream. Forcing single-threaded extraction would
+also hide it, by luck rather than construction.
 
 ## What the ceiling is, and why
 

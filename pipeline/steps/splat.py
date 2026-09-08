@@ -240,7 +240,14 @@ class RenderSplatStep(Step):
     inputs:  {"splat_scene": SplatScene} or {"splat_path": str},
              plus optionally {"dataset": Dataset} — the source dataset,
              used for framing bounds, focal-length inheritance, camera
-             reuse, point-cloud preservation and extras pass-through
+             reuse, point-cloud preservation and extras pass-through,
+             and optionally {"given_anchor_camera": Camera} — the anchor
+             camera as the source render built it (its `image_warp.camera`);
+             with `override_cam_from_mesh` on, the new path is carried,
+             rigidly, by the delta between it and the dataset's live anchor
+             camera, so the anchor frame lands where `refine_cameras` left
+             the photograph's camera rather than where the source render
+             put it. See _carry_anchor_refinement.
     outputs: same shape as steps/render.py — {"images", "masks",
              "cameras", "image_names", "points_3d", "resolution",
              "focal_length_mm"} plus "anchor_position" /
@@ -404,7 +411,8 @@ class RenderSplatStep(Step):
         height = params["height"]
 
         cameras, focal_length, effective_mm, anchor_frame_index = _resolve_cameras(
-            scene=scene, dataset=dataset, params=params, width=width, height=height
+            scene=scene, dataset=dataset, params=params, width=width, height=height,
+            given_anchor_camera=inputs.get("given_anchor_camera"),
         )
 
         # BLACK, not white. Two reasons, and the second is the one that
@@ -821,7 +829,8 @@ def _describe_splat_arg(cmd: List[str]) -> str:
 
 
 def _resolve_cameras(
-    *, scene, dataset, params: Dict[str, Any], width: int, height: int
+    *, scene, dataset, params: Dict[str, Any], width: int, height: int,
+    given_anchor_camera: Any = None,
 ) -> Tuple[list, float, float, Optional[int]]:
     """Work out which cameras to render from, and at what focal length.
 
@@ -829,6 +838,9 @@ def _resolve_cameras(
     anchor_frame_index). Split out of run() so the whole decision — which
     is where every subtlety in this step lives — is testable without gsplat
     or a GPU.
+
+    `given_anchor_camera` only matters to the anchored path: see
+    _carry_anchor_refinement.
     """
     from body2colmap.camera import Camera
     from body2colmap.path import (
@@ -923,6 +935,8 @@ def _resolve_cameras(
             circular_solver=compute_original_camera_orbit_params,
             helical_solver=compute_helical_anchor_params,
         )
+        cameras = _carry_anchor_refinement(
+            cameras, anchor_frame_index, dataset, extras, given_anchor_camera)
         return cameras, focal_length, effective_mm, anchor_frame_index
 
     # Framing bounds from the source render, falling back to the splat's own
@@ -1236,6 +1250,125 @@ def _anchored_path(
         **helix_params,
     )
     return cameras, int(anchor_info["anchor_frame_index"])
+
+
+def _carry_anchor_refinement(cameras, anchor_frame_index: int, dataset,
+                             extras: Dict[str, Any], given_anchor_camera):
+    """Move a freshly anchored path, rigidly, by the refinement's delta on
+    the source dataset's anchor camera.
+
+    `_anchored_path` puts the anchor camera where the SOURCE render put it:
+    the photograph's camera at the world origin, `look_at`-turned onto the
+    orbit target. That is the pose the reference image was warped for, and
+    it is the right pose as long as the splat being rendered was trained
+    with the photograph's camera there. After `refine_cameras` it was not:
+    the refinement moves the anchor camera off the origin — 0.9-1.6 deg and
+    41-68 mm in every fast_helical_native run since 2026-09-04; it is the
+    one real frame, outvoted by 80 painted ones — the training runs on the
+    moved cameras, and the splat's subject sits where THOSE cameras say.
+    Rendered from the origin it then disagrees with the photograph injected
+    at that very frame by the anchor's delta: 8-10 px vertically at the
+    subject, measured on runs 467c17 / fd852e / fa59e5 (2026-09-08), which
+    is the seam the first denoise pass had, handed to the second one again.
+
+    So when the caller wires `given_anchor_camera` — the anchor as the
+    source render built it, its `image_warp.camera` — the world motion
+    between it and the dataset's live anchor camera (`refined_photo_pose`,
+    the same T = refined o given^-1 the face cap hangs on) is applied to
+    EVERY camera of the new path. Rigid, not the anchor frame alone: the
+    anchor lands exactly on the refined anchor camera, the injected
+    photograph agrees with the splat renders either side of it, and the
+    path keeps the shape the solver gave it — moving one frame would put a
+    kink of the delta's size into the video at the one frame that is real.
+    The reference warp stays valid because the anchor camera's tilt
+    relative to the photograph's camera is untouched: T moves both.
+
+    Without `given_anchor_camera` the path is returned as built, and the
+    log says so: a re-render of a dataset whose cameras were never refined
+    has nothing to carry.
+    """
+    if given_anchor_camera is None:
+        logger.info(
+            "render_splat: the anchored path stays on the source render's given "
+            "anchor pose (no given_anchor_camera wired)"
+        )
+        return cameras
+
+    index = extras.get("anchor_frame_index")
+    if index is None or dataset is None or not dataset.cameras:
+        raise ValueError(
+            "render_splat: given_anchor_camera was wired, but the source dataset "
+            "records no anchor_frame_index (or has no cameras) to take the "
+            "anchor's refinement from. It is only meaningful on a dataset whose "
+            "render anchored a frame (override_cam_from_mesh) and whose cameras "
+            "were refined since; drop it otherwise."
+        )
+    index = int(index)
+    if not 0 <= index < len(dataset.cameras):
+        raise ValueError(
+            f"render_splat: the source dataset's anchor_frame_index {index} is "
+            f"not a frame of its {len(dataset.cameras)}-camera path"
+        )
+
+    from .pointmap_splat import camera_pose, refined_photo_pose, rotation_angle_deg
+
+    refined = dataset.cameras[index]
+    given_rotation, given_position = camera_pose(given_anchor_camera)
+    rotation, translation = refined_photo_pose(refined, given_anchor_camera)
+    delta_deg = rotation_angle_deg(rotation)
+    delta_mm = float(np.linalg.norm(camera_pose(refined)[1] - given_position)) * 1000.0
+
+    # The path's own anchor camera is meant to BE the given one — same
+    # position, same look_at — which is what keeps the reference warp valid
+    # here without re-warping. Say so if it is not; the carry below still
+    # moves the photograph's camera to the right place, but the warp was
+    # computed for a camera this path does not contain.
+    built_rotation, built_position = camera_pose(cameras[anchor_frame_index])
+    gap_mm = float(np.linalg.norm(built_position - given_position)) * 1000.0
+    gap_deg = rotation_angle_deg(built_rotation @ given_rotation.T)
+    if gap_mm > 1.0 or gap_deg > 0.05:
+        logger.warning(
+            "render_splat: the path's anchor camera (frame %d) sits %.1f mm / "
+            "%.3f deg off the given_anchor_camera it is being carried from; the "
+            "reference image was warped for the given one",
+            anchor_frame_index, gap_mm, gap_deg,
+        )
+
+    if delta_deg < 1e-4 and delta_mm < 1e-2:
+        logger.info(
+            "render_splat: the source dataset's anchor camera (frame %d) is where "
+            "its render built it (%.4f deg, %.3f mm off); the path is not moved",
+            index, delta_deg, delta_mm,
+        )
+        return cameras
+
+    moved = [_transform_camera(camera, rotation, translation) for camera in cameras]
+    logger.info(
+        "render_splat: carried the anchor's refinement onto the path — all %d "
+        "cameras moved by %.3f deg, %.1f mm, so frame %d sits on the source "
+        "dataset's refined anchor camera (its frame %d) at %s rather than on the "
+        "given pose at %s",
+        len(moved), delta_deg, delta_mm, anchor_frame_index, index,
+        np.round(moved[anchor_frame_index].position, 4).tolist(),
+        np.round(given_position, 4).tolist(),
+    )
+    return moved
+
+
+def _transform_camera(camera, rotation: np.ndarray, translation: np.ndarray):
+    """`camera` under the world motion x -> rotation @ x + translation:
+    same intrinsics, pose composed on the left."""
+    from body2colmap.camera import Camera
+
+    c2w = np.asarray(camera.rotation, dtype=np.float64)
+    position = np.asarray(camera.position, dtype=np.float64)
+    return Camera(
+        focal_length=(camera.fx, camera.fy),
+        image_size=(camera.width, camera.height),
+        principal_point=(camera.cx, camera.cy),
+        position=(rotation @ position + translation).astype(np.float32),
+        rotation=(rotation @ c2w).astype(np.float32),
+    )
 
 
 def _resolve_pointcloud(scene, dataset, params: Dict[str, Any]):

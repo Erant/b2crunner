@@ -654,6 +654,31 @@ class TestWorkflowFiles(unittest.TestCase):
                         f"extras — refine_cameras republishes it ~62mm off the "
                         f"origin, ~10x the match tolerance",
                     )
+                    # And if the cameras were refined between the source
+                    # render and this one, the splat was trained with the
+                    # photograph's camera OFF the pose the new path anchors
+                    # on: the render must carry that delta onto its path
+                    # (`given_anchor_camera`, splat.py's
+                    # _carry_anchor_refinement) or the injected photo and the
+                    # renders beside it disagree by it — 8-10 px at the
+                    # subject in every run measured on 2026-09-08.
+                    refined_before = [
+                        j for j, s in by_index.items()
+                        if j < max(repaths) and s.step == "refine_cameras"
+                        and "dataset.cameras" in s.outputs.values()
+                    ]
+                    if refined_before:
+                        self.assertTrue(
+                            render.inputs.get("given_anchor_camera"),
+                            f"{path.name}: '{by_index[refined_before[-1]].id}' "
+                            f"rewrote dataset.cameras before '{render.id}' "
+                            f"re-anchored its path, but the render wires no "
+                            f"`given_anchor_camera`, so its anchor frame sits on "
+                            f"the GIVEN anchor pose while the splat it renders was "
+                            f"trained with the photograph's camera at the refined "
+                            f"one — '{step.id}' then injects the photo where the "
+                            f"renders beside it disagree with it",
+                        )
 
     def test_a_confidence_render_is_not_thresholded_again(self):
         """The two halves of one decision, and running both is worse than

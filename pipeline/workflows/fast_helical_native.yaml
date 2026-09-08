@@ -13,6 +13,16 @@
 # and reads the .ply optionally, so the branch being off leaves it with
 # nothing to composite rather than nothing to resolve.
 #
+# WHAT CHANGED (2026-09-08, later): **the helical re-render follows the
+# camera refinement.** `rerender_splat` takes `given_anchor_camera:
+# scene.image_warp.camera` and moves its whole helix by the delta between
+# that and the refined anchor camera it was handed, so the stage-3
+# `reinject_anchor` puts the photograph where the trained splat thinks it
+# was taken from. It sat on the GIVEN pose — 46-68 mm / 1.1-1.6 deg away,
+# 8-10 px vertically at the subject in every run measured (467c17, fd852e,
+# fa59e5) — and pass 2 inherited pass 1's seam. splat.py's
+# _carry_anchor_refinement has the numbers.
+#
 # WHAT CHANGED (2026-09-08): **an experimental branch redraws the outline
 # from a matte instead of the mesh** — `re_outline`, a setting, OFF by
 # default. The silhouette pass 1 conditions on is the SAM-3D-Body mesh's,
@@ -1676,9 +1686,10 @@ steps:
       # republishes both keys for the helix it builds, because a position
       # match has to be against the path the frames were rendered along, and
       # this refinement's ~62 mm move would miss it by ~10x the tolerance.
-      # refine_cameras_final, after that, republishes nothing — it wires no
-      # anchor_frame_index, and moving the helix's anchor off the pose its
-      # own frames were rendered from is exactly the mistake above.
+      # refine_cameras_final, after that, publishes no anchor_position —
+      # moving the helix's anchor off the pose its own frames were rendered
+      # from is exactly the mistake above. (It does take the frame index,
+      # so its log line and stats describe the photograph's frame.)
       anchor_position: dataset.extras.anchor_position
 
   # --------------------------- the face splat, rebuilt on the refined poses
@@ -2142,6 +2153,10 @@ steps:
 
   # ANCHORED: the bootstrap hands this tail an anchored dataset (its render
   # ran under override_cam_from_mesh), so the helix bends onto the anchor.
+  # Since 2026-09-08 the bent helix is then MOVED, rigidly, by the
+  # refinement's delta on that anchor (`given_anchor_camera` below): "the
+  # world origin" is where the photograph's camera was BEFORE
+  # refine_cameras, and the splat was trained after it.
   #
   # This block used to read "the ComfyUI node leaves override_cam_from_mesh
   # off here", and to lean on `inject_anchor` below re-applying the anchor
@@ -2202,6 +2217,18 @@ steps:
       # serialising ~900k Gaussians to a temp dir before every render.
       splat_path: dataset.splat_path
       dataset: dataset
+      # The anchor camera as render_initial_views built it: the photograph's
+      # camera at the origin, look_at-turned. `refine_cameras` has since
+      # moved the dataset's copy of it — 0.9-1.6 deg / 41-68 mm in every
+      # run since 2026-09-04, 8-10 px at the subject — and train_splat
+      # trained on the moved one, so the splat's subject sits where the
+      # REFINED anchor sees it. Wired, this render carries that delta onto
+      # the whole helix, rigidly: frame 37 lands on the refined anchor
+      # camera, the photograph reinject_anchor puts there agrees with the
+      # splat renders either side of it, and the path keeps its shape. The
+      # published anchor_position below is the moved one, so the injection
+      # still matches at d=0. See splat.py's _carry_anchor_refinement.
+      given_anchor_camera: scene.image_warp.camera
     params:
       width: ${globals.resolution.0}
       height: ${globals.resolution.1}
@@ -2642,6 +2669,11 @@ steps:
       image_names: dataset.image_names
       images: dataset.images
       masks: dataset.masks
+      # The helix's anchor (37), as rerender_splat published it — so the
+      # "anchor frame is left N deg" line and stats.json's anchor_residual
+      # are about the photograph, not frame 0. Until 2026-09-08 this was
+      # unwired and both described a synthetic frame.
+      anchor_frame_index: dataset.extras.anchor_frame_index?
     params:
       debug_dir: ${globals.output_root}/debug/refine_cameras_final
     outputs:
