@@ -92,6 +92,24 @@ class _ProbeBase(Step):
             sys.stdout.flush()
             os._exit(9)
 
+        if mode == "crash_on_exit":
+            # TEMPORARY, paired with the salvage in
+            # pipeline/dispatch/subprocess_python.py: a child that finishes
+            # its work, hands back a payload, and *then* dies on a signal
+            # during interpreter teardown — what seedvr2 was seen doing.
+            # `atexit` fires after run_once() has written the output pickle,
+            # so the parent sees a good payload next to a -9.
+            import atexit
+            import signal
+
+            images = list(inputs.get("images", []))
+            keep = params.get("keep_images")
+            if keep is not None:
+                images = images[:keep]
+            atexit.register(lambda: os.kill(os.getpid(), signal.SIGKILL))
+            _say("SENTINEL_LAST_WORDS before the teardown crash")
+            return {"images": images, "pid": os.getpid()}
+
         if mode == "slow":
             # Halfway marker, then a pause, so a test can prove the line
             # reached the parent's log *before* run() returned rather than

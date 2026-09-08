@@ -14,7 +14,10 @@ import os
 import sys
 import unittest
 
-from pipeline.dispatch.subprocess_python import SubprocessPythonDispatcher
+from pipeline.dispatch.subprocess_python import (
+    SubprocessPythonDispatcher,
+    _exit_description,
+)
 from pipeline.proc import ProcessFailed, stream_command
 
 
@@ -139,6 +142,37 @@ class TestChildEnvironment(unittest.TestCase):
         with self.assertRaises(RuntimeError) as caught:
             dispatcher.run("save_dataset", {}, {})
         self.assertIn("envs.yaml", str(caught.exception))
+
+
+class TestExitDescription(unittest.TestCase):
+    """`exit -9` names nothing; the signal is the diagnosis.
+
+    A child killed by a signal runs no cleanup, so the last line of its
+    output is often `multiprocessing.resource_tracker`'s leaked-semaphore
+    warning — written by a helper process that outlived it — and that line
+    reads like a cause. Naming the signal is what stops the next reader
+    chasing the warning.
+    """
+
+    def test_a_normal_exit_code_is_left_alone(self):
+        self.assertEqual(_exit_description(0), "exit 0")
+        self.assertEqual(_exit_description(1), "exit 1")
+
+    def test_sigkill_is_named_and_points_at_the_oom_killer(self):
+        message = _exit_description(-9)
+        self.assertIn("SIGKILL", message)
+        self.assertIn("OOM", message)
+        self.assertIn("dmesg", message)
+
+    def test_a_native_crash_is_named(self):
+        self.assertIn("SIGSEGV", _exit_description(-11))
+        self.assertIn("SIGABRT", _exit_description(-6))
+
+    def test_an_unknown_signal_still_says_it_was_a_signal(self):
+        self.assertIn("signal", _exit_description(-999))
+
+    def test_never_started_has_a_word_for_it(self):
+        self.assertEqual(_exit_description(None), "never started")
 
 
 if __name__ == "__main__":

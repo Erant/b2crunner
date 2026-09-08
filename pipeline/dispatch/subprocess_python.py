@@ -53,6 +53,12 @@ which trains a Gaussian splat on the same GPU, and a worker sitting on ~35
 GB of Wan experts would OOM it — a regression over the reloading this
 replaces, not an improvement. Skipping the network read is the win;
 squatting on VRAM was never part of it.
+
+**A failed child fails its step, with one TEMPORARY exception.** See the
+block above `_payload_complete`: a one-shot child that died on a signal
+*after* writing a complete-looking payload has that payload accepted, and
+says so loudly, because seedvr2 has been observed crashing on its way out
+of a successful upscale.
 """
 
 from __future__ import annotations
@@ -61,6 +67,7 @@ import json
 import logging
 import os
 import pickle
+import signal
 import subprocess
 import tempfile
 import time
@@ -86,6 +93,154 @@ _ERROR_TAIL_LINES = 60
 # must not be the thing that hangs a completed run.
 _SHUTDOWN_TIMEOUT_S = 60.0
 _KILL_TIMEOUT_S = 10.0
+
+# What a negative return code means, in the words of the thing that most
+# often produces it. `Popen.returncode` is -N when the child died on signal
+# N, and "exit -9" on its own has sent more than one debugging session
+# looking for a Python bug that was never there.
+_SIGNAL_HINTS = {
+    "SIGKILL": (
+        "no traceback is possible — nothing in the child ran after this. "
+        "Almost always the host OOM killer: check `dmesg -T | grep -i -E "
+        "'oom|killed process'` and what else was resident at the time"
+    ),
+    "SIGSEGV": "a native crash inside the child (torch/CUDA), not a Python exception",
+    "SIGBUS": "a native crash inside the child (torch/CUDA), not a Python exception",
+    "SIGABRT": "the child aborted — usually a C++ exception escaping a torch/CUDA call",
+}
+
+
+def _exit_description(returncode: Optional[int]) -> str:
+    """How the child ended, named rather than numbered.
+
+    A death by signal also explains a line that turns up at the very end of
+    such a child's output and reads like the cause:
+
+        UserWarning: resource_tracker: There appear to be 1 leaked
+        semaphore objects to clean up at shutdown
+
+    `multiprocessing.resource_tracker` is a *separate* helper process, forked
+    the first time anything in the child makes a semaphore or a shared-memory
+    block (seedvr2's `inference_cli` sets the spawn start method at import;
+    torch's DataLoader and shared tensors do the same). It holds a pipe to
+    the child, and stays quiet when the child exits normally, because a
+    normal exit unregisters everything first. It reports leaks only when that
+    pipe closed with objects still registered — i.e. when the child died
+    without running a single line of cleanup. So the warning is written by a
+    process that outlived the crash, and it is a symptom of the signal named
+    below, never the cause of it.
+    """
+    if returncode is None:
+        return "never started"
+    if returncode >= 0:
+        return f"exit {returncode}"
+    number = -returncode
+    try:
+        name = signal.Signals(number).name
+    except ValueError:
+        return f"killed by signal {number}"
+    hint = _SIGNAL_HINTS.get(name)
+    return f"killed by {name} ({number})" + (f" — {hint}" if hint else "")
+
+
+# ---------------------------------------------------------------------------
+# TEMPORARY (added 2026-09-08) — remove once the seedvr2 teardown crash is
+# understood.
+#
+# `seedvr2` has been seen dying on a signal *after* finishing its upscale and
+# writing its output pickle: the log shows the step's own "finished in Ns"
+# line and its output summary, and only then the child disappears somewhere
+# in interpreter teardown. The run is thrown away at that point, which costs
+# a whole pipeline for a process that had already done its work.
+#
+# So: a child that died by signal, but left behind a payload that loads and
+# looks complete, has its payload accepted and the run continues. The check
+# below is deliberately shallow — the frames are all there and none of them
+# is empty — not a claim that the output is *correct*. Everything else still
+# fails the way it did: a Python-level failure (a positive exit code) is
+# never salvaged, a missing or truncated pickle is never salvaged, and both
+# say so.
+#
+# When the teardown crash is fixed, delete `_payload_complete`,
+# `_salvage_after_signal` and their call site in `run()`.
+
+
+def _payload_complete(outputs: Dict[str, Any], inputs: Dict[str, Any]) -> tuple[bool, str]:
+    """Shallow "did it write everything" check on a salvaged payload.
+
+    Only list-valued outputs are examined, which for the step this exists
+    for is the frames and their cameras: each must be non-empty, must not
+    have lost entries against the same-named input list, and must contain no
+    zero-size array. Returns (ok, reason-it-is-not).
+    """
+    for name, value in outputs.items():
+        if not isinstance(value, list):
+            continue
+        if not value:
+            return False, f"output '{name}' is empty"
+        expected = inputs.get(name)
+        if isinstance(expected, list) and len(value) != len(expected):
+            return False, (
+                f"output '{name}' has {len(value)} entries, not the "
+                f"{len(expected)} that went in"
+            )
+        for index, item in enumerate(value):
+            size = getattr(item, "size", None)
+            if size is not None and size == 0:
+                return False, f"output '{name}'[{index}] is empty"
+    return True, ""
+
+
+def _salvage_after_signal(
+    step_name: str,
+    returncode: int,
+    output_path: Path,
+    inputs: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """The payload of a child that died on its way out, or None to raise.
+
+    See the TEMPORARY block above.
+    """
+    if returncode >= 0:
+        return None  # raised, exited, or SystemExit — not a teardown crash
+    if not output_path.exists():
+        return None
+
+    try:
+        with open(output_path, "rb") as f:
+            outputs = pickle.load(f)
+    except Exception as exc:  # noqa: BLE001 - anything here means "not salvageable"
+        logger.warning(
+            "%s: %s, and the output pickle it left behind will not load (%s)",
+            step_name, _exit_description(returncode), exc,
+        )
+        return None
+
+    if not isinstance(outputs, dict) or not outputs:
+        return None
+
+    complete, reason = _payload_complete(outputs, inputs)
+    if not complete:
+        logger.warning(
+            "%s: %s, and the output pickle it left behind is incomplete (%s)",
+            step_name, _exit_description(returncode), reason,
+        )
+        return None
+
+    logger.warning(
+        "%s: the child was %s AFTER writing what looks like a complete payload "
+        "(%s). TEMPORARY: accepting it and continuing the run rather than "
+        "throwing the whole run away. This is not a clean step — the crash is "
+        "real and still needs fixing; see the TEMPORARY block in %s.",
+        step_name,
+        _exit_description(returncode),
+        ", ".join(
+            f"{name}: {len(value)}" if isinstance(value, list) else name
+            for name, value in sorted(outputs.items())
+        ),
+        __name__,
+    )
+    return outputs
 
 
 class SubprocessPythonDispatcher(Dispatcher):
@@ -146,6 +301,7 @@ class SubprocessPythonDispatcher(Dispatcher):
             )
 
             started = time.time()
+            outputs: Optional[Dict[str, Any]] = None
             if self.keep_loaded:
                 tail = self._run_on_resident(
                     step_name, str(input_path), str(params_path), str(output_path)
@@ -157,25 +313,33 @@ class SubprocessPythonDispatcher(Dispatcher):
                 ]
                 returncode, tail = self._stream(cmd, step_name)
                 if returncode != 0:
+                    # TEMPORARY, see the block above _payload_complete: a
+                    # child that crashed after writing a good payload keeps
+                    # its run instead of costing one.
+                    outputs = _salvage_after_signal(
+                        step_name, returncode, output_path, inputs
+                    )
+                if returncode != 0 and outputs is None:
                     elapsed = time.time() - started
                     raise RuntimeError(
                         f"Step '{step_name}' failed after {elapsed:.1f}s in isolated env "
-                        f"'{self.python_bin}' (exit {returncode}).\n"
+                        f"'{self.python_bin}' ({_exit_description(returncode)}).\n"
                         f"Command: {' '.join(cmd)}\n"
                         f"--- last {len(tail)} lines of output ---\n" + "".join(tail)
                     )
             elapsed = time.time() - started
 
-            if not output_path.exists():
-                raise RuntimeError(
-                    f"Step '{step_name}' exited 0 but wrote no output pickle to "
-                    f"{output_path}. This usually means the worker was killed "
-                    f"(OOM) rather than raising.\n"
-                    f"--- last {len(tail)} lines of output ---\n" + "".join(tail)
-                )
+            if outputs is None:
+                if not output_path.exists():
+                    raise RuntimeError(
+                        f"Step '{step_name}' exited 0 but wrote no output pickle to "
+                        f"{output_path}. This usually means the worker was killed "
+                        f"(OOM) rather than raising.\n"
+                        f"--- last {len(tail)} lines of output ---\n" + "".join(tail)
+                    )
 
-            with open(output_path, "rb") as f:
-                outputs = pickle.load(f)
+                with open(output_path, "rb") as f:
+                    outputs = pickle.load(f)
 
             logger.info("%s: finished in %.1fs", step_name, elapsed)
             return outputs
@@ -234,8 +398,8 @@ class SubprocessPythonDispatcher(Dispatcher):
             return self._resident
         if self._resident is not None:
             logger.warning(
-                "%s: resident worker exited between jobs (code %s); starting a new one",
-                step_name, self._resident.returncode,
+                "%s: resident worker exited between jobs (%s); starting a new one",
+                step_name, _exit_description(self._resident.returncode),
             )
             self._shutdown_resident(drain=False)
 
@@ -324,7 +488,7 @@ class SubprocessPythonDispatcher(Dispatcher):
             returncode = self._shutdown_resident()
             raise RuntimeError(
                 f"Step '{step_name}': the resident worker in '{self.python_bin}' was gone "
-                f"before its job could be sent (exit {returncode}). {exc}"
+                f"before its job could be sent ({_exit_description(returncode)}). {exc}"
             ) from exc
 
         # readline() rather than `for line in stdout`: this loop has to stop
@@ -350,8 +514,8 @@ class SubprocessPythonDispatcher(Dispatcher):
             returncode = self._shutdown_resident(drain=False)
             raise RuntimeError(
                 f"Step '{step_name}': the resident worker in '{self.python_bin}' died "
-                f"mid-job without reporting (exit {returncode}). This usually means it "
-                f"was killed (OOM) rather than raising.\n"
+                f"mid-job without reporting ({_exit_description(returncode)}). This "
+                f"usually means it was killed rather than raising.\n"
                 f"--- last {len(tail)} lines of output ---\n" + "".join(tail)
             )
 
@@ -433,4 +597,6 @@ class SubprocessPythonDispatcher(Dispatcher):
             logger.exception("shutting down the resident worker failed; continuing")
             return
         if code is not None:
-            logger.info("resident worker for %s exited (code %s)", self.python_bin, code)
+            logger.info(
+                "resident worker for %s exited (%s)", self.python_bin, _exit_description(code)
+            )
