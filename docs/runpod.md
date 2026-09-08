@@ -114,6 +114,28 @@ and what you put in it decides what runs — no input picker:
   too: each is a reference sheet and the **Subject description** box is the
   prompt for all of them.
 
+  An image can also carry a **settings sidecar** — `image1.yaml` (or
+  `.yml`, or `.json`) beside `image1.jpg` — holding that run's own
+  overrides on top of the form:
+
+  ```yaml
+  settings:              # the workflow's own knobs, as the Settings box has them
+    seed: 7
+    run_upscale: false
+  step_params:           # a step id, then that step's params
+    train_final_splat:
+      align_iters: 8
+  ```
+
+  Both blocks are optional and a sidecar is optional for every image, so a
+  zip can mix images that have one with images that do not. This is the
+  sweep path: copy one subject's sheet a dozen times, give each copy a
+  sidecar that differs by the one knob under test, and a single upload
+  fans out into a dozen runs that differ by exactly that. A sidecar naming
+  a setting the workflow does not declare is **refused**, not dropped —
+  unlike a stale control in the browser's own panel — and so is one whose
+  name matches no image.
+
 Both shapes run `fast_helical_native` — there is no workflow picker. The
 read-only **Pipeline** field just confirms it.
 
@@ -343,7 +365,9 @@ NAME=$(curl -sH "$AUTH" \
   $POD/api/v1/runs | jq -r '.runs[0].name')
 
 # ...or a .zip of image/prompt pairs: one run per pair, fanned across
-# every GPU, exactly as the UI's upload box does it
+# every GPU, exactly as the UI's upload box does it. An `image1.yaml`
+# beside a pair carries that run's own `settings:`/`step_params:` — the
+# same two keys as the fields above, per image instead of per submission
 curl -sH "$AUTH" -F file=@subjects.zip $POD/api/v1/runs | jq '.runs[].name'
 
 # ...or a sheet already on the volume, which is the right way for anything

@@ -182,6 +182,15 @@ def _run(job: RunJob, status_path: Path) -> int:
             job.run_name, spec.name, os.environ.get("CUDA_VISIBLE_DEVICES", "(unset)"),
         )
         logger.info("output: %s", job.output_dir)
+        # What this run was overridden with, spelled into its own log —
+        # which is the log that rides in its result .zip as `log.txt`. A
+        # sweep is a dozen archives whose only difference is a knob or
+        # two, and without this line the archive does not say which one it
+        # was: the run name carries the subject, not the settings.
+        if job.global_overrides:
+            logger.info("settings: %s", json.dumps(job.global_overrides, sort_keys=True, default=str))
+        for step_id, values in sorted(job.step_overrides.items()):
+            logger.info("step params: %s: %s", step_id, json.dumps(values, sort_keys=True, default=str))
         log_machine_banner()
 
         # Scoped to the steps this run will actually execute — a run with

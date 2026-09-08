@@ -80,7 +80,8 @@ python -m pipeline.cli run fast_helical_native --reference-image sheet.png \
 python -m pipeline.cli doctor
 
 # the web UI: upload a reference sheet, or a .zip of image/prompt pairs (one
-# run per pair, fanned across every GPU); watch progress, pull the result
+# run per pair, fanned across every GPU — and an optional image1.yaml beside
+# a pair runs that one at its own settings); watch progress, pull the result
 # back as one .zip. Its Settings and Outputs boxes are the workflow's own
 # `settings:` / `outputs:` blocks; the ~300 per-step knobs are still all
 # there, behind the "Per-step settings" fold.

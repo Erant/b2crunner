@@ -282,8 +282,8 @@ class TestSubmitting(ApiTestCase):
         self.assertEqual(overrides["seed"], 7)
 
     def test_step_params_reach_the_job_under_their_step_id(self):
-        self.submit_sheet(step_params=json.dumps({"denoise_pass1": {"steps": 3}}))
-        self.assertEqual(self.submitted[0].step_overrides, {"denoise_pass1": {"steps": 3}})
+        self.submit_sheet(step_params=json.dumps({"denoise_pass1": {"steps_high": 3}}))
+        self.assertEqual(self.submitted[0].step_overrides, {"denoise_pass1": {"steps_high": 3}})
 
     def test_an_output_whose_requires_is_off_is_forced_off(self):
         # Same rule the UI's greyed-out checkbox states: with the upscale

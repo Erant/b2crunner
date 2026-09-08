@@ -230,12 +230,12 @@ class TestAgainstAServer(unittest.TestCase):
         self.client.submit(
             reference_image=str(self._sheet()),
             settings={"run_upscale": False, "seed": 11},
-            step_params={"denoise_pass1": {"steps": 3}},
+            step_params={"denoise_pass1": {"steps_high": 3}},
         )
         job = self.submitted[0]
         self.assertIs(job.global_overrides["run_upscale"], False)
         self.assertEqual(job.global_overrides["seed"], 11)
-        self.assertEqual(job.step_overrides, {"denoise_pass1": {"steps": 3}})
+        self.assertEqual(job.step_overrides, {"denoise_pass1": {"steps_high": 3}})
 
     def test_a_refusal_arrives_with_the_servers_own_wording(self):
         with self.assertRaises(ApiError) as caught:

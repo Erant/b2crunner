@@ -28,8 +28,11 @@ import shutil
 import threading
 import time
 import zipfile
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
+
+import yaml
 
 from . import steps  # noqa: F401  registers every Step; the registry must be whole
 from .gpu_scheduler import GpuScheduler
@@ -42,8 +45,9 @@ from .workflow import Output, WorkflowSpec, apply_ui_overrides
 logger = logging.getLogger(__name__)
 
 # There is no workflow picker: every submission — an image, or a zip of
-# image/prompt pairs — runs this one workflow. The `workflow` argument
-# exists so a caller can be explicit, not so it can pick something else.
+# image/prompt/settings triples — runs this one workflow. The `workflow`
+# argument exists so a caller can be explicit, not so it can pick something
+# else.
 WORKFLOW_NATIVE = "fast_helical_native"
 
 
@@ -209,8 +213,132 @@ def workflow_param_panel(
 # can decode.
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
 
-# One (reference_image, prompt) per run a submission fans out to.
-RunPlan = List["tuple[Path, str]"]
+# The settings sidecar a zip member may carry beside its image, in the
+# order a stem is looked up. `.json` is read by the same loader — JSON is
+# a subset of YAML — and exists only so a script can drop in the object it
+# would otherwise have POSTed as `settings`/`step_params`.
+SETTINGS_SUFFIXES = (".yaml", ".yml", ".json")
+
+
+@dataclass
+class PlannedRun:
+    """One run a submission fans out to: a reference sheet, its prompt, and
+    whatever settings file rode beside it.
+
+    The overrides here are *per image*, applied on top of the
+    submission-wide ones the front end sent (the param panel, or the API's
+    `settings`/`step_params`), which is what turns a zip into a sweep
+    rather than twelve subjects at one setting: `image1.yaml` says
+    `align_iters: 8`, `image2.yaml` says `align_iters: 0`, and the two runs
+    differ by exactly that and nothing else. The same image copied under a
+    dozen names, each with its own sidecar, is a dozen variants of one
+    subject.
+
+    `settings_path` is carried only so a refusal can name the file somebody
+    has to go and fix — by the time one is refused there is a zip of them.
+    """
+
+    reference_image: Path
+    prompt: str = ""
+    global_overrides: Dict[str, Any] = field(default_factory=dict)
+    step_overrides: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    settings_path: Optional[Path] = None
+
+    def __post_init__(self) -> None:
+        # Both are read as paths (`.name` in a refusal, `.stem` in the run
+        # name), and a caller building one of these by hand — a test, a
+        # script driving `submit_runs` directly — reaches for a string.
+        self.reference_image = Path(self.reference_image)
+        if self.settings_path is not None:
+            self.settings_path = Path(self.settings_path)
+
+
+# One PlannedRun per run a submission fans out to.
+RunPlan = List[PlannedRun]
+
+
+def read_settings_sidecar(path: Path) -> Tuple[Dict[str, Any], Dict[str, Dict[str, Any]]]:
+    """`(settings, step_params)` from one `image1.yaml` beside its image.
+
+    Deliberately the API's own two field names, so a sidecar and the JSON
+    body you would otherwise have POSTed are the same document:
+
+        settings:            # the workflow's declared knobs
+          run_upscale: false
+        step_params:         # a step id, then that step's own params
+          brush_final:
+            align_iters: 8
+
+    Both keys are optional; an empty file is no overrides. Nothing here
+    checks that a key names a real setting — that needs the workflow, and
+    it happens in `submit_runs`, which refuses one that does not (see
+    `_refuse_unknown_overrides`). This only refuses what is not a
+    submission at all, and every refusal names the file: the caller is
+    looking at an archive of a dozen of these, not at one.
+    """
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (yaml.YAMLError, UnicodeDecodeError) as exc:
+        raise SubmitError(f"{path.name} does not parse as YAML or JSON: {exc}") from None
+    if data is None:
+        return {}, {}
+    if not isinstance(data, dict):
+        raise SubmitError(
+            f"{path.name} must be a mapping with `settings:` and/or `step_params:`, "
+            f"not a {type(data).__name__}."
+        )
+
+    unknown = sorted(set(data) - {"settings", "step_params"})
+    if unknown:
+        hint = (" The prompt belongs in the matching .txt file."
+                if "prompt" in unknown else "")
+        raise SubmitError(
+            f"{path.name} has nowhere to put: {', '.join(unknown)}. A settings "
+            f"sidecar holds `settings:` (the workflow's own knobs) and "
+            f"`step_params:` (a step id, then that step's params).{hint}"
+        )
+
+    settings = data.get("settings") or {}
+    step_params = data.get("step_params") or {}
+    if not isinstance(settings, dict):
+        raise SubmitError(
+            f"{path.name}: `settings:` must be a mapping of setting to value."
+        )
+    if not isinstance(step_params, dict):
+        raise SubmitError(
+            f"{path.name}: `step_params:` must be a mapping of step id to that "
+            f"step's params."
+        )
+    for step_id, values in step_params.items():
+        if not isinstance(values, dict):
+            raise SubmitError(
+                f"{path.name}: `step_params: {step_id}:` must be a mapping of param "
+                f"to value, not a {type(values).__name__}."
+            )
+    return dict(settings), {str(k): dict(v) for k, v in step_params.items()}
+
+
+def _settings_sidecar(image: Path) -> Optional[Path]:
+    """The settings file beside `image`, if it has one.
+
+    Two spellings of the same stem is refused rather than picked between:
+    `image1.yaml` next to `image1.json` means somebody edited one and
+    forgot the other, and running the loser is the hours-of-GPU-at-the-
+    wrong-settings failure the rest of this file exists to prevent.
+    """
+    found = [
+        candidate
+        for suffix in SETTINGS_SUFFIXES
+        for candidate in (image.with_suffix(suffix), image.with_suffix(suffix.upper()))
+        if candidate.exists()
+    ]
+    if len(found) > 1:
+        raise SubmitError(
+            f"{image.name} has more than one settings sidecar: "
+            + ", ".join(p.name for p in found)
+            + ". Keep one."
+        )
+    return found[0] if found else None
 
 
 def _guarded_extract(zip_path: str, target: Path) -> Path:
@@ -238,18 +366,25 @@ def _iter_files(root: Path):
     return (p for p in root.rglob("*") if p.is_file() and "__MACOSX" not in p.parts)
 
 
-def pair_images_with_prompts(root: Path, fallback_prompt: str = "") -> List["tuple[Path, str]"]:
-    """[(image_path, prompt), ...] for every image under an already-extracted zip.
+def pair_images_with_prompts(root: Path, fallback_prompt: str = "") -> RunPlan:
+    """One `PlannedRun` per image under an already-extracted zip.
 
     Pairing is by stem within a directory — `image1.jpg` takes `image1.txt`
-    beside it — so a zip made by selecting files and one made by zipping a
-    folder both work.
+    and `image1.yaml` beside it — so a zip made by selecting files and one
+    made by zipping a folder both work.
 
-    Two shapes are accepted. If the archive carries any `.txt` it is treated
-    as image/prompt pairs and every image must have its match (a missing one
-    is a slip, not an intent to run promptless). If it carries none, each
-    image is a bare reference sheet and `fallback_prompt` — what the Subject
-    box holds — is the prompt for all of them.
+    Two prompt shapes are accepted. If the archive carries any `.txt` it is
+    treated as image/prompt pairs and every image must have its match (a
+    missing one is a slip, not an intent to run promptless). If it carries
+    none, each image is a bare reference sheet and `fallback_prompt` — what
+    the Subject box holds — is the prompt for all of them.
+
+    The settings sidecar is optional for every image, unlike the prompt:
+    it holds this run's overrides and having none is the ordinary case. One
+    that matches no image is refused rather than ignored — a sidecar named
+    for a stem that is not there is a typo, and a typo that quietly changes
+    nothing is the worst outcome available: the batch completes, hours
+    later, at settings nobody chose.
     """
     images = sorted(p for p in _iter_files(root) if p.suffix.lower() in IMAGE_SUFFIXES)
     if not images:
@@ -258,19 +393,38 @@ def pair_images_with_prompts(root: Path, fallback_prompt: str = "") -> List["tup
             "`image1.jpg` + `image1.txt` pairs)."
         )
     have_prompts = any(p.suffix.lower() == ".txt" for p in _iter_files(root))
+    sidecars = {
+        p for p in _iter_files(root) if p.suffix.lower() in SETTINGS_SUFFIXES
+    }
 
-    pairs: List["tuple[Path, str]"] = []
+    plan: RunPlan = []
     missing: List[str] = []
+    matched: set = set()
     for image in images:
         prompt_file = next(
             (image.with_suffix(s) for s in (".txt", ".TXT") if image.with_suffix(s).exists()),
             None,
         )
-        if prompt_file is None:
-            (missing.append(image.name) if have_prompts
-             else pairs.append((image, fallback_prompt)))
+        if prompt_file is None and have_prompts:
+            missing.append(image.name)
             continue
-        pairs.append((image, prompt_file.read_text(encoding="utf-8").strip() or fallback_prompt))
+        prompt = fallback_prompt
+        if prompt_file is not None:
+            prompt = prompt_file.read_text(encoding="utf-8").strip() or fallback_prompt
+
+        settings_path = _settings_sidecar(image)
+        overrides, step_overrides = (
+            read_settings_sidecar(settings_path) if settings_path else ({}, {})
+        )
+        if settings_path is not None:
+            matched.add(settings_path)
+        plan.append(PlannedRun(
+            reference_image=image,
+            prompt=prompt,
+            global_overrides=overrides,
+            step_overrides=step_overrides,
+            settings_path=settings_path,
+        ))
 
     if missing:
         raise SubmitError(
@@ -278,7 +432,14 @@ def pair_images_with_prompts(root: Path, fallback_prompt: str = "") -> List["tup
             + ". Give every image a same-named .txt beside it, or remove all the "
             ".txt files to use the Subject box for each."
         )
-    return pairs
+    orphans = sorted(p.name for p in sidecars - matched)
+    if orphans:
+        raise SubmitError(
+            "No image matches the settings file(s): " + ", ".join(orphans)
+            + ". Name each one after the image it belongs to (`image1.jpg` + "
+            "`image1.yaml`), or take it out of the zip."
+        )
+    return plan
 
 
 def resolve_upload(upload_path: str, prompt: str) -> RunPlan:
@@ -286,16 +447,21 @@ def resolve_upload(upload_path: str, prompt: str) -> RunPlan:
 
     Content decides — there is no input picker any more:
 
-      * a bare image file        -> one reference-sheet run
-      * a .zip of images (+ .txt) -> one run per image
+      * a bare image file                    -> one reference-sheet run
+      * a .zip of images (+ .txt, + .yaml)   -> one run per image, each at
+                                                its own settings
+
+    A bare image carries no sidecar: it is one file, and whatever a caller
+    would have put in a settings file it can send as the submission's own
+    overrides instead.
     """
     suffix = Path(upload_path).suffix.lower()
     if suffix in IMAGE_SUFFIXES:
-        return [(save_upload(upload_path, "reference"), prompt)]
+        return [PlannedRun(save_upload(upload_path, "reference"), prompt)]
     if suffix != ".zip":
         raise SubmitError(
             f"Don't know what to do with a {suffix or 'no-extension'} file — upload "
-            "a .zip of image/prompt pairs or a single reference image."
+            "a .zip of image/prompt/settings triples or a single reference image."
         )
 
     # Same random suffix, and it matters more here: `_guarded_extract` is
@@ -426,7 +592,7 @@ def submit_runs(
     workflow: str = WORKFLOW_NATIVE,
     strict: bool = False,
 ) -> List[str]:
-    """Queue one run per (reference sheet, prompt) in `plan`; return their names.
+    """Queue one run per `PlannedRun` in `plan`; return their names.
 
     The one place a `RunJob` is built. Both front ends come through here, so
     a browser submission and an HTTP one cannot mean different things — the
@@ -434,15 +600,28 @@ def submit_runs(
     outputs off, and the same workflow is validated before anything is
     queued.
 
+    Each run's own settings sidecar is applied on top of the
+    submission-wide overrides, key by key: a `settings:` the sidecar names
+    replaces the panel's, a `step_params:` entry merges into that step's,
+    and everything the sidecar is silent about is whatever the submission
+    said. The sidecar wins because it is the more specific of the two —
+    the panel is what this batch runs at, the sidecar is what *this image*
+    runs at.
+
     Validated *here*, before the first job is queued, rather than inside the
     worker: a bad override should fail while the caller is still listening,
     not forty minutes into a run a `pipeline.run_worker` process reports as
-    merely "failed". The overrides are identical across a fanned-out batch,
-    so one check covers every job it produces.
+    merely "failed". Once per plan entry, not once per batch: the entries no
+    longer have to agree, so a sidecar that names a setting that does not
+    exist, or one that switches every output off, has to be caught on its
+    own run. Nothing is queued until every entry has passed — a batch that
+    is half-submitted and then refused is the shape that wastes GPU.
 
-    `strict` decides what an override this workflow does not declare means:
-    a typo to refuse (an API client) or a stale control to drop (a browser
-    whose panel was drawn before the workflow changed under it). See
+    `strict` decides what a *submission-wide* override this workflow does
+    not declare means: a typo to refuse (an API client) or a stale control
+    to drop (a browser whose panel was drawn before the workflow changed
+    under it). A sidecar's own keys are refused either way — a file
+    somebody wrote by hand for this run has no stale panel to forgive. See
     `_refuse_unknown_overrides`.
 
     Returns the run names in plan order; `submit()` never blocks, so this
@@ -462,58 +641,83 @@ def submit_runs(
     step_overrides = {k: dict(v) for k, v in (step_overrides or {}).items()}
 
     workflow_path = resolve_workflow(workflow)
-    spec = WorkflowSpec.from_yaml(workflow_path)
-    if strict:
-        _refuse_unknown_overrides(spec, global_overrides, step_overrides)
-    try:
-        apply_ui_overrides(spec, global_overrides, step_overrides)
-        # The deliverable switches, with every `requires:` applied and
-        # "exports nothing" refused. Written back into both the spec (so
-        # `validate` and the step list see the run that will actually
-        # happen) and the overrides (so the worker, which re-reads the
-        # pristine YAML, reaches the same answer).
-        forced = resolve_outputs(spec)
-        global_overrides.update(forced)
-        spec.globals.update(forced)
-        spec.validate()
-    except ValueError as exc:
-        # `ParamError` (a ValueError) for a value of the wrong type for the
-        # setting it names, plain ValueError for a workflow this
-        # submission's overrides have made invalid. Either way it is
-        # something the caller can fix, and the exception's own message
-        # already says what — so it becomes the refusal rather than being
-        # restated. Without this the UI shows a traceback and the API
-        # answers 500 for what is plainly a bad request. `SubmitError` is
-        # not a ValueError, so `resolve_outputs`' own refusal passes
-        # through with its wording intact.
-        raise SubmitError(str(exc)) from None
-
     fanned_out = len(plan) > 1
-    names: List[str] = []
-    for reference_image, run_prompt in plan:
+    jobs: List[RunJob] = []
+    for planned in plan:
+        merged_globals = {**global_overrides, **planned.global_overrides}
+        merged_steps = {k: dict(v) for k, v in step_overrides.items()}
+        for step_id, values in planned.step_overrides.items():
+            merged_steps.setdefault(step_id, {}).update(values)
+
+        # A fresh spec per entry: `apply_ui_overrides` mutates it, so two
+        # entries sharing one would have the first one's settings under the
+        # second one's sidecar.
+        spec = WorkflowSpec.from_yaml(workflow_path)
+        # Which file a refusal is about. Only worth saying when a sidecar
+        # is in play — without one every entry carries the same overrides
+        # and the message would be the same for all of them.
+        blame = (
+            f"{planned.reference_image.name} (with {planned.settings_path.name}): "
+            if planned.settings_path is not None else ""
+        )
+        try:
+            if strict:
+                _refuse_unknown_overrides(spec, merged_globals, merged_steps)
+            elif planned.settings_path is not None:
+                _refuse_unknown_overrides(
+                    spec, planned.global_overrides, planned.step_overrides
+                )
+            apply_ui_overrides(spec, merged_globals, merged_steps)
+            # The deliverable switches, with every `requires:` applied and
+            # "exports nothing" refused. Written back into both the spec (so
+            # `validate` and the step list see the run that will actually
+            # happen) and the overrides (so the worker, which re-reads the
+            # pristine YAML, reaches the same answer).
+            forced = resolve_outputs(spec)
+            merged_globals.update(forced)
+            spec.globals.update(forced)
+            spec.validate()
+        except (ValueError, SubmitError) as exc:
+            # `ParamError` (a ValueError) for a value of the wrong type for
+            # the setting it names, plain ValueError for a workflow this
+            # submission's overrides have made invalid, `SubmitError` for
+            # `resolve_outputs`' "exports nothing". Either way it is
+            # something the caller can fix, and the exception's own message
+            # already says what — so it becomes the refusal rather than
+            # being restated, with only the offending file prepended.
+            # Without this the UI shows a traceback and the API answers 500
+            # for what is plainly a bad request.
+            raise SubmitError(blame + str(exc)) from None
+
         # A fanned-out batch names each run after its image so the picker
         # reads `fast_helical_native-image1-...`; a single run keeps the bare
         # workflow prefix it always had. The stem is squeezed to
         # filename-safe chars — it becomes a directory and a log-file name.
         prefix = spec.name
         if fanned_out:
-            stem = re.sub(r"[^A-Za-z0-9._-]+", "-", Path(reference_image).stem).strip("-")
+            stem = re.sub(
+                r"[^A-Za-z0-9._-]+", "-", planned.reference_image.stem
+            ).strip("-")
             prefix = f"{spec.name}-{stem}" if stem else spec.name
         run_name = timestamped_run_name(prefix)
-        scheduler.submit(RunJob(
+        jobs.append(RunJob(
             run_name=run_name,
             workflow_name=spec.name,
             workflow_path=str(workflow_path),
             output_dir=str(output_dir() / run_name),
             envs_path=envs_path,
-            global_overrides=global_overrides,
-            step_overrides=step_overrides,
-            reference_image=str(reference_image),
-            prompt=run_prompt,
+            global_overrides=merged_globals,
+            step_overrides=merged_steps,
+            reference_image=str(planned.reference_image),
+            prompt=planned.prompt,
         ))
-        names.append(run_name)
+
+    names: List[str] = []
+    for job in jobs:
+        scheduler.submit(job)
+        names.append(job.run_name)
     logger.info(
-        "queued %d run(s) of %s: %s", len(names), spec.name, ", ".join(names)
+        "queued %d run(s) of %s: %s", len(names), jobs[0].workflow_name, ", ".join(names)
     )
     return names
 

@@ -235,7 +235,7 @@ class SubmitBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     reference_image: str = Field(
-        ..., description="Path on the pod to a reference sheet, or a .zip of image/prompt pairs.",
+        ..., description="Path on the pod to a reference sheet, or a .zip of image/prompt/settings files.",
     )
     prompt: str = ""
     settings: Dict[str, Any] = Field(
@@ -282,7 +282,7 @@ def _parse_json_field(
             raise HTTPException(
                 status_code=400,
                 detail=f"{field}: {', '.join(bad)} must map to an object of "
-                       f'that step\'s params, e.g. {{"{bad[0]}": {{"steps": 4}}}}.',
+                       f'that step\'s params, e.g. {{"{bad[0]}": {{"steps_high": 3}}}}.',
             )
     return value
 
@@ -425,7 +425,7 @@ def build_router(
     async def create_runs(
         request: Request,
         file: Optional[UploadFile] = File(
-            None, description="A reference sheet, or a .zip of image/prompt pairs.",
+            None, description="A reference sheet, or a .zip of image/prompt/settings files.",
         ),
         prompt: str = Form(""),
         settings: Optional[str] = Form(None, description="A JSON object of workflow settings."),

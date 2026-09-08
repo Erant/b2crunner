@@ -404,7 +404,8 @@ def add_parser(subparsers) -> argparse.ArgumentParser:
     def submission_args(parser: argparse.ArgumentParser) -> None:
         parser.add_argument(
             "image",
-            help="A reference sheet, or a .zip of image/prompt pairs (one run per pair)",
+            help="A reference sheet, or a .zip of image/prompt pairs (one run per "
+                 "pair; add image1.yaml beside one to give it its own settings)",
         )
         parser.add_argument("--prompt", default="", help="Subject description")
         parser.add_argument(

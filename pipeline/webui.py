@@ -23,6 +23,13 @@ picker (`resolve_upload`). Two shapes are understood:
     files works too: each is a reference sheet and the Subject box is the
     prompt for all of them.
 
+    An image may also carry `image1.yaml` (or `.yml`/`.json`), a settings
+    sidecar holding this run's own `settings:` and `step_params:` on top of
+    whatever the form below says. That is what makes the same box a sweep:
+    one image copied a dozen times, a dozen sidecars, one submission — and
+    twelve runs differing by exactly the knob under test. See
+    `runs.read_settings_sidecar`.
+
 Both shapes run the same workflow, `fast_helical_native`, so there is no
 workflow picker either.
 
@@ -435,7 +442,9 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
                     gr.Markdown(
                         "_Upload **one** of:_\n"
                         "- _a **`.zip` of `image1.jpg` + `image1.txt` pairs** — one "
-                        "run per pair, fanned across every GPU;_\n"
+                        "run per pair, fanned across every GPU. Add "
+                        "`image1.yaml` (`settings:` / `step_params:`) beside a "
+                        "pair to run just that one at its own settings;_\n"
                         "- _a single **reference-sheet image** — one run._\n\n"
                         "_Either shape runs `fast_helical_native`._"
                     )

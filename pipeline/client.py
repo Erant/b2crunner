@@ -153,7 +153,8 @@ class B2CClient:
         """Queue a run per reference sheet; return their `RunState` dicts.
 
         `reference_image` uploads a local file (an image, or a `.zip` of
-        image/prompt pairs). `remote_path` names one already on the pod
+        image/prompt pairs, each optionally with its own `image1.yaml`
+        settings sidecar). `remote_path` names one already on the pod
         instead — the right choice for anything large, since the upload
         would otherwise cross the pod's HTTP proxy to reach a disk it is
         already on.

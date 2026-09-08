@@ -60,7 +60,7 @@ class TestRunWorkerSubprocess(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def _run(self, run_name: str, gpu_index: str) -> dict:
+    def _run(self, run_name: str, gpu_index: str, **overrides) -> dict:
         out_dir = self.root / f"{run_name}-out"
         workflow_path = self.root / f"{run_name}.yaml"
         _write_workflow(workflow_path, out_dir / "checkpoint")
@@ -68,7 +68,7 @@ class TestRunWorkerSubprocess(unittest.TestCase):
         job = RunJob(
             run_name=run_name, workflow_name=run_name,
             workflow_path=str(workflow_path), output_dir=str(out_dir),
-            envs_path=ENVS_PATH, dataset_dir=str(DATASET),
+            envs_path=ENVS_PATH, dataset_dir=str(DATASET), **overrides,
         )
         job_path = self.root / f"{run_name}.job.json"
         status_path = self.root / f"{run_name}.status.json"
@@ -113,6 +113,20 @@ class TestRunWorkerSubprocess(unittest.TestCase):
         self.assertNotEqual(state_a["log_path"], state_b["log_path"])
         self.assertEqual(state_a["status"], "done")
         self.assertEqual(state_b["status"], "done")
+
+    def test_the_run_log_says_what_this_run_was_overridden_with(self):
+        """The log is what rides in the result .zip as `log.txt`, and a
+        sweep — a zip of images each with its own settings sidecar — is a
+        dozen archives that differ by a knob or two. Without this the
+        archive cannot say which variant produced it: the run name carries
+        the subject, not the settings."""
+        state = self._run(
+            "run-overridden", gpu_index="0",
+            step_overrides={"checkpoint": {"directory": str(self.root / "elsewhere")}},
+        )
+        log = Path(state["log_path"]).read_text()
+        self.assertIn("step params: checkpoint:", log)
+        self.assertIn("elsewhere", log)
 
     def test_a_bad_override_fails_the_run_not_the_worker(self):
         """`spec.validate()` runs inside the worker too (webui.py validates
