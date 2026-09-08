@@ -248,11 +248,16 @@ class TestTheDinov3SourceTree(unittest.TestCase):
                 self.assertEqual(models._fetch_dinov3_hub(), "/hub/x")
         torch.hub._get_cache_or_reload.assert_called_once()
 
-    def test_it_is_wired_to_every_step_that_builds_the_model(self):
-        """All three call `load_sam_3d_body`, so all three construct
-        Dinov3Backbone — the same three the checkpoint entry names."""
+    def test_it_is_wired_to_every_step_that_builds_the_backbone(self):
+        """sam3d_body calls `load_sam_3d_body`, which constructs
+        Dinov3Backbone through torch.hub. fit_head_to_face shares the
+        checkpoint but builds the MHR head alone (2026-09-07), so it must
+        NOT be listed here: a hub source it does not read would make it
+        block on a prefetch it does not need."""
         sources = models.registry()
-        self.assertEqual(sources["dinov3_hub"].steps, sources["sam3dbody"].steps)
+        self.assertEqual(sources["dinov3_hub"].steps, ("sam3d_body",))
+        self.assertIn("fit_head_to_face", sources["sam3dbody"].steps)
+        self.assertNotIn("fit_head_to_face", sources["dinov3_hub"].steps)
 
 
 class TestRequiredForSteps(unittest.TestCase):

@@ -515,13 +515,14 @@ def _registry() -> List[ModelSource]:
         ModelSource(
             # The dinov3 backbone SOURCE, not weights: 20 MB of Python that
             # sam_3d_body pulls from GitHub through torch.hub the first time
-            # either of these builds the model. Same two steps as the
-            # checkpoint above, because both call `load_sam_3d_body`.
+            # a step builds the model. Only sam3d_body does now:
+            # fit_head_to_face used to call `load_sam_3d_body` too, and
+            # since 2026-09-07 builds the MHR head alone, backbone-free.
             # Prefetching it is also what keeps two workers on a multi-GPU
             # pod from racing torch.hub into a half-extracted tree — see
             # `_fetch_dinov3_hub`.
             "dinov3_hub", f"{DINOV3_HUB_REPO} (sam3d_body backbone source)",
-            ("sam3d_body", "fit_head_to_face"),
+            ("sam3d_body",),
             _fetch_dinov3_hub, _probe_dinov3_hub, approx_gb=0.02,
         ),
         ModelSource(

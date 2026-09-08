@@ -596,6 +596,12 @@ steps:
 
   # The fit itself, in the sam3dbody env because it needs the MHR body
   # model (the same checkpoint reconstruct_body loaded — no new download).
+  # It builds the MHR head ALONE from that checkpoint, not the SAM-3D-Body
+  # model around it: no DINOv3 backbone, ~25 MB of the 2.1 GB read, 0.7 GB
+  # of VRAM instead of 3.5 (2026-09-07; it used to be most of this step's
+  # 70 s on a pod). The optimiser itself is ~10 ms an iteration on a 4070
+  # Ti and bound by launch overhead, not the GPU — `iterations` is the
+  # knob if the remaining ~10 s matter.
   # Overwrites the geometry AND pose_params, so everything downstream —
   # the render, the face splat's depth alignment, any later replay — sees
   # one consistent head. `shape_regularisation` 1.0 keeps the head shape

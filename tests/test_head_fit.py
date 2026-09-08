@@ -35,6 +35,26 @@ def _skeleton_and_mesh(focal=1000.0, width=720, height=1280, depth=2.5):
     return joints, np.concatenate([head_verts, body_verts]), focal, width, height
 
 
+class TestHeadStateDict(unittest.TestCase):
+    """The fit builds the MHR head alone and feeds it the checkpoint's
+    `head_pose.*` entries — not the backbone's, not the hand twin's."""
+
+    def test_it_keeps_the_heads_entries_only_and_strips_the_prefix(self):
+        checkpoint = {"state_dict": {
+            "backbone.encoder.blocks.0.weight": 1,
+            "head_pose.scale_mean": 2,
+            "head_pose.keypoint_mapping": 3,
+            "head_pose_hand.scale_mean": 4,
+            "init_pose.weight": 5,
+        }}
+        self.assertEqual(head_fit.head_state_dict(checkpoint),
+                         {"scale_mean": 2, "keypoint_mapping": 3})
+
+    def test_a_bare_state_dict_works_too(self):
+        self.assertEqual(head_fit.head_state_dict({"head_pose.faces": 1, "x": 2}),
+                         {"faces": 1})
+
+
 class TestHeadCrop(unittest.TestCase):
     def test_the_box_holds_the_head_and_not_the_body(self):
         joints, verts, focal, w, h = _skeleton_and_mesh()
