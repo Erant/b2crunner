@@ -25,7 +25,8 @@ requests>=2.31.0
 #
 # NOTE the pinned body2colmap commit in docker/Dockerfile: steps/render.py's
 # `...+splat` render modes pass a `splat_layer` into
-# `Renderer.render_composite`, which only exists from 24fe424 on.
+# `Renderer.render_composite`, which only exists from 24fe424 on, and its
+# `outline_masks` input needs `render_outline(mask=...)`, from 76a74bc on.
 #
 # `pointmap_splat` needs `scipy` — ndimage for the mask morphology, and
 # sparse/cg for the normal integration. Not listed as a hard requirement

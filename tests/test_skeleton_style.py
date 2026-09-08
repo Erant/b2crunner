@@ -160,5 +160,88 @@ class TestOutlineAblation(_RenderStepCase):
         self.assertIn("outline+splat", choices)
 
 
+class TestSuppliedOutline(_RenderStepCase):
+    """`outline_masks`: the silhouette from a matte instead of the mesh.
+
+    body2colmap draws whatever bool it is handed in `modes["outline"]["mask"]`
+    (its own tests cover the drawing); what this step owns is which mask
+    reaches which frame, the threshold, and the refusals.
+    """
+
+    def _mattes(self, n=2, size=(8, 8), value=0.7):
+        w, h = size
+        mattes = []
+        for i in range(n):
+            m = np.zeros((h, w), dtype=np.float32)
+            m[i + 1 : i + 4, 2:6] = value
+            mattes.append(m)
+        return mattes
+
+    def _run_with(self, mattes, **params):
+        step = get_step_class("render")()
+        return step.run(
+            {"mesh_output": self.mesh_output, "outline_masks": mattes},
+            get_step_class("render").resolve_params(
+                {"n_frames": 2, "resolution": [8, 8],
+                 "render_mode": "outline+skeleton", **params}),
+        )
+
+    def test_each_frame_gets_its_own_thresholded_matte(self):
+        mattes = self._mattes()
+        self._run_with(mattes)
+        for index, (name, kwargs) in enumerate(self.recorder.calls):
+            self.assertEqual(name, "render_composite")
+            mask = kwargs["modes"]["outline"]["mask"]
+            self.assertEqual(mask.dtype, np.bool_)
+            self.assertTrue(np.array_equal(mask, mattes[index] >= 0.5))
+        self.assertFalse(np.array_equal(
+            self.recorder.calls[0][1]["modes"]["outline"]["mask"],
+            self.recorder.calls[1][1]["modes"]["outline"]["mask"],
+        ))
+
+    def test_the_threshold_is_a_param(self):
+        self._run_with(self._mattes(value=0.7), outline_mask_threshold=0.8)
+        mask = self.recorder.calls[0][1]["modes"]["outline"]["mask"]
+        self.assertFalse(mask.any())
+
+    def test_a_uint8_matte_is_normalised_first(self):
+        mattes = [(m * 255).astype(np.uint8) for m in self._mattes()]
+        self._run_with(mattes)
+        mask = self.recorder.calls[0][1]["modes"]["outline"]["mask"]
+        self.assertTrue(mask.any())
+
+    def test_the_fill_and_blur_are_unchanged(self):
+        """Only the silhouette's source moves: same colours, same blur."""
+        self._run(render_mode="outline+skeleton")
+        plain = dict(self.recorder.calls[0][1]["modes"]["outline"])
+        self.setUp()
+        self._run_with(self._mattes())
+        supplied = dict(self.recorder.calls[0][1]["modes"]["outline"])
+        supplied.pop("mask")
+        self.assertEqual(repr(plain), repr(supplied))
+
+    def test_without_the_input_no_mask_key_is_sent(self):
+        """An older body2colmap ignores the key silently; a newer one must
+        see None-vs-absent the same way, so the step sends nothing."""
+        self._run(render_mode="outline+skeleton")
+        self.assertNotIn("mask", self.recorder.calls[0][1]["modes"]["outline"])
+
+    def test_the_wrong_count_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "2 frames"):
+            self._run_with(self._mattes(n=3))
+
+    def test_the_wrong_size_is_refused_and_names_the_fix(self):
+        with self.assertRaisesRegex(ValueError, "resize_batch"):
+            self._run_with(self._mattes(size=(6, 8)))
+
+    def test_a_mode_without_an_outline_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "outline"):
+            self._run_with(self._mattes(), render_mode="depth+skeleton")
+
+    def test_the_splat_spelling_takes_it_too(self):
+        self._run_with(self._mattes(), render_mode="outline+skeleton+splat")
+        self.assertIn("mask", self.recorder.calls[0][1]["modes"]["outline"])
+
+
 if __name__ == "__main__":
     unittest.main()

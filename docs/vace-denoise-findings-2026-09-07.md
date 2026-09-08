@@ -182,7 +182,9 @@ that differed from the graph is now matched in the working tree (section
 2: schedule, shift, solver, hand-off, reference fit) but untested on a
 pod. What remains different: the Q8 GGUF vs fp8-scaled quant (rounding
 level), and b2crunner's own control content — the outline silhouette, the
-face splat composited in, MHR-derived joints drawn as DWPose.
+face splat composited in, MHR-derived joints drawn as DWPose. (The outline
+has an alternative since 2026-09-08: docs/re-outline.md, a silhouette cut
+from a matte of a 480p denoise of these very frames, gated off by default.)
 
 **Earlier stage-2/3 finding, still true but a separate thing**: the
 helical re-render anchors at the world origin while the intermediate

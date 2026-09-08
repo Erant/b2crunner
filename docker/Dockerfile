@@ -817,11 +817,21 @@ COPY --from=python-builder /opt/vendor /opt/vendor
 # everywhere else. An older commit is an ImportError inside the render step,
 # but only for a run that switched the flag on — it defaults off.
 #
+# 76a74bc ("Draw the outline from a supplied mask", 2026-09-08) adds
+# `mask=` to `Renderer.render_outline` and forwards `modes["outline"]["mask"]`
+# through `render_composite`. steps/render.py's `outline_masks` input — the
+# re-outline branch of fast_helical_native.yaml — passes a matte-derived
+# silhouette per frame that way. An older commit ignores the key silently
+# (`render_composite` reads its options with `.get`) and draws the mesh
+# outline as before: a run that switched `re_outline` on would spend a third
+# denoise and change nothing, with no error to say so. The assert below is
+# what turns that into a failed build.
+#
 # Failing the build is deliberate: an image built against an older commit
 # would install cleanly and then raise on the first render_splat of a real
 # run, an hour into a pod booking. The last five asserts below are what stop it.
 RUN /opt/venv_base/bin/pip install --force-reinstall --no-deps \
-        'body2colmap @ git+https://github.com/Erant/body2colmap.git@81a0e1b066618519903f96d1a1522ce9ca2fd4ac' \
+        'body2colmap @ git+https://github.com/Erant/body2colmap.git@76a74bcd7fffd40983be1ded74cd4554c2e2d652' \
     && /opt/venv_base/bin/python -c "\
 import inspect; \
 import body2colmap.face as f; \
@@ -844,6 +854,9 @@ assert (sr.INACTIVE, sr.REACTIVE) == (0, 255) \
     and sr.InactiveMaskOptions().threshold == 0.9, \
     'bump the body2colmap pin: steps/render.py needs InactiveMaskOptions, and ' \
     'documents its polarity and 0.9 threshold as the ones it publishes'; \
+assert 'mask' in inspect.signature(Renderer.render_outline).parameters, \
+    'bump the body2colmap pin: steps/render.py needs render_outline(mask=...) ' \
+    'for the outline_masks input, or the re-outline branch silently draws the mesh'; \
 print('body2colmap eye_style default:', f.DEFAULT_EYE_STYLE)"
 
 # NOT /workspace/b2c_runner, which is where this used to live. RunPod's

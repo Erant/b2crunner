@@ -1215,8 +1215,11 @@ class TestWorkflowFiles(unittest.TestCase):
         from it deliberately — but all four copies must still agree.)
 
         The prompts are now a param of each wan22_vace_denoise step, not a
-        workflow global — and each workflow has two denoise passes carrying
-        their own copy, so this checks every one.
+        workflow global — and each workflow has THREE denoise passes carrying
+        their own copy since 2026-09-08: the two full-resolution passes and
+        the gated 480p re-outline pass between the bootstrap and pass 1,
+        which must read as pass 1 does or its silhouette is of a different
+        subject. So this checks every one.
         """
         workflows = _workflows()
         seen = 0
@@ -1233,8 +1236,8 @@ class TestWorkflowFiles(unittest.TestCase):
                     self.assertEqual(
                         step.params.get("negative_prompt"), DENOISE_NEGATIVE_PROMPT
                     )
-            self.assertEqual(passes, 2, f"{path.name}: expected two denoise passes")
-        self.assertEqual(seen, 2 * len(workflows))
+            self.assertEqual(passes, 3, f"{path.name}: expected three denoise passes")
+        self.assertEqual(seen, 3 * len(workflows))
 
     def test_every_render_with_a_backdrop_draws_the_same_room(self):
         """The backdrop was a pipeline SETTING until 2026-09-01, which made
@@ -1521,6 +1524,99 @@ class TestTheFirstDenoiseInputIsKept(unittest.TestCase):
         self.assertEqual(denoise.inputs["control_masks"], "dataset.masks")
 
 
+class TestTheReoutlineBranch(unittest.TestCase):
+    """The experimental branch that redraws the silhouette from a matte
+    (docs/re-outline.md): six gated steps between the anchor injection and
+    the first denoise. What is pinned is what makes it a faithful copy of
+    pass 1 and of the first render — a different denoise would matte a
+    different subject, a different render would put matte i on the wrong
+    camera — and that with the setting off nothing of it runs.
+    """
+
+    BRANCH = [
+        "reoutline_downscale", "reoutline_denoise", "reoutline_matte",
+        "reoutline_upscale_mattes", "render_reoutlined_views",
+        "reinject_anchor_reoutlined",
+    ]
+
+    def _spec(self):
+        from pipeline.cli import resolve_workflow
+
+        return WorkflowSpec.from_yaml(resolve_workflow("fast_helical_native"))
+
+    def _step(self, spec, step_id):
+        return next(s for s in spec.steps if s.id == step_id)
+
+    def test_it_sits_between_the_anchor_injection_and_the_dump(self):
+        spec = self._spec()
+        order = [s.id for s in spec.steps]
+        first = order.index("reinject_anchor_initial") + 1
+        self.assertEqual(order[first:first + len(self.BRANCH)], self.BRANCH)
+        self.assertEqual(order[first + len(self.BRANCH)], "dump_denoise_input")
+
+    def test_every_step_is_gated_on_the_setting_and_it_defaults_off(self):
+        spec = self._spec()
+        setting = next(s for s in spec.settings if s.name == "re_outline")
+        self.assertIs(setting.default, False)
+        for step_id in self.BRANCH:
+            with self.subTest(step=step_id):
+                self.assertEqual(self._step(spec, step_id).when, "${globals.re_outline}")
+
+    def test_the_extra_denoise_is_pass_1_at_480p(self):
+        spec = self._spec()
+        extra = self._step(spec, "reoutline_denoise")
+        pass1 = self._step(spec, "denoise_pass1")
+        expected = dict(pass1.params, width=480, height=832)
+        self.assertEqual(extra.params, expected)
+        self.assertEqual((extra.dispatch, extra.env, extra.keep_loaded),
+                         (pass1.dispatch, pass1.env, pass1.keep_loaded))
+        self.assertEqual(extra.inputs["reference_image"], pass1.inputs["reference_image"])
+        self.assertEqual(extra.inputs["subject_desc"], pass1.inputs["subject_desc"])
+        # It reads the downscaled batch, not the dataset, and writes beside it.
+        self.assertEqual(extra.inputs["control_video"], "scene.reoutline.images")
+        self.assertEqual(extra.inputs["control_masks"], "scene.reoutline.masks")
+        self.assertEqual(extra.outputs, {"images": "scene.reoutline.denoised"})
+
+    def test_the_batch_is_resized_here_not_by_diffusers(self):
+        """diffusers fits a control video under the target AREA (464x832 for
+        a 720x1280 batch asked for 480x832) — see steps/resize.py."""
+        spec = self._spec()
+        down = self._step(spec, "reoutline_downscale")
+        self.assertEqual(down.params, {"width": 480, "height": 832})
+        self.assertEqual(down.inputs, {"images": "dataset.images", "masks": "dataset.masks"})
+        up = self._step(spec, "reoutline_upscale_mattes")
+        self.assertEqual(up.params, {"width": "${globals.resolution.0}",
+                                     "height": "${globals.resolution.1}"})
+        self.assertEqual(up.inputs, {"masks": "scene.reoutline.mattes"})
+        self.assertEqual(up.outputs, {"masks": "scene.outline_masks"})
+
+    def test_the_re_render_is_the_first_render_plus_the_mattes(self):
+        """Same params, so the same cameras; and it republishes nothing about
+        them, so nothing can drift."""
+        spec = self._spec()
+        first = self._step(spec, "render_initial_views")
+        again = self._step(spec, "render_reoutlined_views")
+        self.assertEqual(again.params, first.params)
+        self.assertEqual(again.inputs, dict(first.inputs, outline_masks="scene.outline_masks"))
+        self.assertEqual(set(again.outputs), {"images", "masks", "inactive_masks"})
+        self.assertEqual(again.outputs["images"], "dataset.images")
+
+    def test_the_anchor_goes_back_in_after_the_re_render(self):
+        spec = self._spec()
+        first = self._step(spec, "reinject_anchor_initial")
+        again = self._step(spec, "reinject_anchor_reoutlined")
+        self.assertEqual(again.inputs, first.inputs)
+        self.assertEqual(again.outputs, first.outputs)
+
+    def test_the_480p_pass_lands_in_the_debug_bundle(self):
+        from pipeline.templating import resolve
+
+        spec = self._spec()
+        matte = self._step(spec, "reoutline_matte")
+        scope = {"globals": dict(spec.globals, output_root="/out")}
+        self.assertEqual(resolve(matte.params, scope)["debug_dir"], "/out/debug/reoutline")
+
+
 class TestDeclaredSettings(unittest.TestCase):
     """The `settings:` and `outputs:` blocks, which are the whole UI.
 
@@ -1682,11 +1778,13 @@ class TestDeclaredSettings(unittest.TestCase):
 
     def test_one_seed_reaches_every_stochastic_step(self):
         """It was three step params holding 0, 0 and 42 — one run drawing
-        three unrelated samples."""
+        three unrelated samples. Four readers since 2026-09-08: the gated
+        re-outline denoise draws the same seed as pass 1, so the silhouette
+        it cuts is of the sample pass 1 would have drawn at 480p."""
         for path in _workflows():
             spec = WorkflowSpec.from_yaml(str(path))
             readers = [step.id for step in spec.steps
                        if step.params.get("seed") == "${globals.seed}"]
             with self.subTest(workflow=path.name):
-                self.assertEqual(len(readers), 3, readers)
+                self.assertEqual(len(readers), 4, readers)
                 self.assertTrue(any("upscale" in r for r in readers))

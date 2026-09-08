@@ -67,6 +67,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
+from ..masks import normalize_mask
 from ..registry import register_step
 from ..step import REQUIRED, Param, Step
 from .backdrop import BACKGROUND_FADE_PARAMS, BACKGROUND_PARAMS, build_background
@@ -349,6 +350,56 @@ def _inactive_masks(
     ]
 
 
+def _resolve_outline_masks(
+    mattes: Optional[List[np.ndarray]], *, n_frames: int, width: int, height: int,
+    threshold: float, render_mode: str,
+) -> Optional[List[np.ndarray]]:
+    """The per-frame boolean silhouettes an `outline*` mode draws from, or
+    None to draw the mesh's.
+
+    Refused rather than repaired: a batch of the wrong length is a batch
+    for some other render, and a matte of the wrong size is one nobody
+    resampled onto this render's pixel grid — `resize_batch` is the step
+    for that, and it is named in the error so the fix is one line of
+    workflow. The threshold is applied here, once, so body2colmap gets the
+    bool it asks for and the blur it applies afterwards is the only
+    softening left.
+    """
+    if mattes is None:
+        return None
+    base = render_mode[: -len("+splat")] if render_mode.endswith("+splat") else render_mode
+    if base != "outline" and not base.startswith("outline+"):
+        raise ValueError(
+            f"outline_masks draws the silhouette of an `outline*` render_mode, "
+            f"and {render_mode!r} draws none. Use outline, outline+skeleton or "
+            f"their +splat spellings, or drop the input."
+        )
+    mattes = list(mattes)
+    if len(mattes) != n_frames:
+        raise ValueError(
+            f"outline_masks has {len(mattes)} mattes for {n_frames} frames; "
+            f"the batch must be one per rendered frame, in camera order."
+        )
+    silhouettes = []
+    for index, matte in enumerate(mattes):
+        matte = normalize_mask(matte)
+        if matte.shape != (height, width):
+            raise ValueError(
+                f"outline_masks[{index}] is {matte.shape[1]}x{matte.shape[0]}, "
+                f"the render is {width}x{height}. Put the mattes on the render's "
+                f"pixel grid first (a `resize_batch` step at the render "
+                f"resolution); this step does not resample them."
+            )
+        silhouettes.append(matte >= threshold)
+    covered = [float(m.mean()) for m in silhouettes]
+    logger.info(
+        "render: outline from %d supplied mattes, threshold %.2f, coverage "
+        "%.1f%%-%.1f%% of the frame",
+        len(silhouettes), threshold, 100.0 * min(covered), 100.0 * max(covered),
+    )
+    return silhouettes
+
+
 @register_step("render")
 class RenderStep(Step):
     """Render a camera-path orbit of a SAM-3D-Body mesh/skeleton.
@@ -364,7 +415,16 @@ class RenderStep(Step):
              "anchor_position": Optional[np.ndarray] (3,) — where the
              photograph the splat was built from was taken. Only needed
              for a splat mode without override_cam_from_mesh, which
-             already knows}
+             already knows,
+             "outline_masks": Optional[List[np.ndarray]] — one matte per
+             frame (either mask form, at the render size) that the
+             `outline*` modes draw the silhouette FROM instead of the mesh:
+             thresholded at `outline_mask_threshold`, then filled, coloured
+             and blurred exactly as the mesh silhouette would be
+             (body2colmap `render_outline(mask=...)`, 76a74bc). The
+             re-outline branch hands it rmbg's mattes of a denoised copy of
+             the first render, so the outline is the subject's — hair and
+             clothes included — rather than the body model's}
 
     See body2colmap.path.OrbitPath / body2colmap.renderer.Renderer for the
     exact semantics of each param below — this step is a thin pass-through.
@@ -375,7 +435,10 @@ class RenderStep(Step):
              unioned in, because it is real subject surface exactly as the
              mesh silhouette is, and `Renderer._composite_splat` unions it
              for that reason. The skeleton stays out: it is an annotation,
-             not geometry), "inactive_masks": Optional[List[np.ndarray]] —
+             not geometry. With `outline_masks` given, the base coverage is
+             the thresholded matte's rather than the mesh's — the workflow
+             overwrites these with inject_anchor's VACE flags either way),
+             "inactive_masks": Optional[List[np.ndarray]] —
              the conditioning mask under `splat_inactive_mask`, 0.0 over the
              splat and 1.0 elsewhere, and None when that flag is off (see
              `_inactive_masks`; it is a SECOND batch, not a reinterpretation
@@ -426,6 +489,13 @@ class RenderStep(Step):
               "overlay is composited on top afterwards and stays sharp. "
               "Ignored by every other render_mode",
               minimum=0, advanced=True),
+        Param("outline_mask_threshold", float, 0.5,
+              "With an `outline_masks` input only: the matte level at or "
+              "above which a pixel counts as subject. The silhouette is cut "
+              "hard at this level and then softened by `outline_blur` exactly "
+              "as the mesh silhouette is, so a soft rmbg edge is re-softened "
+              "rather than carried. Ignored without the input",
+              minimum=0.0, maximum=1.0, advanced=True),
         Param("splat_max_angle_deg", float, 60.0,
               "The `+splat` modes only: composite the splat on every frame whose "
               "view of it is within this angle of the photograph's. Past it the "
@@ -826,6 +896,15 @@ class RenderStep(Step):
         elif want_splat:
             logger.info("render: splat_max_angle_deg is 0, nothing composited")
 
+        # The silhouettes an `outline*` mode draws from instead of the mesh,
+        # when the workflow supplies them (the re-outline branch). None means
+        # body2colmap rasterizes the mesh as it always has.
+        outline_masks = _resolve_outline_masks(
+            inputs.get("outline_masks"),
+            n_frames=len(cameras), width=width, height=height,
+            threshold=params["outline_mask_threshold"], render_mode=render_mode,
+        )
+
         # The environment behind every frame (steps/backdrop.py). Handed to
         # the Renderer rather than composited afterwards, because
         # `render_composite` is the only thing that knows where the base
@@ -888,6 +967,8 @@ class RenderStep(Step):
                         "bg_color": outline_bg_color,
                         "blur": outline_blur,
                     }
+                    if outline_masks is not None:
+                        composite_modes["outline"]["mask"] = outline_masks[index]
                 if face_mode is not None and "skeleton" in composite_modes:
                     composite_modes["face"] = {
                         "face_mode": face_mode,

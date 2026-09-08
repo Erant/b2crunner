@@ -37,6 +37,13 @@ class RMBGStep(Step):
               advanced=True),
         Param("device", str, None, "Torch device; empty means cuda if available",
               advanced=True),
+        Param("debug_dir", str, None,
+              "When set, write the frames this step was handed and the mattes "
+              "it produced there as PNGs (frame_NNNNN.png / matte_NNNNN.png). "
+              "The re-outline branch points it under output_root/debug/ so the "
+              "480p denoise output, which exists nowhere else on disk, rides "
+              "in the result .zip. Off (None) for every other instance",
+              advanced=True),
     )
 
     def __init__(self) -> None:
@@ -72,6 +79,8 @@ class RMBGStep(Step):
             masks = []
             for i in range(0, len(images), batch_size):
                 masks.extend(self._run_batch(images[i : i + batch_size]))
+            if params["debug_dir"]:
+                _write_debug(params["debug_dir"], images, masks)
             return {"masks": masks}
 
         return {"mask": self._run_batch([inputs["image"]])[0]}
@@ -103,3 +112,17 @@ class RMBGStep(Step):
             mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_LINEAR)
             out.append(mask.astype(np.float32))
         return out
+
+
+def _write_debug(directory: str, images: List[np.ndarray], masks: List[np.ndarray]) -> None:
+    """The batch and its mattes as PNGs, one pair per frame, 1-based like
+    the dataset's own frame names."""
+    from pathlib import Path
+
+    from ..masks import mask_to_alpha_u8
+
+    out = Path(directory)
+    out.mkdir(parents=True, exist_ok=True)
+    for i, (image, mask) in enumerate(zip(images, masks), start=1):
+        cv2.imwrite(str(out / f"frame_{i:05d}.png"), image)
+        cv2.imwrite(str(out / f"matte_{i:05d}.png"), mask_to_alpha_u8(mask))

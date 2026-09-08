@@ -119,6 +119,7 @@ pipeline/
 │   └── factory.py       build_dispatcher(dispatch, env_config) -> Dispatcher
 ├── steps/
 │   ├── dataset_io.py    save_dataset / load_dataset — real, working
+│   ├── resize.py        resize_batch: frames/masks onto another pixel grid (the re-outline branch)
 │   ├── rmbg.py          real, verified (single-image + batch paths)
 │   ├── wan22_vace_denoise.py  real, verified against real inference
 │   ├── sapiens2.py      real, verified (single-image + batch paths)

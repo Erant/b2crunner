@@ -13,6 +13,22 @@
 # and reads the .ply optionally, so the branch being off leaves it with
 # nothing to composite rather than nothing to resolve.
 #
+# WHAT CHANGED (2026-09-08): **an experimental branch redraws the outline
+# from a matte instead of the mesh** — `re_outline`, a setting, OFF by
+# default. The silhouette pass 1 conditions on is the SAM-3D-Body mesh's,
+# and the mesh is wrong wherever hair and clothing leave the body model
+# (docs/vace-denoise-findings-2026-09-07.md: scalp 7 px low, feet 22 px
+# high). With the setting on, six gated steps between
+# `reinject_anchor_initial` and `dump_denoise_input` run the same control
+# video through a third wan22_vace_denoise at 480x832 with pass 1's exact
+# settings, matte its output with rmbg, bring the mattes back to the render
+# size and render the orbit AGAIN with `outline_masks` — body2colmap
+# 76a74bc's `render_outline(mask=...)` — under the same skeleton and face
+# splat, then re-inject the anchor. `dump_denoise_input` and pass 1 read
+# whichever render came last. docs/re-outline.md has the argument, and the
+# reason the 480p batch is resized HERE rather than handed to diffusers at
+# `width: 480` (it would run at 464x832 and letterbox the reference).
+#
 # WHAT CHANGED (2026-09-07, last): **both trainings run a different
 # trainer, and one of them runs the alignment loop somewhere else.** The
 # `brush` step now drives **b2ctrain** (Erant/b2ctrain: brush's CLI,
@@ -396,6 +412,23 @@ settings:
       what every run before 2026-08-31 used. Note what it never sees: the
       supporting views, which are renders made FROM these poses and so have no
       independent evidence to offer about them.
+
+  - name: re_outline
+    label: Re-outline (experimental)
+    type: bool
+    default: false
+    advanced: true
+    help: >-
+      Draw the silhouette pass 1 conditions on from a matte of the subject
+      instead of from the body mesh. The mesh outline is wrong wherever hair
+      and clothing extend past the body model; this runs the same control
+      video through an extra Wan 2.2 denoise at 480x832 (pass 1's settings
+      exactly), mattes the result with rmbg, and re-renders the orbit with
+      that matte as the outline — skeleton, face splat and everything after
+      unchanged. Costs a third 81-frame denoise (the resident experts are
+      reused, so no second load). Off is the run as it was;
+      `debug/reoutline/` in the result .zip holds the 480p frames and their
+      mattes when it is on. See docs/re-outline.md.
 
 outputs:
   # What stage 6 can produce, and the switch each one is. `name:` is the
@@ -1025,6 +1058,300 @@ steps:
       # Worth knowing what that changes: WITHOUT it, pass 1 is told the
       # whole frame is synthetic and free to repaint the face the splat
       # exists to carry. That has been true of every run to date.
+      masks: scene.inactive_masks?
+    outputs:
+      images: dataset.images
+      masks: dataset.masks
+
+  # ------------------------------------------------- re-outline (experimental)
+  # Six steps, every one gated on `re_outline`, that replace the silhouette
+  # in the drawings above with one cut from a matte of the SUBJECT. With the
+  # setting off none of them runs and pass 1 conditions on the render as it
+  # stands; with it on, the last two steps rewrite dataset.images and
+  # dataset.masks and pass 1 conditions on those instead.
+  #
+  # Why: the outline is the mesh's, and the mesh is a naked body model.
+  # Wherever hair, a coat or a platform sole leaves that model the outline
+  # tells the denoiser the subject stops short of where the photograph
+  # says it goes (docs/vace-denoise-findings-2026-09-07.md measured the
+  # scalp 7 px low and the feet 22 px high on cyber_6f). A denoised copy
+  # of these very frames — the same control video, the same photograph at
+  # the anchor, pass 1's own settings — has the subject where the model
+  # paints it, hair and all, and rmbg cuts that out cleanly. At 480x832 the
+  # pass costs a fraction of pass 1; what it produces is thrown away except
+  # for its silhouette. The skeleton and face splat are re-drawn from the
+  # same mesh and .ply as before, on the same cameras.
+  #
+  # The anchor is injected BEFORE this branch (reinject_anchor_initial,
+  # above), so the extra pass sees the warped photograph at the anchor
+  # frame with its 0.0 VACE mask exactly as pass 1 does, and rmbg of that
+  # frame is the photograph's own matte. It is injected AGAIN at the end
+  # (reinject_anchor_reoutlined) because render_reoutlined_views writes a
+  # fresh render over the whole batch, anchor frame included.
+
+  # 720x1280 -> 480x832, HERE and not in the denoise step. diffusers fits a
+  # control video under the target AREA aspect-preserving and floors to
+  # multiples of 16, so a 720x1280 batch asked for 480x832 would be
+  # denoised at 464x832 with the (480x832-cropped) reference letterboxed
+  # between white bars. Resized to exactly 480x832 first, diffusers has
+  # nothing to fit. The resize is plain and 2.6% anisotropic; the mattes
+  # go back through the same plain resize below, which cancels it.
+  # dataset.masks here is the per-frame VACE flag batch inject_anchor
+  # built (1.0 render / 0.0 anchor), which survives any resize exactly.
+  - id: reoutline_downscale
+    step: resize_batch
+    dispatch: in_process
+    when: ${globals.re_outline}
+    inputs:
+      images: dataset.images
+      masks: dataset.masks
+    params:
+      width: 480
+      height: 832
+    outputs:
+      images: scene.reoutline.images
+      masks: scene.reoutline.masks
+
+  # denoise_pass1's block, character for character, at 480x832. The 480
+  # and 832 are literals on purpose: this pass runs at the low size
+  # whatever the run's `resolution` is, that is the point of it. The
+  # prompts are pinned by tests/test_workflows.py against every
+  # wan22_vace_denoise step, this one included. `keep_loaded: true` puts it
+  # on the same resident worker as the two passes below (the runner keys
+  # workers on dispatch/env/keep_loaded), and width/height are not load
+  # params, so the experts are loaded once for all three.
+  - id: reoutline_denoise
+    step: wan22_vace_denoise
+    dispatch: subprocess
+    env: wan22
+    keep_loaded: true
+    when: ${globals.re_outline}
+    inputs:
+      control_video: scene.reoutline.images
+      control_masks: scene.reoutline.masks
+      reference_image: dataset.reference_image
+      subject_desc: dataset.prompt
+    params:
+      width: 480
+      height: 832
+      steps_high: 2
+      steps_low: 4
+      cfg: 1.0
+      seed: ${globals.seed}
+      strength: [1, 1, 0.75, 0.5, 0.25, 0]
+      prompt: "人工光、柔光、低对比度、环绕运镜。时间静止，人物完全静止。身体\
+        如雕塑般僵硬，胸口没有起伏，头部保持固定角度，面部肌肉完全不动，维持单\
+        一的中性表情。双眼一眨不眨，眼睑保持张开且稳定，目光空洞而固定，锁定远\
+        处墙面上的一个点，对镜头毫无察觉、毫无反应。人物站在一间空房间里：灰色\
+        墙面上有均匀的网格线，深色地板，浅色天花板，墙面相交处有清晰的墙角。房\
+        间本身固定不动，镜头以匀速、固定焦距围绕主体平滑移动，墙角依次从画面中\
+        掠过。灯光属于房间本身，位置固定：主光始终来自人物自身的左前方，右侧是\
+        柔和的补光。人物身上的明暗、阴影与高光始终停留在同一片皮肤和衣物上，每\
+        一帧完全相同——左侧始终是受光面，右侧始终是柔和的暗面；镜头绕到人物右侧\
+        时，看到的正是那一侧的暗面。房间里的阴影同样固定：墙面上的明暗、以及人\
+        物投在地面上的影子，始终落在房间中的同一位置，不随镜头移动。 Time is \
+        frozen and only the camera moves. The gaze stays anchored to that \
+        point on the wall as the camera passes, so the eyes slide across the \
+        frame, always aimed past the lens at the wall behind it. Eyelids stay \
+        open and steady, the expression holds without a single \
+        micro-movement, and the head keeps its exact angle throughout. The \
+        frozen subject is $SUBJECT_DESC$, standing in an empty room: grey \
+        walls ruled with an even grid, a dark floor and a lighter ceiling, \
+        meeting at clear corners. The room is fixed in place and the camera \
+        travels through it, so the walls and their corners sweep past the \
+        frame while the room itself never turns. Soft, low-contrast studio \
+        light: the key sits high on the subject's own left, a soft fill on \
+        their right, both fixed to the room and holding still while the \
+        camera arcs around. Every highlight and shadow stays welded to the \
+        same patch of skin and cloth from the first frame to the last, so \
+        their left remains the lit side and their right remains the \
+        soft-shadowed side for the whole circle; as the camera arcs round to \
+        their right it sees that shadowed side. The room's shadows are just \
+        as fixed: the shading on the walls and the shadow the subject casts \
+        on the floor stay in the same place in the room in every frame, and \
+        do not swing round with the camera. Matte skin, matte cloth, \
+        photorealistic, sharp focus, identical face, clothing and lighting in \
+        every frame."
+      negative_prompt: "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静\
+        止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的\
+        手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体\
+        ，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走, \
+        chewing, tattoos, 眼球运动，眨眼，眼动追踪，微表情，面部抽动，头部移\
+        动, 小头, 小脸"
+    outputs:
+      images: scene.reoutline.denoised
+
+  # The subject, cut out of the denoised 480p frames. `debug_dir` is what
+  # puts this pass on disk at all — nothing else reads scene.reoutline.*
+  # after the resize below — so the frames and their mattes land in the
+  # result .zip's debug/ beside denoise_pass1_input/, which is the drawing
+  # they replace the outline of.
+  - id: reoutline_matte
+    step: rmbg
+    dispatch: in_process
+    when: ${globals.re_outline}
+    inputs:
+      images: scene.reoutline.denoised
+    params:
+      debug_dir: ${globals.output_root}/debug/reoutline
+    outputs:
+      masks: scene.reoutline.mattes
+
+  # Back onto the render's pixel grid. `render` refuses a matte of any other
+  # size rather than resampling it, and this is the one place the size is
+  # decided: the same plain resize as the downscale, inverted.
+  - id: reoutline_upscale_mattes
+    step: resize_batch
+    dispatch: in_process
+    when: ${globals.re_outline}
+    inputs:
+      masks: scene.reoutline.mattes
+    params:
+      width: ${globals.resolution.0}
+      height: ${globals.resolution.1}
+    outputs:
+      masks: scene.outline_masks
+
+  # render_initial_views again, with one input more. The params block is a
+  # copy of that step's, and MUST stay one: the render builds its cameras
+  # from the mesh and these params alone, so an identical block is what
+  # puts matte i on the camera frame i was rendered from. It publishes only
+  # the three things that change — the frames, their alpha and the inactive
+  # masks — and leaves dataset.cameras and every extras.* key as the first
+  # render wrote them (the same values; not re-published so nothing can
+  # drift). tests/test_workflows.py checks the two blocks agree.
+  - id: render_reoutlined_views
+    step: render
+    dispatch: in_process
+    when: ${globals.re_outline}
+    inputs:
+      mesh_output: scene
+      splat_path: scene.face_splat_path?
+      outline_masks: scene.outline_masks
+    params:
+      pattern: circular
+      n_frames: 81
+      resolution: ${globals.resolution}
+      # See the `framing` global: rerender_splat below reads the same value,
+      # and the two renderers must frame the subject identically.
+      framing: ${globals.framing}
+      override_cam_from_mesh: true
+      # Flat silhouette base + the usual skeleton overlay, with the face
+      # splat composited last. The base layer's background is always
+      # #7F7F7F (render.py forces it, `bg_color` below does not reach it),
+      # and `outline_strength` sets how dark the fill is — left at its
+      # default, which lands the fill on #6F6F6F, just off the ground.
+      render_mode: outline+skeleton+splat
+      # The skeleton overlay's drawing convention. `dwpose` is the step
+      # default and what these frames want: the same convention Wan 2.2
+      # VACE's own pose maps are drawn in, measured against
+      # `vace/annotators/dwpose/util.py` (and the identical code in
+      # MimicMotion and comfyui_controlnet_aux) — body limbs dimmed to 60%
+      # with undimmed joint dots, sticks and dots both ~7 px at this
+      # resolution, and hands a quarter as thick under a hue sweep with blue
+      # keypoints.
+      #
+      # The BODY topology is DWPose's exactly: its 17 limbs, no more. So no
+      # feet (DWPose detects them and draws none) and no MidHip — the torso
+      # runs neck->RHip and neck->LHip directly, two limbs crossing the
+      # chest, where BODY_25 drew a Y meeting at the pelvis. The palette is
+      # indexed off that limb order too, which is what the older style got
+      # one hue step out below the hips and across the whole head. Hands are
+      # NOT dropped: MimicMotion draws them unconditionally and
+      # controlnet_aux defaults them on, so they are well in distribution.
+      #
+      # Left unwritten here so the step's default governs;
+      # `skeleton_style: openpose` restores the older look for a comparison,
+      # and `joint_radius`/`bone_radius` follow whichever style is chosen
+      # unless they are set explicitly.
+      #
+      # For the ABLATION — is the skeleton earning its place at all? — set
+      # `render_mode: outline+splat` here. That is this exact frame with the
+      # overlay and nothing else removed: same silhouette, same face
+      # splat, same background, same masks.
+      # The room the drawings stand in — OFF as of 2026-09-04, and off
+      # ENTIRELY: an empty `background` makes build_background return before
+      # it reads a single fade param (steps/backdrop.py), so this one line
+      # takes the grid and the subject fade with it. What stood here was
+      # `background: grid` with `background_base_color: [0.5, 0.5, 0.5]` and
+      # the step's own fade defaults — smoothstep, margin 1, falloff 1,
+      # fading to `plain`.
+      #
+      # Why it goes: the room (2026-09-01), the fade (09-04) and the fade's
+      # margin (09-04) all landed in the three days before a run that came
+      # back not looking right, and nothing on this pipeline has been
+      # compared against a run without them. Off is the baseline that
+      # comparison needs, and one line is a cheaper ablation than three.
+      #
+      # What it costs is the thing the backdrop was added for: over a blank
+      # backdrop a video diffusion model reads an orbit as the SUBJECT
+      # turning rather than the camera travelling — steps/backdrop.py's
+      # docstring is the long version. If the denoise comes back with a
+      # figure that spins in place, or a splat that will not converge
+      # because the frames disagree about which way it faced, this is the
+      # first line to put back. Putting it back is the two lines quoted
+      # at the top of this note; their colours were measured (0.5 walls render a flat 128, seventeen
+      # levels off the #6F6F6F silhouette fill, where grid's own blue-tinted
+      # default landed within four) and the margin was too (1 keeps 33% of
+      # the ruling in frame frontal / 66-72% three-quarter, against 22% / 44%
+      # at 2). This file at `542eb79` has both arguments in full.
+      #
+      # NOTE that `rerender_splat` below followed on 2026-09-05: neither
+      # render draws a room now, so the two denoise passes agree again. What
+      # they do NOT agree with is their own prompt, whose 场景 slot still
+      # describes the gridded room in both passes — see the note on that
+      # string below, and steps/backdrop.py's docstring for the argument
+      # that the room should come back rather than the prompt go.
+      background: ""
+      # Every frame whose view of the head is within this of the
+      # photograph's takes the layer; past it the 2.5-D shell's open rim is
+      # what would appear, so it is dropped entirely. body2colmap measured
+      # that boundary (c65a7f7): a Face_Neck head splat reads cleanly to
+      # about 30 degrees, the rim starts flaring by 45, and by 60 the shell
+      # is mostly edge. 60 is the far end of that on purpose, and it is
+      # passed explicitly rather than left to the step's default for that
+      # reason: out there the alternative is a drawing with no face at all,
+      # and these frames go through two denoise passes that can rewrite a
+      # flared rim. The supporting views make the opposite trade — nothing
+      # rewrites them — and get their own 30-degree cap render below.
+      splat_max_angle_deg: 60.0
+      # Mid grey, not the step's default white. This does NOT change the
+      # rendered background — neither `outline+skeleton`'s flat #7F7F7F base
+      # nor `render_depth` takes bg_color — it changes the ONE other thing
+      # render.py spends this param on: it publishes it as
+      # `image_warp["bg_color"]` (render.py's `if image_warp is not None`
+      # block), which is where warp_reference_to_anchor below gets the
+      # border colour it fills around the warped reference photo.
+      #
+      # 0.5 rather than a literal 127/255, because the recorded run shows
+      # both roundings and 0.5 is what produces them: the renderer does
+      # `int(bg*255)` = 127 and generate_firstlast does `round(bg*255)` =
+      # 128. cyber2_6f/initial has mesh frames at 127 and an anchor.png at
+      # 128 — the same 0.5 down two code paths, which is the evidence that
+      # 0.5 is the value the reference pipeline used. It also matches the
+      # #7F7F7F the outline base grounds on, so the anchor border and the
+      # render backgrounds agree.
+      #
+      # White is the value that cannot be right: the anchor frame reaches
+      # denoise_pass2 sitting among grey renders, and a white border is the
+      # largest possible disagreement with them.
+      bg_color: [0.5, 0.5, 0.5]
+    outputs:
+      images: dataset.images
+      masks: dataset.masks
+      inactive_masks: scene.inactive_masks
+
+  # And the anchor once more, over the fresh render — reinject_anchor_initial
+  # exactly, reading the warped photograph it already made.
+  - id: reinject_anchor_reoutlined
+    step: inject_anchor
+    dispatch: in_process
+    when: ${globals.re_outline}
+    inputs:
+      images: dataset.images
+      cameras: dataset.cameras
+      anchor_position: dataset.extras.anchor_position
+      anchor_image: dataset.anchor_image
       masks: scene.inactive_masks?
     outputs:
       images: dataset.images
