@@ -1081,10 +1081,12 @@ steps:
       # Full scale while the pose is being set, gone by the time the last
       # step paints, which is the lever for a control frame whose skeleton
       # otherwise survives into the output as ink rather than as pose. The
-      # fade sits where it does because of where the experts split: with
-      # this checkpoint's boundary_ratio (0.875) and the scheduler's
-      # flow_shift (3.0) steps 1-2 are the high-noise expert's and steps 3-6
-      # the low-noise one's, so the two 1.0s leave the structure pass
+      # fade sits where it does because of where the experts split: at the
+      # step's default `steps_high: 2` / `steps_low: 4` (the reference
+      # graph's split, on its sampler — `sigma_schedule: beta`,
+      # `sampler_shift: 8`, so t = 1000, 988 | 955, 889, 753, 448) steps 1-2
+      # are the high-noise expert's and steps 3-6 the low-noise one's, so
+      # the two 1.0s leave the structure pass
       # untouched and the taper is spent entirely on the four steps that
       # decide detail. The last entry is a true 0: VACE off, the frame
       # finished on the model's own prior.

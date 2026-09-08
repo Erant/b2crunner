@@ -240,7 +240,7 @@ python -m pipeline.cli run fast_helical_native --reference-image /data/sheet.png
 # dotted one is that step's own param, which is how the two brush trainings
 # and the two denoise passes are told apart
 python -m pipeline.cli run fast_helical_native --reference-image /data/sheet.png \
-    --param 'resolution=[720, 1280]' --param denoise_pass1.steps=8 \
+    --param 'resolution=[720, 1280]' --param denoise_pass1.steps_low=6 \
     --param train_final_splat.total_steps=15000
 
 # what a run would actually use, defaults included

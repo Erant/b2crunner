@@ -28,7 +28,7 @@ wires the rest itself:
           reference_image: dataset.reference_image
           style_hint: scene.style?    # optional; None when nothing wrote it
         params:                       # overrides on THIS step's own defaults
-          steps: 6                    # this step's own knob, a literal
+          steps_high: 2               # this step's own knob, a literal
           width: ${globals.resolution.0}
         outputs:
           denoised: dataset.images    # written back into the shared Context

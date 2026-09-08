@@ -1,0 +1,253 @@
+name: anchor_probe
+description: fast_helical_native up to the injected anchor, then saved
+settings:
+- name: resolution
+  label: Resolution
+  type: list
+  default:
+  - 720
+  - 1280
+  choices:
+  - - 720
+    - 1280
+  - - 600
+    - 1040
+  - - 480
+    - 832
+  help: 'Frame size, width x height, and the value more than one step must agree on: the render size,
+    wan22_vace_denoise''s width/height, and render_splat''s. `render` takes it whole and has no width/height
+    override of its own, so that stage cannot drift; denoise and render_splat split it via .0/.1. Only
+    sizes the denoise model was trained for are offered. (2026-08-25: this file inherited [512, 512] from
+    an earlier draft.)'
+- name: framing
+  label: Framing
+  default: full
+  choices:
+  - full
+  - torso
+  - bust
+  - head
+  help: "How much of the body fills the frame. Threaded through both renderers that see it \u2014 the\
+    \ mesh render (render_initial_views) and the splat re-render (rerender_splat) \u2014 because they\
+    \ have to agree: `render` frames the mesh at this preset, the splat is trained on cameras aimed for\
+    \ it, and rerender_splat rebuilds its helical orbit around the same preset. `full` is the whole body\
+    \ and what every prior run used; torso / bust / head crop progressively tighter. Only the mesh reconstruction's\
+    \ skeleton makes the tighter presets available \u2014 `render` falls back to `full` for any it cannot\
+    \ compute, and rerender_splat follows."
+- name: face_splat
+  label: Face splat
+  type: bool
+  default: true
+  advanced: true
+  help: "Whether the face branch runs: a Gaussian splat of the subject's actual face, composited onto\
+    \ the skeleton drawings wherever the camera can see it (+-60 deg). It REPLACES the MediaPipe landmark\
+    \ overlay this file used to draw \u2014 `detect_face` is gone, not disabled \u2014 so turning this\
+    \ off leaves the skeleton frames with no face at all rather than falling back to landmarks. That gap\
+    \ is deliberate: a YAML input cannot be conditionally wired, so a `when:`-skipped detect_face would\
+    \ make render_initial_views raise on an unresolvable context path. Putting the landmarks back means\
+    \ pasting the detect_face block and one `face_landmarks:` input line back in; the step, its params\
+    \ on `render`, and its tests are all still there. Costs a third 1B Sapiens2 head (~6.5 GB, segmentation)\
+    \ on top of the normal head, plus the pointmap head the splat itself needs."
+outputs: []
+globals:
+  output_root: output/fast_helical_native
+steps:
+- id: split_sheet
+  step: split_reference_sheet
+  dispatch: in_process
+  inputs:
+    sheet: dataset.reference_image
+  params:
+    front_side: left
+  outputs:
+    front: scene.front_image
+    back: dataset.reference_image
+- id: reconstruct_body
+  step: sam3d_body
+  dispatch: subprocess
+  env: sam3dbody
+  inputs:
+    image: scene.front_image
+  outputs:
+    vertices: scene.vertices
+    faces: scene.faces
+    joints: scene.joints
+    keypoints_3d: scene.keypoints_3d
+    global_rots: scene.global_rots
+    cam_t: scene.cam_t
+    focal_length: scene.focal_length
+    image_size: scene.image_size
+    bbox: scene.bbox
+    pose_params: scene.pose_params
+- id: detect_face
+  step: detect_face_landmarks
+  dispatch: in_process
+  inputs:
+    image: scene.front_image
+  outputs:
+    face_landmarks: scene.face_landmarks
+- id: map_face_to_mesh
+  step: map_face_to_mesh
+  dispatch: in_process
+  inputs:
+    mesh_output: scene
+    image: scene.front_image
+  outputs:
+    face_correspondence: scene.face_correspondence
+- id: fit_head_to_face
+  step: fit_head_to_face
+  dispatch: subprocess
+  env: sam3dbody
+  inputs:
+    mesh_output: scene
+    face_landmarks: scene.face_landmarks
+    face_correspondence: scene.face_correspondence
+    image: scene.front_image
+  outputs:
+    vertices: scene.vertices
+    keypoints_3d: scene.keypoints_3d
+    joints: scene.joints
+    global_rots: scene.global_rots
+    pose_params: scene.pose_params
+    head_fit_stats: scene.head_fit_stats
+- id: locate_face
+  step: sapiens2_seg
+  dispatch: in_process
+  when: ${globals.face_splat}
+  inputs:
+    image: scene.front_image
+  params:
+    parts: face
+  outputs:
+    box: scene.face_box
+- id: crop_face
+  step: crop_to_box
+  dispatch: in_process
+  when: ${globals.face_splat}
+  inputs:
+    image: scene.front_image
+    box: scene.face_box
+  outputs:
+    image: scene.face_image
+    crop_info: scene.face_crop_info
+- id: face_seg
+  step: sapiens2_seg
+  dispatch: in_process
+  when: ${globals.face_splat}
+  inputs:
+    image: scene.face_image
+  params:
+    parts: face
+  outputs:
+    mask: scene.face_seg_matte
+- id: face_mask
+  step: face_landmark_mask
+  dispatch: in_process
+  when: ${globals.face_splat}
+  inputs:
+    face_landmarks: scene.face_landmarks
+    mask: scene.face_seg_matte
+    crop_info: scene.face_crop_info
+  outputs:
+    mask: scene.face_matte
+- id: face_normals
+  step: sapiens2_lite
+  dispatch: in_process
+  when: ${globals.face_splat}
+  inputs:
+    image: scene.face_image
+  outputs:
+    normal_map: scene.face_normals
+- id: face_splat
+  step: face_pointmap_splat
+  dispatch: in_process
+  when: ${globals.face_splat}
+  inputs:
+    image: scene.face_image
+    mask: scene.face_matte
+    normal_map: scene.face_normals
+    crop_info: scene.face_crop_info
+    mesh_output: scene
+  params:
+    filepath: ${globals.output_root}/face/face.ply
+    debug_dir: ${globals.output_root}/debug/face_splat
+  outputs:
+    splat_path: scene.face_splat_path
+    splat_stats: scene.face_splat_stats
+- id: render_initial_views
+  step: render
+  dispatch: in_process
+  inputs:
+    mesh_output: scene
+    splat_path: scene.face_splat_path?
+  params:
+    pattern: circular
+    n_frames: 81
+    resolution: ${globals.resolution}
+    framing: ${globals.framing}
+    override_cam_from_mesh: true
+    render_mode: outline+skeleton+splat
+    background: ''
+    splat_max_angle_deg: 60.0
+    bg_color:
+    - 0.5
+    - 0.5
+    - 0.5
+  outputs:
+    images: dataset.images
+    masks: dataset.masks
+    inactive_masks: scene.inactive_masks
+    cameras: dataset.cameras
+    image_names: dataset.image_names
+    points_3d: dataset.points_3d
+    resolution: dataset.resolution
+    focal_length_mm: dataset.extras.focal_length_mm
+    orbit_target: dataset.extras.orbit_target
+    forward_azimuth_deg: dataset.extras.forward_azimuth_deg
+    anchor_position: dataset.extras.anchor_position
+    anchor_frame_index: dataset.extras.anchor_frame_index
+    original_focal_length: dataset.extras.original_focal_length
+    framing_bounds: dataset.extras.framing_bounds
+    initial_rotation: dataset.extras.initial_rotation
+    image_warp: scene.image_warp
+- id: save_pre
+  step: save_dataset
+  dispatch: in_process
+  inputs:
+    dataset: dataset
+  params:
+    directory: ${globals.output_root}/pre_inject
+  outputs:
+    directory_path: scene.saved_pre
+- id: warp_reference_to_anchor
+  step: generate_firstlast
+  dispatch: in_process
+  inputs:
+    image: scene.front_image
+    camera: scene.image_warp.camera
+    original_focal_length: scene.image_warp.original_focal_length
+    render_size: scene.image_warp.render_size
+    bg_color: scene.image_warp.bg_color
+  outputs:
+    warped_image: dataset.anchor_image
+- id: reinject_anchor_initial
+  step: inject_anchor
+  dispatch: in_process
+  inputs:
+    images: dataset.images
+    cameras: dataset.cameras
+    anchor_position: dataset.extras.anchor_position
+    anchor_image: dataset.anchor_image
+    masks: scene.inactive_masks?
+  outputs:
+    images: dataset.images
+    masks: dataset.masks
+- id: save_initial
+  step: save_dataset
+  dispatch: in_process
+  inputs:
+    dataset: dataset
+  params:
+    directory: ${globals.output_root}/initial
+  outputs:
+    directory_path: scene.saved_initial

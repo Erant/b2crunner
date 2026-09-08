@@ -112,7 +112,7 @@ class TestLoadParams(unittest.TestCase):
 
         load_params = set(Wan22VaceDenoiseStep.LOAD_PARAMS)
         for per_call in (
-            "strength", "steps", "cfg", "seed", "prompt",
+            "strength", "steps_high", "steps_low", "cfg", "seed", "prompt",
             "negative_prompt", "width", "height", "subject_desc",
         ):
             self.assertNotIn(per_call, load_params, f"{per_call} is a per-call param")

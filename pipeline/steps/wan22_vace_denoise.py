@@ -38,8 +38,9 @@ lands in the same VRAM ballpark.
 text encoder, tokenizer, scheduler and model_index.json (~11.89 GB all
 told) plus the tiny `transformer/config.json` that describes the model
 geometry wan_fp8.py instantiates. Its model_index.json confirms
-boundary_ratio=0.875 and UniPCMultistepScheduler, matching the ComfyUI
-graph's uni_pc/beta sampler. Its own `transformer/` and `transformer_2/`
+boundary_ratio=0.875 and UniPCMultistepScheduler — the same solver family
+as the ComfyUI graph's uni_pc, though NOT the same step schedule; see "The
+sampler's schedule" below. Its own `transformer/` and `transformer_2/`
 (34.68 GB EACH) are deliberately never downloaded: diffusers skips fetching
 any component handed to `from_pretrained` directly — it filters
 `allow_patterns` against `passed_components`, see
@@ -137,6 +138,83 @@ this step merely types and validates. It defaults to leaving every layer
 alone. Neither is a load param, so the resident worker still serves both
 passes from one pipeline.
 
+**The sampler's schedule** is two more per-call params, `sigma_schedule`
+and `sampler_shift`, and their defaults reproduce the ComfyUI graph rather
+than the HF repo. The graph sampled with `uni_pc` on ComfyUI's `beta`
+scheduler and carried no ModelSamplingSD3 node, which leaves a Wan 2.2
+model at ComfyUI's default shift of 8.0 (comfy/supported_models.py,
+`WAN21_T2V.sampling_settings`). The repo's scheduler_config.json is UniPC
+too, but spaced `linspace` at `flow_shift: 3.0`, and until 2026-09-07 that
+is what this step ran, believing it matched. The two are not close:
+
+    ComfyUI   beta, shift 8      t = 1000, 988 | 955, 889, 753, 448
+    diffusers linspace, shift 3  t = 1000, 938 | 857, 750, 601, 376
+
+`beta` is ComfyUI's arithmetic exactly — `beta_scheduler` in
+comfy/samplers.py: Beta(0.6, 0.6) quantiles of the 1000-entry training
+index, rounded, then the model's sigma shift — computed by
+`_comfy_beta_sigmas` and handed to diffusers' own `set_timesteps` as custom
+`sigmas`, which its flow-sigma branch shifts by `flow_shift` afterwards, the
+same order of operations. It goes in through a wrapper on the scheduler's
+`set_timesteps` (`_install_sigma_schedule`) because `pipe()` calls that
+method itself with a step count and nothing else, so there is no argument
+to pass a schedule through. `linspace` leaves the call alone and is the
+pre-2026-09-07 run at `sampler_shift: 3.0`.
+
+One consequence: the expert split is why `steps_high`/`steps_low` are
+counts rather than the checkpoint's `boundary_ratio` of 0.875. At shift 8
+that threshold would put FOUR of six steps on the high-noise expert (1000,
+988, 955 and 889 are all >= 875), where the graph split at step 2
+(`KSamplerAdvanced`'s end_at_step) — the count is what the graph said, so
+the count is what is set.
+
+**The solver and the hand-off** are matched too, by three more per-call
+params, all defaulting to the graph's behaviour (2026-09-08):
+
+  * `solver_variant` / `solver_order`: ComfyUI's `uni_pc` sampler is
+    UniPC's bh1 variant; the repo's scheduler config is bh2 at order 2.
+    Both are plain config values the scheduler reads inside `step()`, so
+    `_configure_sampler` writes them with the shift. `solver_order` is a
+    CAP: `sample_unipc` sets `order = min(3, len(timesteps) - 2)` per
+    sampler, and each KSamplerAdvanced owns only its slice of the
+    schedule, so the graph's 2-step high-noise sampler ran at order 1 and
+    its 4-step low-noise one at 3 (`_phase_order`). Per step, the graph
+    took orders 1, 1 | 1, 2, 2, 1; diffusers left alone takes 1, 2 | 3, 3,
+    2, 1 — verified on the real scheduler, both. bh1 also needs ComfyUI's
+    terminal-sigma substitution (`COMFY_TERMINAL_SIGMA`), applied by the
+    `set_timesteps` wrapper: at a terminal sigma of 0 diffusers' bh1 last
+    step is non-finite.
+  * `handoff_reset`: the graph's second KSamplerAdvanced is a NEW sampler
+    — it starts the low-noise expert with an empty multistep history, so
+    step 3 is a first-order step and the order ramps up again over steps 4
+    and 5, and the first sampler ENDS, so its last step is first-order
+    too (`lower_order_final` counts the steps its own sampler has left).
+    diffusers runs one loop and carries the history across, so without
+    this the low-noise expert's first step is corrected by x0 predictions
+    the HIGH-noise expert made at t=1000 and 988: a different network,
+    trained on a different noise range, extrapolated into a step neither
+    was trained for. Two pre-hooks do it: `_phase_end_hook` on
+    `transformer` drops the order to 1 for the last high-noise step, and
+    `_handoff_hook` on `transformer_2`, on its first forward of a pass,
+    sets the low-noise sampler's order and clears what `set_timesteps`
+    initialises (`model_outputs`, `timestep_list`, `lower_order_nums`,
+    `last_sample`), leaving `_step_index` alone. That first low-noise step
+    is also where the skeleton ink is committed (see the strength notes
+    above), so this is not cosmetic. Off, the run is diffusers' continuous
+    loop at the cap — the run before 2026-09-08.
+
+**The reference image** is the last seam, `reference_fit`. diffusers'
+`preprocess_conditions` LETTERBOXES a reference: scales it to fit inside
+the frame and pads the rest with WHITE (a canvas of ones, in [-1, 1]
+space) — a 768x1536 back view becomes 640x1280 between 40 px white bars.
+ComfyUI's `WanVaceToVideo` runs `common_upscale(..., "center")` instead:
+crop the reference to the frame's aspect about its centre, then resize it
+to fill (comfy/utils.py), so the same back view loses 85 px top and
+bottom and fills the frame. `crop` (the default) does ComfyUI's arithmetic
+in `_fit_reference` before the image reaches diffusers, which then finds
+nothing to scale or pad; `letterbox` hands it over untouched, the run
+before 2026-09-08.
+
 Attention backend: defaults to SageAttention via diffusers' attention
 dispatcher (params["attention_backend"] = "auto"), steered per-GPU-arch by
 `_select_sage_backend()` below — see its docstring for the SM89/L40S
@@ -182,6 +260,24 @@ DEFAULT_LORA_REPO = "lightx2v/Wan2.2-Lightning"
 DEFAULT_LORA_SUBFOLDER = "Wan2.2-T2V-A14B-4steps-lora-rank64-Seko-V1.1"
 DEFAULT_LORA_HIGH = "high_noise_model.safetensors"
 DEFAULT_LORA_LOW = "low_noise_model.safetensors"
+
+# ComfyUI's `beta` scheduler (comfy/samplers.py, `beta_scheduler`): the
+# denoise steps are Beta(alpha, beta) quantiles of the training index.
+COMFY_BETA_ALPHA = 0.6
+COMFY_BETA_BETA = 0.6
+# The sigma shift a Wan 2.2 model gets in ComfyUI when the graph carries no
+# ModelSamplingSD3 node (comfy/supported_models.py, WAN21_T2V's
+# `sampling_settings`) — and so what the reference graph sampled at. The HF
+# repo's scheduler_config.json says 3.0.
+COMFY_WAN_SHIFT = 8.0
+# What ComfyUI's `sample_unipc` puts in place of a terminal sigma of 0
+# (`timesteps[-1] = 0.001`, comfy/extra_samplers/uni_pc.py). Needed here
+# for the bh1 variant: diffusers' bh1 update uses B(h) = h, and at sigma 0
+# h is infinite, so the last step comes out non-finite — measured on the
+# real scheduler for both hand-off modes. bh2 (B(h) = expm1(h)) stays
+# finite at 0 and is left with diffusers' own terminal sigma, which keeps
+# the pre-2026-09-08 run byte-identical.
+COMFY_TERMINAL_SIGMA = 0.001
 
 
 def resolve_fp8_checkpoint(
@@ -240,6 +336,342 @@ def _conditioning_scale(
     return [float(strength) * float(multiplier) for multiplier in taper]
 
 
+def _total_steps(params: Dict[str, Any]) -> int:
+    """How many denoise steps this run takes: the two experts' shares, summed.
+
+    There is no total to set. `steps_high` and `steps_low` are the whole of
+    it, because the number that mattered was never the total: it was how
+    many steps each expert got, and with a single `steps` param that was
+    decided for you, by the scheduler's timesteps falling either side of the
+    checkpoint's boundary_ratio. `steps: 6` happened to mean 2 high and 4
+    low; `steps: 5` would have meant 1 and 4, and nothing said so.
+    """
+    high, low = int(params["steps_high"]), int(params["steps_low"])
+    # `minimum` on a Param is a UI hint, not a check `resolve_params` runs,
+    # so the floor is enforced here — a negative share would quietly shorten
+    # the run rather than fail it.
+    if high < 0 or low < 0:
+        raise ValueError(
+            f"wan22_vace_denoise: steps_high={high}, steps_low={low} — an "
+            "expert cannot take a negative number of steps"
+        )
+    if high + low < 1:
+        raise ValueError(
+            "wan22_vace_denoise: steps_high and steps_low are both 0 — a run "
+            "has to take at least one denoise step"
+        )
+    return high + low
+
+
+def _expert_boundary_ratio(
+    timesteps: list, steps_high: int, num_train_timesteps: int
+) -> float:
+    """The `boundary_ratio` that puts the first `steps_high` steps on the
+    high-noise expert.
+
+    diffusers picks the expert per step by comparing that step's timestep
+    against `boundary_ratio * num_train_timesteps`: `t >= boundary` is the
+    high-noise expert, below it the low-noise one (pipeline_wan_vace.py's
+    denoising loop). So the split is not a count anywhere in diffusers — it
+    is a threshold, and which count it produces depends on where the
+    scheduler's timesteps happen to land, which depends on the step count
+    and the flow_shift. Asking for a count and computing the threshold that
+    delivers it turns that round the right way.
+
+    The threshold goes MIDWAY between the last high step and the first low
+    one, so it is the split furthest from either neighbour: a float cast
+    somewhere in diffusers cannot move a step across it.
+
+    The checkpoint's own 0.875 is what the old sampler (linspace, shift
+    3.0: t = 1000, 937 | 857, 750, 600, 375) resolved to 2/4 under — the
+    default 2/4 computes a boundary of 897 there and selects the same
+    experts for the same steps. Under the sampler the step runs now (beta,
+    shift 8: t = 1000, 988 | 955, 889, 753, 448) that same 0.875 would hand
+    the high-noise expert FOUR steps, which is not what the reference graph
+    did; it split by count, at step 2, and so does this.
+    """
+    if steps_high >= len(timesteps):
+        return 0.0  # every t >= 0: the high-noise expert takes the run
+    if steps_high <= 0:
+        # Above the first (largest) timestep, so no step is ever >= it.
+        return (timesteps[0] + 1.0) / num_train_timesteps
+    last_high, first_low = timesteps[steps_high - 1], timesteps[steps_high]
+    if not last_high > first_low:
+        raise ValueError(
+            f"wan22_vace_denoise: cannot split after step {steps_high} — the "
+            f"scheduler's timesteps are {last_high} then {first_low}, which "
+            "leaves nowhere to put a boundary between them"
+        )
+    return ((last_high + first_low) / 2.0) / num_train_timesteps
+
+
+def _comfy_beta_sigmas(
+    n_steps: int,
+    num_train_timesteps: int = 1000,
+    alpha: float = COMFY_BETA_ALPHA,
+    beta: float = COMFY_BETA_BETA,
+) -> list:
+    """The sigmas ComfyUI's `beta` scheduler picks for an `n_steps` run,
+    BEFORE the model's shift.
+
+    comfy/samplers.py's `beta_scheduler`, line for line: `n_steps` quantile
+    levels descending from 1 (`1 - linspace(0, 1, n, endpoint=False)`), each
+    mapped through the Beta(alpha, beta) quantile function, scaled to the
+    last index of the model's 1000-entry sigma table and rounded. ComfyUI
+    then reads `model_sampling.sigmas[index]`, and for a Wan model that
+    table is `shift((index + 1) / 1000)` (comfy/model_sampling.py,
+    `ModelSamplingDiscreteFlow.set_parameters`) — so the unshifted value at
+    an index is `(index + 1) / num_train_timesteps`, and the shift is left
+    to the scheduler these are handed to: diffusers' flow-sigma branch
+    applies `flow_shift` to custom sigmas, the same order ComfyUI does it in.
+
+    scipy for the quantile function because ComfyUI uses scipy's, and
+    matching its rounding to the index is the whole point. venv_wan22 sees
+    venv_base's copy (docker/make-child-venv.sh).
+
+    ComfyUI silently drops a repeated index, which shortens the run. That is
+    refused here instead: everything else in this step plans against the
+    step count it was given (`strength` has one entry per step, the expert
+    split is placed by count), and a run of fewer steps than planned would
+    misplace both.
+    """
+    try:
+        from scipy.stats import beta as beta_distribution
+    except ImportError as exc:  # pragma: no cover - environment, not logic
+        raise RuntimeError(
+            "wan22_vace_denoise: the `beta` sigma schedule needs scipy (it is "
+            "ComfyUI's own quantile function); install it, or set "
+            "sigma_schedule: linspace"
+        ) from exc
+    if n_steps < 1:
+        raise ValueError("wan22_vace_denoise: a schedule needs at least one step")
+    levels = 1.0 - np.linspace(0.0, 1.0, n_steps, endpoint=False)
+    index = np.rint(
+        beta_distribution.ppf(levels, alpha, beta) * (num_train_timesteps - 1)
+    )
+    if len(np.unique(index)) != len(index):
+        raise ValueError(
+            f"wan22_vace_denoise: {n_steps} steps on the beta schedule put two "
+            "steps on the same timestep, which ComfyUI would silently drop; use "
+            "fewer steps, or sigma_schedule: linspace"
+        )
+    return [float(value) for value in (index + 1.0) / num_train_timesteps]
+
+
+def _install_sigma_schedule(step: "Wan22VaceDenoiseStep", scheduler) -> None:
+    """Route the run's sigma schedule into the scheduler's `set_timesteps`.
+
+    `pipe()` calls `self.scheduler.set_timesteps(num_inference_steps,
+    device=device)` itself, and `_set_expert_split` calls it the same way
+    before the pass; neither hands sigmas across. diffusers does accept
+    them — `set_timesteps(..., sigmas=...)` is its documented way to run a
+    custom schedule — so the one seam is the call, and this wraps it on the
+    instance: a `beta` run computes ComfyUI's sigmas and passes them in, a
+    `linspace` run passes nothing and diffusers spaces the steps itself.
+    Both then go through diffusers' own shift, eps and final-sigma handling.
+
+    The schedule is read off the step per call (`_sigma_schedule`), the way
+    the scale hooks read `_scales`, so the two passes of one resident
+    pipeline can differ without reinstalling anything. Installed once per
+    scheduler object; `_configure_sampler` remembers which.
+
+    `sigmas` on UniPC's `set_timesteps` is recent: diffusers 0.36.0 does
+    not have it (checked against the release), the 0.41 development tree
+    does. A scheduler without it is refused at the first `beta` call rather
+    than run on the linspace schedule while the log says beta — the guard
+    is by signature, so it is the installed diffusers that answers, not a
+    version table here.
+    """
+    import inspect
+
+    original = scheduler.set_timesteps
+    accepts_sigmas = "sigmas" in inspect.signature(original).parameters
+
+    @functools.wraps(original)
+    def set_timesteps(num_inference_steps=None, device=None, sigmas=None, **kwargs):
+        if sigmas is None and step._sigma_schedule == "beta":
+            sigmas = _comfy_beta_sigmas(
+                int(num_inference_steps), int(scheduler.config.num_train_timesteps)
+            )
+        if sigmas is not None:
+            if not accepts_sigmas:
+                raise RuntimeError(
+                    "wan22_vace_denoise: this diffusers' UniPCMultistepScheduler."
+                    "set_timesteps takes no `sigmas`, so the beta schedule cannot "
+                    "reach it; upgrade diffusers (0.36.0 lacks it) or set "
+                    "sigma_schedule: linspace, which only needs the shift"
+                )
+            # An array, whatever the signature says (`list[float]`): the
+            # flow-sigma branch does `flow_shift * sigmas / (...)` on it
+            # directly, and a list raises there. Verified against 0.41.
+            kwargs["sigmas"] = np.asarray(sigmas, dtype=np.float64)
+        result = original(num_inference_steps, device=device, **kwargs)
+        # ComfyUI's terminal-sigma substitution, for the variant that
+        # needs it — see COMFY_TERMINAL_SIGMA. The timesteps are untouched:
+        # only where the last step lands changes, from 0 to 0.001.
+        sigmas_out = getattr(scheduler, "sigmas", None)
+        if (
+            step._solver_variant == "bh1"
+            and sigmas_out is not None
+            and len(sigmas_out)
+            and float(sigmas_out[-1]) == 0.0
+        ):
+            sigmas_out[-1] = COMFY_TERMINAL_SIGMA
+        return result
+
+    scheduler.set_timesteps = set_timesteps
+
+
+def _history_slots(scheduler) -> int:
+    """How many previous model outputs the scheduler keeps: its
+    `solver_order`, read off the config so a change to the order made
+    after construction is honoured."""
+    order = getattr(getattr(scheduler, "config", None), "solver_order", None)
+    if order is None:
+        order = len(getattr(scheduler, "model_outputs", ()))
+    return max(int(order), 1)
+
+
+def _restart_multistep(scheduler) -> None:
+    """Empty the scheduler's multistep history, as a new sampler starts.
+
+    Exactly the fields UniPCMultistepScheduler's own `set_timesteps` (and
+    `__init__`) initialise for the history: the retained model outputs and
+    their timesteps, the warm-up counter that ramps the order, and the
+    sample the corrector uses. `_step_index` is deliberately kept — the run
+    is still on the same step of the same schedule; only what it may
+    extrapolate from is gone. Attributes are only reset where they exist,
+    so a scheduler without one field cannot be given a stray attribute.
+
+    The lists are sized from the CONFIG's solver_order, not from their
+    current length: `set_timesteps` rebuilds `model_outputs` from the
+    config but leaves `timestep_list` at the length `__init__` gave it, so
+    a solver_order raised after construction (which `_configure_sampler`
+    does) otherwise leaves `step()` indexing past the shorter list.
+    Measured on the real scheduler: order 3 over a 2-slot `timestep_list`
+    raises IndexError on the first step.
+    """
+    slots = _history_slots(scheduler)
+    if hasattr(scheduler, "model_outputs"):
+        scheduler.model_outputs = [None] * slots
+    if hasattr(scheduler, "timestep_list"):
+        scheduler.timestep_list = [None] * slots
+    if hasattr(scheduler, "lower_order_nums"):
+        scheduler.lower_order_nums = 0
+    if hasattr(scheduler, "last_sample"):
+        scheduler.last_sample = None
+
+
+def _phase_order(order_cap: int, phase_steps: int) -> int:
+    """The UniPC order one of the graph's two samplers ran at.
+
+    comfy/extra_samplers/uni_pc.py's `sample_unipc` sets
+    `order = min(3, len(timesteps) - 2)`, and a KSamplerAdvanced hands it
+    the slice of the schedule it owns plus the boundary sigma — so a
+    sampler of `phase_steps` steps sees `phase_steps + 1` timesteps and
+    runs at `min(cap, phase_steps - 1)`: ORDER 1 for the graph's 2-step
+    high-noise sampler, 3 for its 4-step low-noise one. Floor 1, since a
+    single step still has to be taken.
+    """
+    return max(1, min(int(order_cap), int(phase_steps) - 1))
+
+
+def _nearest_step(scheduler, timestep) -> Optional[int]:
+    """Which step of the live schedule `timestep` is, by nearest value —
+    the lookup `_step_index` does, without its plan bookkeeping."""
+    if timestep is None:
+        return None
+    timesteps = [float(value) for value in scheduler.timesteps]
+    if not timesteps:
+        return None
+    value = float(timestep.flatten()[0])
+    return min(range(len(timesteps)), key=lambda index: abs(timesteps[index] - value))
+
+
+def _phase_end_hook(step: "Wan22VaceDenoiseStep"):
+    """A forward pre-hook for the HIGH-noise expert: make its last step
+    first-order, as the end of the graph's first sampler was.
+
+    `lower_order_final` caps a step's order by how many steps REMAIN, and
+    in ComfyUI that count belongs to the sampler at hand: the first
+    KSamplerAdvanced's final step has one step remaining and runs at order
+    1 whatever its cap. diffusers counts to the end of the whole run and
+    would not cap it. Setting `solver_order` to 1 before that step's
+    forward is enough — `step()` reads the config per call — and the
+    hand-off hook restores the low-noise sampler's order right after.
+    Fires only while the hand-off is pending, so it is inert once the
+    low-noise expert has taken over, and inert when `handoff_reset` is off.
+    """
+
+    def hook(module, args, kwargs):
+        if not step._handoff_pending:
+            return None
+        scheduler = step._pipe.scheduler
+        index = _nearest_step(scheduler, kwargs.get("timestep"))
+        if index is None or index != step._steps_high - 1:
+            return None
+        if getattr(scheduler.config, "solver_order", 1) != 1:
+            scheduler.register_to_config(solver_order=1)
+            logger.info("  hand-off: the high-noise sampler's final step is first-order")
+        return None
+
+    return hook
+
+
+def _handoff_hook(step: "Wan22VaceDenoiseStep"):
+    """A forward pre-hook for the LOW-noise expert: the first time it runs
+    in a pass, give it the graph's second sampler — its own order, and an
+    empty multistep history.
+
+    A pre-hook rather than anything in the loop, for the same reason as
+    `_vace_scale_hook`: the transformer's forward is the only seam the
+    pipeline offers, and a module pre-hook survives the offload wrappers.
+    Before the forward is early enough — the scheduler only reads its
+    history and order in `step()`, after the forward returns.
+    `_handoff_pending` is armed by `_configure_sampler` and disarmed on
+    the first firing, so a run with classifier-free guidance (two forwards
+    per step) resets once.
+    """
+
+    def hook(module, args, kwargs):
+        if not step._handoff_pending:
+            return None
+        step._handoff_pending = False
+        scheduler = step._pipe.scheduler
+        order = _phase_order(step._solver_order, step._steps_low)
+        scheduler.register_to_config(solver_order=order)
+        _restart_multistep(scheduler)
+        logger.info(
+            "  hand-off: multistep history restarted for the low-noise expert, order %d",
+            order,
+        )
+        return None
+
+    return hook
+
+
+def _fit_reference(image: np.ndarray, width: int, height: int) -> np.ndarray:
+    """ComfyUI's `common_upscale(image, width, height, "bilinear", "center")`.
+
+    Crop to the target aspect about the centre — comfy/utils.py's own
+    arithmetic, Python `round` included — then resize to exactly
+    `width` x `height`. `cv2.INTER_LINEAR` is torch's `bilinear` without
+    antialiasing, half-pixel centres on both sides. The result fits the
+    frame exactly, so diffusers' `preprocess_conditions` finds nothing to
+    scale or pad.
+    """
+    old_height, old_width = image.shape[:2]
+    old_aspect = old_width / old_height
+    new_aspect = width / height
+    x = y = 0
+    if old_aspect > new_aspect:
+        x = round((old_width - old_width * (new_aspect / old_aspect)) / 2)
+    elif old_aspect < new_aspect:
+        y = round((old_height - old_height * (old_aspect / new_aspect)) / 2)
+    cropped = image[y:old_height - y, x:old_width - x]
+    return cv2.resize(cropped, (width, height), interpolation=cv2.INTER_LINEAR)
+
+
 def _scale_schedule(
     strength: list, taper: Optional[list], n_layers: int, n_steps: int
 ) -> list:
@@ -278,10 +710,10 @@ def _vace_scale_hook(step: "Wan22VaceDenoiseStep", expert: str):
     pipeline_wan_vace.py, for both the cond and uncond calls. The call
     itself is the only seam, and this is it. Both experts carry a hook
     because a schedule spans the whole run and they split it between them:
-    with this checkpoint's boundary_ratio (0.875) and the scheduler's
-    flow_shift (3.0), a 6-step run leaves steps 1-2 to the high-noise
-    expert and 3-6 to the low-noise one. They read the same plan; `expert`
-    is here to name which one went wrong in the guard below.
+    at the default 2/4 the high-noise expert takes steps 1-2 and the
+    low-noise one 3-6, and `steps_high`/`steps_low` move that. They read the
+    same plan; `expert` is here to name which one went wrong in the guard
+    below.
 
     A module pre-hook specifically, NOT a wrapper around the transformer's
     `.forward`: the offload machinery owns `forward`. diffusers' group
@@ -333,7 +765,57 @@ class Wan22VaceDenoiseStep(Step):
     PARAMS = (
         Param("width", int, REQUIRED, "Frame width the pipeline generates at", minimum=1),
         Param("height", int, REQUIRED, "Frame height the pipeline generates at", minimum=1),
-        Param("steps", int, 6, "Diffusion steps", minimum=1),
+        Param("steps_high", int, 2,
+              "Denoise steps the HIGH-noise expert takes — the opening steps, "
+              "where the frame's structure is decided. The two experts' step "
+              "counts are set separately because that split is the thing being "
+              "chosen; their sum is the run's total (2 + 4 = the 6 steps this "
+              "was calibrated at, and the same steps each expert had then)",
+              minimum=0),
+        Param("steps_low", int, 4,
+              "Denoise steps the LOW-noise expert takes — the closing steps, "
+              "where detail is decided, and the ones a `strength` taper is "
+              "usually spent on",
+              minimum=0),
+        Param("sigma_schedule", str, "beta",
+              "How the denoise steps are spaced before the shift. `beta` is "
+              "ComfyUI's beta scheduler — Beta(0.6, 0.6) quantiles of the "
+              "training index, what the reference graph sampled on; `linspace` "
+              "is diffusers' own even spacing, what this step ran before "
+              "2026-09-07",
+              choices=("beta", "linspace")),
+        Param("sampler_shift", float, COMFY_WAN_SHIFT,
+              "Flow-matching sigma shift — how far the steps crowd toward the "
+              "noisy end. 8.0 is what ComfyUI gives a Wan 2.2 model with no "
+              "ModelSamplingSD3 node, and so what the reference graph ran at; "
+              "the HF scheduler config's 3.0 is what this step ran before "
+              "2026-09-07. With the beta schedule at 6 steps: 8 -> t = 1000, "
+              "988 | 955, 889, 753, 448; 3 -> 1000, 968 | 888, 751, 534, 233",
+              minimum=1.0),
+        Param("solver_variant", str, "bh1",
+              "UniPC's B(h) variant. ComfyUI's uni_pc sampler is bh1, which "
+              "the reference graph ran; the HF scheduler config says bh2",
+              choices=("bh1", "bh2")),
+        Param("solver_order", int, 3,
+              "UniPC's multistep order cap — how many previous model outputs a "
+              "step may extrapolate from. With handoff_reset on, each expert's "
+              "sampler runs at min(cap, its steps - 1) as ComfyUI's uni_pc does: "
+              "1 for the 2-step high-noise sampler, 3 for the 4-step low-noise "
+              "one. The HF scheduler config says 2, flat",
+              minimum=1, maximum=3),
+        Param("handoff_reset", bool, True,
+              "Run the two experts as the reference graph's two KSamplerAdvanced "
+              "nodes did: the high-noise sampler's last step is first-order, and "
+              "the low-noise expert starts with an empty multistep history at "
+              "its own order. Off, the run is one continuous loop at the cap and "
+              "the low-noise expert's first step is corrected by the high-noise "
+              "expert's x0 predictions — what this step did before 2026-09-08"),
+        Param("reference_fit", str, "crop",
+              "How the reference image is fitted to the frame. `crop` is "
+              "ComfyUI's common_upscale center: crop to the frame's aspect, "
+              "resize to fill; `letterbox` is diffusers' own: fit inside, pad "
+              "with white — the run before 2026-09-08",
+              choices=("crop", "letterbox")),
         Param("cfg", float, 1.0, "Classifier-free guidance scale"),
         Param("seed", int, 0, "Diffusion seed"),
         Param("strength", list, [1.0],
@@ -397,8 +879,10 @@ class Wan22VaceDenoiseStep(Step):
     # rebuilds it when they are not — see load_signature() there.
     #
     # The per-call params are deliberately ABSENT: `strength`,
-    # `strength_layers`, `steps`, `cfg`, `seed`, `prompt`, `negative_prompt`,
-    # `width`, `height`, `subject_desc`. That is the whole point —
+    # `strength_layers`, `steps_high`, `steps_low`, `sigma_schedule`,
+    # `sampler_shift`, `solver_variant`, `solver_order`, `handoff_reset`,
+    # `reference_fit`, `cfg`, `seed`, `prompt`, `negative_prompt`, `width`,
+    # `height`, `subject_desc`. That is the whole point —
     # fast_helical_native's two passes differ only by `strength`, so listing
     # it here would rebuild the pipeline between them and buy nothing at
     # all. Both strength knobs reach the pipeline through the call and
@@ -427,6 +911,20 @@ class Wan22VaceDenoiseStep(Step):
         # The run's timesteps, descending, cached on first use within a pass
         # and cleared at the top of the next one — see _step_index.
         self._timesteps = None
+        # The run's step spacing, read per call by the wrapper
+        # _install_sigma_schedule puts on the scheduler; `_scheduled` is the
+        # scheduler object that wrapper is on, so it goes on once.
+        self._sigma_schedule = "beta"
+        self._scheduled = None
+        # The hand-off plan: armed by _configure_sampler when
+        # `handoff_reset` is on and both experts take steps, disarmed by the
+        # low-noise expert's pre-hook the first time it fires — see
+        # _phase_end_hook and _handoff_hook, which read the rest.
+        self._handoff_pending = False
+        self._steps_high = 0
+        self._steps_low = 0
+        self._solver_order = 3
+        self._solver_variant = "bh1"
 
     def load(self, params: Dict[str, Any]) -> None:
         """Build the pipeline around the pre-quantized fp8 transformers.
@@ -562,6 +1060,17 @@ class Wan22VaceDenoiseStep(Step):
                 transformer.register_forward_pre_hook(
                     _vace_scale_hook(self, expert), with_kwargs=True
                 )
+        # The hand-off: the high-noise expert's sampler ends (its last step
+        # first-order), the low-noise expert's begins (its own order, no
+        # history) — see _phase_end_hook and _handoff_hook.
+        if pipe.transformer is not None:
+            pipe.transformer.register_forward_pre_hook(
+                _phase_end_hook(self), with_kwargs=True
+            )
+        if pipe.transformer_2 is not None:
+            pipe.transformer_2.register_forward_pre_hook(
+                _handoff_hook(self), with_kwargs=True
+            )
 
         self._device = device
         self._cpu_offload = params["cpu_offload"]
@@ -808,6 +1317,103 @@ class Wan22VaceDenoiseStep(Step):
             key=lambda index: abs(self._timesteps[index] - value),
         )
 
+    def _configure_sampler(self, pipe, params: Dict[str, Any]) -> None:
+        """Point the scheduler at this run's step spacing and shift.
+
+        Both are per-call. The shift is a config value diffusers reads
+        inside `set_timesteps` (`flow_shift`, in its flow-sigma branch), so
+        it is written to the config the way `_set_expert_split` writes the
+        boundary; the spacing is read off the step by the wrapper
+        `_install_sigma_schedule` puts on that method. Neither touches a
+        weight, so the resident worker serves both passes from one pipeline,
+        exactly as it does for `strength`.
+
+        Refuses a scheduler that is not on flow sigmas: the shift is only
+        read there, and custom sigmas are only accepted there, so on any
+        other scheduler both knobs would be silently inert.
+        """
+        scheduler = pipe.scheduler
+        if not getattr(scheduler.config, "use_flow_sigmas", False):
+            raise RuntimeError(
+                "wan22_vace_denoise: the scheduler is not on flow sigmas "
+                "(`use_flow_sigmas` is off), so neither sampler_shift nor "
+                "sigma_schedule would reach it — this is not the checkpoint's "
+                "UniPC scheduler"
+            )
+        shift = float(params["sampler_shift"])
+        variant, order = params["solver_variant"], int(params["solver_order"])
+        high, low = int(params["steps_high"]), int(params["steps_low"])
+        self._sigma_schedule = params["sigma_schedule"]
+        self._solver_order = order
+        self._solver_variant = variant
+        self._steps_high, self._steps_low = high, low
+        # The hand-off only exists when both experts take steps. With it
+        # on, `solver_order` is the CAP and each sampler runs at its own
+        # `_phase_order`; off, the run is one continuous loop at the cap,
+        # which is what diffusers does by itself.
+        self._handoff_pending = bool(params["handoff_reset"]) and high > 0 and low > 0
+        if params["handoff_reset"]:
+            opening = _phase_order(order, high if high > 0 else low)
+        else:
+            opening = order
+        # The solver is config too: `step()` reads solver_type and
+        # solver_order per call, and set_timesteps sizes the history from
+        # solver_order, and both run after this.
+        scheduler.register_to_config(
+            flow_shift=shift, solver_type=variant, solver_order=opening
+        )
+        # Size the history to the order NOW: set_timesteps will rebuild
+        # `model_outputs` from the config, but not `timestep_list` — see
+        # _restart_multistep on what that does to step().
+        _restart_multistep(scheduler)
+        if self._scheduled is not scheduler:
+            _install_sigma_schedule(self, scheduler)
+            self._scheduled = scheduler
+        logger.info(
+            "  sampler: UniPC %s order %d (opening at %d), %s schedule, shift %.1f, hand-off %s",
+            variant, order, opening, self._sigma_schedule, shift,
+            "restarts the history" if self._handoff_pending else "carries it across",
+        )
+
+    def _set_expert_split(self, pipe, steps_high: int, n_steps: int) -> None:
+        """Point the pipeline's expert boundary at the requested split, and
+        log which steps each expert ends up with.
+
+        The scheduler is asked for this run's timesteps here rather than
+        after the fact because diffusers computes the boundary once, before
+        the denoising loop, from `pipe.config.boundary_ratio` — so the only
+        moment to place it is before the call. `set_timesteps` is a full
+        reset of the scheduler's state (model_outputs, lower_order_nums,
+        step index), and `pipe()` calls it again with the same count, so
+        asking early costs the run nothing.
+
+        The log line is half the point of this feature. `steps: 6` never
+        said which steps the high-noise expert got, and a `strength`
+        schedule is written against that split — the taper is spent on the
+        low-noise steps because those are where detail is decided. Now the
+        run's own log says it, per pass, in the units the schedule is
+        written in.
+        """
+        scheduler = pipe.scheduler
+        scheduler.set_timesteps(n_steps)
+        timesteps = [float(value) for value in scheduler.timesteps]
+        if len(timesteps) != n_steps:
+            raise RuntimeError(
+                f"wan22_vace_denoise: asked the scheduler for {n_steps} steps "
+                f"and got {len(timesteps)} — the expert split cannot be placed "
+                "against timesteps that are not the ones the run will take"
+            )
+        ratio = _expert_boundary_ratio(
+            timesteps, steps_high, scheduler.config.num_train_timesteps
+        )
+        pipe.register_to_config(boundary_ratio=ratio)
+        logger.info(
+            "  experts: %d high-noise (t=%s) + %d low-noise (t=%s), boundary t=%.1f",
+            steps_high, [round(t) for t in timesteps[:steps_high]],
+            n_steps - steps_high, [round(t) for t in timesteps[steps_high:]],
+            ratio * scheduler.config.num_train_timesteps,
+        )
+
     def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
         import torch
 
@@ -840,6 +1446,11 @@ class Wan22VaceDenoiseStep(Step):
         # (Dataset.from_disk's alpha-channel masks).
         masks = [_mask_to_pil(m) for m in inputs["control_masks"]]
         ref_img = inputs.get("reference_image")
+        # Fitted to the frame HERE when `reference_fit` is `crop`, so that
+        # diffusers' own letterboxing finds nothing to do — see the module
+        # docstring on the two behaviours.
+        if ref_img is not None and params["reference_fit"] == "crop":
+            ref_img = _fit_reference(ref_img, int(params["width"]), int(params["height"]))
         # check_inputs() requires reference_images to be PIL.Image (or nested
         # lists thereof) specifically — unlike video/mask, a raw ndarray is
         # rejected outright.
@@ -860,11 +1471,11 @@ class Wan22VaceDenoiseStep(Step):
         # them from one config), so either one answers.
         #
         # A schedule spans the whole run rather than one expert's share of
-        # it, and the two experts split it at a fixed step: with this
-        # checkpoint's boundary_ratio of 0.875 and the scheduler's flow_shift
-        # of 3.0, a 6-step run puts t=1000 and 937 on the high-noise expert
-        # and t=857, 750, 600 and 375 on the low-noise one — four of the six
-        # steps, and the four where detail is decided. A control frame here
+        # it, and the two experts split it at a fixed step: at the default
+        # 2/4 on the default sampler (beta, shift 8) a 6-step run puts
+        # t=1000 and 988 on the high-noise expert and t=955, 889, 753 and
+        # 448 on the low-noise one — four of the six steps, and the four
+        # where detail is decided. A control frame here
         # is a drawing (a flat silhouette under a DWPose skeleton), so those
         # late steps at full scale are where its ink survives into the output
         # as ink instead of being read as pose. That is why BOTH experts
@@ -877,8 +1488,9 @@ class Wan22VaceDenoiseStep(Step):
         )
         n_layers = len(vace_layers)
         taper = params["strength_layers"]
+        n_steps = _total_steps(params)
         schedule = _scale_schedule(
-            params["strength"], taper, n_layers, params["steps"]
+            params["strength"], taper, n_layers, n_steps
         )
         self._timesteps = None
         # A one-entry plan is a constant scale, and it goes into the call
@@ -897,6 +1509,11 @@ class Wan22VaceDenoiseStep(Step):
                 schedule if taper is not None else [entry[0] for entry in schedule],
             )
 
+        # The sampler first: the split is placed against the timesteps the
+        # scheduler will actually take, which the schedule and shift decide.
+        self._configure_sampler(pipe, params)
+        self._set_expert_split(pipe, params["steps_high"], n_steps)
+
         # Timings, not just a call. Everything up to the progress bar's
         # "0%" is silent otherwise, which on a resident worker's second
         # pass reads as a two-minute hang — see _PRE_LOOP_PHASES.
@@ -912,7 +1529,7 @@ class Wan22VaceDenoiseStep(Step):
                 height=params["height"],
                 width=params["width"],
                 num_frames=params["length"] or len(video),
-                num_inference_steps=params["steps"],
+                num_inference_steps=n_steps,
                 guidance_scale=params["cfg"],
                 generator=generator,
                 output_type="np",

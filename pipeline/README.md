@@ -400,7 +400,7 @@ steps:
     params:                      # OVERRIDES on this step's declared defaults
       width: ${globals.resolution.0}
       height: ${globals.resolution.1}
-      steps: 6                    # a literal: this step's own knob, not shared
+      steps_high: 2               # a literal: this step's own knob, not shared
     outputs:                     # step's returned name -> dotted Context path (written after the call)
       images: dataset.images
     when: ${globals.export_ply}  # optional; skip this step when falsy
