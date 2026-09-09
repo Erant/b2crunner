@@ -585,7 +585,7 @@ class TestTheTrainerBackend(unittest.TestCase):
 
     def test_a_binary_that_cannot_run_is_the_pipeline_loop_not_an_error(self):
         from pipeline.steps import brush as brush_step
-        brush_step._ALIGN_PROBE.pop("/nonexistent/trainer", None)
+        brush_step._HELP_PROBE.pop("/nonexistent/trainer", None)
         self.assertFalse(brush_step._trainer_aligns("/nonexistent/trainer"))
 
     def test_an_unknown_backend_is_refused(self):

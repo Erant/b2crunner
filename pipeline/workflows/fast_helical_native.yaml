@@ -2328,6 +2328,27 @@ steps:
       world_from_raw: scene.world_from_raw
       rig_binding: scene.rig_binding
       body_refit_stats: scene.body_refit_stats
+      body_params: scene.body_params
+
+  # The per-view deformation rig for the final training (pipeline/body_rig.py):
+  # the refit body's skinning and joint tree; every joint but the root chain
+  # gets a per-view rotation the trainer learns, which is what removes the
+  # double limb the generated frames' arm motion left in the splat.
+  - id: build_body_rig
+    step: build_body_rig
+    when:
+      - ${globals.refit_body}
+      - ${globals.export_ply}
+    inputs:
+      mesh_world: scene.mesh_world
+      joints: scene.joints
+      world_from_raw: scene.world_from_raw
+      rig_binding: scene.rig_binding
+    params:
+      debug_dir: ${globals.output_root}/debug/body_rig
+    outputs:
+      body_rig: scene.body_rig
+      body_rig_stats: scene.body_rig_stats
 
   - id: rerender_splat
     step: render_splat
@@ -2893,6 +2914,13 @@ steps:
       masks: dataset.masks
       # The body mesh, for the hollow loss (see hollow_weight below).
       mesh: scene.mesh_world?
+      # The refitted MHR body (parameters, frame, posed skeleton), written
+      # into scene.ply's header as b2c.mhr.* comments — the deliverable
+      # carries its own skeleton for whoever binds and animates it.
+      body_params: scene.body_params?
+      # The per-view deformation rig (build_body_rig): --body-rig on the
+      # trainer, per-view joint rotations, canonical export.
+      body_rig: scene.body_rig?
       # No normal_maps, and no step computing them any more (see above).
       # brush only emits the normal-loss flags when this input is wired, so
       # the absence is already the whole of "supervision off" — the explicit

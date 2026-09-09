@@ -295,28 +295,38 @@ _ALIGN_BACKENDS = ("auto", "trainer", "pipeline")
 #: Whether a trainer binary carries the in-process alignment loop, by path.
 #: Probed once per path: a --help is cheap but not free, and run() is called
 #: twice per workflow.
-_ALIGN_PROBE: Dict[str, bool] = {}
+_HELP_PROBE: Dict[str, str] = {}
 
 
-def _trainer_aligns(brush_path: str) -> bool:
-    """True if `brush_path --help` lists --align-iters, else False.
+def _trainer_help(brush_path: str) -> str:
+    """`brush_path --help`, once per path; empty when the binary cannot be run.
 
-    A binary that cannot be run at all is a False here rather than an error:
-    the missing-binary failure belongs to `_run_brush`, with its hint, and
-    not to a probe that only decides which of two working paths to take.
+    A binary that cannot be run at all is an empty text here rather than an
+    error: the missing-binary failure belongs to `_run_brush`, with its hint,
+    and not to a probe that only decides which of two working paths to take.
     """
-    cached = _ALIGN_PROBE.get(brush_path)
+    cached = _HELP_PROBE.get(brush_path)
     if cached is not None:
         return cached
     try:
         result = subprocess.run(
             [brush_path, "--help"], capture_output=True, text=True, timeout=30,
         )
-        supported = "--align-iters" in (result.stdout + result.stderr)
+        text = result.stdout + result.stderr
     except (OSError, subprocess.SubprocessError):
-        supported = False
-    _ALIGN_PROBE[brush_path] = supported
-    return supported
+        text = ""
+    _HELP_PROBE[brush_path] = text
+    return text
+
+
+def _trainer_aligns(brush_path: str) -> bool:
+    """True if `brush_path --help` lists --align-iters, else False."""
+    return "--align-iters" in _trainer_help(brush_path)
+
+
+def _trainer_has_body_rig(brush_path: str) -> bool:
+    """True if the trainer takes `--body-rig` (b2ctrain ee71363 or later)."""
+    return "--body-rig" in _trainer_help(brush_path)
 
 
 def _use_trainer_alignment(backend: str, brush_path: str) -> bool:
@@ -770,6 +780,14 @@ class BrushStep(Step):
              "mesh": Optional[(vertices (N,3), faces (F,3))] — the body mesh in
                      the dataset's world frame (render.py's "mesh" output);
                      written as mesh.ply for the hollow loss (`hollow_weight`),
+             "body_params": Optional[dict] — refit_body_to_splat's record of
+                     the fitted MHR body; written into the exported .ply's
+                     header as `b2c.mhr.*` comments (pipeline/ply_meta.py) so
+                     the deliverable carries its skeleton,
+             "body_rig": Optional[dict] — build_body_rig's rig; written as
+                     body_rig.bin beside the COLMAP model and passed to the
+                     trainer as `--body-rig` (per-view joint rotations, the
+                     fix for the double limb; see pipeline/body_rig.py),
              "support_cameras": Optional[List[Camera]],
              "support_images": Optional[List[np.ndarray]] BGR(A),
              "support_masks": Optional[List[np.ndarray]] float32 [0,1],
@@ -957,6 +975,24 @@ class BrushStep(Step):
               "The reference depth at a pixel is the farthest mesh surface within "
               "this many pixels, so silhouettes and folds where the mesh is slightly "
               "off are forgiven rather than penalised", minimum=0, advanced=True),
+        Param("body_rig", bool, True,
+              "Deform the splat per training view with the wired `body_rig` (the refit "
+              "body's joints): the trainer learns a small rotation per view and active "
+              "joint, so the generated frames' per-segment limb motion is explained per "
+              "view instead of averaged into a double limb. Measured on the deliverable "
+              "training: the double limb gone at novel views, hand sharpness +24%, body "
+              "+6%, face +9%. Needs a trainer with --body-rig; silently off otherwise"),
+        Param("body_rig_start_iter", int, 1000,
+              "Iteration of the main run the per-view rotations start learning at; the "
+              "earlier the sharper (1000 > 5000 > 15000 measured)", minimum=0, advanced=True),
+        Param("body_rig_smooth", float, 0.05,
+              "Pull of each view's rotations towards the mean of its two orbit neighbours",
+              minimum=0.0, advanced=True),
+        Param("body_rig_zero", float, 0.02,
+              "Pull of every per-view rotation towards zero; keeps joints with little "
+              "evidence (fingers, a hidden limb) from wandering", minimum=0.0, advanced=True),
+        Param("body_rig_lr", float, 0.002,
+              "Adam step of the per-view rotations, radians", minimum=0.0, advanced=True),
         Param("evidence_normal_weight", float, 0.0,
               "Fold w * the normal-map residual into the evidence residual, for a "
               "dataset that has normals/. Costs one extra render per view and is "
@@ -1000,6 +1036,8 @@ class BrushStep(Step):
         weights = _loss_weights(inputs, len(images))
         support = _SupportViews.from_inputs(inputs, image_names)
         mesh = inputs.get("mesh")
+        body_params = inputs.get("body_params")
+        body_rig = inputs.get("body_rig") if params["body_rig"] else None
 
         if len(images) != len(image_names):
             raise ValueError(f"images ({len(images)}) and image_names ({len(image_names)}) length mismatch")
@@ -1041,6 +1079,10 @@ class BrushStep(Step):
         hollow_weight = params["hollow_weight"]
         hollow_margin = params["hollow_margin"]
         hollow_dilate = params["hollow_dilate"]
+        body_rig_start_iter = params["body_rig_start_iter"]
+        body_rig_smooth = params["body_rig_smooth"]
+        body_rig_zero = params["body_rig_zero"]
+        body_rig_lr = params["body_rig_lr"]
         if hollow_weight > 0 and mesh is None:
             logger.info(
                 "brush: hollow_weight %s with no `mesh` input wired: the trainer builds "
@@ -1086,6 +1128,27 @@ class BrushStep(Step):
             # The body mesh beside the model, for the hollow loss. Written
             # whenever it is wired (a few hundred KB) so a run with the loss
             # off is one param away from one with it on.
+            # The deformation rig beside it (pipeline/body_rig.py), for the
+            # training views only: the supporting views have no entry and
+            # render undeformed.
+            rig_path: Optional[Path] = None
+            if body_rig is not None:
+                if _trainer_has_body_rig(brush_path):
+                    from pipeline.body_rig import write_body_rig
+                    rig_path = colmap_dir / "body_rig.bin"
+                    write_body_rig(rig_path, body_rig, list(image_names))
+                    logger.info(
+                        "brush: body rig on — %d active joints of %d, per-view rotations "
+                        "from iteration %d (smooth %s, zero %s, lr %s); the export stays canonical",
+                        len(body_rig["active"]), len(body_rig["parents"]), body_rig_start_iter,
+                        body_rig_smooth, body_rig_zero, body_rig_lr,
+                    )
+                else:
+                    logger.warning(
+                        "brush: a body_rig is wired but %s takes no --body-rig (b2ctrain "
+                        "ee71363 or later); training without the per-view deformation",
+                        brush_path,
+                    )
             mesh_path: Optional[Path] = None
             if mesh is not None:
                 mesh_path = colmap_dir / "mesh.ply"
@@ -1257,6 +1320,18 @@ class BrushStep(Step):
                         "--hollow-margin", str(hollow_margin),
                         "--hollow-dilate", str(hollow_dilate),
                         "--hollow-proxy", "auto",
+                    ])
+                # The per-view deformation: on every invocation, since the
+                # rotations live in the trainer's process (the alignment
+                # refits keep learning them in-trainer; a separate polish
+                # would learn its own from zero).
+                if rig_path is not None:
+                    cmd.extend([
+                        "--body-rig", str(rig_path),
+                        "--body-rig-start-iter", str(body_rig_start_iter),
+                        "--body-rig-smooth", str(body_rig_smooth),
+                        "--body-rig-zero", str(body_rig_zero),
+                        "--body-rig-lr", str(body_rig_lr),
                     ])
                 return cmd
 
@@ -1440,6 +1515,22 @@ class BrushStep(Step):
         if not ply_path.exists():
             raise RuntimeError(
                 f"Expected output PLY file not found: {ply_path}\nBrush may not have exported successfully."
+            )
+
+        # The body record rides in the header of whatever the last invocation
+        # exported, so it is written once, after the polish and the alignment
+        # refits have all overwritten the file for the last time.
+        if body_params:
+            from pipeline import ply_meta
+            lines = ply_meta.body_comments(
+                body_params["pose_params"], body_params["world_from_raw"],
+                joints=body_params.get("joints"), global_rots=body_params.get("global_rots"),
+                joint_parents=body_params.get("joint_parents"), model=body_params.get("model", ""),
+            )
+            ply_meta.embed_comments(ply_path, lines)
+            logger.info(
+                "brush: the refitted body (%d b2c.mhr.* comments: MHR parameters, world_from_raw, "
+                "posed skeleton) is in %s's header", len(lines), ply_path.name,
             )
 
         return {"splat_path": str(ply_path.absolute())}

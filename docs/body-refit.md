@@ -100,3 +100,68 @@ second camera refinement bundle-adjusts against the frames with the gauge
 restored, so the refit frame carries through. A second refit after stage 5,
 against the final splat, is where the splat-to-body binding will be
 written.
+
+## The body in the delivered .ply
+
+`refit_body_to_splat` also publishes `scene.body_params`, and
+`train_final_splat` takes it as `body_params` and writes it into
+`ply/scene.ply`'s header after its last export (`pipeline/ply_meta.py`).
+Header comments are the one place a record survives every reader —
+b2ctrain refuses non-vertex elements and viewers parse every element they
+find, but all of them skip comments. One line per key:
+
+    comment b2c.mhr.<key> <shape> <values...>
+
+| key | what |
+|---|---|
+| `version`, `model` | record version (1); the checkpoint repo and the `mhr_model.pt` the parameters replay through |
+| `frame` | a one-line note of the conventions below |
+| `world_from_raw.scale` / `.rotation` (3x3) / `.translation` (3) | `world = scale * raw @ rotation.T + translation`, SAM-3D-Body raw metres into the splat's world frame |
+| `pose_params.<entry>` | every entry a replay must pass: `global_rot`, `body_pose_params`, `hand_pose_params`, `scale_params`, `shape_params`, `expr_params`, `global_trans` (metres), `scale_offsets` — raw frame |
+| `joint_parents` (127) | the skeleton's parent index per joint (-1 at the root) |
+| `joints` (127x3), `global_rots` (127x3x3) | the posed skeleton, joint positions and global joint rotations, already in the WORLD frame |
+
+So a consumer that only wants to bind and pose the splats needs the last
+three keys and the model's skinning weights (`rig_binding_data`, read from
+`mhr_model.pt`); one that wants the mesh replays `pose_params` through the
+model and applies `world_from_raw`. `ply_meta.parse_body_comments(
+ply_meta.read_comments(path))` gives the record back as arrays. The record
+is about 25 KB of header; it is written once, after the polish and the
+alignment refits, and replaced rather than duplicated if written again.
+`SplatScene.to_ply` does not carry comments, so a splat that is loaded and
+re-saved through body2colmap loses it — nothing in the shipped workflow does
+that to the deliverable (`load_splat` only reads; `Dataset.to_disk` copies
+the file).
+
+
+## Per-view joint rotations: the double limb
+
+The generated frames move the limbs by centimetres between segments of
+the orbit (measured between adjacent pristine frames against the refit
+mesh's parallax: forearms and hands 7-8 px per 4.5-degree step, torso and
+legs 2-3), and a canonical splat averages them into a **double limb** that
+no image warp can fix. `build_body_rig` (pipeline/steps/body_rig.py,
+pipeline/body_rig.py) turns the refit body into a rig — a subsample of its
+vertices with the model's skinning, the joint tree and pivots, and the
+active joints — and `train_final_splat` writes it as `body_rig.bin` beside
+the COLMAP model and passes `--body-rig` (b2ctrain ee71363 or later; the
+step probes the binary's --help and trains without it otherwise). The
+trainer learns one small rotation per view and active joint, renders every
+splat at its skinned position, and exports the canonical model; the
+rotations land in `body_rig_omega.json` next to the .ply.
+
+Active are all joints skinned to at least `min_subtree` (30) vertices
+whose subtree is at most `max_subtree_fraction` (0.5) of the body: every
+limb, the hands, the neck and head, but not the root chain (root, pelvis,
+spine), where a rotation moves the whole body per view and was measured to
+destroy sharpness everywhere. Settings on the brush step: `body_rig` (on),
+`body_rig_start_iter` 1000, `body_rig_smooth` 0.05, `body_rig_zero` 0.02,
+`body_rig_lr` 0.002. Measured on the 2026-09-09 bundle (b2ctrain
+docs/STATUS.md, "Per-view arm rotations"): the double limb gone at novel
+views, hand sharpness +24%, body +6%, face +9%, legs and torso unchanged,
+the training loss the best of every run. The canonical model's PSNR
+against the training frames drops by construction (its limbs sit at the
+mean pose while each frame's are elsewhere); that number is not the
+metric for this. `debug/body_rig/body_rig.json` lists the active joints
+and subtree sizes; `pipeline.cli doctor` checks the trainer for
+`--body-rig`.

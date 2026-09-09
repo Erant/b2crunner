@@ -78,3 +78,62 @@ class TestBrushHollowArgv(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestBrushBodyRecord(unittest.TestCase):
+    """A wired `body_params` input ends up in the exported .ply's header."""
+
+    def test_the_record_is_embedded_after_the_export(self):
+        from pipeline import ply_meta
+        from plyfile import PlyData, PlyElement
+        step_class = get_step_class("brush")
+        step = step_class()
+        calls = []
+
+        def fake_run_brush(cmd, ply_path, colmap_dir=None):
+            calls.append(list(cmd))
+            data = np.zeros(3, dtype=[("x", "f4"), ("y", "f4"), ("z", "f4")])
+            data["x"] = [1, 2, 3]
+            PlyData([PlyElement.describe(data, "vertex")], comments=["Exported from Brush"]).write(str(ply_path))
+
+        step._run_brush = fake_run_brush
+        rng = np.random.RandomState(0)
+        pose = {k: rng.randn(n).astype(np.float32) for k, n in
+                zip(ply_meta.POSE_KEYS, (3, 133, 108, 28, 45, 72, 3, 68))}
+        body = {
+            "pose_params": pose,
+            "world_from_raw": {"scale": 1.0, "rotation": np.eye(3), "translation": np.zeros(3)},
+            "joints": rng.randn(127, 3).astype(np.float32),
+            "global_rots": np.tile(np.eye(3, dtype=np.float32), (127, 1, 1)),
+            "joint_parents": np.arange(-1, 126, dtype=np.int32),
+            "model": "facebook/sam-3d-body-dinov3 assets/mhr_model.pt",
+        }
+        inputs = {**_inputs(), "body_params": body}
+        with tempfile.TemporaryDirectory() as tmp:
+            params = step_class.resolve_params({"export_dir": tmp, "align_iters": 0, "polish_steps": 1000})
+            out = step.run(inputs, params)
+            ply = PlyData.read(out["splat_path"])
+            np.testing.assert_array_equal(ply["vertex"]["x"], [1, 2, 3])
+            self.assertEqual(ply.comments[0], "Exported from Brush")
+            rec = ply_meta.parse_body_comments(ply_meta.read_comments(out["splat_path"]))
+        self.assertEqual(len(calls), 2)  # cold run + polish: the record survives the last export
+        np.testing.assert_array_equal(rec["pose_params"]["body_pose_params"], pose["body_pose_params"])
+        np.testing.assert_allclose(rec["joints"], body["joints"], rtol=1e-6, atol=1e-6)
+        self.assertEqual(rec["joint_parents"].shape, (127,))
+        self.assertEqual(rec["model"], body["model"])
+
+    def test_no_record_without_the_input(self):
+        from pipeline import ply_meta
+        from plyfile import PlyData, PlyElement
+        step_class = get_step_class("brush")
+        step = step_class()
+
+        def fake_run_brush(cmd, ply_path, colmap_dir=None):
+            data = np.zeros(1, dtype=[("x", "f4")])
+            PlyData([PlyElement.describe(data, "vertex")]).write(str(ply_path))
+
+        step._run_brush = fake_run_brush
+        with tempfile.TemporaryDirectory() as tmp:
+            params = step_class.resolve_params({"export_dir": tmp, "align_iters": 0})
+            out = step.run(_inputs(), params)
+            self.assertEqual(ply_meta.parse_body_comments(ply_meta.read_comments(out["splat_path"])), {})

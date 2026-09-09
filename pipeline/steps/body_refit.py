@@ -415,6 +415,8 @@ class RefitBodyToSplatStep(Step):
               "world_from_raw" — {"scale", "rotation", "translation"},
               "rig_binding" — the rig's skeleton and skinning (see
               `rig_binding_data`),
+              "body_params" — the record the brush step writes into the
+              delivered .ply's header (pipeline/ply_meta.py),
               "body_refit_stats"}
     """
 
@@ -786,4 +788,15 @@ class RefitBodyToSplatStep(Step):
                                "translation": trans.astype(np.float64)},
             "rig_binding": rig_binding_data(head.mhr),
             "body_refit_stats": stats_out,
+            # What the delivered .ply carries in its header (pipeline/ply_meta.py): the replayable parameters,
+            # the frame, the posed skeleton and the model they belong to.
+            "body_params": {
+                "pose_params": new_pose,
+                "world_from_raw": {"scale": float(scale), "rotation": rot.astype(np.float64),
+                                   "translation": trans.astype(np.float64)},
+                "joints": joints_np,
+                "global_rots": rots.cpu().numpy(),
+                "joint_parents": rig_binding_data(head.mhr)["joint_parents"],
+                "model": f"{params['checkpoint_repo']} {params['mhr_path'] or 'assets/mhr_model.pt'}",
+            },
         }
