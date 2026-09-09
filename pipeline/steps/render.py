@@ -444,6 +444,9 @@ class RenderStep(Step):
              `_inactive_masks`; it is a SECOND batch, not a reinterpretation
              of "masks"), "cameras": List[Camera],
              "image_names": List[str], "points_3d": (positions, colors),
+             "mesh": (vertices float32 (N,3), faces int32 (F,3)) — the body
+             mesh in the SAME world frame as points_3d and the cameras (after
+             auto-orient), for the trainer's hollow loss,
              "resolution": (width, height), "orbit_target" (np.ndarray(3,)),
              "forward_azimuth_deg" (float), "focal_length_mm" (float),
              "framing_bounds" (dict), "initial_rotation" (float)} plus, when
@@ -1035,6 +1038,10 @@ class RenderStep(Step):
             "cameras": cameras,
             "image_names": image_names,
             "points_3d": (points, colors),
+            # The mesh points_3d was sampled from, in the frame the cameras
+            # are expressed in. steps/brush.py writes it beside the COLMAP
+            # model as the surface the hollow loss measures depth against.
+            "mesh": (np.asarray(scene.vertices, dtype=np.float32), np.asarray(scene.faces, dtype=np.int32)),
             "resolution": (width, height),
             # Orbit metadata, matching nodes/render_node.py's b2c_data. Not
             # decoration: filter_fov and rotate_views both hard-error

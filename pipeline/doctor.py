@@ -236,6 +236,7 @@ def check_trainer_binaries() -> Check:
         "--normal-loss-every",
         "--export-evidence", "--normalize-masked-loss",
         "--alpha-mode", "--export-name", "--total-train-iters",
+        "--hollow-weight",
     ]
     lines, status = [], OK
 

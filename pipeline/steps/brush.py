@@ -556,6 +556,29 @@ class _SupportViews:
         )
 
 
+def _write_mesh_ply(path: Path, vertices: np.ndarray, faces: np.ndarray) -> None:
+    """A binary little-endian triangle-mesh .ply (float vertices, uint list
+    faces), the one layout b2ctrain's mesh reader and every viewer agree on."""
+    v = np.ascontiguousarray(np.asarray(vertices, dtype=np.float32)).reshape(-1, 3)
+    f = np.ascontiguousarray(np.asarray(faces, dtype=np.uint32)).reshape(-1, 3)
+    if v.shape[0] == 0 or f.shape[0] == 0:
+        raise ValueError(f"mesh has {v.shape[0]} vertices and {f.shape[0]} faces; cannot write {path}")
+    if int(f.max()) >= v.shape[0]:
+        raise ValueError(f"mesh face index {int(f.max())} out of range for {v.shape[0]} vertices")
+    header = (
+        "ply\nformat binary_little_endian 1.0\n"
+        f"element vertex {v.shape[0]}\nproperty float x\nproperty float y\nproperty float z\n"
+        f"element face {f.shape[0]}\nproperty list uchar uint vertex_indices\nend_header\n"
+    )
+    face_rec = np.empty(f.shape[0], dtype=[("n", "u1"), ("i", "<u4", (3,))])
+    face_rec["n"] = 3
+    face_rec["i"] = f
+    with open(path, "wb") as fh:
+        fh.write(header.encode("ascii"))
+        fh.write(v.astype("<f4").tobytes())
+        fh.write(face_rec.tobytes())
+
+
 def _loss_weights(inputs: Dict[str, Any], count: int) -> Optional[List[np.ndarray]]:
     """The `weights` input, checked against the training views.
 
@@ -744,6 +767,9 @@ class BrushStep(Step):
              "normal_maps": Optional[List[np.ndarray]] HxWx3 float32 [-1,1],
              "weights": Optional[List[np.ndarray]] float32 [0,1], a per-pixel
                         loss weight per training view (weights/ sidecar),
+             "mesh": Optional[(vertices (N,3), faces (F,3))] — the body mesh in
+                     the dataset's world frame (render.py's "mesh" output);
+                     written as mesh.ply for the hollow loss (`hollow_weight`),
              "support_cameras": Optional[List[Camera]],
              "support_images": Optional[List[np.ndarray]] BGR(A),
              "support_masks": Optional[List[np.ndarray]] float32 [0,1],
@@ -910,6 +936,26 @@ class BrushStep(Step):
               "nothing, because this has not been looked at on a real run yet and a "
               "splat dropped here is gone from the deliverable .ply, not merely "
               "hidden in one render", advanced=True),
+        Param("hollow_weight", float, 0.0,
+              "Weight of b2ctrain's hollow loss, which needs the `mesh` input: per "
+              "training pixel, the splat weight arriving from more than "
+              "hollow_margin behind the body mesh surface is penalised, and the "
+              "gradient of that weight through the splats in front is what makes "
+              "the visible surface opaque instead of a semi-transparent front with "
+              "the back showing through (the false transparency seen while tilting "
+              "a splat). 0 disables; 0.5 measured on the deliverable training: "
+              "weight from behind the body 0.038 -> 0.0025, -0.1 dB, +5% time. "
+              "Inert without a mesh input (logged)", minimum=0.0),
+        Param("hollow_margin", float, 0.05,
+              "Depth behind the mesh surface, in scene units (metres for a SAM-3D-Body "
+              "mesh), where the hollow penalty starts; full strength at twice this. "
+              "Room for clothing over the body model and for its fit error, so the "
+              "real front surface is never what gets penalised", minimum=0.0,
+              advanced=True),
+        Param("hollow_dilate", int, 2,
+              "The reference depth at a pixel is the farthest mesh surface within "
+              "this many pixels, so silhouettes and folds where the mesh is slightly "
+              "off are forgiven rather than penalised", minimum=0, advanced=True),
         Param("evidence_normal_weight", float, 0.0,
               "Fold w * the normal-map residual into the evidence residual, for a "
               "dataset that has normals/. Costs one extra render per view and is "
@@ -952,6 +998,7 @@ class BrushStep(Step):
         normal_maps = inputs.get("normal_maps")
         weights = _loss_weights(inputs, len(images))
         support = _SupportViews.from_inputs(inputs, image_names)
+        mesh = inputs.get("mesh")
 
         if len(images) != len(image_names):
             raise ValueError(f"images ({len(images)}) and image_names ({len(image_names)}) length mismatch")
@@ -990,6 +1037,13 @@ class BrushStep(Step):
         export_evidence = params["export_evidence"]
         evidence_prune_inmask = params["evidence_prune_inmask"]
         evidence_normal_weight = params["evidence_normal_weight"]
+        hollow_weight = params["hollow_weight"]
+        hollow_margin = params["hollow_margin"]
+        hollow_dilate = params["hollow_dilate"]
+        if hollow_weight > 0 and mesh is None:
+            logger.warning(
+                "brush: hollow_weight %s but no `mesh` input is wired, so the hollow "
+                "loss is OFF for this training", hollow_weight)
         with_viewer = params["with_viewer"]
         render_path = params["render_path"]
 
@@ -1026,6 +1080,19 @@ class BrushStep(Step):
                 image_names=list(image_names) + support.image_names,
                 points_3d=points_3d,
             ).export(output_dir=colmap_dir)
+
+            # The body mesh beside the model, for the hollow loss. Written
+            # whenever it is wired (a few hundred KB) so a run with the loss
+            # off is one param away from one with it on.
+            mesh_path: Optional[Path] = None
+            if mesh is not None:
+                mesh_path = colmap_dir / "mesh.ply"
+                _write_mesh_ply(mesh_path, mesh[0], mesh[1])
+                if hollow_weight > 0:
+                    logger.info(
+                        "brush: hollow loss on (weight %s, margin %s, dilate %s px) "
+                        "against a %d-triangle body mesh", hollow_weight, hollow_margin,
+                        hollow_dilate, int(np.asarray(mesh[1]).shape[0]))
 
             images_dir = colmap_dir / "images"
             images_dir.mkdir(exist_ok=True)
@@ -1174,6 +1241,15 @@ class BrushStep(Step):
                 # run, carried on the cold run's own argv.
                 if align:
                     cmd.extend(align)
+                # The hollow loss: a regulariser rather than supervision, so
+                # it stays on through the polish and alignment refits too.
+                if mesh_path is not None and hollow_weight > 0:
+                    cmd.extend([
+                        "--mesh", str(mesh_path),
+                        "--hollow-weight", str(hollow_weight),
+                        "--hollow-margin", str(hollow_margin),
+                        "--hollow-dilate", str(hollow_dilate),
+                    ])
                 return cmd
 
             if alpha_mode and support:
