@@ -268,6 +268,23 @@ def check_trainer_binaries() -> Check:
                 status = FAIL
             else:
                 lines.append(f"  all {len(required_flags)} flags the argv needs are present")
+            # The body refit (steps/body_refit.py) samples the splat's
+            # surface through `b2ctrain probe --depth`; a build without it
+            # fails the workflow after the first training.
+            try:
+                probe = _run([path, "probe", "--help"], timeout=30)
+                probe_text = probe.stdout + probe.stderr
+            except (subprocess.TimeoutExpired, OSError) as exc:
+                probe_text = ""
+                lines.append(f"  could not run `probe --help` ({exc})")
+            if "--depth" not in probe_text:
+                lines.append(
+                    "  MISSING `probe --depth` — the body refit (splat_surface) needs "
+                    "a b2ctrain from 2026-09-09 or later; same rebuild as above"
+                )
+                status = FAIL
+            else:
+                lines.append("  probe --depth present (body refit)")
             if "--align-iters" not in help_text:
                 # Not a failure: steps/brush.py's `align_backend: auto`
                 # falls back to its own render/warp/re-invoke loop, which

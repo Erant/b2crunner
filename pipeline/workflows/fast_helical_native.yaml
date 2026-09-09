@@ -425,6 +425,24 @@ settings:
       supporting views, which are renders made FROM these poses and so have no
       independent evidence to offer about them.
 
+  - name: refit_body
+    label: Refit the body model to the intermediate splat
+    type: bool
+    default: true
+    help: >-
+      After the first training, move SAM-3D-Body's mesh and skeleton onto the
+      splat (pipeline/steps/body_refit.py, docs/body-refit.md): the splat
+      follows the generated frames and by then sits centimetres off the body
+      the run started from (3 cm up, 1.3 cm sideways and a 3 deg yaw on the
+      2026-09-09 example run, arms visibly off). The final training's hollow
+      loss then forbids weight behind a body that is where the splat is, which
+      lets its margin come down from 5 cm to 3 cm at the same PSNR, with four
+      times less weight behind the body; the refit skeleton is also what a
+      later re-posing of the splat will hang from. Costs a probe render of the
+      training views and ~90 s of fitting. Off, the final training keeps the
+      original mesh at the 3 cm margin below, which is the riskier setting for
+      a mesh that may be too big for the subject.
+
   - name: re_outline
     label: Re-outline (experimental)
     type: bool
@@ -2264,6 +2282,53 @@ steps:
   # render_initial_views, which frames the mesh at that same preset — the
   # splat re-render has to match it or the two disagree about how tight the
   # body fills the frame.
+  # Body refit (docs/body-refit.md): the splat trained above is where the
+  # subject actually is; the body model has not moved since the photograph.
+  # `splat_surface` samples the splat's median surface through the trainer's
+  # probe; `refit_body_to_splat` re-runs the MHR forward with root, pose,
+  # scales and shape free against it and republishes the body — vertices,
+  # skeleton, pose parameters, and the world-frame mesh the final training's
+  # hollow loss takes. Runs before the second pass re-renders the splat so the
+  # debug bundle carries the refit beside the intermediate splat it was fitted
+  # to; nothing between here and train_final_splat reads the body.
+  - id: splat_surface
+    step: splat_surface
+    dispatch: in_process
+    when:
+      - ${globals.refit_body}
+      - ${globals.export_ply}
+    inputs:
+      splat_path: dataset.splat_path
+      cameras: dataset.cameras
+    params:
+      debug_dir: ${globals.output_root}/debug/splat_surface
+    outputs:
+      surface: scene.splat_surface
+
+  - id: refit_body
+    step: refit_body_to_splat
+    dispatch: subprocess
+    env: sam3dbody
+    when:
+      - ${globals.refit_body}
+      - ${globals.export_ply}
+    inputs:
+      mesh_output: scene
+      mesh_world: scene.mesh_world
+      surface: scene.splat_surface
+    params:
+      debug_dir: ${globals.output_root}/debug/body_refit
+    outputs:
+      vertices: scene.vertices
+      keypoints_3d: scene.keypoints_3d
+      joints: scene.joints
+      global_rots: scene.global_rots
+      pose_params: scene.pose_params
+      mesh_world: scene.mesh_world
+      world_from_raw: scene.world_from_raw
+      rig_binding: scene.rig_binding
+      body_refit_stats: scene.body_refit_stats
+
   - id: rerender_splat
     step: render_splat
     dispatch: in_process
@@ -2853,6 +2918,12 @@ steps:
       # -0.2 dB; 0.5 is the conservative choice until a real run has been
       # looked at. See train_splat.
       hollow_weight: 0.5
+      # 3 cm behind the REFIT body (splat_surface / refit_body above), measured
+      # 2026-09-09 as equal PSNR to 5 cm with four times less weight behind the
+      # body; 2 cm measured best still, on the one example run. With refit_body
+      # off this margin applies to SAM-3D-Body's own mesh, where 5 cm was the safe
+      # setting (docs/body-refit.md).
+      hollow_margin: 0.03
       # Normal supervision off, measured on THIS training (guide §1): it
       # costs 4.7 band-limited s1 (-18%) and 1.8 dB of fidelity at once,
       # which is the tell that it is a straight loss rather than a

@@ -340,6 +340,62 @@ class MapFaceToMeshStep(Step):
         return np.asarray(color[:, :, :3]), np.asarray(depth)
 
 
+def build_mhr_head(checkpoint_repo: str, checkpoint_dir, mhr_path, device: str):
+    """Build the MHR head alone — not the SAM-3D-Body model it lives in.
+
+    Only `head.mhr_forward` runs in the steps that call this (fit_head_to_face,
+    refit_body_to_splat); the image backbone never sees a pixel. Until
+    2026-09-07 fit_head_to_face called `load_sam_3d_body` and kept
+    `.head_pose`, which meant a fresh subprocess constructing the DINOv3
+    backbone through torch.hub, reading the whole 2.1 GB checkpoint and
+    parking 3.5 GB on the GPU, every run, to use 13 small buffers of it.
+    Measured on the 4070 Ti with a warm page cache: 12.0 s against 0.4 s,
+    3.54 GB against 0.73 GB of VRAM; a pod reads the checkpoint off a
+    network volume, where the gap is what made that step's 70 s.
+
+    The head is what `SAM3DBody._initialze_model` builds — `build_head`
+    with the checkpoint's own config, MHR_MODEL_PATH pointed at
+    `mhr_model.pt` exactly as `load_sam_3d_body` does — and its buffers
+    (scale mean/components, the keypoint regressor, the hand PCA, the
+    wrist frames) come from the checkpoint's `head_pose.*` entries, read
+    through a memory map so only those pages are touched.
+    `load_sam_3d_body` loads the same entries into the same module,
+    non-strictly too; the one thing it does besides is overwrite
+    `hand_pose_comps` with the identity BEFORE loading the checkpoint,
+    which the checkpoint then overwrites back. Verified against the full
+    model on random parameters, hands and expressions included: vertices
+    agree to 2.4e-7 m, joints and rotations exactly.
+    """
+    from pathlib import Path
+
+    import torch
+    from huggingface_hub import snapshot_download
+    from sam_3d_body.models.heads import build_head
+    from sam_3d_body.utils.config import get_config
+
+    checkpoint_dir = Path(checkpoint_dir or snapshot_download(checkpoint_repo))
+    mhr_path = mhr_path or str(checkpoint_dir / "assets" / "mhr_model.pt")
+    cfg = get_config(str(checkpoint_dir / "model_config.yaml"))
+    cfg.defrost()
+    cfg.MODEL.MHR_HEAD.MHR_MODEL_PATH = mhr_path
+    cfg.freeze()
+    head = build_head(cfg, cfg.MODEL.PERSON_HEAD.POSE_TYPE)
+    checkpoint = torch.load(str(checkpoint_dir / "model.ckpt"), map_location="cpu",
+                            weights_only=False, mmap=True)
+    missing, unexpected = head.load_state_dict(head_state_dict(checkpoint), strict=False)
+    # `mhr.*` comes from mhr_model.pt and `proj.*` (the pose-token MLP)
+    # is never run; anything else missing means a checkpoint whose head
+    # this code does not know, and that must not be quietly zero.
+    missing = [k for k in missing if not k.startswith(("mhr.", "proj."))]
+    if missing or unexpected:
+        raise RuntimeError(
+            f"the checkpoint's head_pose entries do not match the MHR head built "
+            f"from its config (missing {missing}, unexpected {list(unexpected)}). "
+            f"Is {checkpoint_dir} a facebook/sam-3d-body snapshot?"
+        )
+    return head.to(device).eval()
+
+
 @register_step("fit_head_to_face")
 class FitHeadToFaceStep(Step):
     """Re-fit the MHR head parameters to the photograph's landmarks.
@@ -397,60 +453,8 @@ class FitHeadToFaceStep(Step):
         self._head = None
 
     def load(self, params: Dict[str, Any]) -> None:
-        """Build the MHR head alone — not the SAM-3D-Body model it lives in.
-
-        Only `model.head_pose.mhr_forward` runs here; the image backbone
-        never sees a pixel. Until 2026-09-07 this called `load_sam_3d_body`
-        and kept `.head_pose`, which meant a fresh subprocess constructing
-        the DINOv3 backbone through torch.hub, reading the whole 2.1 GB
-        checkpoint and parking 3.5 GB on the GPU, every run, to use 13
-        small buffers of it. Measured on the 4070 Ti with a warm page
-        cache: 12.0 s against 0.4 s, 3.54 GB against 0.73 GB of VRAM; a
-        pod reads the checkpoint off a network volume, where the gap is
-        what made this step's 70 s.
-
-        The head is what `SAM3DBody._initialze_model` builds — `build_head`
-        with the checkpoint's own config, MHR_MODEL_PATH pointed at
-        `mhr_model.pt` exactly as `load_sam_3d_body` does — and its
-        buffers (scale mean/components, the keypoint regressor, the hand
-        PCA, the wrist frames) come from the checkpoint's `head_pose.*`
-        entries, read through a memory map so only those pages are
-        touched. `load_sam_3d_body` loads the same entries into the same
-        module, non-strictly too; the one thing it does besides is
-        overwrite `hand_pose_comps` with the identity BEFORE loading the
-        checkpoint, which the checkpoint then overwrites back.
-        Verified against the full model on random parameters, hands and
-        expressions included: vertices agree to 2.4e-7 m, joints and
-        rotations exactly.
-        """
-        from pathlib import Path
-
-        import torch
-        from huggingface_hub import snapshot_download
-        from sam_3d_body.models.heads import build_head
-        from sam_3d_body.utils.config import get_config
-
-        checkpoint_dir = Path(params["checkpoint_dir"] or snapshot_download(params["checkpoint_repo"]))
-        mhr_path = params["mhr_path"] or str(checkpoint_dir / "assets" / "mhr_model.pt")
-        cfg = get_config(str(checkpoint_dir / "model_config.yaml"))
-        cfg.defrost()
-        cfg.MODEL.MHR_HEAD.MHR_MODEL_PATH = mhr_path
-        cfg.freeze()
-        head = build_head(cfg, cfg.MODEL.PERSON_HEAD.POSE_TYPE)
-        checkpoint = torch.load(str(checkpoint_dir / "model.ckpt"), map_location="cpu",
-                                weights_only=False, mmap=True)
-        missing, unexpected = head.load_state_dict(head_state_dict(checkpoint), strict=False)
-        # `mhr.*` comes from mhr_model.pt and `proj.*` (the pose-token MLP)
-        # is never run; anything else missing means a checkpoint whose head
-        # this code does not know, and that must not be quietly zero.
-        missing = [k for k in missing if not k.startswith(("mhr.", "proj."))]
-        if missing or unexpected:
-            raise RuntimeError(
-                f"fit_head_to_face: the checkpoint's head_pose entries do not match "
-                f"the MHR head built from its config (missing {missing}, unexpected "
-                f"{list(unexpected)}). Is {checkpoint_dir} a facebook/sam-3d-body snapshot?"
-            )
-        self._head = head.to(params["device"]).eval()
+        self._head = build_mhr_head(params["checkpoint_repo"], params["checkpoint_dir"],
+                                    params["mhr_path"], params["device"])
 
     def unload(self) -> None:
         self._head = None
