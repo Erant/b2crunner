@@ -53,22 +53,6 @@ colour; it is thrown away.
 With no `splat_path` (the face branch is off) every weight is 1 and any
 masks pass through unchanged, so a workflow can wire this ungated in front
 of `merge_support_views` without a second switch.
-
-**The second consumer is the second denoise** (`face_cap_vace_mask`,
-2026-09-09). A VACE control mask says, per pixel, how free the denoiser is
-to repaint — 1 generate, 0 keep what the control frame shows (diffusers'
-pipeline_wan_vace.py: "black areas indicate conditioning regions") — which
-is the same question a loss weight answers, so the same map serves. The
-step is handed `mask_splat`'s all-1.0 batch as `masks` and folds the
-weight in; over the face of every helix frame within the cap the mask
-comes back 0, and `denoise_pass2` reproduces the trained splat's face
-there instead of repainting it. Two things about VACE decide that call's
-settings: diffusers splits the control video into its inactive/reactive
-halves at `mask > 0.5`, so only the mask channel it concatenates onto the
-latents ever sees a soft value — hence `strength: 1.0` there rather than
-the training call's 0.9, since a 0.1 would reach the split as a 0 and the
-channel as an ambiguous hint — and the feather is what that channel sees
-at the rim, so it stays.
 """
 
 from __future__ import annotations
@@ -171,21 +155,6 @@ class FacePriorityWeightsStep(Step):
                 f"face_priority_weights: {len(masks)} masks for {len(cameras)} "
                 f"cameras. The masks are the views' own and have to arrive with them."
             )
-        if masks is not None and cameras:
-            # The weight is rendered at the cameras' size and multiplied into
-            # the mask pixel for pixel, so the two have to agree. They do
-            # whenever the masks came from a render of these cameras; a VACE
-            # batch from a resized dataset would not, and numpy would either
-            # raise on the product or, worse, broadcast it.
-            width, height = _frame_size(cameras)
-            odd = {tuple(np.asarray(m).shape[:2]) for m in masks} - {(height, width)}
-            if odd:
-                raise ValueError(
-                    f"face_priority_weights: the masks are {sorted(odd)} (HxW) but "
-                    f"the cameras render at {height}x{width}; the weight is folded "
-                    f"into the mask pixel for pixel, so the batch has to be at the "
-                    f"cameras' size."
-                )
 
         if not cameras:
             return self._passthrough([], masks, why="no views")

@@ -82,76 +82,33 @@ Two steps in the shared tail, both `face_priority_weights`:
 `train_final_splat` takes neither: it has no supporting views, so there is
 nothing for its frames to yield to.
 
-## The second consumer: the second denoise's VACE mask
-
-Added 2026-09-09, behind the `face_vace_mask` setting (on by default,
-needs `face_splat`). The 2026-09-08 pass-2 sweep
-(docs/vace-denoise-findings-2026-09-07.md, section 6) found that head
-detail is decided upstream of `denoise_pass2`: in all six runs the final
-head's sharpness sat at or below its control frame's, whatever the
-strength, shift or sampler. The face in that control frame is the trained
-splat's, which inside the cap is the photo-derived face the weights above
-won for it — so the one pass-2 lever left is to stop the pass repainting
-it.
-
-A VACE control mask is per-pixel, and it answers the same question a loss
-weight does: 0 means "conditioning region, reproduce what the control
-frame shows", 1 means "generate" (diffusers' `pipeline_wan_vace.py`; the
-convention the injected anchor photo's all-0 frame has always used). So
-the workflow reuses the step:
-
-- **`face_cap_vace_mask`** (after `mask_splat_fringes`, before
-  `reinject_anchor`, gated on `face_splat` AND `face_vace_mask`): the
-  helix's cameras (`dataset.cameras`, carrying the anchor's refinement
-  rigidly since `rerender_splat`'s `given_anchor_camera`), the refined
-  face splat, the anchor index and position `rerender_splat` published,
-  and `dataset.masks` — the all-1.0 batch `mask_splat` just emitted —
-  in; `dataset.masks` out with the weight folded in. Over the face of a
-  frame within the cap the mask is 0; it ramps to 1 over `fade_deg` past
-  the cap and over `feather_px` at the rim; everywhere else it is
-  untouched. `reinject_anchor` then writes its 0.0 over the anchor frame
-  as before.
-
-Two settings differ from the training call, both forced by diffusers:
-
-- **`strength: 1.0`**, not 0.9. `prepare_video_latents` splits the
-  control video into inactive/reactive halves at `mask > 0.5` — a hard
-  cut, so 0.1 and 0 are the same split — and only `prepare_masks`' mask
-  channel, concatenated onto the conditioning latents, sees the soft
-  value. A tenth left to the denoiser would reach it as an ambiguous
-  hint, not a tenth of anything.
-- **The feather stays** (4 px) for the same reason in reverse: the mask
-  channel is carried to latent resolution with nothing spatial lost (an
-  8x8 pixel block becomes 64 channels), so the ramp at the rim is exactly
-  what the model sees between kept face and repainted hair.
-
-Past the cap the mask is deliberately 1: there the splat's face is what
-pass 1 painted, resampled through a training, and cleaning that up is the
-pass's job.
-
-The batch `denoise_pass2` is handed, mask in alpha, lands in the debug
-bundle as `debug/denoise_pass2_input/` (`dump_denoise2_input`, gated on
-`export_debug`), so the first run can answer whether the 0 sits on the
-face and not a hairline off it.
-
-Never run on a pod as of 2026-09-09, but run for real on a pod's data: the
-step, wired exactly as above, on run F1's refined face .ply and its
-`colmap_preupscale/` cameras (the helix at 720x1280, anchor at frame 37),
-through the local b2ctrain rasteriser. 22 of 81 views are within the cap
-and its fade, 17 carry a pixel below 0.5 — the anchor's neighbours 34-40
-at a full 0, the other loop's pass at 0-5 and 70-73 partially — and on
-frame 37 the 0 region is an 80x100 px box on the face (x 313-393,
-y 185-286), eyes to chin, clear of the hair and the neck. About 0.7% of
-the frame, 10x12 latent pixels. Three frames either side of the anchor
-the mask is already above 0.5, which is the cap's 30 degrees at the
-helix's 9 degrees per frame; the fade only reaches the mask channel.
-
 `face_support_views`' `min_path_angle_deg` went from the step's default 5
 to 0 in the same change. The default dropped the cap views within 5° of
 the denoising path because those views "have a denoised frame of their own
 already"; with that frame silenced over the face, a cap view on the path
 is the only face evidence at that angle rather than a resampled copy of
 something the training has.
+
+## Tried and backed out: the second denoise's VACE mask
+
+A third consumer was wired on 2026-09-09 and reverted the same day. The
+2026-09-08 pass-2 sweep found head detail is decided upstream of
+`denoise_pass2` (docs/vace-denoise-findings-2026-09-07.md, section 6), so
+the pass-2 lever left looked like stopping that pass repainting the face:
+a VACE control mask is per-pixel and answers the same question a loss
+weight does (0 = conditioning region, reproduce; 1 = generate), so a
+`face_cap_vace_mask` step folded these weights into the mask batch
+`mask_splat` emits, at `strength: 1.0` — diffusers splits the control
+video at `mask > 0.5`, so a partial value never reaches the split —
+between `mask_splat_fringes` and `reinject_anchor`.
+
+It was detrimental to the splat, and is out (commit f602498, reverted).
+Why is not established: the frozen face is the trained splat's own
+render, so the frames the final training is handed carry no new face
+evidence there, and pass 2 was evidently doing something for the fit that
+the sweep's head-sharpness numbers did not see. Anyone reaching for this
+idea again should expect to answer that first, and to judge it on the
+trained splat rather than on the re-render.
 
 ## Status
 

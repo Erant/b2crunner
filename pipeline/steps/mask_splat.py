@@ -36,13 +36,11 @@ background colour.
 a re-render that already ends on the colour the denoise wants. Neither is
 a no-op: both still do the step's *other* job, replacing the per-pixel
 splat alpha in `dataset.masks` with the per-frame all-1.0 VACE batch,
-which is what `denoise_pass2` reads, what `face_cap_vace_mask` writes the
-face cap's 0 into (steps/face_priority.py, 2026-09-09) and what
-`inject_anchor` writes its anchor-frame 0.0 into. That is also why the
-step stays here rather than being deleted: the ordering it anchors
-("inject_anchor must run AFTER mask_splat", see steps/anchor_stub.py)
-still holds, and `mode: threshold` keeps the recorded run reproducible for
-an A/B. See docs/spatial-reinforcement.md.
+which is what `denoise_pass2` reads and what `inject_anchor` writes its 0.0
+into. That is also why the step stays here rather than being deleted: the
+ordering it anchors ("inject_anchor must run AFTER mask_splat", see
+steps/anchor_stub.py) still holds, and `mode: threshold` keeps the recorded
+run reproducible for an A/B. See docs/spatial-reinforcement.md.
 
 **Mask conventions.** ComfyUI's MASK is inverted (1.0 = background), so the
 graph binarises the *background* and inverts it. This pipeline's convention
