@@ -1178,7 +1178,9 @@ steps:
       steps_low: 4
       cfg: 1.0
       seed: ${globals.seed}
-      strength: [1, 1, 0.75, 0.5, 0.25, 0]
+      sampler_high: uni_pc
+      sampler_shift: 5
+      strength: [1, 1, 0.5, 0.5, 0.5, 0.5]
       prompt: "人工光、柔光、低对比度、环绕运镜。时间静止，人物完全静止。身体\
         如雕塑般僵硬，胸口没有起伏，头部保持固定角度，面部肌肉完全不动，维持单\
         一的中性表情。双眼一眨不眨，眼睑保持张开且稳定，目光空洞而固定，锁定远\
@@ -1487,26 +1489,46 @@ steps:
       steps_low: 4
       cfg: 1.0
       seed: ${globals.seed}
-      # How hard the control video pushes, one scale per denoise step, first
-      # to last — the whole of it, since the per-expert `strength_low` and
-      # the multiplier `strength_steps` folded into this list on 2026-09-04.
-      # Full scale while the pose is being set, gone by the time the last
-      # step paints, which is the lever for a control frame whose skeleton
-      # otherwise survives into the output as ink rather than as pose. The
-      # fade sits where it does because of where the experts split: at the
-      # step's default `steps_high: 2` / `steps_low: 4` (the reference
-      # graph's split, on its sampler — `sigma_schedule: beta`,
-      # `sampler_shift: 8`, so t = 1000, 988 | 955, 889, 753, 448) steps 1-2
-      # are the high-noise expert's and steps 3-6 the low-noise one's, so
-      # the two 1.0s leave the structure pass
-      # untouched and the taper is spent entirely on the four steps that
-      # decide detail. The last entry is a true 0: VACE off, the frame
-      # finished on the model's own prior.
+      # The sampler and the scale schedule are run E4's, the settled result
+      # of the 2026-09-08 skeleton-leak sweep (docs/vace-denoise-findings-
+      # 2026-09-07.md, section 5; sidecar docs/vace-leak-sweep/E4-shift5-
+      # unipc.yaml), applied here on 2026-09-09. The question the sweep
+      # answered: the DWPose skeleton in the control drawing was surviving
+      # the denoise as painted sticks — red neck/shoulder "yoke" over the
+      # hair on back views, coloured limb lines over the trousers — and
+      # pass 2 inherits it through the intermediate splat.
       #
-      # This is also where the two passes disagree: pass 1 denoises the
-      # circular render from scratch at these scales, pass 2 runs the same
-      # shape at 0.8 of it against the helical re-render.
-      strength: [1, 1, 0.75, 0.5, 0.25, 0]
+      # `sampler_shift: 5` is the whole of the fix: it takes the leak from
+      # 1.74 (the 2.5-shift baseline A) to -0.53, yoke included, on its own
+      # (E2, euler) and with `uni_pc` on the high-noise expert alike (E4).
+      # Shift is the axis the sampler stops mattering on — at shift 2.5 the
+      # same `uni_pc` is the worst yoke ever measured (E3, 116 against A's
+      # 14.5), because UniPC's multistep history carries what the two
+      # high-noise steps committed straight through the hand-off, ink
+      # included — so E4 over E1/E2 for being the setting that is not one
+      # sampler flip away from that. `sampler_high` is written out although
+      # it is the step's default for the same reason everything else here
+      # is: the reference graph's sampler, kept on purpose.
+      #
+      # The schedule: one scale per denoise step, first to last. Steps 1-2
+      # are the high-noise expert's (structure), 3-6 the low-noise one's
+      # (detail), at the 2/4 split above. Full scale on the structure
+      # steps, 0.5 on all four detail steps — a flat half rather than the
+      # `[1, 1, 0.75, 0.5, 0.25, 0]` taper this shipped with until
+      # 2026-09-09, which spent its whole fade on steps 5-6, the two that
+      # measured WORSE than inert on leak per point of silhouette (section
+      # 1a), and paid full scale on step 3. E4 keeps the most silhouette
+      # of the three clean settings (IoU 0.8468, 0.6 pt under A) and costs
+      # the most view flow (1.189 against A's 0.986, +20%) — which pass 2
+      # at a flat scale recovers whole (section 6, F1 flow 1.007).
+      #
+      # Caveat on record: the taper it replaces was never measured at
+      # shift 8 — every one of the 17 runs deviated from it — so its only
+      # fault may have been the taper's placement. The missing corner is
+      # one run with these two lines reverted.
+      sampler_high: uni_pc
+      sampler_shift: 5
+      strength: [1, 1, 0.5, 0.5, 0.5, 0.5]
       # One knob sits beside it, left unset here so this pass keeps pushing
       # on every layer alike: `strength_layers` tapers each step's scale
       # across the eight VACE injection layers, shallow to deep.
@@ -2595,7 +2617,8 @@ steps:
     params:
       width: ${globals.resolution.0}
       height: ${globals.resolution.1}
-      # Same as denoise_pass1 — see the note there. Only `strength` differs.
+      # Same as denoise_pass1 except the sampler and the scale, which are
+      # this pass's own — see below.
       #
       # UNREVIEWED against the render above (2026-08-30, still true): these
       # frames are a subject cut out of 0.5 GREY — by rmbg's matte since
@@ -2612,9 +2635,40 @@ steps:
       steps_low: 4
       cfg: 1.0
       seed: ${globals.seed}
-      # Pass 1's fade, every entry scaled by this pass's 0.8: 0.8 down
-      # through 0.6, 0.4 and 0.2 to a true 0 on the last step.
-      strength: [0.8, 0.8, 0.6, 0.4, 0.2, 0]
+      # The pass-2 quality sweep's settings (docs/vace-denoise-findings-
+      # 2026-09-07.md, section 6; six runs F1-F6 on E4's pass 1, 2026-09-08),
+      # applied 2026-09-09. This pass's control is a splat render, not a
+      # drawing, and the sweep found the sampler axis dead or harmful on
+      # it: shift 8 (the step's default, and what shipped here) cost 3.2
+      # points of the deliverable's head sharpness for +0.09 dB (F4);
+      # `uni_pc` on the high-noise expert cost 2.8 points, 0.6 dB and 8%
+      # flow, and painted the hardest hallucinated tile grid of the batch
+      # (F5) — the sampler that hugs the control hardest hugs a splat
+      # render that has no detail to hug; shift 5 bought nothing (F3), and
+      # a 3/3 expert split bought nothing over 2/4 (F6). Euler on the
+      # opening steps at shift 2.5 is the corner every one of those was
+      # measured against, and the one nothing beat.
+      #
+      # The scale is a flat 0.8 on every step. Strength on this pass is a
+      # dial that turns the same way on three instruments — 0.6 / 0.8 /
+      # 1.0 gave PSNR 24.77 / 25.75 / 26.29 dB, flow 1.389 / 1.189 /
+      # 1.007 and BA inflation 0.067 / 0.028 / 0.006 — paid in the frames'
+      # own texture the other way (frame head s1 40.2 / 39.3 / 37.4). 1.0
+      # is the fidelity end (F1: a re-render with a small blur, and the
+      # deliverable the fit can hold); 0.6 is the wrong side of the curve
+      # (it invents: a tile grid, ceiling lights, eyeshadow); 0.8 is the
+      # compromise, chosen for the texture. No taper: the taper to 0 this
+      # shipped with, `[0.8, 0.8, 0.6, 0.4, 0.2, 0]`, was pass 1's shape
+      # scaled, and pass 1's reason for it (the skeleton ink) does not
+      # exist on a splat render — a step at scale 0 here is a step the
+      # model spends inventing.
+      #
+      # None of this sharpens the head: the final head sat at or below its
+      # control's in all six runs, whatever this pass did. That lever is
+      # face_cap_vace_mask, above.
+      sampler_high: euler
+      sampler_shift: 2.5
+      strength: [0.8, 0.8, 0.8, 0.8, 0.8, 0.8]
       prompt: "人工光、柔光、低对比度、环绕运镜。时间静止，人物完全静止。身体\
         如雕塑般僵硬，胸口没有起伏，头部保持固定角度，面部肌肉完全不动，维持单\
         一的中性表情。双眼一眨不眨，眼睑保持张开且稳定，目光空洞而固定，锁定远\

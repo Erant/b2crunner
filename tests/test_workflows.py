@@ -1599,6 +1599,45 @@ class TestTheFirstDenoiseInputIsKept(unittest.TestCase):
         self.assertEqual(denoise.inputs["control_masks"], "dataset.masks")
 
 
+class TestTheDenoiseSettingsAreTheMeasuredOnes(unittest.TestCase):
+    """The two passes ship the settings the 2026-09-08 sweeps settled on
+    (docs/vace-denoise-findings-2026-09-07.md, sections 5 and 6), applied
+    2026-09-09. Pinned because they are decisions with numbers behind them,
+    and a step default drifting under them — the step's own `sampler_shift`
+    is 8, which cost pass 2 three points of head sharpness — would be
+    silent.
+    """
+
+    def _step(self, step_id):
+        from pipeline.cli import resolve_workflow
+        from pipeline.workflow import WorkflowSpec
+
+        spec = WorkflowSpec.from_yaml(resolve_workflow("fast_helical_native"))
+        return next(s for s in spec.steps if s.id == step_id)
+
+    def test_pass_1_is_run_e4(self):
+        """The skeleton-leak sweep's E4: shift 5 erases the ink, uni_pc is
+        the reference graph's sampler and at shift 5 it no longer matters,
+        the structure steps stay at full scale and the four detail steps
+        sit at a flat half rather than a taper spent on steps 5-6."""
+        params = self._step("denoise_pass1").params
+        self.assertEqual(params["sampler_high"], "uni_pc")
+        self.assertEqual(params["sampler_shift"], 5)
+        self.assertEqual(params["strength"], [1, 1, 0.5, 0.5, 0.5, 0.5])
+        self.assertEqual((params["steps_high"], params["steps_low"]), (2, 4))
+
+    def test_pass_2_is_the_quality_sweep_s_corner_at_0_8(self):
+        """Euler on the opening steps at shift 2.5 (shift 8 and uni_pc each
+        cost ~3 points of head sharpness on a splat render), a flat 0.8 on
+        every step (strength is a fidelity-vs-texture dial; 0.8 is the
+        texture compromise, and a taper to 0 is invention), 2/4 kept."""
+        params = self._step("denoise_pass2").params
+        self.assertEqual(params["sampler_high"], "euler")
+        self.assertEqual(params["sampler_shift"], 2.5)
+        self.assertEqual(params["strength"], [0.8] * 6)
+        self.assertEqual((params["steps_high"], params["steps_low"]), (2, 4))
+
+
 class TestTheFaceCapProtectsTheSecondDenoise(unittest.TestCase):
     """`face_cap_vace_mask`: the face cap's coverage written into pass 2's
     VACE mask as 0, so the second denoise keeps the trained splat's face

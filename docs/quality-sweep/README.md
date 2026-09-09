@@ -86,4 +86,6 @@ identical controls give the noise floor: head s1 sd 1.2, body sd 0.3.
 No run raised head s1 and PSNR together. Strength is a monotone dial
 (0.6 / 0.8 / 1.0 -> 24.77 / 25.75 / 26.29 dB, flow 1.389 / 1.189 / 1.007)
 paid in frame texture; shift 8 and uni_pc each cost ~3 points of head s1;
-3/3 buys nothing over F3. Recommended: F1, `strength: [1]*6`. Not applied.
+3/3 buys nothing over F3. Recommended: F1, `strength: [1]*6`. Applied
+2026-09-09 at the texture compromise instead: the workflow's pass 2 is
+now euler / shift 2.5 / flat `[0.8]*6` (E4's own pass 2), and pass 1 is E4.

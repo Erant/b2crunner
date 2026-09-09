@@ -539,7 +539,10 @@ refinement change, some the softer control.
 
 **Recommendation: E4's settings as the new pass-1 default**
 (`sampler_high: uni_pc`, `sampler_shift: 5`,
-`strength: [1, 1, .5, .5, .5, .5]`), E1 as the runner-up. E4 leaves the
+`strength: [1, 1, .5, .5, .5, .5]`), E1 as the runner-up. *Applied to
+`denoise_pass1` (and the re-outline denoise, which mirrors it) on
+2026-09-09; the two caveats below stand, and the missing corner is still
+unrun.* E4 leaves the
 structure steps at full scale, keeps the reference graph's sampler, holds
 the best silhouette of the three, and — the deciding point — sits in the
 regime where the sampler does not matter, while E1 at shift 2.5 is one
@@ -749,9 +752,12 @@ body only) is the one pass-2 change left that can move it.
 
 **Recommendation.** `denoise_pass2: strength: [1]*6` at euler / shift
 2.5 / 2|4 (F1), on E4's pass 1: +0.5 dB, flow -15 %, BA inflation ÷ 5,
-head within noise of E4, and the deliverable the fit can hold. Not
-applied to the workflow. If texture in the frames is preferred over
-fidelity, 0.8 is the compromise and 0.6 is the wrong side of the curve.
+head within noise of E4, and the deliverable the fit can hold. If texture
+in the frames is preferred over fidelity, 0.8 is the compromise and 0.6
+is the wrong side of the curve. *Applied 2026-09-09 as the texture
+compromise: `denoise_pass2` ships euler / shift 2.5 / 2|4 with a flat
+`[0.8]*6` — E4's own pass 2, the corner every F run was measured
+against — not F1's 1.0.*
 The shipped pass 2 (uni_pc, shift 8, taper to 0) stacks the three
 settings that each individually lost here or in ef13a7; it should not be
 left as the default whatever is chosen.
