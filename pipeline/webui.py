@@ -571,7 +571,11 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
                                 "_What the run produces, and what the Results tab's "
                                 ".zip contains. Each box switches its export steps "
                                 "off entirely — unticking the .ply skips a whole "
-                                "30,000-iteration brush training._"
+                                "30,000-iteration brush training. The debug bundle "
+                                "is the half-exception: most of it is written either "
+                                "way and the box only decides what is packaged, but "
+                                "the two debug COLMAP datasets it carries are skipped "
+                                "with it._"
                             )
 
                     with gr.Row():

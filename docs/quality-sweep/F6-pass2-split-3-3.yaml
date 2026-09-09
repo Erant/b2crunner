@@ -1,0 +1,67 @@
+# F6 — pass 2 split 3/3 at shift 5: each expert on the steps it was trained for
+#
+# The experts have split 2 | 4 in every run since the port, because the
+# ComfyUI graph's `steps: 6` happened to fall that way. The checkpoint's
+# own boundary is t = 875: the high-noise expert was trained at and above
+# it, the low-noise one below. Where the six beta-schedule steps land
+# depends on the shift, and how many sit at or above 875 with them:
+#
+#     shift 2.5   1000  961 | 868  714  487  200      2 high-range steps
+#     shift 5     1000  980  929 | 833  655  334      3
+#     shift 8     1000  987  955  889 | 752  445      4  (the ComfyUI graph)
+#
+# So E4's pass 2 (2 | 4 at shift 2.5) is the one split that matches the
+# trained ranges by accident, F3 (2 | 4 at shift 5) hands the low expert a
+# step at 929 it was not trained for, and the reference graph handed it
+# two. A 3 | 3 split at shift 2.5 would put t = 868 on the high expert,
+# 7 below its floor — so this run is 3 | 3 AT SHIFT 5, where the split
+# falls between 929 and 833 with margin either side. Against F3 (same
+# shift, 2 | 4) the delta is the split alone; against E4 it is shift and
+# split together, read through F3.
+#
+# What to watch: the high expert holds layout to the control, so a third
+# structure step should move flow DOWN; the low expert has three steps for
+# texture instead of four, so frame and splat s1 may give something back.
+# `strength` stays six entries at flat 0.8 — the split is a different
+# question from the taper. With euler on the high expert the order cap is
+# inert there; the low expert's UniPC runs at order 2 instead of 3
+# (min(cap, steps - 1)), part of the change and inseparable from it.
+#
+# Base = E4 (run 02ff74, 2026-09-08): pass 1 at `sampler_high: uni_pc`,
+# `sampler_shift: 5`, `strength: [1, 1, .5, .5, .5, .5]` — the clean pass 1
+# the leak sweep recommended — and pass 2 at euler / shift 2.5 / flat 0.8,
+# the pass 2 every A-family run carried. E4 measured: leak -0.53, IoU 0.8468,
+# flow 1.189, final splat head s1 29.5 / PSNR 25.75, pass-2 output head s1
+# 34.8 against 36.0 in its control (kept pixels). Every line below reproduces E4
+# except the ones marked CHANGED, so this run's numbers minus E4's are the
+# effect of that change and nothing else.
+#
+# All six leave pass 1 untouched, so their pass-1 frames, their
+# intermediate splat and therefore their pass-2 CONTROL should be E4's,
+# frame for frame (same seed, same weights) — which is what makes a pass-2
+# delta readable, and is itself a determinism check worth reading.
+
+settings:
+  # export_debug carries the measurement: debug/intermediate_splat.ply is
+  # what scripts/final_splat_quality.py re-renders as the pass-2 control,
+  # colmap_preupscale/ is pass 2's own output, debug/alignment/ the flow.
+  # A run without it is wasted. The other two match every reference run.
+  export_colmap: true
+  export_debug: true
+  export_ply: true
+
+step_params:
+  denoise_pass1:
+    sampler_high: uni_pc
+    sampler_shift: 5
+    strength: [1, 1, 0.5, 0.5, 0.5, 0.5]
+  denoise_pass2:
+    sampler_high: euler
+    # CHANGED from E4's 2.5 — F3's value, and the shift at which three
+    # steps sit in the high expert's trained range (see the table above).
+    sampler_shift: 5
+    # CHANGED from E4's 2 | 4 (the step defaults, spelled out in the
+    # workflow). The sum stays 6, so `strength` keeps its six entries.
+    steps_high: 3
+    steps_low: 3
+    strength: [0.8, 0.8, 0.8, 0.8, 0.8, 0.8]

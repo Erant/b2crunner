@@ -77,10 +77,12 @@ def resolve_outputs(spec: WorkflowSpec) -> Dict[str, bool]:
 
     An output whose `requires:` setting is switched off is forced off here
     rather than left to produce something under a name that no longer means
-    what it says — the pre-upscale COLMAP export with the upscale off would
-    be the ordinary `colmap/` twice. The UI also disables that checkbox, so
-    this is the second half of one rule, for the paths that do not go
-    through a checkbox at all (`--param`, a stale panel).
+    what it says. The UI also disables that checkbox, so this is the second
+    half of one rule, for the paths that do not go through a checkbox at all
+    (`--param`, a stale panel). No output declares a `requires:` today — the
+    pre-upscale COLMAP export did until it was folded into the debug bundle
+    (a step `when:` naming both switches now says the same thing) — but the
+    rule stays because it belongs to the outputs schema, not to that export.
 
     Raises `SubmitError` if nothing would be exported: a run that produces no
     deliverable leaves nothing to download, and it is an hour of GPU either
@@ -815,15 +817,33 @@ def result_dirs(run_dir: Optional[Path], workflow: str = "") -> Dict[str, Path]:
 # splat that drives the helical re-render, and so the first thing to look
 # at when the re-render comes out wrong. `face/` is where the workflow
 # writes the face splat .ply files, the one artefact a face-placement
-# question cannot be answered without. None of these is a deliverable, so
-# they are carried beside `result_dirs`' rather than declared in a
-# workflow's `outputs:` block.
+# question cannot be answered without. `colmap_intermediate/` and
+# `colmap_preupscale/` are the two debug COLMAP datasets the workflow's
+# export steps write — what the first brush training was fed, and the
+# frames as they were before the upscale. None of these is a deliverable,
+# so they are carried beside `result_dirs`' rather than declared in a
+# workflow's `outputs:` block; the debug bundle's own switch is what
+# decides whether they are packaged, and for the two COLMAP datasets
+# whether they are written at all (`when: ${globals.export_debug}` on the
+# steps — they are the one thing here that is not already a side effect of
+# work the run does anyway).
+#
+# They keep their run-directory names and are only remapped on the way
+# into the archive, so a path written down in a script or a notebook
+# (scripts/skeleton_leak.py reads `colmap_intermediate/images/`) still
+# points at the same place on the volume.
 #
 # Most of it is small — camera dumps, a ~10k-Gaussian face cap — but the
 # intermediate splat is not: a 30,000-iteration training is hundreds of MB,
 # and it is the reason a result .zip is now noticeably bigger than the
-# deliverables alone.
-DEBUG_SUBDIRS: Dict[str, str] = {"debug": "debug", "face": "debug/face"}
+# deliverables alone. The two COLMAP datasets are the other bulky members,
+# an image per frame each.
+DEBUG_SUBDIRS: Dict[str, str] = {
+    "debug": "debug",
+    "face": "debug/face",
+    "colmap_intermediate": "debug/colmap_intermediate",
+    "colmap_preupscale": "debug/colmap_preupscale",
+}
 _DEBUG_TEXT_SUFFIXES = {".txt", ".json", ".log", ".csv"}
 
 

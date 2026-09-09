@@ -204,7 +204,8 @@ they keep carving the silhouette. Absent means 1 everywhere, and brush's
 evidence pass honours the same map, so a silenced region does not count
 as evidence against what the supporting views put there.
 
-`export_colmap_intermediate` writes the same export: `colmap_export` takes
+The `export_colmap_intermediate` step (the debug bundle's colmap_intermediate/)
+writes the same export: `colmap_export` takes
 the same `support_*` inputs, reads them with this module's `_SupportViews`
 and writes them with the same code, so wiring the two steps to the same
 context paths gives a debug dataset that is a record of what brush saw

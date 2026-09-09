@@ -68,6 +68,38 @@ class TestStepEnabled(unittest.TestCase):
             with self.subTest(value=value):
                 self.assertTrue(step_enabled(step, {"x": value}))
 
+    def test_a_list_is_every_one_of_them(self):
+        """A list `when:` is `and`. Not plain truthiness on the list: a
+        one-element `[False]` is a non-empty list, so falling through would
+        run a step whose only condition says no. The case it exists for is
+        the debug bundle's pre-upscale COLMAP export, which wants the
+        bundle AND the upscale."""
+        step = StepSpec.from_dict({
+            "id": "a", "step": "_test_echo",
+            "when": ["${globals.debug}", "${globals.upscale}"],
+        })
+        for debug, upscale, expected in (
+            (True, True, True),
+            (True, False, False),
+            (False, True, False),
+            (False, False, False),
+            # The string rule holds inside a list too.
+            (True, "false", False),
+            ("yes", "1", True),
+        ):
+            with self.subTest(debug=debug, upscale=upscale):
+                self.assertIs(
+                    step_enabled(step, {"debug": debug, "upscale": upscale}),
+                    expected,
+                )
+
+    def test_a_one_element_list_is_not_read_as_a_non_empty_list(self):
+        step = StepSpec.from_dict(
+            {"id": "a", "step": "_test_echo", "when": ["${globals.x}"]}
+        )
+        self.assertFalse(step_enabled(step, {"x": False}))
+        self.assertTrue(step_enabled(step, {"x": True}))
+
     def test_an_unresolvable_when_names_the_step(self):
         step = StepSpec.from_dict(
             {"id": "final_splat", "step": "_test_echo", "when": "${globals.typo}"}

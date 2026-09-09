@@ -27,15 +27,19 @@ the run's output directory:
 ```
 <run>/colmap/                cameras.txt, images.txt, points3D.txt, images/, normals/
 <run>/ply/                   scene.ply — brush, normal-supervised
-<run>/colmap_intermediate/   debug: what the first brush training was fed
-<run>/colmap_preupscale/     debug: the same, from the pre-upscale frames
 <run>/debug/                 camera dumps, face splat stats,
                              denoise_pass1_input/ — the control video the
                              first denoise is handed — and
                              intermediate_splat.ply — the splat the helical
-                             re-render is built from. Rides into the result
-                             .zip unless the Debug bundle output is off
+                             re-render is built from
+<run>/colmap_intermediate/   debug: what the first brush training was fed
+<run>/colmap_preupscale/     debug: the same, from the pre-upscale frames
+                             (upscale runs only)
 ```
+
+The last three are the Debug bundle output: they ride into the result .zip
+under `debug/` when it is on, and the two COLMAP datasets are not written
+at all when it is off.
 
 ## Install
 
@@ -73,10 +77,11 @@ python -m pipeline.cli run fast_helical_native --reference-image sheet.png \
 # every step's own params (add --all for the ones nothing overrides)
 python -m pipeline.cli params fast_helical_native
 
-# the COLMAP dataset the first brush training is handed, for when the
-# helical re-render comes out wrong and the question is what it trained on
+# without the debug bundle: no debug/ in the .zip, and neither of the two
+# debug COLMAP datasets — including the one the first brush training is
+# handed, which is what to look at when the helical re-render comes out wrong
 python -m pipeline.cli run fast_helical_native --reference-image sheet.png \
-    --param export_colmap_intermediate=true
+    --param export_debug=false
 
 # what can this machine actually run? (GPU, Vulkan, EGL, venvs, HF access)
 python -m pipeline.cli doctor

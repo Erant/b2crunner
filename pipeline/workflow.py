@@ -33,6 +33,7 @@ wires the rest itself:
         outputs:
           denoised: dataset.images    # written back into the shared Context
         when: ${globals.run_denoise}  # optional; skip the step when falsy
+                                      # a list is `and`: all of them truthy
 
 **One flat namespace, three ways to declare into it.** A `settings:` entry,
 an `outputs:` entry and a bare `globals:` key all land in `spec.globals`,
@@ -271,6 +272,13 @@ class StepSpec:
     # (fast_helical_native.yaml's COLMAP dataset and trained .ply) needs the
     # caller to pick which ones to pay for, and a 30,000-iteration brush run
     # is not something to start and throw away.
+    #
+    # A LIST is every one of them, i.e. `and`: the pre-upscale COLMAP dump
+    # wants the debug bundle AND the upscale, because with the upscale off
+    # it is the ordinary colmap/ under a second name. That is the whole
+    # expression language — no `or`, no negation. Anything that is not a
+    # plain conjunction wants a global that already says what it means,
+    # not an expression parser in a config file.
     #
     # A skipped step still occupies its slot in the run — the runner reports
     # it as skipped rather than renumbering around it, so a step list in the
@@ -567,7 +575,13 @@ def truthy(value: Any) -> bool:
 
 
 def step_enabled(step: StepSpec, workflow_globals: Dict[str, Any]) -> bool:
-    """Whether `step`'s `when:` selects it, given a workflow's globals."""
+    """Whether `step`'s `when:` selects it, given a workflow's globals.
+
+    A list `when:` is a conjunction — every entry has to be truthy — and
+    that is spelled out rather than left to fall through because it is not
+    what plain truthiness would say: `[False]` is a non-empty list, so a
+    step both of whose conditions say no would run.
+    """
     from .templating import resolve
 
     try:
@@ -577,6 +591,8 @@ def step_enabled(step: StepSpec, workflow_globals: Dict[str, Any]) -> bool:
             f"Step '{step.id}' has a `when:` of {step.when!r}, which does not "
             f"resolve: {exc}. Workflow globals: {sorted(workflow_globals)}"
         ) from exc
+    if isinstance(value, list):
+        return all(truthy(item) for item in value)
     return truthy(value)
 
 

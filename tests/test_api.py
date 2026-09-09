@@ -285,15 +285,17 @@ class TestSubmitting(ApiTestCase):
         self.submit_sheet(step_params=json.dumps({"denoise_pass1": {"steps_high": 3}}))
         self.assertEqual(self.submitted[0].step_overrides, {"denoise_pass1": {"steps_high": 3}})
 
-    def test_an_output_whose_requires_is_off_is_forced_off(self):
-        # Same rule the UI's greyed-out checkbox states: with the upscale
-        # off, colmap_preupscale/ would be colmap/ under a name that says
-        # otherwise. The worker re-reads the pristine YAML, so the switch
-        # has to travel in the overrides, not only in the spec.
-        self.submit_sheet(settings=json.dumps(
-            {"run_upscale": False, "export_colmap_preupscale": True}
-        ))
-        self.assertIs(self.submitted[0].global_overrides["export_colmap_preupscale"], False)
+    def test_the_resolved_output_switches_travel_to_the_job(self):
+        # The worker re-reads the pristine YAML, so a switch has to travel
+        # in the overrides and not only in the spec — including the ones
+        # the caller never named, since `resolve_outputs` is what applies
+        # an output's `requires:` and the worker has no other way to hear
+        # about it.
+        self.submit_sheet(settings=json.dumps({"export_ply": False}))
+        overrides = self.submitted[0].global_overrides
+        self.assertIs(overrides["export_ply"], False)
+        self.assertIs(overrides["export_colmap"], True)
+        self.assertIs(overrides["export_debug"], True)
 
     def test_a_json_body_can_name_a_sheet_already_on_the_volume(self):
         sheet = self.data / "staged.png"
@@ -317,7 +319,7 @@ class TestWhatItRefuses(ApiTestCase):
         self.assertRefused(
             self.submit_sheet(settings=json.dumps({
                 "export_colmap": False, "export_ply": False,
-                "export_colmap_intermediate": False,
+                "export_debug": True,
             })),
             "Pick at least one output",
         )
@@ -414,7 +416,7 @@ class TestWhatItRefuses(ApiTestCase):
                 files={"file": ("batch.zip", buffer.getvalue(), "application/zip")},
                 data={"settings": json.dumps({
                     "export_colmap": False, "export_ply": False,
-                    "export_colmap_intermediate": False,
+                    "export_debug": True,
                 })},
             ),
             "Pick at least one output",
@@ -564,7 +566,13 @@ class TestWhatAWorkflowDeclares(ApiTestCase):
         ).json()
         by_name = {o["name"]: o for o in body["outputs"]}
         self.assertEqual(by_name["export_colmap"]["dir"], "colmap")
-        self.assertEqual(by_name["export_colmap_preupscale"]["requires"], "run_upscale")
+        # `requires:` is published whether or not anything declares one —
+        # nothing has since the pre-upscale export was folded into the
+        # debug bundle (2026-09-08) — because a client builds its own
+        # greyed-out checkbox out of this field.
+        self.assertEqual(
+            {o["requires"] for o in body["outputs"]}, {""},
+        )
 
     def test_every_declared_setting_is_a_name_submit_will_accept(self):
         # The point of the endpoint: what it lists is what `settings`

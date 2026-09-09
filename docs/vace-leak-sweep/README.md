@@ -52,6 +52,21 @@ these are deltas from, both measured on 2026-09-08:
     A = 31a008   leak  1.74   yoke 14.54   flow 0.986   IoU 0.8525
     B = 467c17   leak 16.62   yoke 55.61   flow 1.039   IoU 0.8501
 
-`export_colmap_intermediate` is the one that matters and it defaults
-**false** — every sidecar sets it, because without those frames there is
-no leak to measure and the run is wasted.
+`export_debug` is the one that matters. It defaults **true**, and every
+sidecar spells it out anyway: it carries both halves of the measurement
+(`debug/colmap_intermediate/`, pass 1's frames, and
+`debug/denoise_pass1_input/`, the control they are compared against), and
+a run without it is wasted. Until 2026-09-08 those frames were their own
+output, `export_colmap_intermediate`, which defaulted false — archives
+from before then keep them at the top level, and
+`scripts/skeleton_leak.py` reads both layouts.
+
+## Results
+
+Measured 2026-09-08 evening; the full reading is section 5 of
+`docs/vace-denoise-findings-2026-09-07.md` ("Results"). In one line each:
+E1 clean (-0.46, yoke 0.2); E2 clean — shift 5 alone was 9e315f; E3
+the worst yoke ever measured (116) — `uni_pc` on the high expert at low
+shift; E4 clean with the best silhouette of the three (0.8468); E5 the
+skeleton painted literally (105); E6 no ink and no pose (IoU 0.57). The
+clean three all cost 17-20% of view flow against A.

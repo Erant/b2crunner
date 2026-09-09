@@ -183,12 +183,6 @@ unchecked step does not run:
   that used to be the separate `fast_helical` workflow — the way to check
   whether the upscale is what degrades the output. Sets the `run_upscale`
   global.
-- **Pre-upscale COLMAP dataset (debug)** — with the upscale on, also
-  exports `colmap_preupscale/` from the frames as they are *before*
-  SeedVR2, so you can train a splat on each and compare. It declares
-  `requires: run_upscale`, so with the upscale off the checkbox is greyed
-  out: the frames would then be the same as `colmap/`'s, and it used to
-  silently give you that instead, under a name that says otherwise.
 - **Debug bundle** (on by default) — the `debug/` directory in the result
   `.zip`: refine_cameras' given-vs-refined camera models, the face splat's
   stats and depth visualisations, the face `.ply` files,
@@ -200,27 +194,33 @@ unchecked step does not run:
   and therefore the first thing to look at when that re-render is wrong.
   The dataset dump is the only look at the drawings a run was denoised
   *from*: every other export describes frames from after a denoise.
-  Unlike every other switch here it skips no work: those dumps are a side
-  effect of steps the run needs anyway, so they are written to the volume
-  either way and this decides only whether they are packaged. Worth turning
-  off for a run you are only going to look at, because the intermediate
-  splat is hundreds of MB against a few hundred KB for the rest of that
-  directory. It is not a deliverable on its own — a run with every other
-  output off is still refused.
 
-- **Intermediate COLMAP dataset (debug)** — also exports
-  `colmap_intermediate/`: the dataset the **first** brush training is
-  handed, i.e. the frames as `denoise_pass1` leaves them plus the RMBG
-  mattes and the normal maps computed for that training. Every other export
-  in a run describes frames from after the helical re-render; this is the
-  only look at what the splat driving that re-render actually saw, which is
-  the question behind a bad re-render. No interaction with the upscale, and
-  it is a valid sole output. Sets `export_colmap_intermediate`.
+  It also carries the two debug COLMAP datasets, which had a checkbox each
+  until 2026-09-08 and are now this one switch:
+
+  - `debug/colmap_intermediate/` — the dataset the **first** brush training
+    is handed: the frames as `denoise_pass1` leaves them, plus the RMBG
+    mattes and normal maps computed for that training, and a pose for every
+    supporting view. Every other export in a run describes frames from
+    after the helical re-render; this is the only look at what the splat
+    driving that re-render actually saw.
+  - `debug/colmap_preupscale/` — the same export from the frames as they
+    are *before* SeedVR2, so you can train a splat on each and compare.
+    Only with **Upscale dataset** on: with it off those frames are
+    `colmap/`'s, and this used to be a greyed-out checkbox saying so.
+
+  Most of the bundle costs nothing to produce — those dumps are a side
+  effect of steps the run needs anyway, written to the volume either way,
+  and the switch decides only whether they are packaged. The two COLMAP
+  datasets are the exception: nothing else in the run wants them, so this
+  switch skips them outright. Worth turning off for a run you are only
+  going to look at, because the intermediate splat is hundreds of MB
+  against a few hundred KB for the camera dumps. It is not a deliverable on
+  its own — a run with every other output off is still refused.
 
 The **Results** tab has three things: the one `.zip` of the run's
-deliverables (`colmap/` and/or `ply/`, plus `debug/` and either debug export
-you asked for, and nothing else — the run directory's own frames and the intermediate
-splat stay on the volume), the
+deliverables (`colmap/` and/or `ply/`, plus `debug/` if you asked for it,
+and nothing else — the run directory's own frames stay on the volume), the
 final frames, and a **per-step contact sheet**: eight frames spaced evenly
 through the batch, captured after every step, one row per step in run
 order. That last one is for answering "which step broke it" by looking
@@ -256,16 +256,13 @@ python -m pipeline.cli params fast_helical_native --all
 python -m pipeline.cli run fast_helical_native --reference-image /data/sheet.png \
     --param run_upscale=false
 
-# the same output switches the UI's Outputs box drives
-python -m pipeline.cli run fast_helical_native --reference-image /data/sheet.png \
-    --param export_ply=false --param export_colmap_preupscale=true
-
-# the debug COLMAP exports, which the UI's Outputs box also drives:
+# the same output switches the UI's Outputs box drives. export_debug is
+# what turns the two debug COLMAP exports on and off with it:
 # colmap_intermediate/ is the dataset the FIRST brush training is handed
 # (denoised frames + their mattes and normals), colmap_preupscale/ the same
-# idea one stage before SeedVR2
+# idea one stage before SeedVR2 (upscale runs only)
 python -m pipeline.cli run fast_helical_native --reference-image /data/sheet.png \
-    --param export_colmap_intermediate=true
+    --param export_ply=false --param export_debug=true
 ```
 
 ## Automating it

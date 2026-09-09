@@ -347,8 +347,7 @@ class SidecarSubmissionTests(unittest.TestCase):
                 "a.jpg",
                 global_overrides={
                     "export_colmap": False, "export_ply": False,
-                    "export_colmap_intermediate": False,
-                    "export_colmap_preupscale": False,
+                    "export_debug": True,
                 },
                 settings_path=Path("a.yaml"),
             )])
@@ -367,17 +366,19 @@ class SidecarSubmissionTests(unittest.TestCase):
         self.assertEqual(self.scheduler.jobs, [])
 
     def test_the_output_switches_are_resolved_per_run(self):
-        """`requires:` is applied against each run's own settings, so one
-        sidecar switching the upscale off cannot force the pre-upscale
-        export off in the run beside it."""
+        """Every run carries its own resolved switches, so one sidecar
+        cannot decide what the run beside it exports. `resolve_outputs` is
+        also where an output's `requires:` is applied, and it is applied
+        against that run's own settings."""
         jobs = self.submit([
             self.planned("a.jpg",
-                         global_overrides={"run_upscale": False},
+                         global_overrides={"export_ply": False},
                          settings_path=Path("a.yaml")),
             self.planned("b.jpg"),
-        ], global_overrides={"export_colmap_preupscale": True})
-        self.assertFalse(jobs[0].global_overrides["export_colmap_preupscale"])
-        self.assertTrue(jobs[1].global_overrides["export_colmap_preupscale"])
+        ], global_overrides={"export_debug": False})
+        self.assertFalse(jobs[0].global_overrides["export_ply"])
+        self.assertTrue(jobs[1].global_overrides["export_ply"])
+        self.assertFalse(jobs[1].global_overrides["export_debug"])
 
 
 class OutputSwitchTests(unittest.TestCase):
@@ -398,10 +399,7 @@ class OutputSwitchTests(unittest.TestCase):
     def test_the_declared_defaults_are_both_deliverables(self):
         self.assertEqual(
             runs.resolve_outputs(self.spec()),
-            {"export_colmap": True, "export_ply": True,
-             "export_colmap_intermediate": False,
-             "export_debug": True,
-             "export_colmap_preupscale": False},
+            {"export_colmap": True, "export_ply": True, "export_debug": True},
         )
 
     def test_the_debug_bundle_is_not_a_deliverable_on_its_own(self):
@@ -409,11 +407,15 @@ class OutputSwitchTests(unittest.TestCase):
         exports only `debug/` produces nothing: `_write_run_members`
         refuses to build an archive out of it, the same way it refuses to
         build one out of `log.txt`. Counting it here would let that past
-        and hand back nothing after an hour of GPU."""
+        and hand back nothing after an hour of GPU.
+
+        It is not empty, either — since 2026-09-08 it carries the two debug
+        COLMAP datasets that used to be outputs of their own. A run for
+        those alone is still a run with nothing to deliver.
+        """
         with self.assertRaises(SubmitError):
             runs.resolve_outputs(self.spec(
-                export_colmap=False, export_ply=False,
-                export_colmap_intermediate=False, export_debug=True,
+                export_colmap=False, export_ply=False, export_debug=True,
             ))
 
     def test_switching_the_debug_bundle_off_leaves_a_run_valid(self):
@@ -421,71 +423,54 @@ class OutputSwitchTests(unittest.TestCase):
         self.assertIs(resolved["export_debug"], False)
         self.assertIs(resolved["export_colmap"], True)
 
-    def test_the_intermediate_colmap_is_independent_of_the_upscale(self):
-        """Unlike the pre-upscale export it declares no `requires:`: the
-        frames it writes are the ones the first brush training saw, which
-        no other export in the run can stand in for."""
-        for run_upscale in (True, False):
-            with self.subTest(run_upscale=run_upscale):
-                got = runs.resolve_outputs(self.spec(
-                    run_upscale=run_upscale, export_colmap=False,
-                    export_colmap_intermediate=True,
-                ))
-                self.assertTrue(got["export_colmap_intermediate"])
-                self.assertFalse(got["export_colmap"])
+    def requiring_spec(self, **globals_):
+        """The shipped workflow with a `requires:` declared on one output.
 
-    def test_the_intermediate_colmap_alone_is_a_valid_run(self):
-        """It is somebody deliberately asking what the first training was
-        fed, so it counts as an output rather than tripping the guard."""
-        got = runs.resolve_outputs(self.spec(
-            export_colmap=False, export_ply=False,
-            export_colmap_intermediate=True,
-        ))
-        self.assertEqual(
-            (got["export_colmap"], got["export_ply"],
-             got["export_colmap_preupscale"], got["export_colmap_intermediate"]),
-            (False, False, False, True),
-        )
+        No shipped output declares one: the pre-upscale COLMAP export did
+        until 2026-09-08, when it became a member of the debug bundle and
+        its `when:` grew the `run_upscale` half instead. The rule below is
+        the outputs schema's rather than that export's, and the web UI
+        greys a checkbox out on it, so it is tested here against a spec
+        that declares one rather than deleted with its last user.
+        """
+        spec = self.spec(**globals_)
+        ply = next(o for o in spec.outputs if o.name == "export_ply")
+        ply.requires = "run_upscale"
+        return spec
 
-    def test_pre_upscale_colmap_is_kept_when_upscaling(self):
-        got = runs.resolve_outputs(self.spec(
-            run_upscale=True, export_colmap=False, export_colmap_preupscale=True,
+    def test_an_output_is_kept_when_its_requirement_is_on(self):
+        got = runs.resolve_outputs(self.requiring_spec(
+            run_upscale=True, export_colmap=False, export_ply=True,
         ))
-        self.assertTrue(got["export_colmap_preupscale"])
+        self.assertTrue(got["export_ply"])
         self.assertFalse(got["export_colmap"])
 
-    def test_pre_upscale_colmap_is_forced_off_without_its_requirement(self):
-        """`requires: run_upscale`. With the upscale off it would be the
-        ordinary colmap/ under a second name, so it is refused rather than
+    def test_an_output_is_forced_off_without_its_requirement(self):
+        """With the requirement off the export is refused rather than
         quietly redirected — which is what this used to do."""
         with self.assertRaises(SubmitError):
-            runs.resolve_outputs(self.spec(
-                run_upscale=False, export_colmap=False, export_ply=False,
-                export_colmap_preupscale=True,
+            runs.resolve_outputs(self.requiring_spec(
+                run_upscale=False, export_colmap=False, export_ply=True,
             ))
 
     def test_a_forced_off_output_does_not_take_the_others_with_it(self):
-        got = runs.resolve_outputs(self.spec(
-            run_upscale=False, export_colmap=True, export_colmap_preupscale=True,
+        got = runs.resolve_outputs(self.requiring_spec(
+            run_upscale=False, export_colmap=True, export_ply=True,
         ))
-        self.assertEqual(
-            (got["export_colmap"], got["export_colmap_preupscale"]), (True, False)
-        )
+        self.assertEqual((got["export_colmap"], got["export_ply"]), (True, False))
 
     def test_a_string_requirement_is_read_the_way_when_reads_it(self):
         """`--param run_upscale=false` arrives as a string, and
         `bool("false")` is True."""
-        got = runs.resolve_outputs(self.spec(
-            run_upscale="false", export_colmap=True, export_colmap_preupscale=True,
+        got = runs.resolve_outputs(self.requiring_spec(
+            run_upscale="false", export_colmap=True, export_ply=True,
         ))
-        self.assertFalse(got["export_colmap_preupscale"])
+        self.assertFalse(got["export_ply"])
 
     def test_nothing_selected_is_an_error(self):
         with self.assertRaises(SubmitError):
             runs.resolve_outputs(self.spec(
-                export_colmap=False, export_ply=False,
-                export_colmap_intermediate=False,
-                export_colmap_preupscale=False,
+                export_colmap=False, export_ply=False, export_debug=False,
             ))
 
 

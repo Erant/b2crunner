@@ -378,11 +378,13 @@ outputs:                     # the deliverables, and the switch each one is
     dir: ply                 # where it lands under output_root
     default: true
     help: A second brush training, flow-aligned.
-  - name: export_colmap_preupscale
-    label: Pre-upscale COLMAP dataset
-    dir: colmap_preupscale
-    default: false
-    requires: run_upscale    # forced off, and its checkbox disabled, without it
+  - name: export_debug
+    label: Debug bundle
+    dir: debug               # what a step's `when:` skips, or packaging drops
+    default: true
+    help: The camera dumps, the face splats, the debug COLMAP datasets.
+    # also: requires: <another switch> — forced off, and its checkbox
+    # disabled, when that one is off. Nothing shipped declares one today.
 
 globals:                     # plumbing with no control of its own
   output_root: output/fast_helical_native
@@ -405,6 +407,7 @@ steps:
     outputs:                     # step's returned name -> dotted Context path (written after the call)
       images: dataset.images
     when: ${globals.export_ply}  # optional; skip this step when falsy
+                                 # a list of these is `and`: all must be truthy
 ```
 
 **One namespace, three declarations.** A `settings:` entry, an `outputs:`
@@ -464,6 +467,11 @@ conditions: the .ply is a full 30,000-iteration brush training, and starting
 one you are going to discard is an hour of GPU. `false`, `no`, `off`, `0` and the empty string are all
 falsy as *strings* too — a `when:` usually resolves through a param
 somebody typed, and `bool("false")` is `True`.
+
+A **list** `when:` is a conjunction: every entry has to be truthy. That is
+the whole expression language — the debug bundle's pre-upscale COLMAP dump
+wants `export_debug` and `run_upscale` both on, and anything less
+mechanical than an `and` wants a global that already says what it means.
 
 See `pipeline/workflows/fast_helical_native.yaml` for a full multi-step,
 from-an-image example.

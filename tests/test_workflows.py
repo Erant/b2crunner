@@ -354,29 +354,44 @@ class TestWorkflowFiles(unittest.TestCase):
         spec.globals["run_upscale"] = False
         self.assertFalse(gated & {s.id for s in spec.enabled_steps()})
 
-    def test_pre_upscale_colmap_is_off_by_default_and_gated_together(self):
+    def test_pre_upscale_colmap_wants_the_debug_bundle_and_the_upscale(self):
         """The debug stage-4b export (masks + colmap) is two steps, both
-        guarded by `export_colmap_preupscale`, both skipped unless it is
-        set. It was three until 2026-09-06: the normals were estimated for a
-        brush training that has stopped supervising on them
-        (docs/final-splat-alignment-guide.md §1)."""
+        guarded by the same conjunction, both skipped unless it holds. It
+        was three until 2026-09-06: the normals were estimated for a brush
+        training that has stopped supervising on them
+        (docs/final-splat-alignment-guide.md §1).
+
+        `export_debug` because this is a member of the debug bundle, and
+        `run_upscale` because with the upscale off these are colmap/'s own
+        frames — which is what `requires: run_upscale` said while it was an
+        output of its own, up to 2026-09-08.
+        """
         preupscale = {"export_masks_preupscale", "export_colmap_preupscale"}
         spec = WorkflowSpec.from_yaml(str(WORKFLOW_DIR / "fast_helical_native.yaml"))
-        self.assertFalse(spec.globals["export_colmap_preupscale"])
-        self.assertFalse(preupscale & {s.id for s in spec.enabled_steps()})
         for step in spec.steps:
             if step.id in preupscale:
-                self.assertEqual(step.when, "${globals.export_colmap_preupscale}")
-        spec.globals["export_colmap_preupscale"] = True
+                self.assertEqual(
+                    step.when,
+                    ["${globals.export_debug}", "${globals.run_upscale}"],
+                )
+        # Both on (the defaults) is the only combination that runs them.
         self.assertTrue(preupscale <= {s.id for s in spec.enabled_steps()})
+        for off in ("export_debug", "run_upscale"):
+            with self.subTest(off=off):
+                spec.globals.update(export_debug=True, run_upscale=True)
+                spec.globals[off] = False
+                self.assertFalse(preupscale & {s.id for s in spec.enabled_steps()})
 
-    def test_the_intermediate_colmap_is_off_by_default_and_exports_brush_s_own_input(self):
+    def test_the_intermediate_colmap_rides_the_debug_bundle_and_exports_brush_s_own_input(self):
         """The debug export of what the FIRST brush training is handed. One
-        step, gated by `export_colmap_intermediate`, and — the part worth
-        pinning — it must read the very same context paths `train_splat`
-        does. Recomputing the mattes or the normals here would export
-        something subtly different from what was trained on, which is the
-        one thing this export exists not to do.
+        step, gated by `export_debug` since 2026-09-08 — it is archived
+        under `debug/`, and it is the one member of that bundle that is not
+        a free side effect of work the run does anyway, so the switch skips
+        it rather than only dropping it from the .zip. The part worth
+        pinning is the wiring: it must read the very same context paths
+        `train_splat` does. Recomputing the mattes or the normals here
+        would export something subtly different from what was trained on,
+        which is the one thing this export exists not to do.
         """
         for path in _workflows():
             spec = WorkflowSpec.from_yaml(str(path))
@@ -386,10 +401,14 @@ class TestWorkflowFiles(unittest.TestCase):
             with self.subTest(workflow=path.name):
                 self.assertIn("export_colmap_intermediate", steps)
                 export = steps["export_colmap_intermediate"]
-                self.assertFalse(spec.globals["export_colmap_intermediate"])
+                self.assertEqual(export.when, "${globals.export_debug}")
+                self.assertTrue(spec.globals["export_debug"])
+                self.assertIn("export_colmap_intermediate",
+                              {s.id for s in spec.enabled_steps()})
+                spec.globals["export_debug"] = False
                 self.assertNotIn("export_colmap_intermediate",
                                  {s.id for s in spec.enabled_steps()})
-                self.assertEqual(export.when, "${globals.export_colmap_intermediate}")
+                spec.globals["export_debug"] = True
 
                 ids = [s.id for s in spec.steps]
                 self.assertLess(ids.index("export_colmap_intermediate"),
@@ -423,8 +442,7 @@ class TestWorkflowFiles(unittest.TestCase):
         list for the same reason — it is a global whose only job is to gate
         steps.
         """
-        switches = ("export_colmap", "export_ply", "export_colmap_preupscale",
-                    "export_colmap_intermediate", "run_upscale")
+        switches = ("export_colmap", "export_ply", "export_debug", "run_upscale")
         for path in _workflows():
             spec = WorkflowSpec.from_yaml(str(path))
             for switch in switches:

@@ -451,13 +451,17 @@ class TestOutputSelection(unittest.TestCase):
             [(o.name, o.directory) for o in outputs],
             [("export_colmap", "colmap"),
              ("export_ply", "ply"),
-             ("export_colmap_intermediate", "colmap_intermediate"),
-             ("export_debug", "debug"),
-             ("export_colmap_preupscale", "colmap_preupscale")],
+             ("export_debug", "debug")],
         )
         self.assertTrue(all(o.label and o.help for o in outputs))
-        preupscale = outputs[-1]
-        self.assertEqual(preupscale.requires, "run_upscale")
+        # The two debug COLMAP datasets had a checkbox each until
+        # 2026-09-08. They are members of the debug bundle now — its
+        # `when:` on their export steps, `DEBUG_SUBDIRS` for the archive —
+        # so the box is three checkboxes rather than five.
+        self.assertEqual(
+            {"colmap_intermediate", "colmap_preupscale"} & set(runs.DEBUG_SUBDIRS),
+            {"colmap_intermediate", "colmap_preupscale"},
+        )
 
     def test_a_workflow_name_that_no_longer_resolves_takes_the_fallback(self):
         """A renamed or deleted workflow must not take packaging down.
@@ -732,6 +736,28 @@ class TestTheDebugDirectoryRidesAlong(_BundleCase):
         self.assertIn("ply/scene.ply", names)
         self.assertNotIn("face/face.ply", names)
         self.assertFalse([n for n in names if n.startswith("brush/")])
+
+    def test_the_debug_colmap_datasets_ride_under_debug(self):
+        """`colmap_intermediate/` and `colmap_preupscale/` are written at
+        the top of the run directory — where every script and every archive
+        made before 2026-09-08 expects them — and remapped into `debug/` on
+        the way into the .zip, the way `face/` is. They must not also show
+        up as deliverables of their own: they stopped being declared
+        outputs when they became members of the debug bundle."""
+        run = _run_dir(self.root, colmap=True, ply=False, name="debug-colmap")
+        _touch(run / "colmap_intermediate" / "images.txt")
+        _touch(run / "colmap_intermediate" / "images" / "frame_00001_.png")
+        _touch(run / "colmap_preupscale" / "images.txt")
+
+        names = self._names(runs.build_result_zip(run))
+        self.assertIn("debug/colmap_intermediate/images.txt", names)
+        self.assertIn("debug/colmap_intermediate/images/frame_00001_.png", names)
+        self.assertIn("debug/colmap_preupscale/images.txt", names)
+        self.assertFalse([n for n in names if n.startswith("colmap_")])
+
+        without = self._names(runs.build_result_zip(run, debug=False))
+        self.assertIn("colmap/cameras.txt", without)
+        self.assertFalse([n for n in without if "colmap_intermediate" in n])
 
     def test_the_intermediate_splat_rides_along(self):
         """The splat that drives the helical re-render is in the archive.

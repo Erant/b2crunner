@@ -50,3 +50,10 @@ cyber_6f.zip
 /brush-mixed-alpha-modes-integration.md
 /docs/stage1-support-views-implementation.md
 /docs/stage1-support-views-plan.md
+
+# Pod-zip staging beside the sweep sidecars: the subject sheet copied under
+# each sidecar's stem and the subject-description .txt (docs/*-sweep/README.md).
+docs/vace-leak-sweep/E*.png
+docs/vace-leak-sweep/E*.txt
+docs/quality-sweep/F*.png
+docs/quality-sweep/F*.txt

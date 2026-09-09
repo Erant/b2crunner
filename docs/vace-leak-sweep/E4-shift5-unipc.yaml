@@ -22,14 +22,13 @@
 # the number being read.
 
 settings:
-  # export_colmap_intermediate defaults FALSE and is the one output the
-  # leak metric reads (pass 1's frames). export_debug carries
-  # debug/denoise_pass1_input, the control side of the same measurement.
-  # The other three only match what the 2026-09-08 reference runs
-  # exported, so the archives stay comparable.
+  # export_debug is the whole measurement: debug/colmap_intermediate is
+  # pass 1's frames, which the leak metric reads, and
+  # debug/denoise_pass1_input is the control side of the same comparison.
+  # It defaults on; it is spelled out because a run without it is wasted.
+  # The other two only match what the 2026-09-08 reference runs exported,
+  # so the archives stay comparable.
   export_colmap: true
-  export_colmap_intermediate: true
-  export_colmap_preupscale: true
   export_debug: true
   export_ply: true
 

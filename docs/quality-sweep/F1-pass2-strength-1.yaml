@@ -1,0 +1,48 @@
+# F1 — pass 2 at full scale: does the control's face survive?
+#
+# Pass 2's control is the intermediate splat re-rendered: perfectly
+# view-consistent by construction, and, where the confidence gate keeps it,
+# about as sharp in the head as pass 2's output (E4: 36.0 against 34.8 on
+# kept pixels — the 44.5 first read off it was the gate's hard grey edges
+# scoring as detail). What pass 2 adds at 0.8 is body texture (28 -> 31)
+# and the filled-in holes; what it costs is agreement between views, which
+# is what the final fit is bounded by (flow 1.19 on E4). VACE scale is the
+# only sidecar-reachable knob for how tightly the frames hold to the
+# control, so this is that axis at its end: 1.0 on every step. Expect flow
+# to fall and body sharpness with it; the question is which the final
+# splat's head s1 and PSNR follow.
+#
+# Base = E4 (run 02ff74, 2026-09-08): pass 1 at `sampler_high: uni_pc`,
+# `sampler_shift: 5`, `strength: [1, 1, .5, .5, .5, .5]` — the clean pass 1
+# the leak sweep recommended — and pass 2 at euler / shift 2.5 / flat 0.8,
+# the pass 2 every A-family run carried. E4 measured: leak -0.53, IoU 0.8468,
+# flow 1.189, final splat head s1 29.5 / PSNR 25.75, pass-2 output head s1
+# 34.8 against 36.0 in its control (kept pixels). Every line below reproduces E4
+# except the ones marked CHANGED, so this run's numbers minus E4's are the
+# effect of that change and nothing else.
+#
+# All six leave pass 1 untouched, so their pass-1 frames, their
+# intermediate splat and therefore their pass-2 CONTROL should be E4's,
+# frame for frame (same seed, same weights) — which is what makes a pass-2
+# delta readable, and is itself a determinism check worth reading.
+
+settings:
+  # export_debug carries the measurement: debug/intermediate_splat.ply is
+  # what scripts/final_splat_quality.py re-renders as the pass-2 control,
+  # colmap_preupscale/ is pass 2's own output, debug/alignment/ the flow.
+  # A run without it is wasted. The other two match every reference run.
+  export_colmap: true
+  export_debug: true
+  export_ply: true
+
+step_params:
+  denoise_pass1:
+    sampler_high: uni_pc
+    sampler_shift: 5
+    strength: [1, 1, 0.5, 0.5, 0.5, 0.5]
+  denoise_pass2:
+    sampler_high: euler
+    sampler_shift: 2.5
+    # CHANGED from E4's flat 0.8. Six entries, not [1]: a single-entry
+    # strength bypasses _vace_scale_hook and is a different code path.
+    strength: [1, 1, 1, 1, 1, 1]

@@ -281,16 +281,18 @@
 #
 #   colmap/              cameras.txt + images.txt + points3D.txt, images/
 #   ply/                 scene.ply — a second brush training, flow-aligned
-#   colmap_preupscale/   debug: a COLMAP dataset from the pre-upscale frames
 #
-# plus one intermediate written on the way through:
+# plus what is written on the way through and archived under `debug/`:
 #
 #   face/face.ply        the photo-derived Gaussian head, composited onto
 #                        every drawing within 60 degrees of the source view
+#   colmap_intermediate/ debug: the dataset the FIRST brush training is fed
+#   colmap_preupscale/   debug: a COLMAP dataset from the pre-upscale frames
 #
-# export_colmap / export_ply switch the first two off; export_colmap_preupscale
-# (with run_upscale on) opts into the third. The web UI's Outputs box drives
-# all of them plus the "Upscale dataset" toggle.
+# export_colmap / export_ply switch the deliverables off; export_debug is
+# the switch for everything in the second list, and the pre-upscale export
+# additionally wants run_upscale on. The web UI's Outputs box drives all of
+# them plus the "Upscale dataset" toggle.
 #
 # The input is not a photo of the subject: it is the two-panel sheet a
 # diffusion model generates, subject facing front on the left and seen from
@@ -450,7 +452,10 @@ outputs:
   # The web UI's Outputs box is exactly this list. `--param export_ply=false`
   # does the same from the CLI. Turning one off skips its steps entirely —
   # which for export_ply means not starting a second 30,000-iteration brush
-  # training you were going to throw away.
+  # training you were going to throw away. export_debug is the half
+  # exception: most of `debug/` is written by steps the run performs
+  # anyway and it only decides what is packaged, but the two COLMAP
+  # datasets in there are its own export steps and are skipped with it.
 
   - name: export_colmap
     label: COLMAP dataset
@@ -472,19 +477,6 @@ outputs:
       own renders and refit so the fit stops blurring its own training data
       (docs/final-splat-alignment-guide.md).
 
-  - name: export_colmap_intermediate
-    label: Intermediate COLMAP dataset (debug)
-    dir: colmap_intermediate
-    default: false
-    help: >-
-      Debug: the dataset the FIRST brush training is handed — the denoised
-      frames plus the mattes and normals computed for them, AND the supporting
-      views with a pose each in images.txt (the face cap),
-      before that splat is re-rendered along the helical orbit and denoised a
-      second time. Everything that training saw, for when the re-render comes
-      out wrong — including a supporting view that landed somewhere other than
-      where its content belongs.
-
   - name: export_debug
     label: Debug bundle
     dir: debug
@@ -494,31 +486,35 @@ outputs:
       and their stats, the face splat's stats and depth visualisations, the
       face .ply files, `denoise_pass1_input/` — the control video the first
       denoise is handed, frames with their VACE mask in alpha beside the
-      reference, the anchor photo and the cameras — and, the big one,
-      `intermediate_splat.ply`, the splat the helical re-render is built
-      from. This is what a misplaced face or a drifted camera is diagnosed
-      from after the pod is gone, and it is why the 2026-09-04 face-cap
+      reference, the anchor photo and the cameras — `intermediate_splat.ply`,
+      the splat the helical re-render is built from, and two COLMAP datasets
+      nothing else exports.
+      `colmap_intermediate/` is what the FIRST brush training is handed: the
+      denoised frames, the mattes and normal maps computed for them, and a
+      pose in images.txt for every supporting view (the face cap), before
+      that splat is re-rendered along the helical orbit and denoised a
+      second time — everything that training saw, for when the re-render
+      comes out wrong, including a supporting view that landed somewhere
+      other than where its content belongs.
+      `colmap_preupscale/` is the same export from the frames as they are
+      BEFORE the upscale (stage 4b), to measure what SeedVR2 does to
+      Gaussian-splatting quality; it is written only when the upscale is on,
+      because with it off it would be the ordinary colmap/ under a second
+      name.
+      This is what a misplaced face or a drifted camera is diagnosed from
+      after the pod is gone, and it is why the 2026-09-04 face-cap
       offset had to be triangulated back out of exported renders instead of
       read off the splat that caused it.
-      Unlike the switches above it does not skip any work — every step still
-      writes its dumps to the volume, because they are a side effect of
-      steps the run needs anyway. It decides only whether they are packaged,
-      which matters because the intermediate splat is hundreds of MB against
-      a few hundred KB for everything else in there. Turn it off for a run
-      whose output you are only going to look at, on for one you may have to
-      explain.
-
-  - name: export_colmap_preupscale
-    label: Pre-upscale COLMAP dataset (debug)
-    dir: colmap_preupscale
-    default: false
-    requires: run_upscale
-    help: >-
-      Debug: the same export built from the frames as they are BEFORE the
-      upscale (stage 4b), to measure what SeedVR2 does to Gaussian-splatting
-      quality. With the upscale off it would be the ordinary colmap/ under a
-      second name, so `requires:` disables it there rather than exporting
-      something else.
+      Most of what lands here is a side effect of steps the run needs
+      anyway — those dumps are written to the volume either way and this
+      decides only whether they are packaged. The two COLMAP datasets are
+      the exception: they exist for nothing else, so this switch skips them
+      outright rather than paying for a dataset copy (and, for the
+      pre-upscale one, an RMBG pass) nobody asked for.
+      Size is why the switch is worth having at all: the intermediate splat
+      is hundreds of MB against a few hundred KB for everything else in
+      there. Turn it off for a run whose output you are only going to look
+      at, on for one you may have to explain.
 
 globals:
   # What has no control of its own, and therefore no `settings:` entry.
@@ -1662,8 +1658,8 @@ steps:
   #                        rather than supporting them. This is why the step
   #                        is here rather than anywhere later.
   #   train_splat          the stage-2 fit itself.
-  #   export_colmap_intermediate  the debug dataset, which has to describe
-  #                        what was trained on.
+  #   export_colmap_intermediate  the debug bundle's dataset, which has to
+  #                        describe what was trained on.
   #
   # WHAT IT IS REFINED AGAINST is denoise_pass1's frames and RMBG's mattes —
   # the training views, and only those. The supporting views are never in
@@ -2007,8 +2003,11 @@ steps:
 
   # Debug deliverable: the COLMAP dataset of the frames `train_splat` below
   # is fitted to — the denoised frames, the RMBG mattes and the normal maps
-  # that the FIRST brush training runs on. Gated by
-  # export_colmap_intermediate, off by default.
+  # that the FIRST brush training runs on. It lands in `colmap_intermediate/`
+  # and rides into the archive under `debug/`, so the debug bundle is its
+  # switch — the one output switch that skips work rather than deciding
+  # what gets packaged, because unlike the rest of `debug/` this dataset is
+  # not a side effect of a step the run performs anyway.
   #
   # It IS everything that training is handed: the supporting views — the
   # face cap — go in too, through the same `support_*` inputs and the same
@@ -2038,7 +2037,7 @@ steps:
   - id: export_colmap_intermediate
     step: colmap_export
     dispatch: in_process
-    when: ${globals.export_colmap_intermediate}
+    when: ${globals.export_debug}
     inputs:
       cameras: dataset.cameras
       image_names: dataset.image_names
@@ -2547,11 +2546,12 @@ steps:
 
   # --------------------------------------------------------------- stage 4b
   # Debug deliverable: a COLMAP dataset from the pre-upscale frames, for
-  # comparing splat quality with and without SeedVR2. Gated by
-  # export_colmap_preupscale, which the web UI only sets when run_upscale is
-  # also on (with the upscale off, stage 6 already exports these same
-  # frames). rmbg is recomputed here rather than reused from stage 6: that
-  # one runs after the upscale, on 1080x1920 frames.
+  # comparing splat quality with and without SeedVR2. Part of the debug
+  # bundle — it lands in `colmap_preupscale/` and is archived under
+  # `debug/` — and AND-ed with run_upscale, because with the upscale off
+  # stage 6 already exports these same frames and this would be colmap/
+  # under a second name. rmbg is recomputed here rather than reused from
+  # stage 6: that one runs after the upscale, on 1080x1920 frames.
   #
   # No normals. This export used to carry a `normals/` sidecar estimated by
   # sapiens2_lite, for a brush training to supervise on; normal supervision
@@ -2563,7 +2563,9 @@ steps:
   - id: export_masks_preupscale
     step: rmbg
     dispatch: in_process
-    when: ${globals.export_colmap_preupscale}
+    when:
+      - ${globals.export_debug}
+      - ${globals.run_upscale}
     inputs:
       images: dataset.images
     outputs:
@@ -2572,7 +2574,9 @@ steps:
   - id: export_colmap_preupscale
     step: colmap_export
     dispatch: in_process
-    when: ${globals.export_colmap_preupscale}
+    when:
+      - ${globals.export_debug}
+      - ${globals.run_upscale}
     inputs:
       cameras: dataset.cameras
       image_names: dataset.image_names
@@ -2676,12 +2680,12 @@ steps:
   # a different name.
   #
   # It does NOT cover export_colmap_preupscale (stage 4b), which is the one
-  # deliverable that necessarily sees the given poses. That export exists to
+  # export that necessarily sees the given poses. That export exists to
   # measure what SeedVR2 does to splat quality by comparison with colmap/,
   # and refining it would have to be its own solve against its own frames —
-  # a second three-minute run for a debug artefact that is off by default.
-  # Worth knowing when comparing the two, which is why it is written down
-  # rather than left to be discovered.
+  # a second three-minute run for a debug artefact. Worth knowing when
+  # comparing the two, which is why it is written down rather than left to
+  # be discovered.
   #
   # Same defaults as the stage-2 instance. `train_final_splat` is gated on
   # export_ply and this is not: export_colmap wants the corrected poses too,

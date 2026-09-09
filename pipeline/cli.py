@@ -180,9 +180,12 @@ def run_workflow(args: argparse.Namespace) -> int:
     apply_param_overrides(spec, global_overrides, step_overrides)
 
     # An output whose `requires:` setting is off is forced off, the same way
-    # the web UI's checkbox for it is disabled — `--param
-    # export_colmap_preupscale=true --param run_upscale=false` would
-    # otherwise write the ordinary colmap/ under a second name.
+    # the web UI's checkbox for it is disabled, so `--param` cannot ask for
+    # an export whose name would stop meaning what it says. Nothing declares
+    # a `requires:` today (the pre-upscale COLMAP export did, until it was
+    # folded into the debug bundle), so this is a no-op loop over the
+    # switches — kept because the rule is the outputs schema's, not that
+    # one export's.
     for name, wanted in spec.apply_output_requirements().items():
         if not wanted and name in global_overrides and global_overrides[name]:
             logger.warning(

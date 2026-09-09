@@ -5,7 +5,9 @@ Three things, in the order they were found. Sections 1 and 3 are
 diagnoses; section 2 is a change already in the working tree. Section 4
 is the one pod run that settles section 3's open question, and section 5
 the minimal set that settles section 1's — section 1 stopped being
-qualitative on 2026-09-08, when eleven runs made it a number.
+qualitative on 2026-09-08, when eleven runs made it a number. Section 6,
+added the same evening once section 5 had run, turns to pass 2 and to
+the quality the clean frames gave up.
 
 ## 1. The skeleton surviving the denoise as ink
 
@@ -402,7 +404,8 @@ cannot remove one, and the families differ partly by what they leave unset
 (`denoise_pass2.sampler_shift`, `render_initial_views.outline_strength`).
 Every sidecar sets **`export_colmap_intermediate: true`**, which defaults
 false and is the output the leak metric reads; without it the run is
-wasted.
+wasted. (As of 2026-09-08 that output is gone: those frames are part of the
+debug bundle, `export_debug`, and the sidecars set that instead.)
 
 `seed` stays at the workflow default (0) — every run in 1a used it, and a
 new seed would make all ten reference numbers unusable.
@@ -457,6 +460,103 @@ references above:
   to B: opposite tapers that both reduce the leak would mean the layer sum
   is what matters, not where in the stack it sits.
 
+### Results, 2026-09-08 evening — the sweep is settled
+
+All six ran to completion (81 frames, `ply/`, `alignment.json`, both
+debug datasets), and `log.txt` confirms each got exactly its sidecar's
+values. Same script, same references, `flow` = alignment iteration 1:
+
+| run | pass 1 | leak | yoke | cover | flow | IoU |
+|---|---|---|---|---|---|---|
+| A 31a008 | `[1, 1, .5, .5, .5, .5]`, shift 2.5, euler | 1.74 | 14.5 | 0.21 | 0.986 | 0.8525 |
+| B 467c17 | `[1]*6`, shift 3, euler | 16.62 | 55.6 | 0.58 | 1.039 | 0.8501 |
+| E1 | A, step 2 -> .5 | **-0.46** | **0.2** | 0.14 | 1.154 | 0.8392 |
+| E2 | A, shift 5 | **-0.44** | **-0.3** | 0.15 | 1.165 | 0.8389 |
+| E3 | A, `sampler_high: uni_pc` | 12.16 | **116.3** | 0.34 | 1.070 | 0.8642 |
+| E4 | A, shift 5 + uni_pc | **-0.53** | **-0.1** | 0.15 | 1.189 | 0.8468 |
+| E5 | B, deep layers off | **105.07** | 161.2 | 0.86 | 1.213 | 0.8196 |
+| E6 | B, shallow layers off | 0.45 | 0.9 | 0.12 | **4.725** | **0.5721** |
+
+`cover` bottoms out at 0.12-0.15 in every clean run, E6 included, so that
+is the metric's floor and not residual ink. The contact sheets agree with
+every row: E1/E2/E4 have no visible sticks on any of frames 1/21/41/61,
+E3 has a bright red V across the shoulders on the back view and a red bar
+over the face in profile, E5 has the whole skeleton painted as green,
+yellow and red lines, and E6 shows the frontal reference photo from every
+camera. The pass-2 output (`colmap_preupscale/`) inherits all of it: A, B
+and E3 still carry red shoulder streaks in their final frames, E1/E2/E4
+do not — the bake-in through the intermediate splat is confirmed.
+
+**E1 clears the bar.** Leak -0.46, yoke 0.24: the two levers add, and
+the yoke — 3-4x the rest in every earlier run — is gone with them. It is
+the criterion set above and by that criterion the sweep is over.
+
+**The 2x2: shift is the whole of 9e315f, and the sampler is a trap at low
+shift.**
+- Shift 5 alone (E2) reaches zero, yoke included. 9e315f's clean frames
+  were the shift; `splat_inactive_mask` needs no seventh run.
+- `uni_pc` on the high-noise expert at shift 2.5 (E3) is the worst yoke
+  ever measured — 116, twice B's, on top of A's low-noise taper. So the
+  taper that took A ten-fold below 0281b9 works under `euler` and barely
+  at all under `uni_pc`: at low shift the sampler decides. The plausible
+  mechanism is that UniPC's multistep history carries what the two
+  high-noise steps committed straight through the hand-off, ink included,
+  while Euler's memoryless steps let the low expert repaint it; that is a
+  reading, not a measurement.
+- At shift 5 the sampler stops mattering: E2 (euler) and E4 (uni_pc) are
+  both clean. E4 keeps the most silhouette of the clean three (0.8468,
+  0.6 pt under A) at the cost of the most flow (1.189).
+
+**The depth axis separates — the wrong way round for what was wanted.**
+The two tapers did NOT both lower the leak, so the layer sum is not what
+matters; position in the stack is. But the shallow layers (0-10) carry
+the pose AND the ink together: with them alone (E5) the pose survives
+(IoU 0.82) and the skeleton arrives as literal paint on every limb (cover
+0.86 — six times B's leak); with them gone (E6) the control is ignored
+outright (IoU 0.57, flow 4.7, a frontal figure in every view). The deep
+layers on their own hold no pose; their job, reading E5 against B, is to
+make the hint be *understood* rather than copied. Neither end gives ink
+reduction at pose authority, which is the only thing this axis was for.
+Something like `[.5, .5, .75, 1, 1, 1, 1, 1]` is the one untested shape
+left — E6's cliff at 0 says nothing about 0.5 — but it is a long shot and
+the time axis already has three clean settings. Park it.
+
+**What the clean frames cost.** 1a's reading that a softer control is
+free on consistency does not hold at this level. All three clean runs sit
+at flow 1.15-1.19 against A's 0.986 and B's 1.039 (+17-20%), and 0.6-1.4
+points of silhouette IoU under A. Those are alignment-loop pixels of view
+disagreement, still around one pixel mean. One confound on the flow
+number: A, B and the other morning runs had `refine_cameras_final`
+REFUSED (trap 5, the DB-order abort fixed in `d83499c`) and trained the
+final splat on the given helix cameras, while E1-E6 ran on the fixed
+image and got refined ones — so A-to-E is across an image change, and
+within the E family E3 (1.070) < E1 < E2 < E4 (1.189) is the clean
+ordering: flow rises as the control softens. What the final splat makes
+of it is in section 6's baseline table: the clean runs' heads are
+SHARPER (splat head s1 29.5-32.1 against A's 29.3) and their fidelity
+0.8-1.4 dB LOWER (25.1-25.8 against 26.6 dB) — some of that the
+refinement change, some the softer control.
+
+**Recommendation: E4's settings as the new pass-1 default**
+(`sampler_high: uni_pc`, `sampler_shift: 5`,
+`strength: [1, 1, .5, .5, .5, .5]`), E1 as the runner-up. E4 leaves the
+structure steps at full scale, keeps the reference graph's sampler, holds
+the best silhouette of the three, and — the deciding point — sits in the
+regime where the sampler does not matter, while E1 at shift 2.5 is one
+sampler flip away from E3's 116. Two caveats before it ships:
+- **The shipped default has never been measured.** Every one of the 17
+  runs deviates from `[1, 1, .75, .5, .25, 0]` at shift 8 / `uni_pc`;
+  the bleed it was blamed for was seen on pre-2026-09-07 runs at
+  `flow_shift` 3.0. If shift 5 erases ink, shift 8 may too, and the
+  shipped default's only fault might be its taper on steps 5-6. One run of
+  the workflow with NO overrides belongs beside E4 before the default
+  moves — it is the missing corner.
+- **Pass 2 was pinned at shift 2.5 / euler / flat 0.8 in all six**, on
+  purpose. Moving pass 1 to shift 5 without deciding what pass 2 does is
+  half a change; the pass-2 output above says pass 1's cleanliness is
+  what pass 2 inherits, so pass 2 probably needs nothing, but that is
+  inference.
+
 ### What none of these measure
 
 Whether the frames still describe the subject's real shape. Silhouette IoU
@@ -486,6 +586,202 @@ rather than this subject) but its output is a `colmap_intermediate` like
 any other, so read it with the same script. A bleed number for the
 reference dataset is the one calibration point none of these runs provides,
 and it is free if section 4 is in the same pod session.
+
+## 6. The quality sweep: pass 2
+
+Section 5 bought clean frames and paid in silhouette and view agreement.
+This batch asks for quality back, and it asks it of the pass nothing has
+ever varied on its own: `denoise_pass2`, the one that paints the frames
+the deliverable is trained on. Six sidecars under **`docs/quality-sweep/`**
+(README has the zip recipe), all dry-run through `read_settings_sidecar` +
+`_refuse_unknown_overrides`.
+
+### What pass 2 does, measured
+
+A new reader, `scripts/final_splat_quality.py`, renders two things per
+archive with the local b2ctrain rasteriser: the final `.ply` at its own
+training cameras (sharpness and PSNR of the deliverable), and the
+intermediate splat at the pre-upscale cameras with `rerender_splat`'s
+confidence gate — a reconstruction of pass 2's control video, which the
+archive does not carry. Over the 2026-09-08 archives:
+
+- **Pass 2 at flat 0.8 / shift 2.5 adds body texture and leaves the head
+  where the control had it.** On kept pixels, control vs output head s1 on
+  E4 is 36.0 vs 34.8; body 28.1 -> 31.2. (Measured naively the control's
+  head reads 44.5 — the gate's culled holes have hard grey edges that score
+  as detail. The reader excludes them.)
+- **Pass 2 is where the frames' agreement is decided, and letting go costs
+  it.** ef13a7's pass 2 tapered to 0 on the last step: the sharpest frames
+  in any archive (body s1 51.9 against ~31) and a final splat head NO
+  sharper than anyone's (27.9 against 29.3-32.1) at the worst flow (1.376)
+  and 25.2 dB. The alignment guide's thesis — the fit averages
+  disagreeing texture into blur, consistency binds — seen on this
+  pipeline, once. The shipped pass-2 default tapers to 0 the same way and
+  has never been scored (every measured run overrode it).
+- **The final splat is at roughly 0.75 of its frames' head sharpness**
+  (29.5 / 39.3 on E4) and 25-27 dB fidelity, run to run. That ratio is the
+  room pass 2 has to give back.
+- Pass 2 has only ever run at shift 2.5 (A family) or 8 (B family,
+  confounded by pass 1), flat 0.8 or a taper to 0, euler on the high
+  expert. The shift, the strongest lever section 5 found, is untested on
+  it.
+
+Baselines for the batch are in `docs/quality-sweep/README.md`.
+
+### The matrix
+
+Base = E4 (02ff74). All six leave pass 1 alone, so their intermediate
+splat and pass-2 control should be E4's frame for frame — a determinism
+check for free, and what makes each pass-2 delta single-variable.
+
+| # | pass 1 | `denoise_pass2` | what it answers |
+|---|---|---|---|
+| F1 | E4 | `strength: [1]*6` | hold the control tighter: flow down, and does the deliverable follow? |
+| F2 | E4 | `strength: [.6]*6` | let go, mildly: 0.6 / 0.8 / 1.0 with E4 and F1 is the strength curve |
+| F3 | E4 | `sampler_shift: 5` | shift on pass 2, the sweet spot pass 1 found |
+| F4 | E4 | `sampler_shift: 8` | shift on pass 2, the step default; 2.5 / 5 / 8 is the shift curve |
+| F5 | E4 | `sampler_high: uni_pc` | the sampler E3 showed hugs the control hardest, on a control with nothing to leak |
+| F6 | E4 | `steps_high: 3`, `steps_low: 3` at shift 5 | the expert split, 2/4 since the port and never chosen; 3/3 at shift 5 is the one that matches the checkpoint's t = 875 boundary; reads against F3 |
+
+### Reading it
+
+    scripts/skeleton_leak.py --iou --by-hue <result-dir> ...
+    scripts/final_splat_quality.py <result-dir> ...
+
+- **A pass-2 setting wins when the final splat's head s1 and PSNR rise
+  together** against E4's 29.5 / 25.75 dB. Sharper frames with falling
+  PSNR and rising flow is ef13a7 again and loses, however good the frames
+  look. Each reads against E4 on one axis: strength (F1, F2), shift (F3,
+  F4), sampler (F5) — and F6 reads against F3, the split being the only
+  difference between them. F6 is not at E4's shift 2.5 because a third
+  high-expert step there would sit at t = 868, below the 875 the expert
+  was trained down to; at shift 5 the six steps are 1000, 980, 929 | 833,
+  655, 334. The same table says the 2/4 split every run has used hands
+  the low expert a step above its boundary at shift 5 (929) and two at
+  the graph's shift 8 (955, 889), so F6 is also the first run whose
+  experts each see only the range they were trained on.
+- **All six runs' pass-1 leak must equal E4's (-0.53) and their
+  `colmap_intermediate` frames E4's.** If they do not, the runs are not
+  deterministic at fixed seed and every single-variable delta in sections
+  5 and 6 carries that noise; measure it before believing anything under
+  a point of s1.
+
+### Results, 2026-09-08 night — strength is the only lever, and it is a dial
+
+All six ran to completion (81 frames, `ply/`, `alignment.json`, both
+debug datasets, and `refine_cameras_final` ran on every one — no trap 5),
+and `log.txt` resolves exactly the sidecar's pass-2 values with pass 1 =
+E4 on all six. Same two scripts, `flow` = alignment iteration 1.
+
+**The determinism check: settled structure, fresh texture.** Pass 1
+reads as E4's on every metric — leak -0.52..-0.59, yoke -0.09..-0.17,
+cover 0.152..0.155, silhouette IoU 0.8451..0.8471 — but the frames are
+not E4's: `colmap_intermediate` differs from E4's at 26-28 dB (mean 7-8
+levels, frame 1 at 31-34 dB), while the control drawings in
+`denoise_pass1_input` differ at only 50-59 dB (under a level: the splat
+trainer and rasteriser) and every log shows `seed = 0`. So the denoiser
+turns a sub-level input difference into a different texture draw on the
+same structure. The seven runs therefore share settings up to pass 2 and
+are a free noise floor for the pass-2-independent columns: the
+reconstructed control's head s1 spans 35.6-39.2 (mean 37.3, sd 1.2) and
+its body s1 28.1-28.9 (sd 0.3). **A head-s1 delta under ~2.5 or a body
+delta under ~0.7 is inside the noise.** No run has ever been repeated
+whole, so PSNR and flow have no measured floor; where they matter below,
+a three-point monotone curve is the evidence, not a single delta. This
+also means section 5's flow spread among E1/E2/E4 (1.154-1.189) may be
+noise; its leak deltas (10-100x) are not.
+
+| run | `denoise_pass2` | frame head s1 | **splat head s1** | splat s1 | **PSNR** | p2 head / ctl head | p2 body / ctl body | p2 PSNR vs ctl | **flow** | BA infl. |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| E4 02ff74 | flat 0.8, shift 2.5, euler, 2/4 | 39.3 | 29.5 | 27.1 | 25.75 | 34.8 / 36.0 | 31.2 / 28.1 | 21.1 | 1.189 | 0.028 |
+| F1 11ffc1 | `strength: [1]*6` | 37.4 | 28.7 | 26.5 | **26.29** | 35.2 / 37.9 | 28.7 / 28.6 | 21.9 | **1.007** | **0.006** |
+| F2 0b6285 | `strength: [.6]*6` | **40.2** | 29.2 | **28.7** | **24.77** | 37.9 / 36.6 | 36.2 / 28.9 | 18.8 | **1.389** | 0.067 |
+| F3 792cf0 | `sampler_shift: 5` | 38.2 | 28.6 | 28.0 | 25.64 | 37.2 / 37.3 | 33.6 / 28.7 | 20.8 | 1.215 | 0.072 |
+| F4 5d3064 | `sampler_shift: 8` | 36.1 | **26.3** | 26.3 | 25.84 | 36.8 / 35.6 | 34.3 / 28.1 | 20.2 | 1.231 | 0.029 |
+| F5 7b5a31 | `sampler_high: uni_pc` | 36.2 | **26.7** | 26.2 | 25.14 | 38.6 / 38.4 | 34.3 / 28.5 | 19.9 | 1.290 | 0.049 |
+| F6 778eeb | 3/3 at shift 5 | 38.4 | 28.6 | 27.5 | 25.17 | 34.5 / 39.2 | 29.1 / 28.4 | 21.0 | 1.206 | 0.037 |
+
+**Nobody clears the bar.** Every run's final head s1 is below E4's:
+F1/F2/F3/F6 by 0.3-0.9 (noise), F4/F5 by 2.8-3.2 (real). No pass-2
+setting made the deliverable's head sharper; two made it softer.
+
+**Strength is a dial, and it turns the same way on three independent
+instruments.** 0.6 / 0.8 / 1.0 (F2 / E4 / F1): PSNR 24.77 / 25.75 /
+26.29 dB, flow 1.389 / 1.189 / 1.007, `ba_scale_inflation` 0.067 / 0.028
+/ 0.006 — while the frames' head sharpness runs the other way, 40.2 /
+39.3 / 37.4, and the pass-2 body against its control 36.2 / 31.2 / 28.7
+over a control of ~28.5. Fidelity and agreement are bought with frame
+texture, point for point.
+- F1's flow 1.007 is A's 0.986: the 17-20 % view agreement that section
+  5 said clean pass-1 frames cost is recovered entirely by holding pass
+  2 at 1.0. And at 1.0 pass 2 adds nothing to the body (28.7 vs 28.6)
+  and takes a little from the head (35.2 vs 37.9): it is a re-render
+  with a small blur, which is exactly what a consistent set of frames is.
+- F2 is ef13a7 in miniature: sharpest frames, sharpest body splat
+  (28.7, the one body number outside the noise), worst PSNR and flow
+  of the batch, and it invents — a tile grid and ceiling lights in the
+  background, red eyeshadow on frame 41 — because 0.6 leaves the model
+  room to paint what the control did not say.
+
+**The sampler axis is dead or harmful on pass 2.**
+- Shift 5 (F3): PSNR level, body +0.9 (noise edge), head level, and the
+  highest BA inflation of the batch (0.072). Nothing bought.
+- Shift 8 (F4), the step's default: head s1 -3.2 (outside noise) for
+  +0.09 dB. The shipped pass-2 shift costs the head and buys nothing.
+- `uni_pc` high (F5): head -2.8, -0.6 dB, flow +8 %, and the hardest
+  hallucinated tile grid of the seven. The sampler that hugs the control
+  hardest on pass 1 hugs a splat render on pass 2, and a splat render
+  has no detail to hug; hugging it harder produced the least faithful
+  deliverable. E3's lesson, in reverse.
+- 3/3 at shift 5 (F6, against F3): head level, -0.47 dB, flow level.
+  Each expert on its trained t-range buys nothing here; the 2/4 split
+  stays.
+
+**Where the head's detail actually is.** The final head sits at
+0.75-0.78 of the frames' head sharpness in every run, and in every run
+pass 2's head is at or below its control's (the one exception, F2's
++1.3, is noise plus invention). Pass 2 does not put detail into the head
+because its control has none to give beyond what the intermediate splat
+held, and that splat's head is the face cap's render. So the head
+sharpness of the deliverable is decided upstream of pass 2 — and the
+face-protecting mask below (keep the cap's pixels, re-synthesise the
+body only) is the one pass-2 change left that can move it.
+
+**Recommendation.** `denoise_pass2: strength: [1]*6` at euler / shift
+2.5 / 2|4 (F1), on E4's pass 1: +0.5 dB, flow -15 %, BA inflation ÷ 5,
+head within noise of E4, and the deliverable the fit can hold. Not
+applied to the workflow. If texture in the frames is preferred over
+fidelity, 0.8 is the compromise and 0.6 is the wrong side of the curve.
+The shipped pass 2 (uni_pc, shift 8, taper to 0) stacks the three
+settings that each individually lost here or in ef13a7; it should not be
+left as the default whatever is chosen.
+
+**The one run this batch could not make: a repeat.** A second F1 (or
+E4) under identical settings is the only way to put a floor under PSNR
+and flow; one slot, and every future single-variable claim on those two
+columns reads against it.
+
+### Not in the batch, and why
+
+- **The shipped pass 2 as-is** (uni_pc high, shift 8, `[0.8, 0.8, 0.6,
+  0.4, 0.2, 0]`). Never scored, but never chosen against a measurement
+  either; its three departures from E4 are each covered by an axis run
+  here (F5, F4, and the taper-to-0 ef13a7 already paid for), so a run
+  confirming their sum would say less than the parts.
+- **A face-protecting VACE mask on pass 2** — `control_masks` at 0 over
+  the face cap's footprint so the photograph's face is kept rather than
+  re-synthesised at ~100 px. The most promising quality lever there is,
+  and a code change (mask_splat writes all-1.0 masks by design), not a
+  sidecar. Next after this batch if F1 shows the control's detail is worth
+  holding.
+- **Pass 1 at `[1]*6` under shift 5** — whether the low-noise taper is
+  still needed once the shift erases the ink, which would return the 1.4
+  points of silhouette the taper cost. Dropped from this batch to keep all
+  six on pass 2; still the one pass-1 run worth making.
+- **`steps_low: 8` on pass 2** — plausible, second-order, and it changes
+  the LoRA's operating point. After the shift and strength curves exist.
+- **Resolution** — already `[720, 1280]`, the largest the model was
+  trained for; there is no larger to buy.
 
 ## Local reproduction recipe (everything before the Wan denoise)
 

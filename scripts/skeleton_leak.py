@@ -6,9 +6,11 @@ Usage:
     scripts/skeleton_leak.py --iou --by-hue <result-dir> [...]
 
 A result dir is an unpacked run archive: it needs `debug/denoise_pass1_input/`
-(the control video handed to stage 1, written when `export_debug` is on) and
-`colmap_intermediate/images/` (the denoised frames the intermediate splat
-trains on, written when `export_colmap_intermediate` is on).
+(the control video handed to stage 1) and `debug/colmap_intermediate/images/`
+(the denoised frames the intermediate splat trains on). Both come from the
+run's Debug bundle output, so `export_debug=false` leaves nothing to measure.
+An archive made before 2026-09-08 carries that dataset at the top level, as
+`colmap_intermediate/`, and is read either way.
 
 What is being measured, and why this shape. The failure is skeleton ink: the
 control's limb sticks arriving in the output as painted stripes rather than
@@ -168,10 +170,24 @@ def control_silhouette(ctl: np.ndarray) -> np.ndarray:
     return figure
 
 
+def intermediate_frames_dir(run_dir: str) -> str:
+    """Where this archive keeps the FIRST denoise's frames.
+
+    `debug/colmap_intermediate/` since 2026-09-08, when the two debug COLMAP
+    exports were folded into the debug bundle and started riding into the
+    archive under it; the top-level path is where every archive already on
+    disk has them, this sweep's included.
+    """
+    nested = os.path.join(run_dir, "debug/colmap_intermediate/images")
+    if os.path.isdir(nested):
+        return nested
+    return os.path.join(run_dir, "colmap_intermediate/images")
+
+
 def silhouette_iou(run_dir: str) -> dict:
     """Control-mesh vs denoised-matte silhouette IoU, averaged over frames."""
     ctl_dir = os.path.join(run_dir, "debug/denoise_pass1_input")
-    out_dir = os.path.join(run_dir, "colmap_intermediate/images")
+    out_dir = intermediate_frames_dir(run_dir)
     scores = []
     for name in sorted(os.listdir(ctl_dir)):
         if not name.startswith("frame_"):
@@ -198,7 +214,7 @@ def silhouette_iou(run_dir: str) -> dict:
 
 def _frames(run_dir: str):
     ctl_dir = os.path.join(run_dir, "debug/denoise_pass1_input")
-    out_dir = os.path.join(run_dir, "colmap_intermediate/images")
+    out_dir = intermediate_frames_dir(run_dir)
     for name in sorted(os.listdir(ctl_dir)):
         if not name.startswith("frame_"):
             continue

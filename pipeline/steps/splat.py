@@ -350,7 +350,7 @@ class RenderSplatStep(Step):
         Param("evidence_dataset", str, None,
               "Training dataset directory to measure evidence against when the .ply "
               "carries none — a run whose splat predates brush's export_evidence. "
-              "The export_colmap_intermediate output is exactly what train_splat "
+              "The debug bundle's colmap_intermediate/ is exactly what train_splat "
               "saw. Unused when the .ply has its own ev_* block", advanced=True),
         Param("conf_args", list, [],
               "Extra --conf-* flags passed verbatim to brush-splat-render, for "

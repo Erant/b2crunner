@@ -1,0 +1,45 @@
+# F2 — pass 2 loosened: the other end of the same axis
+#
+# The strength curve's third point (0.6 / 0.8 / 1.0 with E4 and F1). The
+# one earlier datapoint in this direction is ef13a7, whose pass 2 let go to
+# 0 on the last step: pass-2 frames at body s1 53.9 against 34, the worst
+# flow measured (1.376) and a final splat NO sharper than A's (head 27.9
+# against 29.3). Sharper frames that disagree with each other do not
+# survive the fit — the alignment guide's thesis, seen once. A flat 0.6 is
+# the mild version: if the final splat improves here and worsens at F1, the
+# model's own detail is worth more than the control's; if the reverse, the
+# control's is.
+#
+# Base = E4 (run 02ff74, 2026-09-08): pass 1 at `sampler_high: uni_pc`,
+# `sampler_shift: 5`, `strength: [1, 1, .5, .5, .5, .5]` — the clean pass 1
+# the leak sweep recommended — and pass 2 at euler / shift 2.5 / flat 0.8,
+# the pass 2 every A-family run carried. E4 measured: leak -0.53, IoU 0.8468,
+# flow 1.189, final splat head s1 29.5 / PSNR 25.75, pass-2 output head s1
+# 34.8 against 36.0 in its control (kept pixels). Every line below reproduces E4
+# except the ones marked CHANGED, so this run's numbers minus E4's are the
+# effect of that change and nothing else.
+#
+# All six leave pass 1 untouched, so their pass-1 frames, their
+# intermediate splat and therefore their pass-2 CONTROL should be E4's,
+# frame for frame (same seed, same weights) — which is what makes a pass-2
+# delta readable, and is itself a determinism check worth reading.
+
+settings:
+  # export_debug carries the measurement: debug/intermediate_splat.ply is
+  # what scripts/final_splat_quality.py re-renders as the pass-2 control,
+  # colmap_preupscale/ is pass 2's own output, debug/alignment/ the flow.
+  # A run without it is wasted. The other two match every reference run.
+  export_colmap: true
+  export_debug: true
+  export_ply: true
+
+step_params:
+  denoise_pass1:
+    sampler_high: uni_pc
+    sampler_shift: 5
+    strength: [1, 1, 0.5, 0.5, 0.5, 0.5]
+  denoise_pass2:
+    sampler_high: euler
+    sampler_shift: 2.5
+    # CHANGED from E4's flat 0.8.
+    strength: [0.6, 0.6, 0.6, 0.6, 0.6, 0.6]

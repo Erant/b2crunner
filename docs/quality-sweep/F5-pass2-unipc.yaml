@@ -1,0 +1,45 @@
+# F5 — uni_pc on pass 2's high-noise expert: the sampler that hugs the control
+#
+# E3 put uni_pc on pass 1's high expert and got the worst ink ever measured
+# (yoke 116) — AND the best silhouette (IoU 0.864) and the best flow of the
+# family (1.070). The multistep history carries what the opening steps
+# committed straight through the hand-off, whatever it is. On pass 1 that
+# was the skeleton. Pass 2's control has no skeleton: it is a splat render,
+# already view-consistent, so the same sampler should carry only the thing
+# wanted — agreement between frames — and the leak sweep's one bad actor
+# becomes a candidate. Every A-family pass 2 has run euler here since
+# 2026-09-08 morning, untested against the step's own default.
+#
+# Base = E4 (run 02ff74, 2026-09-08): pass 1 at `sampler_high: uni_pc`,
+# `sampler_shift: 5`, `strength: [1, 1, .5, .5, .5, .5]` — the clean pass 1
+# the leak sweep recommended — and pass 2 at euler / shift 2.5 / flat 0.8,
+# the pass 2 every A-family run carried. E4 measured: leak -0.53, IoU 0.8468,
+# flow 1.189, final splat head s1 29.5 / PSNR 25.75, pass-2 output head s1
+# 34.8 against 36.0 in its control (kept pixels). Every line below reproduces E4
+# except the ones marked CHANGED, so this run's numbers minus E4's are the
+# effect of that change and nothing else.
+#
+# All six leave pass 1 untouched, so their pass-1 frames, their
+# intermediate splat and therefore their pass-2 CONTROL should be E4's,
+# frame for frame (same seed, same weights) — which is what makes a pass-2
+# delta readable, and is itself a determinism check worth reading.
+
+settings:
+  # export_debug carries the measurement: debug/intermediate_splat.ply is
+  # what scripts/final_splat_quality.py re-renders as the pass-2 control,
+  # colmap_preupscale/ is pass 2's own output, debug/alignment/ the flow.
+  # A run without it is wasted. The other two match every reference run.
+  export_colmap: true
+  export_debug: true
+  export_ply: true
+
+step_params:
+  denoise_pass1:
+    sampler_high: uni_pc
+    sampler_shift: 5
+    strength: [1, 1, 0.5, 0.5, 0.5, 0.5]
+  denoise_pass2:
+    # CHANGED from E4's euler — the step default, and the reference graph's.
+    sampler_high: uni_pc
+    sampler_shift: 2.5
+    strength: [0.8, 0.8, 0.8, 0.8, 0.8, 0.8]
