@@ -101,6 +101,21 @@ RMBGStep's foreground-mask output is a *different* kind of mask (spatial,
 per-pixel) and is not what belongs in `control_masks` here — don't wire
 `rmbg`'s output into this step expecting frame-selection semantics.
 
+The mask IS per-pixel underneath, though, and the second pass uses that
+(2026-09-09): `face_cap_vace_mask` (steps/face_priority.py) writes the face
+cap's coverage into `denoise_pass2`'s batch as 0 over the face of every
+frame within the cap, so the pass keeps the trained splat's face and
+repaints the rest. diffusers honours a spatial mask in two places, and
+not the same way: `prepare_video_latents` splits the control video into
+its inactive (kept) and reactive (generated) halves at `mask > 0.5`, a
+hard cut, while `prepare_masks` carries the mask itself, soft values and
+all, to latent resolution (each 8x8 pixel block becomes 64 channels, so
+nothing spatial is lost) and concatenates it onto the conditioning
+latents. A feathered edge therefore reaches the model through the mask
+channel only. `_mask_to_pil` passes whatever it is given straight
+through; the per-frame flag above is the special case where every pixel
+agrees.
+
 Where that per-frame flag actually comes from: `generate_firstlast`/
 `inject_anchor` (pipeline/steps/anchor_stub.py, not yet ported) overwrite
 the frame(s) at the anchor camera with a warped real photo and mark them

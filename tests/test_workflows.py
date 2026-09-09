@@ -1599,6 +1599,109 @@ class TestTheFirstDenoiseInputIsKept(unittest.TestCase):
         self.assertEqual(denoise.inputs["control_masks"], "dataset.masks")
 
 
+class TestTheFaceCapProtectsTheSecondDenoise(unittest.TestCase):
+    """`face_cap_vace_mask`: the face cap's coverage written into pass 2's
+    VACE mask as 0, so the second denoise keeps the trained splat's face
+    (the photo-derived one, inside the cap) and repaints the rest.
+
+    All wiring, and silent if wrong in the usual way: a `masks` input
+    reading a path nothing writes, or the step landing before mask_splat
+    (where its product would be overwritten by the all-1.0 batch), leaves
+    pass 2 denoising the face at full freedom with nothing in the log to
+    say so. Pinned in the 2026-09-08 sweep's terms: the final head is
+    decided upstream of pass 2, so this mask is the pass-2 lever.
+    """
+
+    def _spec(self):
+        from pipeline.cli import resolve_workflow
+        from pipeline.workflow import WorkflowSpec
+
+        return WorkflowSpec.from_yaml(resolve_workflow("fast_helical_native"))
+
+    def test_it_sits_between_mask_splat_and_the_reinjection(self):
+        """After mask_splat (which replaces dataset.masks wholesale) and
+        before reinject_anchor (so the photograph's 0.0 is the last write,
+        as it always was), and before the denoise it feeds."""
+        spec = self._spec()
+        order = [step.id for step in spec.steps]
+        self.assertLess(order.index("mask_splat_fringes"), order.index("face_cap_vace_mask"))
+        self.assertLess(order.index("face_cap_vace_mask"), order.index("reinject_anchor"))
+        self.assertLess(order.index("reinject_anchor"), order.index("denoise_pass2"))
+
+    def test_it_folds_into_the_batch_the_denoise_reads(self):
+        """The step multiplies the masks it is handed rather than replacing
+        them — `masks` in AND out on the same path — and that path is what
+        denoise_pass2 reads as control_masks."""
+        spec = self._spec()
+        by_id = {s.id: s for s in spec.steps}
+        step = by_id["face_cap_vace_mask"]
+        self.assertEqual(step.step, "face_priority_weights")
+        self.assertEqual(step.inputs["masks"], "dataset.masks")
+        self.assertEqual(step.outputs["masks"], "dataset.masks")
+        self.assertEqual(by_id["denoise_pass2"].inputs["control_masks"], "dataset.masks")
+        self.assertNotIn("weights", step.outputs,
+                         "the weights are the mask here; publishing them too "
+                         "invites a reader that trains on them")
+
+    def test_it_reads_the_same_cap_as_the_training_call(self):
+        """Same refined splat, same pivot, and the helix's own cameras and
+        anchor: rerender_splat carries the anchor's refinement onto the path
+        rigidly and publishes where it put the anchor, so the cap's angle is
+        measured against the frames that are actually in the batch."""
+        spec = self._spec()
+        by_id = {s.id: s for s in spec.steps}
+        step = by_id["face_cap_vace_mask"]
+        training = by_id["face_priority"]
+        self.assertEqual(step.inputs["splat_path"], training.inputs["splat_path"])
+        self.assertEqual(step.inputs["splat_center"], training.inputs["splat_center"])
+        self.assertEqual(step.inputs["cameras"], "dataset.cameras")
+        self.assertEqual(step.inputs["anchor_cameras"], "dataset.cameras")
+        rerender = by_id["rerender_splat"]
+        self.assertEqual(step.inputs["anchor_frame_index"].rstrip("?"),
+                         rerender.outputs["anchor_frame_index"])
+        self.assertEqual(step.inputs["anchor_position"].rstrip("?"),
+                         rerender.outputs["anchor_position"])
+
+    def test_the_mask_is_a_full_zero_over_the_face(self):
+        """diffusers splits the control video at mask > 0.5, so a partial
+        strength never reaches the split; 1.0 is the only value that means
+        what the training call's 0.9 means there."""
+        spec = self._spec()
+        step = next(s for s in spec.steps if s.id == "face_cap_vace_mask")
+        self.assertEqual(step.params.get("strength"), 1.0)
+
+    def test_it_is_gated_on_the_face_and_on_its_own_switch(self):
+        """No cap without the face branch, and an A/B switch of its own
+        (`face_vace_mask`, declared, default on) so the first pod run can
+        turn just this off."""
+        spec = self._spec()
+        step = next(s for s in spec.steps if s.id == "face_cap_vace_mask")
+        self.assertEqual(
+            step.when, ["${globals.face_splat}", "${globals.face_vace_mask}"])
+        setting = next(s for s in spec.settings if s.name == "face_vace_mask")
+        self.assertIs(setting.default, True)
+        self.assertIs(spec.globals["face_vace_mask"], True)
+
+    def test_the_second_denoise_input_is_dumped_under_debug(self):
+        """The mask is the one thing about pass 2 nothing else exports;
+        the dump sits after the reinjection and before the denoise, like
+        pass 1's, and is gated on the debug bundle because these are
+        full-colour frames rather than drawings."""
+        from pipeline.templating import resolve
+
+        spec = self._spec()
+        order = [step.id for step in spec.steps]
+        self.assertLess(order.index("reinject_anchor"), order.index("dump_denoise2_input"))
+        self.assertLess(order.index("dump_denoise2_input"), order.index("denoise_pass2"))
+        dump = next(s for s in spec.steps if s.id == "dump_denoise2_input")
+        self.assertEqual(dump.step, "save_dataset")
+        self.assertEqual(dump.inputs["dataset"], "dataset")
+        self.assertEqual(dump.when, "${globals.export_debug}")
+        scope = {"globals": dict(spec.globals, output_root="/out")}
+        self.assertEqual(resolve(dump.params, scope)["directory"],
+                         "/out/debug/denoise_pass2_input")
+
+
 class TestTheReoutlineBranch(unittest.TestCase):
     """The experimental branch that redraws the silhouette from a matte
     (docs/re-outline.md): six gated steps between the anchor injection and

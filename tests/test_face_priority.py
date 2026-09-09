@@ -207,6 +207,13 @@ class TestStep(unittest.TestCase):
                        {"feather_px": 0.0})
         self.assertAlmostEqual(float(out["masks"][0][0, 0]), 1.0, places=6)
 
+    def test_a_mask_size_mismatch_is_refused(self):
+        """The weight is folded into the mask pixel for pixel; a batch at
+        another size (a resized dataset's VACE masks) must not broadcast."""
+        with self.assertRaisesRegex(ValueError, "cameras render at"):
+            run_step("face_priority_weights",
+                     _inputs([0.0], masks=[np.ones((H + 1, W), np.float32)]))
+
     def test_a_mask_count_mismatch_is_refused(self):
         with self.assertRaisesRegex(ValueError, "masks"):
             run_step("face_priority_weights",

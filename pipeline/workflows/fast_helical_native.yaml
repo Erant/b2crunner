@@ -404,6 +404,24 @@ settings:
       (~6.5 GB, segmentation) on top of the normal head, plus the pointmap
       head the splat itself needs.
 
+  - name: face_vace_mask
+    label: Protect the face in the second denoise
+    type: bool
+    default: true
+    advanced: true
+    help: >-
+      Write the face cap's coverage into the VACE mask the second denoise
+      is handed, as 0 ("keep this") over the face of every helix frame
+      within the cap's angle of the photograph, so denoise_pass2 repaints
+      the body and the room around a face it is told to leave as rendered
+      (`face_cap_vace_mask`, steps/face_priority.py). The re-rendered face
+      is the trained splat's, which the cap won in stage 2 with the
+      `face_priority` weights; this carries that decision through the one
+      pass that could still overwrite it. Needs the face branch on — with
+      `face_splat` off there is no cap to protect and the step is skipped.
+      Off is the run as it was before 2026-09-09: every pixel of every
+      synthetic frame at 1.0, the anchor photo at 0.
+
   - name: refine_cameras
     label: Refine camera poses (COLMAP)
     type: bool
@@ -486,7 +504,9 @@ outputs:
       and their stats, the face splat's stats and depth visualisations, the
       face .ply files, `denoise_pass1_input/` — the control video the first
       denoise is handed, frames with their VACE mask in alpha beside the
-      reference, the anchor photo and the cameras — `intermediate_splat.ply`,
+      reference, the anchor photo and the cameras — `denoise_pass2_input/`,
+      the same for the second denoise, whose VACE mask carries the face
+      cap's coverage — `intermediate_splat.ply`,
       the splat the helical re-render is built from, and two COLMAP datasets
       nothing else exports.
       `colmap_intermediate/` is what the FIRST brush training is handed: the
@@ -2414,7 +2434,8 @@ steps:
   #
   # The step's other half is unchanged and still needed: replacing the
   # per-pixel matte in dataset.masks with the per-frame all-1.0 VACE batch
-  # that denoise_pass2 reads and reinject_anchor writes its 0.0 into.
+  # that denoise_pass2 reads — the batch face_cap_vace_mask below writes the
+  # face's 0 into and reinject_anchor writes its anchor-frame 0.0 into.
   # Ordering is unchanged and still load-bearing (see below). To A/B against
   # the recorded ComfyUI run, set `mode: threshold` and turn rerender_splat's
   # `confidence` off — 6/2 is that step's own default.
@@ -2428,6 +2449,75 @@ steps:
       bg_color: [0.5, 0.5, 0.5]
     outputs:
       dataset: dataset
+
+  # The face cap's coverage, written into the VACE mask as "keep". This is
+  # the batch mask_splat just set to 1.0 everywhere ("denoise every pixel of
+  # every synthetic frame"); here it becomes 1 − g(θ)·feather(coverage): 0
+  # over the face of every frame within the cap's angle of the photograph,
+  # ramping back to 1 over `fade_deg` past it and at the cap's rim, 1
+  # everywhere the cap has nothing to say. VACE's convention is black =
+  # conditioning region, white = generate (diffusers' pipeline_wan_vace.py,
+  # and the same convention the anchor photo's all-0 frame has used since
+  # the ComfyUI days), so a 0 here tells the second denoise that the face
+  # it is looking at is given material, to be reproduced rather than
+  # repainted — the way it already treats the injected photograph.
+  #
+  # Why the face, and why only within the cap: the face in these frames is
+  # the trained splat's, and inside the cap that splat was fitted to the
+  # photo-derived face cap with the denoised frames faded out over it
+  # (`face_priority`, above). It is the truest face this pipeline has, and
+  # denoise_pass2 was the one pass left that could repaint it — and in the
+  # 2026-09-08 sweep it never improved on it: the final head's sharpness
+  # sat at or below its control frame's in every one of the six runs, at
+  # every strength, shift and sampler tried (docs/vace-denoise-findings-
+  # 2026-09-07.md, section 6). Head detail is decided upstream of this
+  # pass, so the lever left is to stop the pass spending it. Past the cap
+  # the splat's face is whatever pass 1 painted there, resampled through
+  # the training, and that IS the thing this pass exists to clean up, so
+  # it stays at 1.
+  #
+  # Same step as `face_priority`, same formula — a loss weight for brush
+  # and a VACE mask are both "how much may this source change these
+  # pixels", which is why the step is reused rather than cloned. Strength
+  # 1.0 rather than that call's 0.9: diffusers splits the control video
+  # into inactive/reactive at mask > 0.5 (a 0.1 and a 0 are the same
+  # split), and only the mask channel it concatenates onto the latents
+  # sees the soft value, so the tenth `face_priority` leaves brush would
+  # reach VACE as an ambiguous hint rather than a tenth of anything. The
+  # feather still matters: the 4 px ramp at the rim is what the mask
+  # channel sees, and it is what keeps the boundary between kept face and
+  # repainted hair from being a hard edge in the latent.
+  #
+  # Same cameras, same splat, same anchor as `face_priority`: the helix's
+  # cameras carry the anchor's refinement rigidly (rerender_splat's
+  # `given_anchor_camera`), the refined face splat lives in that same frame,
+  # and the anchor index/position are the ones rerender_splat published for
+  # this path. `masks` in and out: the step multiplies the batch it is
+  # handed rather than replacing it, so anything already written into
+  # these masks survives.
+  #
+  # BEFORE reinject_anchor, which is only a preference: the anchor frame's
+  # mask is 0 everywhere after that step, and 0 times anything is 0. Kept
+  # ahead of it so that the injected photograph is the last thing to touch
+  # the batch, as it has always been.
+  - id: face_cap_vace_mask
+    step: face_priority_weights
+    dispatch: in_process
+    when:
+      - ${globals.face_splat}
+      - ${globals.face_vace_mask}
+    inputs:
+      cameras: dataset.cameras
+      splat_path: scene.face_splat_path
+      masks: dataset.masks
+      anchor_cameras: dataset.cameras
+      anchor_frame_index: dataset.extras.anchor_frame_index?
+      anchor_position: dataset.extras.anchor_position?
+      splat_center: scene.face_splat_stats.world_center
+    params:
+      strength: 1.0
+    outputs:
+      masks: dataset.masks
 
   # Put the warped reference photo back onto whichever new frames landed on
   # the original camera. Matches by position, so it survives the reorbit —
@@ -2465,8 +2555,31 @@ steps:
       images: dataset.images
       masks: dataset.masks
 
+  # The second denoise's input, dumped the way dump_denoise_input dumps the
+  # first's: the composited re-render with its VACE mask in the alpha, the
+  # reference and the anchor photo beside it. New with face_cap_vace_mask,
+  # and mostly for it — the mask is the one thing about this pass that
+  # cannot be inspected anywhere else, and whether the 0 lands on the face
+  # (and not a hairline off it, or a frame late) is the first question a
+  # run with it will raise. Gated on the debug bundle, unlike pass 1's,
+  # because these are 81 full-colour 720x1280 frames rather than drawings.
+  - id: dump_denoise2_input
+    step: save_dataset
+    dispatch: in_process
+    when: ${globals.export_debug}
+    inputs:
+      dataset: dataset
+    params:
+      directory: ${globals.output_root}/debug/denoise_pass2_input
+    outputs:
+      directory_path: scene.denoise_pass2_input_dir
+
   # ---------------------------------------------------------------- stage 4
   # denoise.json again, strength 0.8 — clean up the re-render.
+  #
+  # dataset.masks here is no longer the flat per-frame batch pass 1 reads:
+  # with the face branch on, face_cap_vace_mask has written the face cap's
+  # coverage into it as 0 on the frames within the cap. See that step.
   - id: denoise_pass2
     step: wan22_vace_denoise
     dispatch: subprocess
