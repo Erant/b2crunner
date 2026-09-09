@@ -945,7 +945,8 @@ class BrushStep(Step):
               "the back showing through (the false transparency seen while tilting "
               "a splat). 0 disables; 0.5 measured on the deliverable training: "
               "weight from behind the body 0.038 -> 0.0025, -0.1 dB, +5% time. "
-              "Inert without a mesh input (logged)", minimum=0.0),
+              "Without a `mesh` input the trainer builds the surface from points_3d "
+              "(surfels on the mesh samples), measured within noise of the mesh", minimum=0.0),
         Param("hollow_margin", float, 0.05,
               "Depth behind the mesh surface, in scene units (metres for a SAM-3D-Body "
               "mesh), where the hollow penalty starts; full strength at twice this. "
@@ -1041,9 +1042,10 @@ class BrushStep(Step):
         hollow_margin = params["hollow_margin"]
         hollow_dilate = params["hollow_dilate"]
         if hollow_weight > 0 and mesh is None:
-            logger.warning(
-                "brush: hollow_weight %s but no `mesh` input is wired, so the hollow "
-                "loss is OFF for this training", hollow_weight)
+            logger.info(
+                "brush: hollow_weight %s with no `mesh` input wired: the trainer builds "
+                "the reference surface from points_3d instead (surfels on the mesh "
+                "samples it already has, --hollow-proxy auto)", hollow_weight)
         with_viewer = params["with_viewer"]
         render_path = params["render_path"]
 
@@ -1243,12 +1245,18 @@ class BrushStep(Step):
                     cmd.extend(align)
                 # The hollow loss: a regulariser rather than supervision, so
                 # it stays on through the polish and alignment refits too.
-                if mesh_path is not None and hollow_weight > 0:
+                # Without a mesh the trainer falls back to surfels on the
+                # model's points3D.txt (--hollow-proxy auto), which in this
+                # pipeline are samples of the same body mesh; measured within
+                # noise of the mesh itself (b2ctrain docs/STATUS.md).
+                if hollow_weight > 0:
+                    if mesh_path is not None:
+                        cmd.extend(["--mesh", str(mesh_path)])
                     cmd.extend([
-                        "--mesh", str(mesh_path),
                         "--hollow-weight", str(hollow_weight),
                         "--hollow-margin", str(hollow_margin),
                         "--hollow-dilate", str(hollow_dilate),
+                        "--hollow-proxy", "auto",
                     ])
                 return cmd
 

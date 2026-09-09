@@ -38,15 +38,17 @@ class TestBrushHollowArgv(unittest.TestCase):
             step.run(inputs, params)
         return seen
 
-    def test_off_by_default_and_without_a_mesh(self):
+    def test_off_by_default_and_points_fallback_without_a_mesh(self):
         self.assertEqual(get_step_class("brush").declared_params()["hollow_weight"].default, 0.0)
         seen = self._run(_inputs())
         self.assertNotIn("--hollow-weight", seen["cmd"])
         self.assertIsNone(seen["mesh"])
-        # A weight without a mesh is a warning, not a flag the trainer would refuse to honour.
+        # A weight without a mesh still reaches the trainer, which falls back to surfels on points3D.txt.
         seen = self._run(_inputs(), hollow_weight=0.5)
-        self.assertNotIn("--hollow-weight", seen["cmd"])
-        self.assertNotIn("--mesh", seen["cmd"])
+        cmd = seen["cmd"]
+        self.assertIn("--hollow-weight", cmd)
+        self.assertNotIn("--mesh", cmd)
+        self.assertEqual(cmd[cmd.index("--hollow-proxy") + 1], "auto")
 
     def test_mesh_is_written_and_passed(self):
         inputs = {**_inputs(), "mesh": _mesh()}
@@ -57,6 +59,7 @@ class TestBrushHollowArgv(unittest.TestCase):
         self.assertEqual(cmd[cmd.index("--hollow-margin") + 1], "0.04")
         self.assertEqual(cmd[cmd.index("--hollow-dilate") + 1], "3")
         self.assertTrue(cmd[cmd.index("--mesh") + 1].endswith("mesh.ply"))
+        self.assertEqual(cmd[cmd.index("--hollow-proxy") + 1], "auto")
         # The sidecar: a binary little-endian ply with 4 vertices and 4 triangles.
         head = seen["mesh"].split(b"end_header\n")[0].decode()
         self.assertIn("format binary_little_endian 1.0", head)
