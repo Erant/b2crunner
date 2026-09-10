@@ -11,6 +11,7 @@ from pipeline.registry import get_step_class
 from pipeline.steps import brush as brush_mod
 
 from .test_brush_evidence import _inputs
+from .test_brush_support_views import _support
 
 
 def _skeleton():
@@ -112,6 +113,50 @@ class TestStep(unittest.TestCase):
             with self.assertRaises(ValueError):
                 step.run(bad, params)
 
+    # -- the initial body: no world_from_raw, the frame comes from mesh_raw ---
+    def _initial_inputs(self):
+        inputs = self._inputs()
+        verts, *_ = _skeleton()
+        del inputs["world_from_raw"]
+        inputs["mesh_raw"] = verts
+        return inputs
+
+    def test_initial_body_recovers_the_frame_from_the_mesh(self):
+        cls = get_step_class("build_body_rig"); step = cls()
+        out = step.run(self._initial_inputs(), cls.resolve_params({"min_subtree": 5, "vertex_stride": 1}))
+        _, joints, *_ = _skeleton()
+        rot = np.array([[0, -1, 0], [1, 0, 0], [0, 0, 1]], np.float64)
+        # the same joints the refit path produces, without being told the transform
+        np.testing.assert_allclose(out["body_rig"]["joint_positions"],
+                                   (2.0 * joints @ rot.T + [1, 0, 0]).astype(np.float32), rtol=1e-5)
+        self.assertEqual(out["body_rig_stats"]["body"], "initial")
+        self.assertAlmostEqual(out["body_rig_stats"]["world_from_raw_scale"], 2.0, places=6)
+
+    def test_refit_path_is_labelled_and_keeps_its_scale(self):
+        cls = get_step_class("build_body_rig"); step = cls()
+        stats = step.run(self._inputs(), cls.resolve_params({"min_subtree": 5, "vertex_stride": 1}))["body_rig_stats"]
+        self.assertEqual(stats["body"], "refit")
+        self.assertAlmostEqual(stats["world_from_raw_scale"], 2.0, places=6)
+
+    def test_initial_body_refuses_a_mesh_that_is_not_the_same_one(self):
+        cls = get_step_class("build_body_rig"); step = cls(); params = cls.resolve_params({"min_subtree": 5})
+        # a different vertex count
+        bad = self._initial_inputs(); bad["mesh_raw"] = bad["mesh_raw"][:-1]
+        with self.assertRaises(ValueError):
+            step.run(bad, params)
+        # the same count, but deformed rather than rigidly placed
+        bad = self._initial_inputs()
+        raw = np.array(bad["mesh_raw"], np.float64); raw[0] += 0.05
+        bad["mesh_raw"] = raw
+        with self.assertRaises(ValueError):
+            step.run(bad, params)
+
+    def test_neither_frame_nor_raw_mesh_is_a_refusal(self):
+        cls = get_step_class("build_body_rig"); step = cls()
+        bad = self._inputs(); del bad["world_from_raw"]
+        with self.assertRaises(ValueError):
+            step.run(bad, cls.resolve_params({}))
+
 
 class TestBrushArgv(unittest.TestCase):
     def _run(self, inputs, supports, **overrides):
@@ -155,6 +200,19 @@ class TestBrushArgv(unittest.TestCase):
         seen = self._run(self._rig_inputs(), False)
         self.assertIsNone(seen["rig"])
         self.assertNotIn("--body-rig", seen["cmds"][0])
+
+    def test_rig_covers_the_training_frames_only_not_the_supporting_views(self):
+        """The intermediate training has face-support renders among its views.
+
+        They are renders of a fixed splat, and letting them deform costs the
+        whole head gain the rig otherwise buys (b2ctrain docs/STATUS.md, "The
+        rig at the INTERMEDIATE stage": novel/head 47.1 back to 43.1). They
+        stay out by construction — `image_names` is the real frames and the
+        supporting views are appended to the COLMAP model separately — and
+        this is the test that keeps it that way.
+        """
+        seen = self._run({**self._rig_inputs(), **_support(count=2)}, True)
+        self.assertEqual(seen["rig"]["names"], ["frame_00001_.png", "frame_00002_.png"])
 
     def test_param_off_or_input_absent(self):
         seen = self._run(self._rig_inputs(), True, body_rig=False)

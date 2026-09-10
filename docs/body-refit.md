@@ -165,3 +165,60 @@ mean pose while each frame's are elsewhere); that number is not the
 metric for this. `debug/body_rig/body_rig.json` lists the active joints
 and subtree sizes; `pipeline.cli doctor` checks the trainer for
 `--body-rig`.
+
+## The same rig on the intermediate training
+
+The intermediate splat has the problem too, and worse in relative terms:
+measured on the 2026-09-09 bundle's `colmap_intermediate`, adjacent-frame
+limb motion beyond the static body mesh is 8-13 mm at the arms and hands
+against 1.4-1.9 mm at the torso and legs (~6x; at the final stage it is
+~3x). It matters more than it looks, because the helical re-render that
+pass 2 is built from is a render of this splat: a translucent double limb
+here is baked into every frame the second denoise sees.
+
+`build_body_rig_initial` (the `body_rig_intermediate` setting, on by
+default) rigs the **initial** body for `train_splat` — SAM-3D-Body's fit
+after `fit_head_to_face`, the same body `mesh_world` already carries for
+the hollow loss. There is no splat to refit against at that point in the
+run, and none is needed: the initial body rigs the intermediate splat as
+well as the refit body does (hand sharpness 107.1 against 105.6, head 47.1
+against 45.8). The step is the same `build_body_rig`; with no
+`world_from_raw` to wire it recovers the raw-to-world similarity from
+`mesh_raw` (scene.vertices) against `mesh_world`, and refuses if the two
+are not the same mesh rigidly placed. `fit_head_to_face` publishes
+`rig_binding` for it — pure model data (`rig_binding_data`), read where the
+MHR model is already loaded.
+
+Measured on that bundle (b2ctrain docs/STATUS.md, "The rig at the
+INTERMEDIATE stage"), s1 at novel cameras against a two-seed baseline:
+
+| | body | hands | head | subject |
+|---|---|---|---|---|
+| baseline | 51.3 | 84.4 | 43.1 | 51.6 |
+| rig, initial body | 55.0 | 107.1 | 47.1 | 55.8 |
+| rig, refit body | 55.3 | 105.6 | 45.8 | 55.9 |
+
+at 1m32s either way (unchanged) and 1% fewer splats. Seed noise is under
+1%. Canonical PSNR falls 38.07 to 33.34 for the usual reason, and the
+split says exactly that: the 81 real frames go 33.86 to 27.20 while the 36
+undeformed supporting views are untouched (47.91 to 47.85), with the
+training loss unchanged.
+
+**Only the real frames are rigged.** The 36 face supporting views are
+renders of a fixed splat; giving them rotations too keeps the body and
+hand gains but loses the whole head gain (novel/head 47.1 back to 43.1,
+the baseline). They stay out by construction — `steps/brush.py` writes the
+rig for `image_names`, which is the training frames, and appends the
+supporting views to the COLMAP model separately — and
+`tests/test_body_rig.py` holds that property down.
+
+One thing worth knowing if you go measuring: the learned rotations here
+are dominated by torso (1.8 deg), head (1.4) and legs (1.3) with the arms
+at 0.3-0.8, the opposite of the final stage, where the trainer's alignment
+loop has already absorbed the body-scale wobble. The two mechanisms are
+close to orthogonal — the alignment loop alone gives body +9% and head
++12% and does nothing for the hands (+0.6%), the rig alone is what fixes
+the hands. Running both on the intermediate training measured better still
+(body +12%, head +15%, hands +19%); it is not wired, because
+`train_splat`'s alignment is the pipeline's own `refine_cameras` and
+turning the in-trainer loop on there is a separate change.

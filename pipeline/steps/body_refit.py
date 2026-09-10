@@ -81,7 +81,7 @@ import numpy as np
 
 from ..registry import register_step
 from ..step import Param, Step
-from .head_fit import FLIP, build_mhr_head
+from .head_fit import FLIP, build_mhr_head, rig_binding_data
 
 logger = logging.getLogger(__name__)
 
@@ -229,45 +229,6 @@ def write_points_ply(path: Path, points: np.ndarray, normals: np.ndarray) -> Non
     with open(path, "wb") as f:
         f.write(header.encode("ascii"))
         f.write(np.concatenate([points, normals], 1).astype("<f4").tobytes())
-
-
-def rig_binding_data(mhr: Any) -> Dict[str, np.ndarray]:
-    """The skeleton and skinning of an MHR model file, as numpy.
-
-    `mhr` is the TorchScript module `mhr_model.pt` loads to (the head's
-    `.mhr`). Its buffers hold everything a binding needs, none of it
-    hidden: the joint hierarchy, the sparse linear-blend-skinning weights
-    (about 2.8 joints per vertex) and each joint's inverse bind pose as
-    translation + quaternion (xyzw) + scale. Units are the rig's own —
-    centimetres, before the `/100` and the `FLIP` that `mhr_forward`'s
-    callers apply — and are left that way so the numbers match a
-    `skel_state` the rig returns.
-    """
-    buffers = dict(mhr.named_buffers())
-    prefix = "character_torch."
-    wanted = {
-        "joint_parents": "skeleton.joint_parents",
-        "joint_translation_offsets": "skeleton.joint_translation_offsets",
-        "joint_prerotations": "skeleton.joint_prerotations",
-        "inverse_bind_pose": "linear_blend_skinning.inverse_bind_pose",
-        "skin_vertex": "linear_blend_skinning.vert_indices_flattened",
-        "skin_joint": "linear_blend_skinning.skin_indices_flattened",
-        "skin_weight": "linear_blend_skinning.skin_weights_flattened",
-        "rest_vertices": "mesh.rest_vertices",
-        "faces": "mesh.faces",
-    }
-    out = {}
-    for key, name in wanted.items():
-        full = prefix + name
-        if full not in buffers:
-            raise RuntimeError(f"rig_binding_data: the MHR model has no buffer {full!r}; its layout "
-                               f"differs from the mhr_model.pt this was written against")
-        out[key] = buffers[full].detach().cpu().numpy().copy()
-    n_joints = len(out["joint_parents"])
-    n_verts = len(out["rest_vertices"])
-    if out["skin_joint"].max() >= n_joints or out["skin_vertex"].max() >= n_verts:
-        raise RuntimeError("rig_binding_data: skinning indices are out of range for the rig's joints/vertices")
-    return out
 
 
 # -- splat_surface -------------------------------------------------------------

@@ -443,6 +443,26 @@ settings:
       original mesh at the 3 cm margin below, which is the riskier setting for
       a mesh that may be too big for the subject.
 
+  - name: body_rig_intermediate
+    label: Per-view body rig on the intermediate training
+    type: bool
+    default: true
+    help: >-
+      Deform the intermediate splat per training view with the INITIAL body's
+      skeleton (pipeline/body_rig.py), the way `body_rig` already does for the
+      final training. The generated frames swing the arms by centimetres
+      between segments of the orbit, and a single canonical body cannot
+      explain them all: the splat answers with a translucent double limb, and
+      the helical re-render that pass 2 is built from inherits it. Measured on
+      the 2026-09-09 example run (b2ctrain docs/STATUS.md, "The rig at the
+      INTERMEDIATE stage"): hand sharpness +27%, body +7%, head +9%, at no
+      extra time and 1% fewer splats. There is no splat to refit the body to
+      at this point, and none is needed — the initial body rigs the
+      intermediate splat as well as a refit one does. Only the real frames get
+      a rotation; the face supporting views are renders of a fixed splat and
+      render undeformed, which is what keeps the head gain (letting them
+      deform loses all of it).
+
   - name: re_outline
     label: Re-outline (experimental)
     type: bool
@@ -685,6 +705,12 @@ steps:
       global_rots: scene.global_rots
       pose_params: scene.pose_params
       head_fit_stats: scene.head_fit_stats
+      # The MHR model's skeleton and skinning — pure model data, published
+      # from here because this is where the model is already loaded. It is
+      # what lets build_body_rig_initial rig the body before any splat
+      # exists; refit_body below republishes the same key from its own
+      # (identical) read for the final training's rig.
+      rig_binding: scene.rig_binding
 
   # -------------------------------------------------------- the face splat
   # What replaced the MediaPipe landmarks: a Gaussian splat of the
@@ -2104,6 +2130,32 @@ steps:
       output_dir: ${globals.output_root}/colmap_intermediate
       layout: brush
 
+  # The per-view deformation rig for the INTERMEDIATE training, from the
+  # INITIAL body — SAM-3D-Body's fit after fit_head_to_face, which is the
+  # same body mesh_world already carries for the hollow loss. The final
+  # training's rig (build_body_rig below) uses the refit body instead,
+  # because by then there is a splat to refit to; here there is not, and
+  # measurement says the initial body is just as good for this
+  # (b2ctrain docs/STATUS.md, "The rig at the INTERMEDIATE stage").
+  #
+  # No `world_from_raw` to wire either — the step recovers the raw-to-world
+  # similarity from `mesh_raw` against `mesh_world`, which are the same mesh
+  # in the two frames.
+  - id: build_body_rig_initial
+    step: build_body_rig
+    when:
+      - ${globals.body_rig_intermediate}
+    inputs:
+      mesh_world: scene.mesh_world
+      mesh_raw: scene.vertices
+      joints: scene.joints
+      rig_binding: scene.rig_binding
+    params:
+      debug_dir: ${globals.output_root}/debug/body_rig_initial
+    outputs:
+      body_rig: scene.body_rig_initial
+      body_rig_stats: scene.body_rig_initial_stats
+
   - id: train_splat
     step: brush
     dispatch: in_process
@@ -2124,6 +2176,13 @@ steps:
       weights: scene.face_priority.weights?
       # The body mesh, for the hollow loss (see hollow_weight below).
       mesh: scene.mesh_world?
+      # The per-view deformation rig (build_body_rig_initial above), on the
+      # initial body. Optional (`?`) so the `body_rig_intermediate` setting
+      # being off leaves this training exactly as it was. Only the training
+      # frames go into the file steps/brush.py writes — `image_names` is the
+      # real frames, the supporting views are appended to the COLMAP model
+      # separately — so the face renders stay undeformed by construction.
+      body_rig: scene.body_rig_initial?
     params:
       # The expensive knob: brush trains twice in this pipeline (here and
       # train_final_splat) at roughly an hour of GPU each. 30000 equals
