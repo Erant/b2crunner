@@ -243,12 +243,15 @@ class TestUnpremultiply(unittest.TestCase):
                    unpremultiply=False)
         self.assertEqual(int(out["images"][0][12, 12, 0]), 100)
 
-    def test_transparent_pixels_stay_black(self):
+    def test_transparent_pixels_are_not_reconstructed(self):
         """1/255 divided by an alpha of 0.002 is noise amplified 500x, and
-        the mask weights those pixels at zero anyway."""
+        the mask weights those pixels at zero anyway. What they get instead
+        is black, or — within `bleed_px` of the mask — the nearest inside
+        colour; never the division."""
         image, alpha = _render(0.5)
         image[0, 0] = 1
-        out = _run({"images": [image], "masks": [alpha], "cameras": _cameras(1)})
+        out = _run({"images": [image], "masks": [alpha], "cameras": _cameras(1)},
+                   bleed_px=0)
         self.assertEqual(int(out["images"][0][0, 0, 0]), 0)
         self.assertEqual(float(out["masks"][0][0, 0]), 0.0)
 
@@ -279,13 +282,21 @@ class TestTheMaskIsCleaned(unittest.TestCase):
 
     def test_the_fringe_is_cut_rather_than_handed_over_at_low_weight(self):
         """A pixel at alpha 0.1 is 1/10th of a vote for whatever the
-        un-premultiply amplified its noise into. It is not evidence."""
+        un-premultiply amplified its noise into. It is not evidence.
+
+        The mask is where that verdict lives. The colour there is the
+        bleed's business (see TestTheColourDoesNotStopAtTheMask), and the
+        one thing it must not be is the amplified noise."""
         image, alpha = _render(1.0, colour=200)
         alpha[4, 4] = 0.1
         image[4, 4] = 20
         out = _run({"images": [image], "masks": [alpha], "cameras": _cameras(1)})
         self.assertEqual(float(out["masks"][0][4, 4]), 0.0)
-        self.assertEqual(int(out["images"][0][4, 4, 0]), 0)
+        # The block's own colour, carried out by the bleed — not 20/0.15.
+        self.assertEqual(int(out["images"][0][4, 4, 0]), 200)
+        out_bare = _run({"images": [image], "masks": [alpha],
+                         "cameras": _cameras(1)}, bleed_px=0)
+        self.assertEqual(int(out_bare["images"][0][4, 4, 0]), 0)
 
     def test_a_pixel_the_step_still_trusts_survives(self):
         """0.15 is the cut, and the band just above it is a real soft edge —
@@ -335,6 +346,57 @@ class TestTheMaskIsCleaned(unittest.TestCase):
         self.assertEqual(int(image[12, 12, 0]), 25)
         out = _run({"images": [image], "masks": [alpha], "cameras": _cameras(1)})
         self.assertEqual(len(out["images"]), 1)
+
+
+class TestTheColourDoesNotStopAtTheMask(unittest.TestCase):
+    """`bleed_px` — the black background is not weightless.
+
+    brush weights the SSIM value at a pixel by the mask, but the SSIM
+    statistics come from an 11-tap window blurred twice around it
+    (b2ctrain's src/gpu/loss.cu, `HALO = 5`), so a zero-weight pixel still
+    receives gradient carrying its OWN ground truth, from every weighted
+    stat position within 2*HALO. With the colour stopping at the mask, that
+    ground truth is black, and the cap's outline came back drawn on the
+    splat in a black line — reproduced and cured by this bleed on run
+    17dff4's own export, see the step's class docstring.
+    """
+
+    def test_the_colour_is_carried_past_the_mask(self):
+        image, alpha = _render(1.0, colour=200)
+        out = _run({"images": [image], "masks": [alpha], "cameras": _cameras(1)},
+                   bleed_px=4)
+        self.assertEqual(int(out["images"][0][7, 12, 0]), 200)
+        self.assertEqual(int(out["images"][0][4, 12, 0]), 200)
+
+    def test_it_reaches_exactly_that_far(self):
+        image, alpha = _render(1.0, colour=200)
+        out = _run({"images": [image], "masks": [alpha], "cameras": _cameras(1)},
+                   bleed_px=4)
+        self.assertEqual(int(out["images"][0][3, 12, 0]), 0)
+
+    def test_the_mask_is_not_widened_with_it(self):
+        """The whole point: those pixels are still worth nothing to the
+        fit. Feathering the mask instead was measured to walk the cap's
+        edge out over the hairline."""
+        image, alpha = _render(1.0, colour=200)
+        out = _run({"images": [image], "masks": [alpha], "cameras": _cameras(1)},
+                   bleed_px=4)
+        self.assertEqual(float(out["masks"][0][7, 12]), 0.0)
+        self.assertEqual(float(out["masks"][0][12, 12]), 1.0)
+
+    def test_zero_leaves_the_frame_as_it_was(self):
+        image, alpha = _render(1.0, colour=200)
+        out = _run({"images": [image], "masks": [alpha], "cameras": _cameras(1)},
+                   bleed_px=0)
+        self.assertEqual(int(out["images"][0][7, 12, 0]), 0)
+
+    def test_an_empty_mask_is_left_alone(self):
+        """Nothing to bleed from; the step must not divide by a nearest
+        neighbour that does not exist."""
+        image = np.zeros((_SIZE, _SIZE, 3), dtype=np.uint8)
+        alpha = np.zeros((_SIZE, _SIZE), dtype=np.float32)
+        out = _run({"images": [image], "masks": [alpha], "cameras": _cameras(1)})
+        self.assertEqual(int(out["images"][0].max()), 0)
 
 
 class TestTheseGoStraightIntoBrush(unittest.TestCase):

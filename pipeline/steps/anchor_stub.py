@@ -437,6 +437,40 @@ class SelectSupportViewsStep(Step):
     measured the same as training on dirty ones on the subject this was
     fitted to, so this is hygiene rather than a quality lever — it is here
     for the subject where the fringe is not so quiet.
+
+    **And the colour must not stop where the mask does** (`bleed_px`).
+    Zeroing the colour outside the mask reads as safe — those pixels carry a
+    weight of zero, so nothing can be fitted to them — and it is not,
+    because a mask weights the SSIM *value* at a pixel while the SSIM
+    *statistics* come from an 11-tap Gaussian window around it, blurred
+    twice (b2ctrain's src/gpu/loss.cu: `HALO = 5`, `M = wp * gt_a * norm`
+    applied after the window). A zero-weight pixel therefore still receives
+    gradient from every weighted stat position within 2*HALO, carrying its
+    own ground truth with it — and its ground truth was black. The cap's
+    silhouette came back drawn on the splat in a black outline.
+
+    Measured 2026-09-10 by retraining run 17dff4's own intermediate export
+    (debug/colmap_intermediate/, 117 views, the shipped b2ctrain argv) with
+    nothing changed but these 36 frames:
+
+        as shipped (black outside)   a 3-7 px band at 0-5/255 hugging the
+                                     cap's outline, on the outside of the
+                                     mask, tracing its per-Gaussian
+                                     staircase
+        colour bled 12 px            no band: the profile across the rim
+                                     runs 111 -> 198 monotonically
+
+    PSNR against the denoised frames moved ±0.6 dB in the 15 px band and
+    not at all over the face, which is the expected null: the frames are
+    silenced there by `face_priority_weights`, so this is a defect the
+    metrics cannot see and only a render shows.
+
+    A *nearest-inside-pixel* extension, not a blur or an inpaint: what the
+    window needs is a plausible local mean and a small local variance, and
+    the boundary colour continued outward is both. The mask is left alone —
+    feathering it instead (a sigma-3 blur, same A/B) hands the extension
+    real weight and the fit follows it, walking the cap's edge out over the
+    hairline.
     """
 
     PARAMS = (
@@ -469,6 +503,16 @@ class SelectSupportViewsStep(Step):
               "inside the matte (dips to 0.90). A grey closing, so it fills the dips "
               "without moving the boundary. 0 leaves the alpha as it came",
               minimum=0, advanced=True),
+        Param("bleed_px", int, 12,
+              "Extend the recovered colour this far past the mask, filling each "
+              "outside pixel with its nearest inside one. The mask is untouched — "
+              "those pixels still carry a weight of zero — but brush's SSIM reads "
+              "an 11-tap window blurred twice around every weighted pixel, so a "
+              "black background reaches 2*HALO = 10 px past the mask as gradient "
+              "and paints the cap's outline onto the splat (measured 2026-09-10; "
+              "see the class docstring). 12 is that radius plus a margin. 0 leaves "
+              "the colour stopping where the mask does",
+              minimum=0, advanced=True),
     )
 
     def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
@@ -479,6 +523,7 @@ class SelectSupportViewsStep(Step):
         min_path_angle = params["min_path_angle_deg"]
         min_alpha = params["min_alpha"]
         alpha_closing = params["alpha_closing"]
+        bleed_px = params["bleed_px"]
 
         if not (len(images) == len(masks) == len(cameras)):
             raise ValueError(
@@ -535,18 +580,22 @@ class SelectSupportViewsStep(Step):
                 because="Un-premultiplying (rgb / a) only recovers the straight "
                         "colour these views are supposed to carry for",
             )
-            out_images.append(
-                _unpremultiply(layer, alpha, min_alpha, keep_px)
-                if params["unpremultiply"] else layer
-            )
+            straight = (_unpremultiply(layer, alpha, min_alpha, keep_px)
+                        if params["unpremultiply"] else layer)
+            # And past the mask, so brush's SSIM window has a colour to read
+            # where its weight has run out — see the docstring's "the colour
+            # must not stop where the mask does".
+            out_images.append(_bleed_outward(straight, keep_px, bleed_px))
             out_masks.append(np.where(keep_px, coverage, 0.0))
             out_cameras.append(cameras[index])
 
         logger.info(
-            "select_support_views: %d/%d frames kept as supporting views%s",
+            "select_support_views: %d/%d frames kept as supporting views%s, "
+            "colour bled %d px past the mask",
             len(keep), len(images),
             f", {len(on_path)} dropped for sitting within {min_path_angle:.1f} deg "
             f"of the denoising path" if on_path else "",
+            bleed_px,
         )
         if not keep:
             # Not an error: brush takes no supporting views and trains
@@ -686,6 +735,29 @@ def _close_alpha(alpha: np.ndarray, size: int) -> np.ndarray:
     return cv2.morphologyEx(
         alpha, cv2.MORPH_CLOSE, np.ones((size, size), np.uint8)
     )
+
+
+def _bleed_outward(image: np.ndarray, keep: np.ndarray, radius: int) -> np.ndarray:
+    """Continue the in-mask colour `radius` pixels past the mask's edge.
+
+    Each outside pixel within `radius` takes the colour of the nearest
+    inside one — an edge extension, not a blur — so brush's SSIM window
+    reads a plausible mean and a small variance where the mask's weight has
+    already gone to zero. Everything further out is left as it was.
+
+    The mask is NOT widened; only the colour is. See
+    `SelectSupportViewsStep`'s docstring for the measurement and for why
+    feathering the mask instead makes it worse.
+    """
+    if radius <= 0 or not keep.any() or keep.all():
+        return image
+    from scipy import ndimage
+
+    distance, nearest = ndimage.distance_transform_edt(~keep, return_indices=True)
+    band = (~keep) & (distance <= radius)
+    out = image.copy()
+    out[band] = image[nearest[0][band], nearest[1][band]]
+    return out
 
 
 def _unpremultiply(layer: np.ndarray, alpha: np.ndarray, min_alpha: float,

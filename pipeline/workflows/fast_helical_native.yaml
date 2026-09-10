@@ -13,6 +13,22 @@
 # and reads the .ply optionally, so the branch being off leaves it with
 # nothing to composite rather than nothing to resolve.
 #
+# WHAT CHANGED (2026-09-10): **the face cap's supporting views carry their
+# colour past their mask** — `select_support_views` grew `bleed_px` (12,
+# the step's default; nothing is set here). A masked view's mask weights
+# the SSIM *value* at a pixel, but the statistics behind it come from an
+# 11-tap window blurred twice (b2ctrain's src/gpu/loss.cu, `HALO = 5`), so
+# a zero-weight pixel still takes gradient toward its own ground truth from
+# every weighted stat position within 2*HALO — and its ground truth was the
+# black background the cap was rendered on. The result was the cap's
+# outline drawn on the intermediate splat in a black line 3-7 px wide,
+# tracing the per-Gaussian staircase of the matte's edge. Retraining run
+# 17dff4's own debug/colmap_intermediate/ with nothing changed but those 36
+# frames removes it (steps/anchor_stub.py has the profiles); PSNR against
+# the denoised frames does not move, which it cannot — face_priority_weights
+# silences them over the face, so this defect lives where the metrics do
+# not look.
+#
 # WHAT CHANGED (2026-09-08, later): **the helical re-render follows the
 # camera refinement.** `rerender_splat` takes `given_anchor_camera:
 # scene.image_warp.camera` and moves its whole helix by the delta between
