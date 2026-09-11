@@ -479,6 +479,24 @@ settings:
       render undeformed, which is what keeps the head gain (letting them
       deform loses all of it).
 
+  - name: specular_suppress
+    label: Highlight suppression
+    type: float
+    default: 0.0
+    minimum: 0.0
+    maximum: 1.0
+    help: >-
+      Pull the highlights down on the frames the second denoise sees, 0 (off)
+      to 1. Those frames are a re-render of a splat trained on the FIRST
+      denoise's output, so they already carry one diffusion pass's shading and
+      specular, and the second pass lights that again — blown-out highlights,
+      plasticky skin, reflective clothing. This removes the specular excess
+      (the per-pixel minimum channel above the batch's `mean + eta * std`,
+      subtracted from all three channels equally, so colour and diffuse
+      shading stay) before the frames are composited over grey. The anchor
+      photo is untouched: it is injected after. Off is the run as it was; see
+      mask_splat's `specular_eta` / `specular_blur` for the shape of the cut.
+
   - name: re_outline
     label: Re-outline (experimental)
     type: bool
@@ -2624,6 +2642,11 @@ steps:
     params:
       mode: composite
       bg_color: [0.5, 0.5, 0.5]
+      # Off by default. The frames here are a re-render of the splat
+      # denoise_pass1's output trained, so they carry that pass's highlights
+      # (and its SH sparkle); denoise_pass2 blows them out again. See the
+      # setting's help and steps/mask_splat.py.
+      specular_suppress: ${globals.specular_suppress}
     outputs:
       dataset: dataset
 

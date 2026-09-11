@@ -257,5 +257,109 @@ class TestMaskSplatComposite(unittest.TestCase):
         self.assertIn("composite", str(caught.exception))
 
 
+class TestMaskSplatSpecularSuppress(unittest.TestCase):
+    """`specular_suppress` on the composite mode — 2026-09-10.
+
+    The frames denoise_pass2 sees are a re-render of a splat trained on
+    pass 1's output, highlights and all; lit a second time those blow out.
+    The suppression is the dichromatic model's specular-free image: the
+    minimum channel's excess over `mean + eta * std` of the batch's matte
+    pixels, taken off all three channels equally.
+
+    A 8x8 patch of one skin colour with a single brighter, whiter pixel in
+    the middle of it — body colour plus a white term — is the whole model.
+    """
+
+    SKIN = (120, 160, 220)          # BGR
+    HIGHLIGHT = (200, 220, 250)     # the same skin plus ~80 of white
+
+    def _frame(self, highlight_at=(4, 4)):
+        image = np.zeros((8, 8, 3), dtype=np.uint8)
+        image[:] = self.SKIN
+        image[highlight_at] = self.HIGHLIGHT
+        return image
+
+    def _dataset(self, images, mask=None):
+        if mask is None:
+            mask = np.ones((8, 8), dtype=np.float32)
+        return Dataset(
+            images=images, image_names=[f"frame_{i:05d}_.png" for i in range(len(images))],
+            cameras=[None] * len(images), points_3d=None, resolution=(8, 8),
+            masks=[mask] * len(images),
+        )
+
+    def _run(self, images, mask=None, **params):
+        return run_step(
+            "mask_splat", {"dataset": self._dataset(images, mask)},
+            {"mode": "composite", "specular_suppress": 1.0, "specular_blur": 0.0, **params},
+        )["dataset"].images
+
+    def test_off_is_the_composite_as_it_was(self):
+        out = run_step(
+            "mask_splat", {"dataset": self._dataset([self._frame()])},
+            {"mode": "composite"},
+        )["dataset"].images[0]
+        np.testing.assert_array_equal(out, self._frame())
+
+    def test_the_highlight_comes_down_by_the_same_amount_per_channel(self):
+        """Body colour plus white, minus white: the pixel's chroma — the
+        gaps between its channels — is what survives, not its brightness."""
+        out = self._run([self._frame()])[0]
+        centre = out[4, 4].astype(int)
+        self.assertLess(centre[0], self.HIGHLIGHT[0])
+        gaps = np.diff(centre)
+        np.testing.assert_array_equal(gaps, np.diff(np.array(self.HIGHLIGHT)))
+
+    def test_the_skin_around_it_is_untouched(self):
+        out = self._run([self._frame()])[0]
+        np.testing.assert_array_equal(out[0, 0], self.SKIN)
+        np.testing.assert_array_equal(out[4, 3], self.SKIN)
+
+    def test_amount_scales_the_cut(self):
+        full = self._run([self._frame()])[0][4, 4].astype(float)
+        half = self._run([self._frame()], specular_suppress=0.5)[0][4, 4].astype(float)
+        expected = (np.array(self.HIGHLIGHT, dtype=float) + full) / 2.0
+        np.testing.assert_allclose(half, expected, atol=1.0)
+
+    def test_the_threshold_is_the_batch_s_not_the_frame_s(self):
+        """One frame all highlight would, measured alone, see nothing to
+        cut (every pixel is the mean). In a batch with a normal frame it is
+        the outlier, and the cut is decided by the batch."""
+        plain = self._frame()
+        glossy = np.zeros((8, 8, 3), dtype=np.uint8)
+        glossy[:] = self.HIGHLIGHT
+        out = self._run([plain, glossy])
+        self.assertLess(int(out[1][0, 0, 0]), self.HIGHLIGHT[0])
+        # And the same pixel value lands in both frames: one threshold.
+        np.testing.assert_array_equal(out[0][4, 4], out[1][0, 0])
+
+    def test_outside_the_matte_nothing_is_subtracted(self):
+        """The statistics come from the matte and so does the cut: the
+        black the re-render culls to and the grey the frame is about to
+        be laid on are not skin."""
+        mask = np.ones((8, 8), dtype=np.float32)
+        mask[0, :] = 0.0
+        image = self._frame()
+        image[0, :] = (255, 255, 255)   # a bright row the matte excludes
+        out = self._run([image], mask=mask)[0]
+        np.testing.assert_array_equal(out[0, 0], (128, 128, 128))
+        # The highlight inside the matte still comes down, and the white
+        # row did not pull the threshold up to meet it.
+        self.assertLess(int(out[4, 4, 0]), self.HIGHLIGHT[0])
+
+    def test_an_empty_matte_is_a_no_op(self):
+        mask = np.zeros((8, 8), dtype=np.float32)
+        out = self._run([self._frame()], mask=mask)[0]
+        np.testing.assert_array_equal(out[4, 4], (128, 128, 128))
+
+    def test_blur_softens_the_edge_of_the_cut(self):
+        """With a blurred excess map the highlight's neighbours take a
+        little of the subtraction and the peak keeps a little more."""
+        sharp = self._run([self._frame()])[0].astype(int)
+        soft = self._run([self._frame()], specular_blur=1.0)[0].astype(int)
+        self.assertLess(soft[4, 3, 0], self.SKIN[0])
+        self.assertGreater(soft[4, 4, 0], sharp[4, 4, 0])
+
+
 if __name__ == "__main__":
     unittest.main()

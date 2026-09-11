@@ -32,6 +32,25 @@ Gaussians that drew them, and the re-render is now made on black so the
 gate's rejects read as holes in the subject rather than as a second
 background colour.
 
+`specular_suppress` (2026-09-10) is a second job the composite mode can
+do, and exists because of double diffusion: the frames this step hands to
+`denoise_pass2` are a re-render of a splat TRAINED ON pass 1's output, so
+they already carry a diffusion pass's shading and highlights — and the
+splat's SH has baked those highlights in as view-dependent sparkle. Pass 2
+lights that again, and each round blows the highlights out further:
+plasticky skin, surfaces that read as wet. The fix is the dichromatic
+model's specular-free image (Shen & Cai 2009): a highlight is an additive,
+near-white component on top of the body colour, so it shows up as an
+elevated per-pixel `min(B,G,R)`; subtract the excess of that minimum over
+a threshold from all three channels equally and the whiteness goes while
+chroma and diffuse shading stay. The threshold is `mean + eta * std` of
+the minimum channel over the matte — measured over the WHOLE batch, not
+per frame, because a per-frame threshold drifts with how much skin versus
+clothing each camera sees, and a video model notices a subject whose skin
+dims and brightens along the orbit. See `_specular_threshold` and
+`_suppress_specular`. Off (0.0) by default so the recorded runs stay an
+A/B; the workflow's `specular_suppress` setting is the dial.
+
 `mode: passthrough` is the same step with the compositing dropped too, for
 a re-render that already ends on the colour the denoise wants. Neither is
 a no-op: both still do the step's *other* job, replacing the per-pixel
@@ -129,6 +148,11 @@ class MaskSplatStep(Step):
 
     The masks are replaced in every mode; that half is the step's real
     remaining job.
+
+    `specular_suppress` > 0 (composite mode only, it needs the matte) pulls
+    the highlights down before compositing — see the module docstring for
+    why a re-render of a splat trained on denoised frames needs that before
+    it is denoised again.
     """
 
     # threshold/sigma_* are advanced because they are not free choices: they
@@ -151,6 +175,23 @@ class MaskSplatStep(Step):
               "handed — the renders it sees elsewhere ground on #7F7F7F — and what "
               "the warped anchor photo's border is filled with, so the injected "
               "real frame does not arrive as the one bright thing in the batch"),
+        Param("specular_suppress", float, 0.0,
+              "composite mode only: how much of each highlight's specular excess "
+              "to remove, 0 (off, the frames as rendered) to 1 (every highlight "
+              "capped at the skin around it). The excess is the per-pixel "
+              "min(B,G,R) above `mean + specular_eta * std` of that minimum over "
+              "the whole batch's matte, subtracted from all three channels "
+              "equally, so chroma and diffuse shading are untouched",
+              minimum=0.0, maximum=1.0),
+        Param("specular_eta", float, 0.5,
+              "How far above the batch's mean minimum-channel value a pixel has "
+              "to sit, in standard deviations, before it counts as a highlight. "
+              "Lower catches more of the skin's sheen, higher only the blown "
+              "peaks", minimum=0.0, advanced=True),
+        Param("specular_blur", float, 2.0,
+              "Gaussian sigma in pixels applied to the excess map before it is "
+              "subtracted, so a highlight's edge fades out rather than ringing; "
+              "0 subtracts it as measured", minimum=0.0, advanced=True),
         Param("filter_size", int, 6, "Bilateral filter diameter", minimum=0),
         Param("dilation", int, 2, "Grow the kept region back out by this many pixels; "
               "0 is a valid no-dilate case", minimum=0),
@@ -181,9 +222,26 @@ class MaskSplatStep(Step):
                     "produces it (rmbg) above this one."
                 )
             bg_color = tuple(params["bg_color"])
+            amount = params["specular_suppress"]
+            frames = [_rgb(img) for img in dataset.images]
+            mattes = [normalize_mask(mask) for mask in dataset.masks]
+            if amount > 0.0:
+                threshold = _specular_threshold(frames, mattes, params["specular_eta"])
+                frames = [
+                    _suppress_specular(
+                        bgr, fg, threshold, amount, params["specular_blur"]
+                    )
+                    for bgr, fg in zip(frames, mattes)
+                ]
+                logger.info(
+                    "mask_splat: highlights suppressed at %.2f — min-channel "
+                    "threshold %.1f/255 over the batch's matte (eta %.2f), "
+                    "excess map blurred at sigma %.1f px",
+                    amount, threshold, params["specular_eta"], params["specular_blur"],
+                )
             images = [
-                _composite_one(img, mask, bg_color)
-                for img, mask in zip(dataset.images, dataset.masks)
+                _composite_one(bgr, fg, bg_color)
+                for bgr, fg in zip(frames, mattes)
             ]
             logger.info(
                 "mask_splat: %d frames composited over %s with the matte they "
@@ -245,7 +303,64 @@ class MaskSplatStep(Step):
         return {"dataset": out}
 
 
-def _composite_one(img: np.ndarray, mask: np.ndarray,
+def _rgb(img: np.ndarray) -> np.ndarray:
+    """The frame's colour channels, an RGBA frame's alpha dropped."""
+    return img[:, :, :3] if img.ndim == 3 and img.shape[2] == 4 else img
+
+
+def _specular_threshold(frames: List[np.ndarray], mattes: List[np.ndarray],
+                        eta: float) -> float:
+    """`mean + eta * std` of the per-pixel minimum channel over every matte
+    pixel in the batch, in 0-255 units.
+
+    One number for the whole batch, accumulated rather than pooled: 81
+    frames of minimum channel would be a spare copy of the batch, and the
+    two moments need only three running sums. A matte pixel is one the
+    matte puts at more than half foreground — the soft edge is left out of
+    the statistics on both sides, since the black the re-render culls to
+    would otherwise drag the mean down.
+    """
+    count = 0
+    total = 0.0
+    total_sq = 0.0
+    for bgr, fg in zip(frames, mattes):
+        i_min = bgr.astype(np.float32).min(axis=2)[fg > 0.5].astype(np.float64)
+        count += i_min.size
+        total += float(i_min.sum())
+        total_sq += float(np.square(i_min).sum())
+    if count == 0:
+        # An empty matte has no skin to measure; a threshold above white
+        # makes the suppression the no-op it should be.
+        return 256.0
+    mean = total / count
+    var = max(total_sq / count - mean * mean, 0.0)
+    return float(mean + eta * np.sqrt(var))
+
+
+def _suppress_specular(bgr: np.ndarray, fg: np.ndarray, threshold: float,
+                       amount: float, blur: float) -> np.ndarray:
+    """The frame with its specular excess pulled down: the dichromatic
+    model's specular-free image, scaled by `amount` and confined to the
+    matte.
+
+    The excess is the minimum channel's rise above `threshold`, the same
+    value taken off all three channels — a highlight is body colour plus
+    an (almost) white term, and removing an equal amount per channel
+    removes only that term. Blurring the excess map first keeps a
+    highlight's border from turning into a hard ring; the few units it
+    spreads onto the skin around the peak are below what the next denoise
+    can tell apart. The matte weight keeps the subtraction off the black
+    the re-render culled to and the grey it is about to be laid on.
+    """
+    image = bgr.astype(np.float32)
+    excess = np.clip(image.min(axis=2) - threshold, 0.0, None)
+    if blur > 0.0:
+        excess = cv2.GaussianBlur(excess, (0, 0), blur)
+    excess *= amount * fg
+    return np.clip(image - excess[:, :, None], 0.0, 255.0)
+
+
+def _composite_one(bgr: np.ndarray, fg: np.ndarray,
                    bg_color: tuple) -> np.ndarray:
     """The subject alpha-blended over a flat colour, softness and all.
 
@@ -256,8 +371,7 @@ def _composite_one(img: np.ndarray, mask: np.ndarray,
     using a better one: an anti-aliased edge over the same grey the rest of
     the batch grounds on leaves the denoise nothing to sharpen into a halo.
     """
-    bgr = img[:, :, :3] if img.ndim == 3 and img.shape[2] == 4 else img
-    fg = normalize_mask(mask)[:, :, None]
+    fg = fg[:, :, None]
     flat = np.array([c * 255.0 for c in reversed(bg_color)], dtype=np.float32)
     blended = bgr.astype(np.float32) * fg + flat * (1.0 - fg)
     # Rounded, not truncated: 0.5 grey has to land on 128, which is where
@@ -279,7 +393,7 @@ def _mask_one(
     sigma_color: float,
     sigma_space: float,
 ) -> np.ndarray:
-    bgr = img[:, :, :3] if img.ndim == 3 and img.shape[2] == 4 else img
+    bgr = _rgb(img)
     fg = normalize_mask(mask)
 
     # ToBinaryMask + InvertMask, expressed in the foreground-is-1
