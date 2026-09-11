@@ -16,6 +16,7 @@ from . import crop  # noqa: F401
 from . import dataset_io  # noqa: F401
 from . import elevation_views  # noqa: F401
 from . import face_priority  # noqa: F401
+from . import face_views  # noqa: F401
 from . import face_landmarks  # noqa: F401
 from . import head_fit  # noqa: F401
 from . import mask_splat  # noqa: F401

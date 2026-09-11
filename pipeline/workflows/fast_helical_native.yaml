@@ -479,6 +479,27 @@ settings:
       render undeformed, which is what keeps the head gain (letting them
       deform loses all of it).
 
+  - name: face_refine
+    label: Per-view face fit and the anchor's eyes
+    type: bool
+    default: true
+    help: >-
+      Before the final training, fit the refit body's head to every frame
+      that shows the face (neck/head pose plus the MHR expression
+      blendshapes, through the frame's own camera) and hand the trainer the
+      per-view face geometry the way the body rig hands it the arms; and
+      replace the frames' eyes — the diffusion's invention per frame, three
+      consecutive frames showing three eye states — with eyeballs textured
+      from the anchor photograph, rendered into each frame through that
+      frame's fitted lids (pipeline/steps/face_views.py, docs/face-refine.md).
+      Measured on four subjects (b2ctrain docs/STATUS.md, "The face per
+      view"): eye error against the eye model 51-82 -> 28-56, closed slits
+      and blue smears become open eyes with an iris at every novel view;
+      face sharpness within the metric's resolution of the baseline; the
+      hair untouched (the deltas are restricted to the face core). Needs the
+      body refit. Off, the final training sees the frames as the upscale
+      left them and the face renders canonical.
+
   - name: specular_suppress
     label: Highlight suppression
     type: float
@@ -2984,6 +3005,109 @@ steps:
       cameras: dataset.cameras
       stats: scene.camera_refinement_final
 
+  # ------------------------------------------- the face per view (stage 6)
+  # steps/face_views.py, docs/face-refine.md. After the refinement, so the
+  # per-view fit looks through the cameras the training will use; before
+  # export_colmap, so the delivered dataset is the one the splat was trained
+  # on (eyes and all). All four are one switch, `face_refine`, and need the
+  # refit body: its head is what gets fitted, its rig is what the face
+  # deltas ride on.
+  #
+  # 1. Landmarks per frame, from the projected head. Main env (MediaPipe,
+  #    no detector — the pipeline's detector misses the 80 px face in 63 of
+  #    81 helical frames). ~35 of 81 landmarked, every view facing the
+  #    camera within ~85 degrees.
+  - id: detect_face_views
+    step: detect_face_views
+    dispatch: in_process
+    when:
+      - ${globals.face_refine}
+      - ${globals.refit_body}
+      - ${globals.export_ply}
+    inputs:
+      images: dataset.images
+      image_names: dataset.image_names
+      cameras: dataset.cameras
+      mesh_world: scene.mesh_world
+      joints: scene.joints
+      keypoints_3d: scene.keypoints_3d
+      world_from_raw: scene.world_from_raw
+      face_correspondence: scene.face_correspondence
+    params:
+      debug_dir: ${globals.output_root}/debug/face_views
+    outputs:
+      face_views: scene.face_views
+
+  # 2. The head fitted to each of them, all views in one batched run on the
+  #    MHR model (sam3dbody env, the same checkpoint fit_head_to_face and
+  #    refit_body loaded). The anchor photograph joins the batch through a
+  #    PnP camera so its lids are fitted too — the eye texture below is
+  #    taken through them. 6.4 -> 2.1 px rms; ~20 s on a 4070 Ti.
+  - id: fit_head_per_view
+    step: fit_head_per_view
+    dispatch: subprocess
+    env: sam3dbody
+    when:
+      - ${globals.face_refine}
+      - ${globals.refit_body}
+      - ${globals.export_ply}
+    inputs:
+      mesh_output: scene
+      world_from_raw: scene.world_from_raw
+      face_correspondence: scene.face_correspondence
+      face_views: scene.face_views
+      face_landmarks: scene.face_landmarks
+      image: scene.front_image
+    params:
+      debug_dir: ${globals.output_root}/debug/head_fit_views
+    outputs:
+      head_fit_views: scene.head_fit_views
+
+  # 3. The anchor's eyes into every fitted frame. Main env (pyrender). The
+  #    frames go back into dataset.images: export_colmap and the final
+  #    training both see them; debug/eyes/panel.jpg shows before/after.
+  - id: paste_eyes
+    step: paste_eyes
+    dispatch: in_process
+    when:
+      - ${globals.face_refine}
+      - ${globals.refit_body}
+      - ${globals.export_ply}
+    inputs:
+      images: dataset.images
+      image_names: dataset.image_names
+      cameras: dataset.cameras
+      head_fit_views: scene.head_fit_views
+      face_correspondence: scene.face_correspondence
+      image: scene.front_image
+      face_landmarks: scene.face_landmarks
+    params:
+      debug_dir: ${globals.output_root}/debug/eyes
+    outputs:
+      images: dataset.images
+      eye_stats: scene.eye_stats
+
+  # 4. The fit as the rig's per-view vertex displacements (rig v3,
+  #    pipeline/body_rig.py), face core only, unfitted frames holding their
+  #    fitted neighbour. Republishes scene.body_rig, which train_final_splat
+  #    already reads.
+  - id: build_face_rig
+    step: build_face_rig
+    dispatch: in_process
+    when:
+      - ${globals.face_refine}
+      - ${globals.refit_body}
+      - ${globals.export_ply}
+    inputs:
+      body_rig: scene.body_rig
+      head_fit_views: scene.head_fit_views
+      image_names: dataset.image_names
+    params:
+      debug_dir: ${globals.output_root}/debug/face_rig
+    outputs:
+      body_rig: scene.body_rig
+      face_rig_stats: scene.face_rig_stats
+
   # Deliverable 1: a COLMAP dataset. `layout: brush` puts the frames in
   # images/ beside the three .txt files — what brush itself reads, and what
   # somebody handed this directory expects, rather than the flat
@@ -3034,7 +3158,9 @@ steps:
       # carries its own skeleton for whoever binds and animates it.
       body_params: scene.body_params?
       # The per-view deformation rig (build_body_rig): --body-rig on the
-      # trainer, per-view joint rotations, canonical export.
+      # trainer, per-view joint rotations, canonical export. With
+      # face_refine on it also carries build_face_rig's per-view face
+      # deltas (rig v3).
       body_rig: scene.body_rig?
       # No normal_maps, and no step computing them any more (see above).
       # brush only emits the normal-loss flags when this input is wired, so

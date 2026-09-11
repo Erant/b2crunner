@@ -25,15 +25,30 @@ Binary layout (little-endian), version 2::
     float32[n_verts*3] verts  int32[n_verts*4] joints  float32[n_verts*4] weights
     char[n_views*64] names (NUL padded)
     int32[n_joints] parents  float32[n_joints*3] joint_positions  int32[n_active] active
+
+Version 3 (`B2CRIG3\\0`) is the same file followed by::
+
+    float32[n_views*n_verts*3] deltas
+
+a per-view displacement of every rig vertex in the canonical frame, which
+the trainer adds to a bound point BEFORE the skinning blend. It is what the
+per-view head fit produces (steps/face_views.py, `build_face_rig`): the
+MHR expression and neck/head pose that explain each frame's face, so the
+face splats render where that frame's face is and the canonical face
+converges to one expression instead of the average of 81. A rig dict with a
+`view_deltas` entry — {view name: (n_verts, 3)} — is written as v3; views
+without an entry get zeros (`assign_view_deltas` fills the gaps between
+fitted views first).
 """
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, Sequence
+from typing import Any, Dict, List, Sequence, Tuple
 
 import numpy as np
 
 MAGIC = b"B2CRIG2\0"
+MAGIC_V3 = b"B2CRIG3\0"
 NAME_LEN = 64
 K = 4
 
@@ -80,6 +95,7 @@ def build_body_rig(vertices: np.ndarray, joint_positions: np.ndarray, parents: n
     excluded = [j for j in range(n_j) if subtree[j] > max_subtree_fraction * n_v]
     return {
         "verts": vertices[idx].astype(np.float32),
+        "vertex_index": idx.astype(np.int32),
         "joints": top.astype(np.int32),
         "weights": tw.astype(np.float32),
         "parents": parents.astype(np.int32),
@@ -100,8 +116,20 @@ def write_body_rig(path: str | Path, rig: Dict[str, Any], image_names: Sequence[
             raise ValueError(f"write_body_rig: view name {n!r} is longer than {NAME_LEN - 1} bytes")
     verts, joints, weights = rig["verts"], rig["joints"], rig["weights"]
     parents, jpos, active = rig["parents"], rig["joint_positions"], rig["active"]
+    view_deltas = rig.get("view_deltas")
+    deltas = None
+    if view_deltas:
+        deltas = np.zeros((len(names), len(verts), 3), np.float32)
+        for i, n in enumerate(names):
+            d = view_deltas.get(n)
+            if d is None:
+                continue
+            d = np.asarray(d, np.float32)
+            if d.shape != (len(verts), 3):
+                raise ValueError(f"write_body_rig: view_deltas[{n!r}] is {d.shape}, not ({len(verts)}, 3)")
+            deltas[i] = d
     with open(path, "wb") as f:
-        f.write(MAGIC)
+        f.write(MAGIC_V3 if deltas is not None else MAGIC)
         f.write(np.array([len(verts), len(parents), len(names), K, NAME_LEN, len(active)], np.int32).tobytes())
         f.write(np.ascontiguousarray(verts, np.float32).tobytes())
         f.write(np.ascontiguousarray(joints, np.int32).tobytes())
@@ -110,13 +138,16 @@ def write_body_rig(path: str | Path, rig: Dict[str, Any], image_names: Sequence[
         f.write(np.ascontiguousarray(parents, np.int32).tobytes())
         f.write(np.ascontiguousarray(jpos, np.float32).tobytes())
         f.write(np.ascontiguousarray(active, np.int32).tobytes())
+        if deltas is not None:
+            f.write(deltas.tobytes())
 
 
 def read_body_rig(path: str | Path) -> Dict[str, Any]:
     """The file back as arrays (tests, and inspection)."""
     data = Path(path).read_bytes()
-    if data[:8] != MAGIC:
-        raise ValueError(f"{path} is not a b2ctrain body rig v2")
+    if data[:8] not in (MAGIC, MAGIC_V3):
+        raise ValueError(f"{path} is not a b2ctrain body rig v2/v3")
+    v3 = data[:8] == MAGIC_V3
     hdr = np.frombuffer(data[8:32], np.int32)
     n_v, n_j, n_views, k, name_len, n_active = (int(v) for v in hdr)
     if k != K or name_len != NAME_LEN:
@@ -137,5 +168,69 @@ def read_body_rig(path: str | Path) -> Dict[str, Any]:
     parents = take(np.int32, n_j)
     jpos = take(np.float32, n_j * 3).reshape(n_j, 3)
     active = take(np.int32, n_active)
-    return {"verts": verts, "joints": joints, "weights": weights, "names": names,
-            "parents": parents, "joint_positions": jpos, "active": active}
+    out = {"verts": verts, "joints": joints, "weights": weights, "names": names,
+           "parents": parents, "joint_positions": jpos, "active": active}
+    if v3:
+        out["deltas"] = take(np.float32, n_views * n_v * 3).reshape(n_views, n_v, 3)
+        if off != len(data):
+            raise ValueError(f"{path}: {len(data) - off} bytes after the v3 delta block")
+    return out
+
+
+def assign_view_deltas(fitted: Dict[int, np.ndarray], n_views: int, n_verts: int, *,
+                       gap: int = 4, hold: int = 3) -> Tuple[np.ndarray, List[str]]:
+    """Every training view's delta from the fitted views' (keyed by view index).
+
+    The head fit covers the views that face the camera (about 35 of 81 on
+    a helical orbit); the rest need something that does not jump. A view
+    between two fitted ones at most `gap` unfitted views apart takes the
+    linear interpolation; a view within `hold` of a fitted neighbour on one
+    side takes that neighbour's delta unchanged (measured better than
+    fading it to zero: swim 3.4 -> 2.4 px on the second subject, b2ctrain
+    docs/STATUS.md, "The face per view"); anything further is canonical.
+    Returns the (n_views, n_verts, 3) deltas and, per view, how it was set:
+    "fit", "interp", "hold" or "zero".
+    """
+    deltas = np.zeros((n_views, n_verts, 3), np.float32)
+    how: List[str] = []
+    keys = sorted(fitted)
+    for v in range(n_views):
+        if v in fitted:
+            deltas[v] = fitted[v]
+            how.append("fit")
+            continue
+        lo = max((k for k in keys if k < v), default=None)
+        hi = min((k for k in keys if k > v), default=None)
+        if lo is not None and hi is not None and hi - lo <= gap + 1:
+            w = (v - lo) / (hi - lo)
+            deltas[v] = (1 - w) * fitted[lo] + w * fitted[hi]
+            how.append("interp")
+        elif lo is not None and v - lo <= hold and (hi is None or v - lo <= hi - v):
+            deltas[v] = fitted[lo]
+            how.append("hold")
+        elif hi is not None and hi - v <= hold:
+            deltas[v] = fitted[hi]
+            how.append("hold")
+        else:
+            how.append("zero")
+    return deltas, how
+
+
+def face_only_weights(rig_verts: np.ndarray, face_verts: np.ndarray, fade: float) -> np.ndarray:
+    """Per rig vertex, 1 on the face core, fading to 0 `fade` metres away from it.
+
+    The deltas of the whole head were measured to blur the hair on three of
+    four subjects (the frames' hair does not follow the face fit, and the
+    back views pin it canonical, so it was supervised in two places);
+    restricted to the face core they cost nothing anywhere.
+    """
+    from scipy.spatial import cKDTree
+
+    rig_verts = np.asarray(rig_verts, np.float64)
+    face_verts = np.asarray(face_verts, np.float64)
+    if len(face_verts) == 0:
+        raise ValueError("face_only_weights: no face vertices")
+    if fade <= 0:
+        raise ValueError("face_only_weights: fade must be positive")
+    d, _ = cKDTree(face_verts).query(rig_verts)
+    return np.clip(1.0 - d / fade, 0.0, 1.0).astype(np.float32)

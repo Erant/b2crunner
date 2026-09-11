@@ -25,11 +25,11 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 import numpy as np
 
-from ..body_rig import build_body_rig
+from ..body_rig import assign_view_deltas, build_body_rig, face_only_weights
 from ..registry import register_step
 from ..step import Param, Step
 from .body_refit import umeyama
@@ -121,5 +121,97 @@ class BuildBodyRigStep(Step):
             debug = Path(params["debug_dir"]); debug.mkdir(parents=True, exist_ok=True)
             (debug / "body_rig.json").write_text(json.dumps({**stats, "active_joints": [int(j) for j in out["active"]],
                                                               "subtree": [int(v) for v in out["subtree"]]}, indent=1))
-        rig_out = {k: v for k, v in out.items() if k in ("verts", "joints", "weights", "parents", "joint_positions", "active")}
+        rig_out = {k: v for k, v in out.items() if k in ("verts", "vertex_index", "joints", "weights", "parents", "joint_positions", "active")}
         return {"body_rig": rig_out, "body_rig_stats": stats}
+
+
+@register_step("build_face_rig")
+class BuildFaceRigStep(Step):
+    """The per-view head fit as the rig's per-view vertex displacements (rig v3).
+
+    inputs:  {"body_rig": build_body_rig's rig (the refit body's),
+              "head_fit_views": fit_head_per_view's output,
+              "image_names": the training frames, in order}
+    outputs: {"body_rig": the same rig with "view_deltas" — {frame name: (n_rig_verts, 3)} in the
+                          canonical frame, for every frame that gets one,
+              "face_rig_stats": {...}}
+
+    Each fitted view's displacement is fitted head - canonical head at the
+    rig's vertices. Frames the fit does not cover take the interpolation
+    between their fitted neighbours (gaps of `gap` frames or less), hold the
+    nearest fitted frame's displacement within `hold` frames of it, and are
+    canonical beyond that. The displacement is restricted to the FACE CORE
+    (`face_motion_cm`: the vertices the expression basis moves by at least
+    this much, fading to nothing `face_fade_cm` away): measured on four
+    subjects, whole-head deltas blur the hair 2-5% on three of them (the
+    frames' hair does not follow the face fit, and the back views pin it
+    canonical, so it was supervised in two places) while face-only deltas
+    cost nothing anywhere, swim least and keep the eye gain. 0 = the whole
+    head, the option when a subject's eyes need it.
+    """
+
+    PARAMS = (
+        Param("face_motion_cm", float, 0.5,
+              "The face core: vertices the expression basis can move by at least this many centimetres. 0 = no "
+              "restriction (whole-head deltas). Anything above 0.01 that is not around 0.5 is the whole head too — "
+              "the basis touches every head vertex by a hair", minimum=0.0),
+        Param("face_fade_cm", float, 3.0, "Fade the deltas to zero this far outside the face core", minimum=0.1),
+        Param("gap", int, 4, "Interpolate across runs of at most this many unfitted frames between fitted ones", minimum=0),
+        Param("hold", int, 3, "An unfitted frame within this many frames of a fitted one holds its deltas", minimum=0),
+        Param("debug_dir", str, "", "Write face_rig.json (how each frame got its deltas) here"),
+    )
+
+    def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+        rig = inputs.get("body_rig")
+        if not isinstance(rig, dict) or "verts" not in rig:
+            raise ValueError("build_face_rig needs 'body_rig' from build_body_rig")
+        fit = inputs.get("head_fit_views")
+        if not isinstance(fit, dict) or "verts_world" not in fit:
+            raise ValueError("build_face_rig needs 'head_fit_views' from fit_head_per_view")
+        names: List[str] = list(inputs["image_names"])
+        verts0 = np.asarray(fit["verts0_world"], np.float64)
+        idx = rig.get("vertex_index")
+        if idx is None:
+            raise ValueError("build_face_rig: the rig carries no vertex_index (built by an older build_body_rig?)")
+        idx = np.asarray(idx, np.int64)
+        rig_verts = np.asarray(rig["verts"], np.float64)
+        if idx.max() >= len(verts0) or np.abs(verts0[idx] - rig_verts).max() > 1e-3:
+            raise ValueError("build_face_rig: the rig's vertices are not the head fit's canonical body at vertex_index; "
+                             "the rig and the fit are from different bodies")
+        index = {n: i for i, n in enumerate(names)}
+        fitted = {}
+        for k, n in enumerate(fit["names"]):
+            if n not in index:
+                raise ValueError(f"build_face_rig: fitted view {n!r} is not a training frame")
+            fitted[index[n]] = (np.asarray(fit["verts_world"][k], np.float64)[idx] - rig_verts).astype(np.float32)
+        if not fitted:
+            raise ValueError("build_face_rig: the head fit covers no view")
+        deltas, how = assign_view_deltas(fitted, len(names), len(idx), gap=int(params["gap"]), hold=int(params["hold"]))
+        weights = None
+        if params["face_motion_cm"] > 0:
+            motion = np.asarray(fit["expression_motion"], np.float64)
+            face = verts0[motion > params["face_motion_cm"]]
+            if len(face) == 0:
+                raise ValueError(f"build_face_rig: no vertex moves more than {params['face_motion_cm']} cm under the expression basis")
+            weights = face_only_weights(rig_verts, face, params["face_fade_cm"] / 100.0)
+            deltas *= weights[None, :, None]
+        view_deltas = {n: deltas[i] for i, n in enumerate(names) if how[i] != "zero"}
+        mag = np.linalg.norm(deltas, axis=2)
+        counts = {k: how.count(k) for k in ("fit", "interp", "hold", "zero")}
+        stats = {
+            "frames": len(names), **{f"frames_{k}": v for k, v in counts.items()},
+            "rig_vertices": int(len(idx)),
+            "rig_vertices_moved": int((mag.max(0) > 1e-4).sum()),
+            "face_only": {"motion_cm": params["face_motion_cm"], "fade_cm": params["face_fade_cm"],
+                          "full_weight": int((weights >= 1).sum()) if weights is not None else int(len(idx)),
+                          "faded": int(((weights > 0) & (weights < 1)).sum()) if weights is not None else 0},
+            "max_delta_mm": float(mag.max() * 1000), "gap": params["gap"], "hold": params["hold"],
+        }
+        logger.info("build_face_rig: %d frames fitted, %d interpolated, %d held, %d canonical; %d of %d rig vertices move "
+                    "(face core %d at full weight, %d faded), max %.1f mm", counts["fit"], counts["interp"], counts["hold"],
+                    counts["zero"], stats["rig_vertices_moved"], stats["rig_vertices"], stats["face_only"]["full_weight"],
+                    stats["face_only"]["faded"], stats["max_delta_mm"])
+        if params["debug_dir"]:
+            debug = Path(params["debug_dir"]); debug.mkdir(parents=True, exist_ok=True)
+            (debug / "face_rig.json").write_text(json.dumps({**stats, "frames_how": dict(zip(names, how))}, indent=1))
+        return {"body_rig": {**rig, "view_deltas": view_deltas}, "face_rig_stats": stats}

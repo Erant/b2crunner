@@ -237,6 +237,8 @@ def check_trainer_binaries() -> Check:
         "--export-evidence", "--normalize-masked-loss",
         "--alpha-mode", "--export-name", "--total-train-iters",
         "--hollow-weight", "--body-rig",
+        # --body-rig's help names the v3 rig magic (per-view face deltas, b2ctrain e8f43ac).
+        "B2CRIG3",
     ]
     lines, status = [], OK
 

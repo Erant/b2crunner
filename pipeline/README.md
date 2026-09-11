@@ -703,6 +703,17 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   the head 23° to hide a too-long mid-face or squashes the skull to fit it;
   see the module docstring. Geometry tests only; the fit needs the gated
   checkpoint.
+- `detect_face_views` + `fit_head_per_view` + `paste_eyes` (`face_views.py`)
+  and `build_face_rig` (`body_rig.py`) — the face per view, before the final
+  training (docs/face-refine.md). Per-frame landmarks from the projected
+  refit head (no detector; 35-38 of 81 helical frames), the MHR head fitted
+  to each of them — neck/head pose plus the 72 expression blendshapes, one
+  batched run in the sam3dbody env, 6.4 → 2.1 px — and the anchor
+  photograph's eyes as textured eyeballs rendered into every fitted frame
+  through that frame's fitted lids. The fit also becomes the body rig's
+  per-view vertex displacements (rig v3, face core only), which is what
+  lets the canonical face converge to the anchor's eye opening. Measured on
+  four subjects: eye error 51-82 → 28-56, face and hair sharpness unchanged.
 - `PointmapSplatStep` (`pointmap_splat.py`; the base class — its whole-body
   `pointmap_splat` registration went with the shell bootstrap on 2026-09-04)
   — one photo into a feed-forward

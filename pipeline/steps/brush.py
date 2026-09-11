@@ -329,6 +329,15 @@ def _trainer_has_body_rig(brush_path: str) -> bool:
     return "--body-rig" in _trainer_help(brush_path)
 
 
+def _trainer_has_rig_v3(brush_path: str) -> bool:
+    """True if `--body-rig` takes a v3 rig with per-view vertex displacements (b2ctrain e8f43ac or later).
+
+    Its --help names the magic; an older trainer refuses the file outright
+    ("bad magic"), so a v3 rig is written as v2 for it, deltas dropped.
+    """
+    return "B2CRIG3" in _trainer_help(brush_path)
+
+
 def _use_trainer_alignment(backend: str, brush_path: str) -> bool:
     if backend not in _ALIGN_BACKENDS:
         raise ValueError(
@@ -787,7 +796,9 @@ class BrushStep(Step):
              "body_rig": Optional[dict] — build_body_rig's rig; written as
                      body_rig.bin beside the COLMAP model and passed to the
                      trainer as `--body-rig` (per-view joint rotations, the
-                     fix for the double limb; see pipeline/body_rig.py),
+                     fix for the double limb; see pipeline/body_rig.py). With
+                     build_face_rig's `view_deltas` in it, a v3 rig: the
+                     face follows each frame's fitted expression and pose,
              "support_cameras": Optional[List[Camera]],
              "support_images": Optional[List[np.ndarray]] BGR(A),
              "support_masks": Optional[List[np.ndarray]] float32 [0,1],
@@ -1136,12 +1147,21 @@ class BrushStep(Step):
                 if _trainer_has_body_rig(brush_path):
                     from pipeline.body_rig import write_body_rig
                     rig_path = colmap_dir / "body_rig.bin"
-                    write_body_rig(rig_path, body_rig, list(image_names))
+                    rig_to_write = body_rig
+                    view_deltas = body_rig.get("view_deltas")
+                    if view_deltas and not _trainer_has_rig_v3(brush_path):
+                        logger.warning(
+                            "brush: the body rig carries per-view face deltas (build_face_rig) but %s takes no v3 "
+                            "rig (b2ctrain e8f43ac or later); writing it as v2, the face renders canonical", brush_path)
+                        rig_to_write = {k: v for k, v in body_rig.items() if k != "view_deltas"}
+                        view_deltas = None
+                    write_body_rig(rig_path, rig_to_write, list(image_names))
                     logger.info(
                         "brush: body rig on — %d active joints of %d, per-view rotations "
-                        "from iteration %d (smooth %s, zero %s, lr %s); the export stays canonical",
+                        "from iteration %d (smooth %s, zero %s, lr %s)%s; the export stays canonical",
                         len(body_rig["active"]), len(body_rig["parents"]), body_rig_start_iter,
                         body_rig_smooth, body_rig_zero, body_rig_lr,
+                        f", per-view face deltas on {sum(1 for n in image_names if n in view_deltas)} of {len(image_names)} frames (rig v3)" if view_deltas else "",
                     )
                 else:
                     logger.warning(
