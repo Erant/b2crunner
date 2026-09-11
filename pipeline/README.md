@@ -120,6 +120,8 @@ pipeline/
 ├── steps/
 │   ├── dataset_io.py    save_dataset / load_dataset — real, working
 │   ├── resize.py        resize_batch: frames/masks onto another pixel grid (the re-outline branch)
+│   ├── pixel_ops.py     pixel_ops: pixel-space operations on a batch, each off by default
+│   │                    (specular_suppress on pass 1's output, before the splat is trained)
 │   ├── rmbg.py          real, verified (single-image + batch paths)
 │   ├── wan22_vace_denoise.py  real, verified against real inference
 │   ├── sapiens2.py      real, verified (single-image + batch paths)

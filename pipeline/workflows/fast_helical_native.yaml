@@ -486,16 +486,18 @@ settings:
     minimum: 0.0
     maximum: 1.0
     help: >-
-      Pull the highlights down on the frames the second denoise sees, 0 (off)
-      to 1. Those frames are a re-render of a splat trained on the FIRST
-      denoise's output, so they already carry one diffusion pass's shading and
-      specular, and the second pass lights that again — blown-out highlights,
-      plasticky skin, reflective clothing. This removes the specular excess
-      (the per-pixel minimum channel above the batch's `mean + eta * std`,
-      subtracted from all three channels equally, so colour and diffuse
-      shading stay) before the frames are composited over grey. The anchor
-      photo is untouched: it is injected after. Off is the run as it was; see
-      mask_splat's `specular_eta` / `specular_blur` for the shape of the cut.
+      Pull the highlights down on the first denoise's output before the
+      intermediate splat is trained on it, 0 (off) to 1. The second denoise
+      conditions on a re-render of that splat, so it re-lights frames that
+      already carry one diffusion pass's shading and specular — blown-out
+      highlights, plasticky skin, reflective clothing — and the splat's SH
+      has fitted pass 1's frame-to-frame inconsistent highlights as sparkle.
+      This removes the specular excess (the per-pixel minimum channel above
+      the batch's `mean + eta * std`, subtracted from all three channels
+      equally, so colour and diffuse shading stay) from the training frames,
+      so the splat never learns it and its re-render is clean in every view.
+      The photograph's frame is left as it is. Off is the run as it was; see
+      pixel_ops' `specular_eta` / `specular_blur` for the shape of the cut.
 
   - name: re_outline
     label: Re-outline (experimental)
@@ -1734,6 +1736,26 @@ steps:
     outputs:
       masks: dataset.masks
 
+  # Pixel-space treatment of pass 1's output before anything downstream
+  # reads it — the splat training, the normal maps, the camera solve and
+  # the debug bundle all see the treated frames. Every operation is off at
+  # its default and the frames pass through byte-identical; the workflow
+  # settings are the switches. Sits AFTER foreground_masks because the
+  # operations that measure the subject need its matte, and skips the
+  # photograph's frame. Why pass 1's output rather than the re-render
+  # denoise_pass2 sees: steps/pixel_ops.py.
+  - id: adjust_denoised
+    step: pixel_ops
+    dispatch: in_process
+    inputs:
+      images: dataset.images
+      masks: dataset.masks
+      anchor_frame_index: dataset.extras.anchor_frame_index?
+    params:
+      specular_suppress: ${globals.specular_suppress}
+    outputs:
+      images: dataset.images
+
   - id: normal_maps
     step: sapiens2_lite
     dispatch: in_process
@@ -2642,11 +2664,6 @@ steps:
     params:
       mode: composite
       bg_color: [0.5, 0.5, 0.5]
-      # Off by default. The frames here are a re-render of the splat
-      # denoise_pass1's output trained, so they carry that pass's highlights
-      # (and its SH sparkle); denoise_pass2 blows them out again. See the
-      # setting's help and steps/mask_splat.py.
-      specular_suppress: ${globals.specular_suppress}
     outputs:
       dataset: dataset
 
