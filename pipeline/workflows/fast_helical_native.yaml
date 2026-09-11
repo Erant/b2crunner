@@ -409,14 +409,12 @@ settings:
       Whether the face branch runs: a Gaussian splat of the subject's actual
       face, composited onto the skeleton drawings wherever the camera can see
       it (+-60 deg). It REPLACES the MediaPipe landmark overlay this file used
-      to draw — `detect_face` is gone, not disabled — so turning this off
-      leaves the skeleton frames with no face at all rather than falling back
-      to landmarks. That gap is deliberate: a YAML input cannot be
-      conditionally wired, so a `when:`-skipped detect_face would make
-      render_initial_views raise on an unresolvable context path. Putting the
-      landmarks back means pasting the detect_face block and one
-      `face_landmarks:` input line back in; the step, its params on `render`,
-      and its tests are all still there. Costs a third 1B Sapiens2 head
+      to draw, so turning this off leaves the skeleton frames with no face at
+      all rather than falling back to landmarks. That gap is deliberate: the
+      landmarks are still detected (the head fit needs them) but they are not
+      wired into render_initial_views; putting the overlay back means one
+      `face_landmarks:` input line on that step, whose params for it are all
+      still there. Costs a third 1B Sapiens2 head
       (~6.5 GB, segmentation) on top of the normal head, plus the pointmap
       head the splat itself needs.
 
@@ -707,15 +705,21 @@ steps:
   # the landmarks whether or not the face splat is drawn. The face branch
   # below still is.
 
-  # Where the face is. CPU, no pod, no GPU: the two model files live in
-  # ~/.cache/body2colmap and the step is crop-first internally, which is
-  # what makes it work on a full-body frame where the face is a few percent
-  # of the pixels (see steps/face_landmarks.py's module docstring).
+  # Where the face is. CPU, no pod, no GPU. MediaPipe's landmarker wants a
+  # face-filling image, so the step landmarks a crop, and the crop is the
+  # MESH HEAD projected through SAM-3D-Body's camera (2026-09-11) — the
+  # box map_face_to_mesh renders at, on the photograph instead of the
+  # render. It used to come from a second MediaPipe model, the
+  # blaze_face_short_range detector, which found spurious second faces on
+  # a single subject and missed others; the mesh above already knows where
+  # the head is, to ~10 px before the fit below and 2.4 px after it (see
+  # steps/face_landmarks.py's module docstring).
   - id: detect_face
     step: detect_face_landmarks
     dispatch: in_process
     inputs:
       image: scene.front_image
+      mesh_output: scene
     outputs:
       face_landmarks: scene.face_landmarks
 

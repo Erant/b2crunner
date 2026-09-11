@@ -170,25 +170,20 @@ def _probe_wan22_fp8() -> bool:
 
 
 def _fetch_mediapipe() -> str:
+    """The landmarker alone. The `blaze_face_short_range` detector that
+    used to sit beside it went on 2026-09-11: the face crop now comes from
+    the body mesh (see steps/face_landmarks.py)."""
     from .steps.face_landmarks import (
-        DETECTOR_MODEL_NAME, DETECTOR_MODEL_URL, LANDMARKER_MODEL_NAME,
-        LANDMARKER_MODEL_URL, _ensure_model, _model_path,
+        LANDMARKER_MODEL_NAME, LANDMARKER_MODEL_URL, _ensure_model, _model_path,
     )
 
-    _ensure_model(LANDMARKER_MODEL_URL, _model_path(LANDMARKER_MODEL_NAME))
-    _ensure_model(DETECTOR_MODEL_URL, _model_path(DETECTOR_MODEL_NAME))
-    return str(_model_path(LANDMARKER_MODEL_NAME).parent)
+    return str(_ensure_model(LANDMARKER_MODEL_URL, _model_path(LANDMARKER_MODEL_NAME)).parent)
 
 
 def _probe_mediapipe() -> bool:
-    from .steps.face_landmarks import (
-        DETECTOR_MODEL_NAME, LANDMARKER_MODEL_NAME, _model_path,
-    )
+    from .steps.face_landmarks import LANDMARKER_MODEL_NAME, _model_path
 
-    return all(
-        _model_path(name).exists()
-        for name in (LANDMARKER_MODEL_NAME, DETECTOR_MODEL_NAME)
-    )
+    return _model_path(LANDMARKER_MODEL_NAME).exists()
 
 
 def _fetch_colmap_onnx() -> str:
@@ -561,7 +556,7 @@ def _registry() -> List[ModelSource]:
             ("refine_cameras",), _fetch_colmap_onnx, _probe_colmap_onnx, approx_gb=0.07,
         ),
         ModelSource(
-            "mediapipe", "MediaPipe face landmarker + detector",
+            "mediapipe", "MediaPipe face landmarker",
             ("detect_face_landmarks", "map_face_to_mesh"), _fetch_mediapipe, _probe_mediapipe, approx_gb=0.01,
         ),
     ]

@@ -1,7 +1,7 @@
 """Face-landmark geometry and real MediaPipe detection.
 
-Detection is verified against cyber_6f's real reference photos. It runs in
-a *subprocess*: mediapipe 1.0.1 on macOS aborted the process once (SIGABRT
+Detection is verified against cyber_6f's real anchor photo. It runs in a
+*subprocess*: mediapipe 1.0.1 on macOS aborted the process once (SIGABRT
 via DrishtiMetalHelper) on the first invocation after downloading its
 models, and an abort cannot be caught in-process — it would take the whole
 test run down. Out-of-process, a recurrence degrades to a skip. On Linux
@@ -9,8 +9,9 @@ this should simply pass.
 
 Everything that is not MediaPipe is tested directly, and that is the part
 most likely to be wrong: the crop -> full-image coordinate mapping (easy to
-get subtly wrong and impossible to notice by eye) and the frontality
-scoring that decides which of several detected faces wins.
+get subtly wrong and impossible to notice by eye) and the crop itself,
+which since 2026-09-11 is the body mesh's head projected onto the
+photograph rather than a face detector's box.
 """
 
 from __future__ import annotations
@@ -24,15 +25,10 @@ from pathlib import Path
 import numpy as np
 
 from pipeline.steps.face_landmarks import (
-    _MP_CHIN,
-    _MP_LEFT_EYE_OUTER,
-    _MP_NOSE_BRIDGE,
-    _MP_RIGHT_EYE_OUTER,
-    _crop_to_face,
+    _detect,
     _face_to_array,
     _face_to_array_from_crop,
-    _frontality_score,
-    _pick_best_face,
+    mesh_head_box,
 )
 from tests.helpers import require_stage, run_step
 
@@ -46,79 +42,142 @@ class _LM:
         self.x, self.y, self.z = float(x), float(y), float(z)
 
 
-def _synthetic_face(yaw: float = 0.0, n: int = 478):
-    """A face whose eye line is rotated `yaw` radians about the y axis.
-
-    yaw=0 is straight-on (score 1); yaw=pi/2 turns the eye line to point
-    along z, i.e. full profile (score 0).
-    """
-    face = [_LM(0.5, 0.5) for _ in range(n)]
-    face[_MP_RIGHT_EYE_OUTER] = _LM(0.5 - 0.1 * np.cos(yaw), 0.4, -0.1 * np.sin(yaw))
-    face[_MP_LEFT_EYE_OUTER] = _LM(0.5 + 0.1 * np.cos(yaw), 0.4, 0.1 * np.sin(yaw))
-    face[_MP_NOSE_BRIDGE] = _LM(0.5, 0.45, 0.0)
-    face[_MP_CHIN] = _LM(0.5, 0.7, 0.0)
-    return face
 
 
-class TestFrontality(unittest.TestCase):
-    def test_frontal_scores_near_one(self):
-        self.assertAlmostEqual(_frontality_score(_synthetic_face(0.0)), 1.0, places=5)
-
-    def test_profile_scores_near_zero(self):
-        self.assertAlmostEqual(
-            _frontality_score(_synthetic_face(np.pi / 2)), 0.0, places=5
-        )
-
-    def test_score_decreases_with_yaw(self):
-        scores = [_frontality_score(_synthetic_face(y)) for y in (0.0, 0.4, 0.8, 1.2)]
-        self.assertEqual(scores, sorted(scores, reverse=True))
-
-    def test_degenerate_face_scores_zero(self):
-        """All landmarks coincident -> zero-length normal, no division blowup."""
-        self.assertEqual(_frontality_score([_LM(0.5, 0.5) for _ in range(478)]), 0.0)
-
-    def test_picks_the_most_frontal_face(self):
-        faces = [_synthetic_face(1.2), _synthetic_face(0.0), _synthetic_face(0.6)]
-        best, idx = _pick_best_face(faces)
-        self.assertEqual(idx, 1)
-        self.assertIs(best, faces[1])
-
-    def test_single_face_is_returned_unscored(self):
-        faces = [_synthetic_face(1.4)]
-        best, idx = _pick_best_face(faces)
-        self.assertEqual(idx, 0)
-        self.assertIs(best, faces[0])
+def _mesh_with_head_at(x0, y0, x1, y1, width, height, focal=1500.0, depth=2.0):
+    """A `mesh_output` whose five MHR70 head keypoints project into the
+    pixel box (x0, y0, x1, y1) the way a face's do: eyes at the top
+    corners, ears at the left/right edges at mid-height, nose at the
+    centre — so the keypoints' own extent is the box's width by the top
+    half of its height. Enough of sam3d_body's dict for the crop; no
+    vertices, which the crop must not need."""
+    def back(u, v):
+        return [(u - width / 2.0) * depth / focal, (v - height / 2.0) * depth / focal, depth]
+    cx, cy = 0.5 * (x0 + x1), 0.5 * (y0 + y1)
+    keypoints = np.zeros((70, 3))
+    keypoints[0] = back(cx, cy)          # nose
+    keypoints[1] = back(x1, y0)          # left eye
+    keypoints[2] = back(x0, y0)          # right eye
+    keypoints[3] = back(x1, cy)          # left ear
+    keypoints[4] = back(x0, cy)          # right ear
+    cam_t = np.array([0.1, -0.2, 0.3])
+    return {"keypoints_3d": keypoints - cam_t, "cam_t": cam_t,
+            "focal_length": focal, "image_size": (width, height)}
 
 
-class TestCropping(unittest.TestCase):
+class TestMeshHeadBox(unittest.TestCase):
+    """The crop the landmarker sees, from the mesh head's keypoints."""
+
+    def test_is_a_square_around_the_keypoints_padded_per_side(self):
+        mesh = _mesh_with_head_at(300, 200, 400, 250, 720, 1280)
+        x0, y0, x1, y1 = mesh_head_box(mesh, 720, 1280, padding=0.5)
+        # Keypoint extent 100 wide x 25 tall -> span 100, side 200, centred
+        # on (350, 212.5); floor/ceil outward.
+        self.assertEqual((x0, y0, x1, y1), (250, 112, 450, 313))
+
+    def test_zero_padding_is_the_keypoints_square(self):
+        mesh = _mesh_with_head_at(300, 200, 400, 250, 720, 1280)
+        self.assertEqual(mesh_head_box(mesh, 720, 1280, padding=0.0), (300, 162, 400, 263))
+
+    def test_cam_t_is_applied(self):
+        """The keypoints are camera-relative only once cam_t is added; a box
+        built from the raw ones lands somewhere else entirely."""
+        mesh = _mesh_with_head_at(300, 200, 400, 250, 720, 1280)
+        with_t = mesh_head_box(mesh, 720, 1280, padding=0.0)
+        mesh["cam_t"] = np.zeros(3)
+        self.assertNotEqual(mesh_head_box(mesh, 720, 1280, padding=0.0), with_t)
+
+    def test_refuses_a_mesh_fitted_on_another_frame_size(self):
+        mesh = _mesh_with_head_at(300, 200, 400, 250, 720, 1280)
+        with self.assertRaises(ValueError) as caught:
+            mesh_head_box(mesh, 360, 640, padding=0.5)
+        self.assertIn("720x1280", str(caught.exception))
+
+    def test_refuses_a_mesh_without_the_camera(self):
+        with self.assertRaises(KeyError):
+            mesh_head_box({"vertices": np.zeros((3, 3))}, 720, 1280, padding=0.5)
+
+    def test_refuses_a_degenerate_head(self):
+        mesh = _mesh_with_head_at(350, 225, 351, 226, 720, 1280)
+        with self.assertRaises(ValueError):
+            mesh_head_box(mesh, 720, 1280, padding=0.5)
+
+
+class _Result:
+    def __init__(self, faces):
+        self.face_landmarks = faces
+
+
+class _FakeLandmarker:
+    """Answers with one face at the crop's centre, only for a crop of the
+    size it was told to expect — so a test can tell the crop path from the
+    whole-frame fallback by what comes back."""
+
+    def __init__(self, answer_for_shape):
+        self.answer_for_shape = answer_for_shape
+        self.seen = []
+
+    def detect(self, image):
+        shape = image.numpy_view().shape[:2]
+        self.seen.append(shape)
+        if shape == self.answer_for_shape:
+            return _Result([[_LM(0.5, 0.5, 0.1)] * 3])
+        return _Result([])
+
+
+class TestDetectCropPath(unittest.TestCase):
+    """`_detect` with a real mediapipe.Image and a fake landmarker."""
+
     def setUp(self):
-        self.img = np.zeros((1000, 600, 3), dtype=np.uint8)
+        try:
+            import mediapipe as mp
+        except ImportError:
+            self.skipTest("mediapipe not installed")
+        self.mp = mp
+        self.rgb = np.zeros((1280, 720, 3), np.uint8)
 
-    def test_padding_is_a_fraction_of_face_size(self):
-        crop, x1, y1 = _crop_to_face(self.img, (200, 300, 100, 100), padding=0.5)
-        self.assertEqual((x1, y1), (150, 250))
-        self.assertEqual(crop.shape[:2], (200, 200))
+    def test_landmarks_the_crop_and_maps_back(self):
+        landmarker = _FakeLandmarker(answer_for_shape=(200, 200))
+        out = _detect(rgb=self.rgb, width=720, height=1280, landmarker=landmarker,
+                      crop_box=(250, 125, 450, 325), mp=self.mp)
+        self.assertEqual(landmarker.seen, [(200, 200)])
+        # The crop's centre is full-frame (350, 225).
+        np.testing.assert_allclose(out[0, :2], [350 / 720, 225 / 1280], atol=1e-6)
+        self.assertAlmostEqual(float(out[0, 2]), 0.1, places=6)
 
-    def test_zero_padding(self):
-        crop, x1, y1 = _crop_to_face(self.img, (200, 300, 100, 120), padding=0.0)
-        self.assertEqual((x1, y1), (200, 300))
-        self.assertEqual(crop.shape[:2], (120, 100))
+    def test_clamps_the_crop_to_the_frame(self):
+        """A box hanging off the frame's edge is cut to the frame, and the
+        landmarks map back from the cut crop's origin, not the box's."""
+        landmarker = _FakeLandmarker(answer_for_shape=(100, 100))
+        out = _detect(rgb=self.rgb, width=720, height=1280, landmarker=landmarker,
+                      crop_box=(-100, -50, 100, 100), mp=self.mp)
+        self.assertEqual(landmarker.seen, [(100, 100)])
+        np.testing.assert_allclose(out[0, :2], [50 / 720, 50 / 1280], atol=1e-6)
 
-    def test_clamps_to_image_bounds(self):
-        """A face near an edge must not produce negative or out-of-range
-        offsets — the mapping back to full-image coords depends on them."""
-        crop, x1, y1 = _crop_to_face(self.img, (10, 5, 100, 100), padding=1.0)
-        self.assertEqual((x1, y1), (0, 0))
-        self.assertLessEqual(crop.shape[1], self.img.shape[1])
+    def test_falls_back_to_the_whole_frame(self):
+        landmarker = _FakeLandmarker(answer_for_shape=(1280, 720))
+        out = _detect(rgb=self.rgb, width=720, height=1280, landmarker=landmarker,
+                      crop_box=(250, 125, 450, 325), mp=self.mp)
+        self.assertEqual(landmarker.seen, [(200, 200), (1280, 720)])
+        np.testing.assert_allclose(out[0, :2], [0.5, 0.5], atol=1e-6)
 
-        crop, x1, y1 = _crop_to_face(self.img, (550, 950, 100, 100), padding=1.0)
-        self.assertLessEqual(x1 + crop.shape[1], self.img.shape[1])
-        self.assertLessEqual(y1 + crop.shape[0], self.img.shape[0])
+    def test_no_crop_box_is_the_whole_frame_only(self):
+        landmarker = _FakeLandmarker(answer_for_shape=(1280, 720))
+        _detect(rgb=self.rgb, width=720, height=1280, landmarker=landmarker,
+                crop_box=None, mp=self.mp)
+        self.assertEqual(landmarker.seen, [(1280, 720)])
 
-    def test_crop_is_contiguous(self):
-        """MediaPipe's Image wrapper requires a contiguous buffer."""
-        crop, _, _ = _crop_to_face(self.img, (200, 300, 100, 100), padding=0.5)
-        self.assertTrue(crop.flags["C_CONTIGUOUS"])
+    def test_no_face_anywhere_raises(self):
+        landmarker = _FakeLandmarker(answer_for_shape=(1, 1))
+        with self.assertRaises(RuntimeError):
+            _detect(rgb=self.rgb, width=720, height=1280, landmarker=landmarker,
+                    crop_box=(250, 125, 450, 325), mp=self.mp)
+
+    def test_an_empty_crop_is_refused(self):
+        landmarker = _FakeLandmarker(answer_for_shape=(1, 1))
+        with self.assertRaises(ValueError):
+            _detect(rgb=self.rgb, width=720, height=1280, landmarker=landmarker,
+                    crop_box=(800, 125, 900, 325), mp=self.mp)
 
 
 class TestCoordinateMapping(unittest.TestCase):
@@ -158,36 +217,47 @@ class TestCoordinateMapping(unittest.TestCase):
         np.testing.assert_allclose(out, _face_to_array(face), atol=1e-6)
 
     def test_face_to_array_shape_and_dtype(self):
-        out = _face_to_array(_synthetic_face())
+        out = _face_to_array([_LM(0.5, 0.5) for _ in range(478)])
         self.assertEqual(out.shape, (478, 3))
         self.assertEqual(out.dtype, np.float32)
+
+
 
 
 DETECTION_SCRIPT = textwrap.dedent(
     """
     import json, sys
     sys.path.insert(0, {repo!r})
+    import numpy as np
     from pipeline.dataset import Dataset
     from pipeline.registry import get_step_class
     import pipeline.steps
+    from tests.test_face_landmarks import _mesh_with_head_at
 
     ds = Dataset.from_disk({stage!r})
     step_class = get_step_class("detect_face_landmarks")
     step, params = step_class(), step_class.resolve_params()
-    out = {{}}
-    for key, image in (("anchor", ds.anchor_image), ("reference", ds.reference_image)):
-        res = step.run({{"image": image}}, params)["face_landmarks"]
-        lm = res["landmarks"]
-        out[key] = {{
-            "n_points": int(lm.shape[0]),
-            "image_size": list(res["image_size"]),
-            "source": res["source"],
-            "x_min": float(lm[:, 0].min()), "x_max": float(lm[:, 0].max()),
-            "y_min": float(lm[:, 1].min()), "y_max": float(lm[:, 1].max()),
-        }}
-    print(json.dumps(out))
+    image = ds.anchor_image
+    h, w = image.shape[:2]
+    mesh = _mesh_with_head_at(*{head!r}, w, h)
+    res = step.run({{"image": image, "mesh_output": mesh}}, params)["face_landmarks"]
+    lm = res["landmarks"]
+    print(json.dumps({{
+        "n_points": int(lm.shape[0]),
+        "image_size": list(res["image_size"]),
+        "source": res["source"],
+        "x_min": float(lm[:, 0].min()), "x_max": float(lm[:, 0].max()),
+        "y_min": float(lm[:, 1].min()), "y_max": float(lm[:, 1].max()),
+    }}))
     """
 )
+
+#: Where the face is on cyber_6f/initial/anchor.png (720x1280), in pixels:
+#: the extent of the landmarks the retired blaze detector's crop produced,
+#: measured 2026-09-11. The end-to-end test builds a mesh whose head
+#: keypoints project to roughly this — deliberately roughly, 10 px off and
+#: a little small, the way a raw SAM-3D-Body fit is.
+ANCHOR_FACE_PX = (303, 173, 393, 274)
 
 
 class TestDetectionEndToEnd(unittest.TestCase):
@@ -195,14 +265,18 @@ class TestDetectionEndToEnd(unittest.TestCase):
     the suite. Skips on any failure to start, with the reason attached —
     on macOS that is expected (see this module's docstring)."""
 
-    def test_detects_a_face_in_the_reference_photo(self):
+    def test_detects_the_face_in_the_mesh_crop(self):
         stage = require_stage("initial")
         try:
             import mediapipe  # noqa: F401
         except ImportError:
             self.skipTest("mediapipe not installed")
 
-        script = DETECTION_SCRIPT.format(repo=str(REPO_ROOT), stage=str(stage))
+        x0, y0, x1, y1 = ANCHOR_FACE_PX
+        # Eyes a third of the way down the face, ears at its middle, the
+        # whole thing 10 px right and 5% narrow of the truth.
+        head = (x0 + 12, y0 + (y1 - y0) // 3, x1 + 6, y0 + (y1 - y0) // 2)
+        script = DETECTION_SCRIPT.format(repo=str(REPO_ROOT), stage=str(stage), head=head)
         proc = subprocess.run(
             [sys.executable, "-c", script],
             capture_output=True, text=True, timeout=600,
@@ -217,34 +291,16 @@ class TestDetectionEndToEnd(unittest.TestCase):
 
         import json
 
-        results = json.loads(proc.stdout.strip().splitlines()[-1])
-
-        anchor = results["anchor"]
+        anchor = json.loads(proc.stdout.strip().splitlines()[-1])
         self.assertEqual(anchor["source"], "mediapipe")
         self.assertIn(anchor["n_points"], (468, 478))
         self.assertEqual(anchor["image_size"], [720, 1280])
-        for key in ("x_min", "y_min"):
-            self.assertGreaterEqual(anchor[key], 0.0)
-        for key in ("x_max", "y_max"):
-            self.assertLessEqual(anchor[key], 1.0)
-        # A real face is a small part of a full-body frame, not the whole
-        # thing — this is what catches the fallback silently returning a
-        # whole-image box instead of a face.
-        self.assertLess(anchor["x_max"] - anchor["x_min"], 0.4)
-        self.assertLess(anchor["y_max"] - anchor["y_min"], 0.4)
-        # Head of a standing figure: upper part of the frame.
-        self.assertLess(anchor["y_max"], 0.5)
-
-        # reference.png is a two-panel front/back sheet. The front-facing
-        # subject is the left panel, so frontality selection must land
-        # there rather than on the back of the head on the right.
-        reference = results["reference"]
-        self.assertEqual(reference["image_size"], [1440, 1280])
-        face_centre_x = (reference["x_min"] + reference["x_max"]) / 2
-        self.assertLess(
-            face_centre_x, 0.5,
-            "frontality scoring picked the back-facing subject in the right panel",
-        )
+        # The landmarks land on the face, not on the crop or the frame:
+        # within a few pixels of where the detector-cropped ones did.
+        found = (anchor["x_min"] * 720, anchor["y_min"] * 1280,
+                 anchor["x_max"] * 720, anchor["y_max"] * 1280)
+        for got, want in zip(found, ANCHOR_FACE_PX):
+            self.assertLess(abs(got - want), 6.0, (found, ANCHOR_FACE_PX))
 
 
 if __name__ == "__main__":

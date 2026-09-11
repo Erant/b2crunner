@@ -226,8 +226,8 @@ class MapFaceToMeshStep(Step):
 
         from . import render as _render_module  # noqa: F401 — sets PYOPENGL_PLATFORM
         from .face_landmarks import (
-            DETECTOR_MODEL_NAME, DETECTOR_MODEL_URL, LANDMARKER_MODEL_NAME,
-            LANDMARKER_MODEL_URL, _detect, _ensure_model, _model_path,
+            LANDMARKER_MODEL_NAME, LANDMARKER_MODEL_URL, _detect, _ensure_model,
+            _model_path,
         )
 
         mesh = inputs["mesh_output"]
@@ -251,12 +251,12 @@ class MapFaceToMeshStep(Step):
         rgb, depth = self._render(vertices, faces, k * focal, cx, cy, rw, rh)
 
         # --- MediaPipe on the render -------------------------------------
+        # The render IS the head crop, so the landmarker takes it whole.
         import mediapipe as mp
         from mediapipe.tasks import python
         from mediapipe.tasks.python import vision
 
         landmarker_path = str(_ensure_model(LANDMARKER_MODEL_URL, _model_path(LANDMARKER_MODEL_NAME)))
-        detector_path = str(_ensure_model(DETECTOR_MODEL_URL, _model_path(DETECTOR_MODEL_NAME)))
         options = vision.FaceLandmarkerOptions(
             base_options=python.BaseOptions(model_asset_path=landmarker_path),
             min_face_detection_confidence=params["min_detection_confidence"],
@@ -267,8 +267,7 @@ class MapFaceToMeshStep(Step):
         try:
             landmarks = _detect(
                 rgb=np.ascontiguousarray(rgb), width=rw, height=rh, landmarker=landmarker,
-                detector_path=detector_path, min_confidence=params["min_detection_confidence"],
-                crop_padding=0.5, mp=mp, vision=vision, python=python,
+                crop_box=None, mp=mp,
             )
         finally:
             landmarker.close()

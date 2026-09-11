@@ -26,9 +26,11 @@ and that explain each frame's lids when fitted.
 ## What it does
 
 1. **`detect_face_views`** (main env, MediaPipe, ~1 s). Landmarks the face
-   per frame without a detector: the pipeline's BlazeFace short-range
-   pass on a whole 1080x1920 frame misses the ~80 px face in 63 of 81
-   helical frames and finds faces on the trousers in four. This projects
+   per frame without a detector: the BlazeFace short-range pass the
+   pipeline used to run (retired 2026-09-11; `detect_face_landmarks` now
+   crops to the mesh head the same way) misses the ~80 px face on a whole
+   1080x1920 frame in 63 of 81 helical frames and finds faces on the
+   trousers in four. This projects
    the refit head into the frame (the vertices `map_face_to_mesh` mapped),
    cuts a 1.8x crop around it rolled upright by the projected head-up
    axis (MHR joints 113 -> 126), and runs the landmarker on the crop. 35-38

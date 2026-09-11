@@ -16,31 +16,30 @@ alone: Sapiens2's `parts: face` is Goliath class 3, `Face_Neck`, so the
 face and the neck are one class and "just the face" cannot be selected,
 only intersected. See `FaceLandmarkMaskStep`.
 
-The detection pipeline is **crop-first**, which is the reason this is more
-than a single library call. The ComfyUI-Body2COLMAP reference node
-(nodes/face_landmarks_node.py, itself lifted from body2colmap's
-`tools/extract_face_landmarks.py`) runs FaceLandmarker on the full image
-first and only crops when that finds nothing — but for this project's
-inputs, which are full-body shots where the face is a small fraction of
-the frame, a whole-image FaceLandmarker pass either finds nothing or
-returns badly-placed landmarks. MediaPipe's FaceLandmarker is trained on
-face-filling images. So:
+The detection is **crop-first**, and the crop comes from the body mesh.
+MediaPipe's FaceLandmarker is trained on face-filling images; on this
+project's inputs — full-body shots where the face is a few percent of the
+frame — a whole-image pass either finds nothing or returns badly-placed
+landmarks. So the step crops to the face and landmarks the crop, mapping
+the crop-space landmarks back to full-image normalized coordinates.
 
-1. Run FaceDetector (blaze_face_short_range) to locate face bounding
-   boxes, crop each with padding, and run FaceLandmarker on the crop.
-   Crop-space landmarks are mapped back to full-image normalized coords.
-2. Only if the detector finds nothing — or no crop yields landmarks — fall
-   back to FaceLandmarker on the whole frame (a head-and-shoulders input,
-   or an aspect ratio the short-range detector was not trained for).
+Where the crop comes from changed on 2026-09-11. Until then a second
+MediaPipe model, the `blaze_face_short_range` FaceDetector, located the
+face boxes (the ComfyUI-Body2COLMAP reference node's approach, from
+body2colmap's `tools/extract_face_landmarks.py`), and the most frontal of
+several landmarked crops won. It was unreliable — spurious second faces on
+a single subject, and misses — and by the time this step runs the
+pipeline already knows where the head is: `sam3d_body` has fitted the
+body, and its head keypoints projected through SAM-3D-Body's own camera
+centre the crop (`mesh_head_box`). The raw fit's head misses the
+photograph's by ~10 px on cyber2_6f, nothing against a crop padded by
+three quarters of the head's extent on every side. `mesh_output` is
+optional only so the step still runs without a mesh (a test, a
+head-and-shoulders input); then, or when the crop yields no landmarks,
+the fallback is FaceLandmarker on the whole frame.
 
-With several faces found (a front/back reference sheet gives two), the
-most frontal wins, scored by the z-component of the cross product of the
-inter-eye and nose-to-chin vectors.
-
-Runs on CPU; no GPU or pod needed. The two `.task`/`.tflite` model files
-are downloaded on first use to ~/.cache/body2colmap, the same location and
-filenames the ComfyUI node and body2colmap's own tool use, so an existing
-cache is picked up rather than re-downloaded.
+Runs on CPU; no GPU or pod needed. The landmarker's `.task` file is
+downloaded on first use into the models volume (see `_model_path`).
 
 Output is the raw MediaPipe format — an (N, 3) array of normalized
 coordinates, 468 or 478 points depending on whether iris landmarks are
@@ -48,12 +47,11 @@ present. Conversion to OpenPose Face 70 happens in `render`, via
 body2colmap's `FaceLandmarkIngest.from_mediapipe`, because that is where
 the image size needed to unnormalize them is known.
 
-VERIFIED locally against cyber_6f's real reference photos (CPU, no pod):
-478 landmarks from the single-subject anchor photo, and — on the
-two-panel front/back reference sheet — the frontality scoring correctly
-selects the front-facing subject in the left panel over the back-of-head
-in the right one. Both resolve through the detector-and-crop path, since
-the face is a small part of a full-body frame. See
+VERIFIED locally (CPU, no pod) on 2026-09-11 against the detector it
+replaced: on cyber_6f's anchor photo and on a recorded SAM-3D-Body fit of
+an 867x1552 portrait, the mesh-cropped landmarks agree with the
+detector-cropped ones to well under a pixel (see the commit), and the
+detector had reported two faces on the single-subject portrait. See
 tests/test_face_landmarks.py.
 
 One operational note: mediapipe 1.0.1 on macOS arm64 aborted the process
@@ -73,7 +71,7 @@ import os
 import tempfile
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, Tuple
 
 import cv2
 import numpy as np
@@ -87,12 +85,7 @@ LANDMARKER_MODEL_URL = (
     "https://storage.googleapis.com/mediapipe-models/"
     "face_landmarker/face_landmarker/float16/1/face_landmarker.task"
 )
-DETECTOR_MODEL_URL = (
-    "https://storage.googleapis.com/mediapipe-models/"
-    "face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite"
-)
 LANDMARKER_MODEL_NAME = "face_landmarker.task"
-DETECTOR_MODEL_NAME = "blaze_face_short_range.tflite"
 
 
 def _model_path(filename: str) -> Path:
@@ -110,38 +103,38 @@ def _model_path(filename: str) -> Path:
 
     return models_dir() / "mediapipe" / filename
 
-# MediaPipe landmark indices used for frontality scoring.
-_MP_RIGHT_EYE_OUTER = 33
-_MP_LEFT_EYE_OUTER = 263
-_MP_NOSE_BRIDGE = 168
-_MP_CHIN = 152
-
 
 @register_step("detect_face_landmarks")
 class DetectFaceLandmarksStep(Step):
     """Detect face landmarks in a single image.
 
-    inputs:  {"image": np.ndarray BGR uint8} — typically
-             dataset.reference_image or dataset.anchor_image
+    inputs:  {"image": np.ndarray BGR uint8 — the photograph,
+              "mesh_output": dict, optional — sam3d_body's outputs for THIS
+                             photograph (keypoints_3d, cam_t, focal_length;
+                             image_size when published). Its head
+                             keypoints, projected, centre the crop the
+                             landmarker sees. None means the whole frame}
     params:  min_detection_confidence (float, default 0.3),
-             crop_padding (float, default 0.5 — padding around a detected
-             face box, as a fraction of face size, before landmarking it)
+             crop_padding (float, default 0.75 — margin around the projected
+             head keypoints, as a fraction of their extent, before
+             landmarking the crop)
     outputs: {"face_landmarks": {"source": "mediapipe",
               "landmarks": np.ndarray (N, 3) normalized,
               "image_size": (width, height)}}
 
-    Raises RuntimeError when neither the short-range detector nor the
-    whole-image landmarker finds a face — a silent empty result would
-    produce a skeleton render with no face and no indication why.
+    Raises RuntimeError when neither the head crop nor the whole-image
+    landmarker finds a face — a silent empty result would produce a
+    skeleton render with no face and no indication why.
     """
 
     PARAMS = (
         Param("min_detection_confidence", float, 0.3,
-              "MediaPipe face-detector confidence floor", minimum=0.0, maximum=1.0,
-              advanced=True),
-        Param("crop_padding", float, 0.5,
-              "How far to pad the detected face box before the second-stage crop, "
-              "as a fraction of the box", minimum=0.0, advanced=True),
+              "MediaPipe's face detection / presence confidence floor",
+              minimum=0.0, maximum=1.0, advanced=True),
+        Param("crop_padding", float, 0.75,
+              "How far to pad the mesh head's projected extent before landmarking "
+              "the crop, as a fraction of that extent on each side",
+              minimum=0.0, advanced=True),
     )
 
     def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
@@ -157,7 +150,6 @@ class DetectFaceLandmarksStep(Step):
 
         image = inputs["image"]
         min_confidence = params["min_detection_confidence"]
-        crop_padding = params["crop_padding"]
 
         # This pipeline speaks cv2 BGR; MediaPipe wants SRGB.
         bgr = image[:, :, :3] if image.ndim == 3 and image.shape[2] == 4 else image
@@ -169,28 +161,25 @@ class DetectFaceLandmarksStep(Step):
             width, height, min_confidence,
         )
 
-        landmarker_path = str(_ensure_model(LANDMARKER_MODEL_URL, _model_path(LANDMARKER_MODEL_NAME)))
-        detector_path = str(_ensure_model(DETECTOR_MODEL_URL, _model_path(DETECTOR_MODEL_NAME)))
+        mesh = inputs.get("mesh_output")
+        crop_box = None
+        if mesh is not None:
+            crop_box = mesh_head_box(mesh, width, height, params["crop_padding"])
+        else:
+            logger.info("detect_face_landmarks: no mesh_output; landmarking the whole frame")
 
+        landmarker_path = str(_ensure_model(LANDMARKER_MODEL_URL, _model_path(LANDMARKER_MODEL_NAME)))
         lm_options = vision.FaceLandmarkerOptions(
             base_options=python.BaseOptions(model_asset_path=landmarker_path),
             min_face_detection_confidence=min_confidence,
             min_face_presence_confidence=min_confidence,
-            num_faces=10,
+            num_faces=1,
         )
         landmarker = vision.FaceLandmarker.create_from_options(lm_options)
         try:
             landmarks = _detect(
-                rgb=rgb,
-                width=width,
-                height=height,
-                landmarker=landmarker,
-                detector_path=detector_path,
-                min_confidence=min_confidence,
-                crop_padding=crop_padding,
-                mp=mp,
-                vision=vision,
-                python=python,
+                rgb=rgb, width=width, height=height, landmarker=landmarker,
+                crop_box=crop_box, mp=mp,
             )
         finally:
             landmarker.close()
@@ -203,6 +192,72 @@ class DetectFaceLandmarksStep(Step):
                 "image_size": (width, height),
             }
         }
+
+
+#: MHR70's head keypoints: nose, left eye, right eye, left ear, right ear.
+_MHR_HEAD_KEYPOINTS = (0, 1, 2, 3, 4)
+
+
+def mesh_head_box(mesh: Dict[str, Any], width: int, height: int,
+                  padding: float) -> Tuple[int, int, int, int]:
+    """A square crop around the mesh head on this photograph.
+
+    Centred on the projected head keypoints (nose, eyes, ears) through
+    SAM-3D-Body's camera — `pred_keypoints_3d + pred_cam_t` with
+    `focal_length` and the principal point at the frame's centre, which is
+    the frame that focal is measured in — with a side of
+    `(1 + 2 * padding)` times the keypoints' extent, ear to ear on a face
+    seen from the front. A frontal face is ~1.3 ear-spans tall and the
+    keypoints sit at its middle, so 0.75 leaves ~0.6 of a span around it:
+    room for the raw fit's ~10 px miss and a head the model made 15% the
+    wrong size, and still a face-filling crop, which is what the landmarker
+    wants. Measured against the detector's crop on an 867x1552 portrait
+    (111 px span): 0.5 / 0.75 / 1.0 agree to 0.9 / 0.6 / 0.7 px mean, the
+    landmarker's own crop-to-crop jitter.
+
+    Not `head_fit.head_crop_box`: that takes every vertex above the neck
+    joint, which is the shoulders as well as the head — the right extent
+    for a render nothing has to find a face in, and on an 867x1552
+    portrait a 730x487 crop for a 110 px face.
+
+    When the mesh publishes the size it was fitted on it must be this
+    frame's: a resized copy would be self-consistent and silently wrong,
+    the same check `face_pointmap_splat` makes.
+    """
+    try:
+        focal = float(mesh["focal_length"])
+        cam_t = np.asarray(mesh["cam_t"], np.float64).reshape(3)
+        keypoints = np.asarray(mesh["keypoints_3d"], np.float64) + cam_t
+        head = keypoints[list(_MHR_HEAD_KEYPOINTS)]
+    except (KeyError, TypeError, ValueError, IndexError) as exc:
+        raise KeyError(
+            "detect_face_landmarks: 'mesh_output' must carry keypoints_3d "
+            "(MHR70), cam_t and focal_length, as sam3d_body writes them"
+        ) from exc
+    fitted = mesh.get("image_size")
+    if fitted is not None and tuple(int(v) for v in fitted) != (width, height):
+        raise ValueError(
+            f"detect_face_landmarks: the mesh was fitted on a "
+            f"{fitted[0]}x{fitted[1]} frame and this image is {width}x{height}; "
+            "the head box would land on the wrong pixels"
+        )
+    z = np.clip(head[:, 2], 1e-6, None)
+    px = np.stack([focal * head[:, 0] / z + width / 2.0,
+                   focal * head[:, 1] / z + height / 2.0], 1)
+    lo, hi = px.min(0), px.max(0)
+    span = float(max(hi[0] - lo[0], hi[1] - lo[1]))
+    if not np.isfinite(span) or span < 4.0:
+        raise ValueError(
+            f"detect_face_landmarks: the mesh head spans {span:.1f} px on a "
+            f"{width}x{height} frame — is the mesh from this photograph?"
+        )
+    centre = 0.5 * (lo + hi)
+    half = 0.5 * span * (1.0 + 2.0 * padding)
+    box = (int(np.floor(centre[0] - half)), int(np.floor(centre[1] - half)),
+           int(np.ceil(centre[0] + half)), int(np.ceil(centre[1] + half)))
+    logger.info("detect_face_landmarks: mesh head spans %.0f px; crop %s at padding %.2f",
+                span, box, padding)
+    return box
 
 
 @register_step("face_landmark_mask")
@@ -432,51 +487,6 @@ def _ensure_model(url: str, path: Path) -> Path:
     return path
 
 
-def _frontality_score(face_landmarks) -> float:
-    """How frontal a face is: 0 = profile, 1 = straight on.
-
-    The face normal is the cross product of the inter-eye vector and the
-    nose-bridge-to-chin vector; its z-component (toward the camera),
-    normalized, is the score.
-    """
-    def _xyz(idx):
-        lm = face_landmarks[idx]
-        return np.array([lm.x, lm.y, lm.z])
-
-    eye_vec = _xyz(_MP_LEFT_EYE_OUTER) - _xyz(_MP_RIGHT_EYE_OUTER)
-    vert_vec = _xyz(_MP_NOSE_BRIDGE) - _xyz(_MP_CHIN)
-    normal = np.cross(eye_vec, vert_vec)
-    norm = float(np.linalg.norm(normal))
-    if norm < 1e-10:
-        return 0.0
-    return abs(float(normal[2])) / norm
-
-
-def _pick_best_face(face_landmarks_list) -> Tuple[Any, int]:
-    """Most frontal face out of several, with its index."""
-    if len(face_landmarks_list) == 1:
-        return face_landmarks_list[0], 0
-
-    best_score, best_idx = -1.0, 0
-    for i, face in enumerate(face_landmarks_list):
-        score = _frontality_score(face)
-        if score > best_score:
-            best_score, best_idx = score, i
-    return face_landmarks_list[best_idx], best_idx
-
-
-def _crop_to_face(rgb: np.ndarray, bbox, padding: float):
-    """Crop to a face bounding box, padded by a fraction of its size."""
-    height, width = rgb.shape[:2]
-    x, y, w, h = bbox
-    pad_x, pad_y = int(w * padding), int(h * padding)
-    x1 = max(0, x - pad_x)
-    y1 = max(0, y - pad_y)
-    x2 = min(width, x + w + pad_x)
-    y2 = min(height, y + h + pad_y)
-    return np.ascontiguousarray(rgb[y1:y2, x1:x2, :]), x1, y1
-
-
 def _face_to_array(face_landmarks) -> np.ndarray:
     return np.array([[lm.x, lm.y, lm.z] for lm in face_landmarks], dtype=np.float32)
 
@@ -500,90 +510,47 @@ def _face_to_array_from_crop(
     )
 
 
-def _detect(
-    *, rgb, width, height, landmarker, detector_path, min_confidence,
-    crop_padding, mp, vision, python,
-) -> np.ndarray:
+def _detect(*, rgb, width, height, landmarker, crop_box, mp) -> np.ndarray:
     """Crop-first detection. Returns (N, 3) full-image normalized landmarks.
 
-    Stage 1 is the short-range detector plus a padded crop per face box,
-    landmarked individually — MediaPipe's FaceLandmarker needs a
-    face-filling image and this project's inputs never are. Stage 2, only
-    when stage 1 comes up empty, is FaceLandmarker on the whole frame.
+    `crop_box` is (x0, y0, x1, y1) in this frame's pixels — the mesh
+    head, padded — and None landmarks the whole frame directly, which is
+    what a render that already IS a head crop wants (`map_face_to_mesh`).
+    When the crop yields nothing the whole frame is tried before giving up.
     """
-    # Stage 1: detect -> pad -> crop -> landmark each crop.
-    det_options = vision.FaceDetectorOptions(
-        base_options=python.BaseOptions(model_asset_path=detector_path),
-        min_detection_confidence=min_confidence,
-    )
-    detector = vision.FaceDetector.create_from_options(det_options)
-    try:
-        detections = detector.detect(
-            mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-        )
-        bboxes = [
-            (d.bounding_box.origin_x, d.bounding_box.origin_y,
-             d.bounding_box.width, d.bounding_box.height)
-            for d in detections.detections
-        ]
-    finally:
-        detector.close()
-
-    if bboxes:
-        logger.info(
-            "detect_face_landmarks: %d face box(es), cropping with padding=%.2f",
-            len(bboxes), crop_padding,
-        )
-        candidates: List[Tuple[Any, np.ndarray, int, int]] = []
-        for bbox in bboxes:
-            crop, x1, y1 = _crop_to_face(rgb, bbox, padding=crop_padding)
-            crop_result = landmarker.detect(
-                mp.Image(image_format=mp.ImageFormat.SRGB, data=crop)
+    if crop_box is not None:
+        x0, y0, x1, y1 = (int(v) for v in crop_box)
+        x0, y0 = max(0, x0), max(0, y0)
+        x1, y1 = min(width, x1), min(height, y1)
+        if x1 - x0 < 8 or y1 - y0 < 8:
+            raise ValueError(
+                f"detect_face_landmarks: head crop {crop_box} is empty on a "
+                f"{width}x{height} frame — is the mesh from this photograph?"
             )
-            if crop_result.face_landmarks:
-                candidates.append((crop_result.face_landmarks[0], crop, x1, y1))
-
-        if candidates:
-            _, best_idx = _pick_best_face([c[0] for c in candidates])
-            face, crop, x1, y1 = candidates[best_idx]
+        crop = np.ascontiguousarray(rgb[y0:y1, x0:x1, :])
+        result = landmarker.detect(
+            mp.Image(image_format=mp.ImageFormat.SRGB, data=crop)
+        )
+        if result.face_landmarks:
             crop_h, crop_w = crop.shape[:2]
-            if len(candidates) > 1:
-                logger.info(
-                    "detect_face_landmarks: chose face #%d of %d (frontality %.2f)",
-                    best_idx + 1, len(candidates), _frontality_score(face),
-                )
             logger.info(
                 "detect_face_landmarks: from crop %dx%d at offset %d,%d",
-                crop_w, crop_h, x1, y1,
+                crop_w, crop_h, x0, y0,
             )
             return _face_to_array_from_crop(
-                face, crop_w, crop_h, x1, y1, width, height
+                result.face_landmarks[0], crop_w, crop_h, x0, y0, width, height
             )
-
-        logger.info(
-            "detect_face_landmarks: detector found %d box(es) but no crop "
-            "yielded landmarks; trying the whole frame", len(bboxes),
-        )
-    else:
-        logger.info(
-            "detect_face_landmarks: detector found no face; trying the whole frame"
+        logger.warning(
+            "detect_face_landmarks: no face in the head crop %s; trying the "
+            "whole frame", (x0, y0, x1, y1),
         )
 
-    # Stage 2 (fallback): the whole frame. A head-and-shoulders crop, or an
-    # aspect ratio the short-range detector was not trained for.
     result = landmarker.detect(mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb))
     if result.face_landmarks:
-        face, idx = _pick_best_face(result.face_landmarks)
-        if len(result.face_landmarks) > 1:
-            logger.info(
-                "detect_face_landmarks: %d faces on the full frame, chose #%d "
-                "(frontality %.2f)",
-                len(result.face_landmarks), idx + 1, _frontality_score(face),
-            )
-        return _face_to_array(face)
+        return _face_to_array(result.face_landmarks[0])
 
     raise RuntimeError(
-        f"No face detected in image ({width}x{height}) by the short-range "
-        "detector or the whole-frame landmarker. Ensure the image contains a "
-        "visible face."
+        f"No face detected in image ({width}x{height}) by the landmarker, "
+        + ("in the head crop or " if crop_box is not None else "")
+        + "on the whole frame. Ensure the image contains a visible face."
     )
