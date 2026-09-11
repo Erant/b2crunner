@@ -318,6 +318,16 @@ class RenderSplatStep(Step):
               "Requires the marker an override-mode render leaves in the extras "
               "(original_focal_length); a dataset without one has been auto-oriented "
               "and its original camera is no longer at the world origin"),
+        Param("sh_degree", int, 3,
+              "Highest spherical-harmonic band the render evaluates, 0..3. The "
+              "trained splat keeps every band it has; this only shortens the "
+              "colour sum per view, so 3 renders all of them, 2 drops band 3, and "
+              "0 is each Gaussian's DC colour with no view dependence at all. "
+              "Alpha and geometry are the same at every setting. Clamped to the "
+              "splat's own degree by the rasteriser, so 3 is 'everything the "
+              "splat has'. The helical re-render (rerender_splat) is the one "
+              "instance that overrides it, to 2",
+              minimum=0, maximum=3),
         Param("bg_color", list, [0.0, 0.0, 0.0],
               "RGB in [0,1]. Black, not the recorded run's 127 grey: black is where "
               "that pipeline ends up after mask_splat, and matching its intermediate "
@@ -461,10 +471,13 @@ class RenderSplatStep(Step):
         image_names = [f"frame_{i + 1:05d}_.png" for i in range(len(cameras))]
 
         confidence = _confidence_options(params)
+        sh_degree = int(params["sh_degree"])
 
         logger.info(
-            "render_splat: %d Gaussians (SH degree %d), %d frames at %dx%d via %s%s",
-            len(scene), scene.sh_degree, len(cameras), width, height, render_path,
+            "render_splat: %d Gaussians (SH degree %d, rendering bands 0..%d), "
+            "%d frames at %dx%d via %s%s",
+            len(scene), scene.sh_degree, min(sh_degree, scene.sh_degree),
+            len(cameras), width, height, render_path,
             "" if confidence is None else
             f", confidence-gated on {confidence.cull_color} "
             f"(gate {confidence.gate_lo}-{confidence.gate_hi})",
@@ -480,6 +493,7 @@ class RenderSplatStep(Step):
             bg_color=bg_color,
             render_path=render_path,
             confidence=confidence,
+            sh_degree=sh_degree,
         )
 
         # The environment behind the splat (steps/backdrop.py). Composited
@@ -595,12 +609,19 @@ def _keep_sidecars(maps, image_names: List[str]) -> None:
 
 def _rasterize(
     *, scene, splat_path, cameras, image_names, width, height, bg_color, render_path,
-    confidence=None,
+    confidence=None, sh_degree=None,
 ) -> Tuple[List[np.ndarray], List[np.ndarray]]:
     """Render `cameras` against `scene` via body2colmap's `SplatRenderer`.
 
     Returns (images, masks): BGR uint8 images and float32 [0,1] foreground
     masks, one per camera, in `cameras` order.
+
+    `sh_degree` caps the spherical-harmonic bands the rasteriser sums for
+    each Gaussian's colour (`--sh-degree`); None renders every band the
+    splat carries, which is what the internal callers — the `+splat`
+    overlay layers and the elevation views — want. Only `render_splat`
+    itself exposes it, and it is the one place a splat is rendered for the
+    next denoise pass to see.
 
     With `confidence`, the binary's output contract changes and so does what
     those two mean: the RGB is composited over the cull colour instead of
@@ -640,6 +661,7 @@ def _rasterize(
         ply_path=None if ply_path is None else str(ply_path),
         on_output=logger_relay,
         on_fault=lambda fault: _save_render_crashlog(fault, image_names),
+        sh_degree=sh_degree,
     )
     try:
         logger.info("$ %s", render_path)

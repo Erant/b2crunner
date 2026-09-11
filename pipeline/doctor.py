@@ -255,6 +255,19 @@ def check_trainer_binaries() -> Check:
             status = FAIL
             continue
         lines.append(f"{binary}: {path}")
+        if binary == "brush-splat-render":
+            # render_splat passes --sh-degree on every invocation, and the
+            # render CLI rejects a flag it does not know: a shim over an
+            # older b2ctrain fails the first render_splat of a run rather
+            # than rendering every band.
+            if "--sh-degree" not in result.stdout + result.stderr:
+                lines.append(
+                    "  MISSING --sh-degree — render_splat needs a b2ctrain from "
+                    "2026-09-11 or later (536681d); same rebuild as below"
+                )
+                status = FAIL
+            else:
+                lines.append("  --sh-degree present (render_splat's band cap)")
         if binary == "b2ctrain":
             help_text = result.stdout + result.stderr
             missing = [flag for flag in required_flags if flag not in help_text]

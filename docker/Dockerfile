@@ -99,7 +99,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 ARG B2CTRAIN_REPO=https://github.com/Erant/b2ctrain.git
 ARG B2CTRAIN_BRANCH=main
-ARG B2CTRAIN_REF=ada3a2407f7a7188c440ab98b63715c4385972c6
+ARG B2CTRAIN_REF=536681da0e4fae4f8f10919edd72cdd3c6647ae3
 RUN git clone --depth 1 --branch ${B2CTRAIN_BRANCH} ${B2CTRAIN_REPO} /src/b2ctrain \
     && cd /src/b2ctrain \
     && head="$(git rev-parse HEAD)" \
@@ -831,7 +831,7 @@ COPY --from=python-builder /opt/vendor /opt/vendor
 # would install cleanly and then raise on the first render_splat of a real
 # run, an hour into a pod booking. The last five asserts below are what stop it.
 RUN /opt/venv_base/bin/pip install --force-reinstall --no-deps \
-        'body2colmap @ git+https://github.com/Erant/body2colmap.git@76a74bcd7fffd40983be1ded74cd4554c2e2d652' \
+        'body2colmap @ git+https://github.com/Erant/body2colmap.git@339a5983d9c36e31e5dd0265a8de905eb8d4c9c4' \
     && /opt/venv_base/bin/python -c "\
 import inspect; \
 import body2colmap.face as f; \
@@ -843,6 +843,8 @@ assert 'splat_layer' in inspect.signature(Renderer.render_composite).parameters;
 assert sr.BINARY_NAME == 'brush-splat-render', sr.BINARY_NAME; \
 assert 'on_fault' in inspect.signature(sr.SplatRenderer.__init__).parameters, \
     'bump the body2colmap pin: steps/splat.py needs on_fault/on_output/ply_path'; \
+assert 'sh_degree' in inspect.signature(sr.SplatRenderer.__init__).parameters, \
+    'bump the body2colmap pin: render_splat needs SplatRenderer(sh_degree=...)'; \
 assert 'grid' in TEXTURE_GENERATORS, sorted(TEXTURE_GENERATORS); \
 assert 'background' in inspect.signature(Renderer.__init__).parameters, \
     'bump the body2colmap pin: steps/backdrop.py needs Renderer(background=...)'; \

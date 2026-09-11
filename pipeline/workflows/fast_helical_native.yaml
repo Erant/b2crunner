@@ -2525,6 +2525,10 @@ steps:
       # is at the world origin, which render_initial_views' override mode
       # guarantees (extras['original_focal_length'] is its marker).
       override_cam_from_mesh: true
+      # Bands 0..2 of the splat's 3: the one render in the workflow that
+      # leaves the highest band out. The step's default (3) renders every
+      # band the splat carries, and every other render_splat keeps it.
+      sh_degree: 2
       # 30/90, not the 45/45 the solver defaults to — the values
       # resplat_helical.json's Body2COLMAP_HelicalPath node carries.
       lead_in_deg: 30.0

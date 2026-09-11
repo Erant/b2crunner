@@ -1599,6 +1599,46 @@ class TestTheFirstDenoiseInputIsKept(unittest.TestCase):
         self.assertEqual(denoise.inputs["control_masks"], "dataset.masks")
 
 
+class TestOnlyTheHelicalRerenderCapsTheShBands(unittest.TestCase):
+    """`rerender_splat` is the one render_splat that sets `sh_degree`, and
+    it sets 2. Every other instance leaves the step's default (3, every
+    band the splat carries) alone — pinned as a workflow decision rather
+    than as a step default, because a `sh_degree:` line quietly added to
+    the face cap's render would change what the final training is
+    supervised by."""
+
+    def test_rerender_splat_says_two_and_nothing_else_says_anything(self):
+        from pipeline.cli import resolve_workflow
+        from pipeline.workflow import WorkflowSpec
+
+        spec = WorkflowSpec.from_yaml(resolve_workflow("fast_helical_native"))
+        renders = [s for s in spec.steps if s.step == "render_splat"]
+        self.assertGreater(len(renders), 1)
+        setting = {s.id: s.params.get("sh_degree") for s in renders}
+        self.assertEqual(setting.pop("rerender_splat"), 2)
+        self.assertEqual(set(setting.values()), {None}, setting)
+
+
+class TestThePixelOpsShipOff(unittest.TestCase):
+    """`adjust_denoised` (pixel_ops) runs in the workflow, but every knob on
+    it is off unless a setting turns it on. The SH cap on `rerender_splat`
+    is aimed at part of what the highlight suppression was for — the
+    specular sparkle a re-render carries into pass 2 — so the two are kept
+    separable: the pixel op stays a choice, not a default."""
+
+    def test_specular_suppress_is_zero_and_is_what_the_step_reads(self):
+        from pipeline.cli import resolve_workflow
+        from pipeline.workflow import WorkflowSpec
+
+        spec = WorkflowSpec.from_yaml(resolve_workflow("fast_helical_native"))
+        setting = next(s for s in spec.settings if s.name == "specular_suppress")
+        self.assertEqual(setting.default, 0.0)
+        step = next(s for s in spec.steps if s.id == "adjust_denoised")
+        self.assertEqual(step.step, "pixel_ops")
+        self.assertEqual(step.params["specular_suppress"],
+                         "${globals.specular_suppress}")
+
+
 class TestTheDenoiseSettingsAreTheMeasuredOnes(unittest.TestCase):
     """The two passes ship the settings the 2026-09-08 sweeps settled on
     (docs/vace-denoise-findings-2026-09-07.md, sections 5 and 6), applied

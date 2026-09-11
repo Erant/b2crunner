@@ -949,7 +949,8 @@ def _render_splat_default_bg():
     return tuple(get_step_class("render_splat").declared_params()["bg_color"].default)
 
 
-def _drive_render(*, bg_color=(0.0, 0.0, 0.0), confidence=None, cameras=1):
+def _drive_render(*, bg_color=(0.0, 0.0, 0.0), confidence=None, cameras=1,
+                  sh_degree=None):
     """Run `_rasterize` against a stub binary and report what happened.
 
     The argv used to be captured by patching `_run_render`, an internal of
@@ -993,6 +994,7 @@ def _drive_render(*, bg_color=(0.0, 0.0, 0.0), confidence=None, cameras=1):
             bg_color=bg_color,
             render_path=binary,
             confidence=confidence,
+            sh_degree=sh_degree,
         )
         return {
             "argv": json.loads((record / "argv.json").read_text()),
@@ -1002,8 +1004,10 @@ def _drive_render(*, bg_color=(0.0, 0.0, 0.0), confidence=None, cameras=1):
         }
 
 
-def _drive_layers(*, alpha=255, min_alpha=None, cameras=1):
+def _drive_layers(*, alpha=255, min_alpha=None, cameras=1, record_argv=False):
     """Run `render_splat_layers` against the stub binary, as `render` does.
+
+    With `record_argv`, returns (layers, argv) instead of the layers.
 
     The straight-alpha recovery lives between `_rasterize` and the caller
     and had no test at all, which is how it came to be calling
@@ -1031,9 +1035,11 @@ def _drive_layers(*, alpha=255, min_alpha=None, cameras=1):
         root = Path(tmp)
         ply = root / "s.ply"
         run_step("save_splat", {"splat_scene": scene}, {"filepath": str(ply)})
-        binary = stub_render_binary(root, alpha=alpha)
+        record = root / "record"
+        binary = stub_render_binary(root, alpha=alpha,
+                                    record=record if record_argv else None)
         kwargs = {} if min_alpha is None else {"min_alpha": min_alpha}
-        return splat_module.render_splat_layers(
+        layers = splat_module.render_splat_layers(
             scene=scene,
             splat_path=str(ply),
             cameras=camera_list,
@@ -1042,6 +1048,9 @@ def _drive_layers(*, alpha=255, min_alpha=None, cameras=1):
             render_path=binary,
             **kwargs,
         )
+        if not record_argv:
+            return layers
+        return layers, json.loads((record / "argv.json").read_text())
 
 
 class TestRenderSplatLayers(unittest.TestCase):
@@ -1081,9 +1090,66 @@ class TestRenderSplatLayers(unittest.TestCase):
     def test_one_layer_per_camera_in_order(self):
         self.assertEqual(len(_drive_layers(cameras=3)), 3)
 
+    def test_the_overlay_layers_render_every_band(self):
+        """`sh_degree` is render_splat's, not `_rasterize`'s default: the
+        `+splat` overlay in the mesh render asks for nothing and so gets the
+        splat's full view-dependent colour, as it always did."""
+        _, argv = _drive_layers(record_argv=True)
+        self.assertNotIn("--sh-degree", argv)
+
 
 def _captured_render_argv(**kwargs):
     return _drive_render(**kwargs)["argv"]
+
+
+class TestRenderSplatShDegree(unittest.TestCase):
+    """`sh_degree` — how many spherical-harmonic bands the re-render sums.
+
+    The splat keeps every band it was trained with; the rasteriser's
+    `--sh-degree` (b2ctrain c25974f, through body2colmap 339a598) stops the
+    colour sum at a lower one. 0 is the DC colour, 3 the full view-dependent
+    one. What is this step's is the flag on the argv and the shipped
+    default: 3, every band the splat has, so a render that says nothing
+    gets the whole splat and only the helical re-render — which says 2 in
+    the workflow — leaves a band out.
+    """
+
+    def test_the_shipped_default_is_every_band(self):
+        from pipeline.registry import get_step_class
+
+        param = get_step_class("render_splat").declared_params()["sh_degree"]
+        self.assertEqual(param.default, 3)
+        self.assertEqual((param.minimum, param.maximum), (0, 3))
+
+    def test_the_cap_reaches_the_binary(self):
+        for degree in (0, 2, 3):
+            argv = _captured_render_argv(sh_degree=degree)
+            self.assertEqual(argv[argv.index("--sh-degree") + 1], str(degree))
+
+    def test_no_cap_means_no_flag(self):
+        """None is body2colmap's 'every band', and it must stay expressible:
+        it is what the overlay layers and the elevation views rely on."""
+        self.assertNotIn("--sh-degree", _captured_render_argv())
+
+    def test_the_whole_step_passes_its_default(self):
+        """Through run_step, so the value on the argv is the one the
+        workflow gets rather than one handed to `_rasterize` directly."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ply = root / "s.ply"
+            scene = _synthetic_scene()
+            run_step("save_splat", {"splat_scene": scene}, {"filepath": str(ply)})
+            record = root / "record"
+            binary = stub_render_binary(root, record=record)
+            run_step(
+                "render_splat",
+                {"splat_scene": scene, "splat_path": str(ply)},
+                {"pattern": "circular", "n_frames": 2, "width": 4, "height": 4,
+                 "bounds_source": "splat", "render_path": binary,
+                 "background": ""},
+            )
+            argv = json.loads((record / "argv.json").read_text())
+        self.assertEqual(argv[argv.index("--sh-degree") + 1], "3")
 
 
 def _confidence(**overrides):
