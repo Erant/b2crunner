@@ -554,6 +554,21 @@ settings:
       The photograph's frame is left as it is. Off is the run as it was; see
       pixel_ops' `specular_eta` / `specular_blur` for the shape of the cut.
 
+  - name: splat_labels
+    label: Body-part label per splat
+    type: bool
+    default: true
+    help: >-
+      Segment every final frame with Sapiens2 (Goliath body parts: face, hair,
+      hands, arms, legs, clothing, shoes...) and vote the classes onto the
+      splats as they are exported: scene.ply gains two float properties per
+      Gaussian, `seg_label` (the class id) and `seg_conf` (the winner's share
+      of the splat's rendered weight). Viewers ignore the extra columns. ~20 s
+      of GPU for 81 frames and an unmeasurable cost at export; the same maps
+      go into the COLMAP bundle as a labels/ sidecar. Measured 2026-09-11:
+      96% of the rendered weight agrees with its splat's class, median
+      confidence 0.99, boundaries and the silhouette are where it wavers.
+
   - name: re_outline
     label: Re-outline (experimental)
     type: bool
@@ -3184,6 +3199,25 @@ steps:
       body_rig: scene.body_rig
       face_rig_stats: scene.face_rig_stats
 
+  # The class map of every final frame, for the per-splat label vote
+  # (`splat_labels`). Sapiens2's segmentation head over the frames as the
+  # final training sees them — after the upscale, the eye paste, everything
+  # — so the labels sit on the pixels the vote is weighted by. bf16 (the
+  # matte the face branch cuts stays on the step's float32 default; this
+  # instance never touches a matte). ~0.24 s a frame on a 4070 Ti. The maps
+  # reach b2ctrain as a labels/ sidecar beside the frames and the trainer
+  # votes them onto the splats in its export pass; see steps/brush.py.
+  - id: segment_views
+    step: sapiens2_seg
+    dispatch: in_process
+    when: ${globals.splat_labels}
+    inputs:
+      images: dataset.images
+    params:
+      dtype: bfloat16
+    outputs:
+      labels: scene.seg_labels
+
   # Deliverable 1: a COLMAP dataset. `layout: brush` puts the frames in
   # images/ beside the three .txt files — what brush itself reads, and what
   # somebody handed this directory expects, rather than the flat
@@ -3201,6 +3235,9 @@ steps:
       points_3d: dataset.points_3d
       images: dataset.images
       masks: dataset.masks
+      # The per-frame class maps as a labels/ sidecar, so the bundle carries
+      # the vote's input. Optional: off, the directory is simply absent.
+      labels: scene.seg_labels?
     params:
       output_dir: ${globals.output_root}/colmap
       layout: brush
@@ -3238,6 +3275,11 @@ steps:
       # face_refine on it also carries build_face_rig's per-view face
       # deltas (rig v3).
       body_rig: scene.body_rig?
+      # The per-frame class maps (segment_views): the trainer votes them
+      # onto the splats at export and scene.ply carries seg_label/seg_conf
+      # per Gaussian. Optional, so `splat_labels: false` leaves this
+      # training byte-identical to before.
+      labels: scene.seg_labels?
       # No normal_maps, and no step computing them any more (see above).
       # brush only emits the normal-loss flags when this input is wired, so
       # the absence is already the whole of "supervision off" — the explicit

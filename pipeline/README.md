@@ -742,7 +742,11 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   fragments without hole filling where an RMBG matte of a body must never be
   filled). Fed by `sapiens2_seg` (a Face_Neck mask, `parts` configurable) and
   `crop_to_box`. Synthetic tests only; the gate is
-  `tests/test_face_splat.py::TestCropIsANoOpOnTheRays`.
+  `tests/test_face_splat.py::TestCropIsANoOpOnTheRays`. `sapiens2_seg` also
+  has a **batched path** (2026-09-11): `images` in, one uint8 class map per
+  frame out (`labels`), one frame at a time, bf16 by a `dtype` param the
+  face branch leaves at float32. The workflow's `segment_views` runs it over
+  the final frames for the per-splat label vote below.
 - The `...+splat` render modes (`render.py`) — alpha-composite that face
   onto the skeleton drawings on every frame within `splat_max_angle_deg` of
   the source view, which at the shipped 60° is roughly two thirds of the
@@ -1032,6 +1036,22 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   confidence work on `normal-map-supervision` — an older binary writes no
   `ev_*`, which the renderer reports as a warning and falls back from, so a
   mismatched image degrades loudly rather than silently.
+  **Update (2026-09-11):** a `labels` input (per-view uint8 class maps,
+  `sapiens2_seg`'s batched output) is written as b2ctrain's `labels/`
+  sidecar and, when the trainer's `--help` lists `--export-labels`, voted
+  onto the splats in the same export replay as the evidence: each Gaussian's
+  rendered weight on each class's pixels, summed over the training views,
+  so it is front-to-back and a floater whose weight lands on background wins
+  class 0. The exported .ply gains two float properties after the `ev_*`
+  block, `seg_label` (the Goliath class id, `steps/sapiens2.py`'s
+  `SEG_CLASSES`) and `seg_conf` (the winner's share); every other reader
+  ignores them. Behind the `splat_labels` setting (on) on the final training
+  and the COLMAP bundle only. Measured on a deliverable before it landed
+  (`output/segsplat/NOTES.md`): 96% of the rendered weight agrees with its
+  splat's class, median confidence 0.99, 95.1% pixel agreement when the 3D
+  labels are rendered back at the training cameras (mIoU 0.845); every
+  third view votes the same result, so the cost is the ~20 s segmentation
+  pass and nothing at export. Tests in `tests/test_splat_labels.py`.
   **Update (2026-09-06):** `align_iters` (4 by default) makes the training a
   loop. The measurement behind it (`docs/final-splat-alignment-guide.md`):
   the deliverable splat is markedly softer than the frames it was fitted to

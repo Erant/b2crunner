@@ -239,6 +239,8 @@ def check_trainer_binaries() -> Check:
         "--hollow-weight", "--body-rig",
         # --body-rig's help names the v3 rig magic (per-view face deltas, b2ctrain e8f43ac).
         "B2CRIG3",
+        # The per-splat label vote (seg_label/seg_conf in the .ply, b2ctrain 2977f0e).
+        "--export-labels",
     ]
     lines, status = [], OK
 

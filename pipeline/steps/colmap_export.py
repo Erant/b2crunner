@@ -73,6 +73,9 @@ class ColmapExportStep(Step):
              "normal_maps": Optional[List[np.ndarray]] HxWx3 float32 [-1,1],
              "weights": Optional[List[np.ndarray]] float32 [0,1] per training
                         view, written as brush's weights/ sidecar (brush layout),
+             "labels": Optional[List[np.ndarray]] HxW uint8 class ids per
+                        training view, written as b2ctrain's labels/ sidecar
+                        (brush layout) so the bundle trains with the same vote,
              "support_cameras": Optional[List[Camera]],
              "support_images": Optional[List[np.ndarray]] BGR(A),
              "support_masks": Optional[List[np.ndarray]] float32 [0,1],
@@ -99,7 +102,7 @@ class ColmapExportStep(Step):
     def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
         from body2colmap.exporter import ColmapExporter
 
-        from .brush import _SupportViews, _loss_weights, write_loss_weights
+        from .brush import _SupportViews, _labels, _loss_weights, write_labels, write_loss_weights
 
         cameras = inputs["cameras"]
         image_names = inputs["image_names"]
@@ -121,6 +124,12 @@ class ColmapExportStep(Step):
             raise ValueError(f"Unknown layout {layout!r}; expected one of {LAYOUTS}.")
 
         weights = _loss_weights(inputs, len(image_names))
+        labels = _labels(inputs, len(image_names))
+        if labels is not None and layout != "brush":
+            raise ValueError(
+                f"labels were wired in but layout is {layout!r}; only the brush "
+                f"layout has a labels/ sidecar directory."
+            )
         if weights is not None and layout != "brush":
             raise ValueError(
                 f"weights were wired in but layout is {layout!r}. A loss-weight map "
@@ -202,6 +211,7 @@ class ColmapExportStep(Step):
                 cv2.imwrite(str(normal_path), out)
 
         write_loss_weights(output_path, image_names, weights)
+        write_labels(output_path, image_names, labels)
         support.write(output_path)
 
         return {"output_path": str(output_path.absolute())}

@@ -99,7 +99,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 ARG B2CTRAIN_REPO=https://github.com/Erant/b2ctrain.git
 ARG B2CTRAIN_BRANCH=main
-ARG B2CTRAIN_REF=536681da0e4fae4f8f10919edd72cdd3c6647ae3
+ARG B2CTRAIN_REF=2977f0e88aa49c7208d793d823cfab28b44c990d
 RUN git clone --depth 1 --branch ${B2CTRAIN_BRANCH} ${B2CTRAIN_REPO} /src/b2ctrain \
     && cd /src/b2ctrain \
     && head="$(git rev-parse HEAD)" \

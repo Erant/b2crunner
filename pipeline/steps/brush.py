@@ -329,6 +329,11 @@ def _trainer_has_body_rig(brush_path: str) -> bool:
     return "--body-rig" in _trainer_help(brush_path)
 
 
+def _trainer_has_labels(brush_path: str) -> bool:
+    """True if the trainer takes `--export-labels` (b2ctrain 2977f0e or later)."""
+    return "--export-labels" in _trainer_help(brush_path)
+
+
 def _trainer_has_rig_v3(brush_path: str) -> bool:
     """True if `--body-rig` takes a v3 rig with per-view vertex displacements (b2ctrain e8f43ac or later).
 
@@ -619,6 +624,46 @@ def _loss_weights(inputs: Dict[str, Any], count: int) -> Optional[List[np.ndarra
     return list(weights)
 
 
+def _labels(inputs: Dict[str, Any], count: int) -> Optional[List[np.ndarray]]:
+    """The `labels` input, checked against the training views like `weights`."""
+    labels = inputs.get("labels")
+    if labels is None or len(labels) == 0:
+        return None
+    if len(labels) != count:
+        raise ValueError(
+            f"labels has {len(labels)} entries but there are {count} training "
+            f"views. A label map belongs to one view; either give every view "
+            f"one or none of them."
+        )
+    return list(labels)
+
+
+def write_labels(colmap_dir: Path, image_names: Sequence[str],
+                 labels: Optional[Sequence[np.ndarray]]) -> None:
+    """Write the training views' class maps as b2ctrain's `labels/` sidecar.
+
+    Single-channel 8-bit PNGs of class ids, one per frame, named like the
+    `masks/` sidecar so the trainer matches them by stem. The ids are
+    written as they are — NOT through `mask_to_alpha_u8`, which scales a
+    [0, 1] map to 0..255 and would turn class 3 into 255. Nothing is written
+    when there are none; the directory's absence means "no vote".
+    """
+    if not labels:
+        return
+    labels_dir = colmap_dir / "labels"
+    labels_dir.mkdir(exist_ok=True)
+    for label, filename in zip(labels, image_names):
+        label = np.asarray(label)
+        if label.ndim != 2:
+            raise ValueError(f"labels must be HxW class-id maps, got shape {label.shape}")
+        cv2.imwrite(str(labels_dir / _sidecar_name(filename)), label.astype(np.uint8))
+    logger.info(
+        "brush: %d training view(s) carry a labels/ sidecar (per-pixel class "
+        "ids); the trainer votes them onto the splats at export as seg_label / "
+        "seg_conf", len(labels),
+    )
+
+
 def write_loss_weights(colmap_dir: Path, image_names: Sequence[str],
                        weights: Optional[Sequence[np.ndarray]]) -> None:
     """Write the training views' loss weights as brush's `weights/` sidecar.
@@ -786,6 +831,14 @@ class BrushStep(Step):
              "normal_maps": Optional[List[np.ndarray]] HxWx3 float32 [-1,1],
              "weights": Optional[List[np.ndarray]] float32 [0,1], a per-pixel
                         loss weight per training view (weights/ sidecar),
+             "labels": Optional[List[np.ndarray]] HxW uint8 class ids per
+                        training view (sapiens2_seg's batched `labels`),
+                        written as the labels/ sidecar; the trainer votes
+                        them onto the splats and the exported .ply carries
+                        `seg_label` / `seg_conf` per Gaussian (b2ctrain
+                        --export-labels). Extra float properties after the
+                        ev_* block, which viewers reading brush's layout
+                        ignore,
              "mesh": Optional[(vertices (N,3), faces (F,3))] — the body mesh in
                      the dataset's world frame (render.py's "mesh" output);
                      written as mesh.ply for the hollow loss (`hollow_weight`),
@@ -1045,6 +1098,7 @@ class BrushStep(Step):
         masks = inputs.get("masks")
         normal_maps = inputs.get("normal_maps")
         weights = _loss_weights(inputs, len(images))
+        labels = _labels(inputs, len(images))
         support = _SupportViews.from_inputs(inputs, image_names)
         mesh = inputs.get("mesh")
         body_params = inputs.get("body_params")
@@ -1239,6 +1293,14 @@ class BrushStep(Step):
                     cv2.imwrite(str(normal_path), out)
 
             write_loss_weights(colmap_dir, image_names, weights)
+            write_labels(colmap_dir, image_names, labels)
+            export_labels = labels is not None and _trainer_has_labels(brush_path)
+            if labels is not None and not export_labels:
+                logger.warning(
+                    "brush: labels were wired in but %s takes no --export-labels; "
+                    "the .ply will carry no seg_label (b2ctrain 2977f0e or later "
+                    "has it)", brush_path,
+                )
             support.write(colmap_dir)
 
             ply_output_name = params["export_name"]
@@ -1317,6 +1379,10 @@ class BrushStep(Step):
                 # .ply, and the two are independent on the brush side.
                 if export_evidence:
                     cmd.append("--export-evidence")
+                # The label vote rides the same replay; on its own it writes
+                # seg_label/seg_conf and no ev_* block.
+                if export_labels:
+                    cmd.append("--export-labels")
                 if evidence_prune_inmask is not None:
                     cmd.extend(["--evidence-prune-inmask", str(evidence_prune_inmask)])
                 if evidence_normal_weight > 0:

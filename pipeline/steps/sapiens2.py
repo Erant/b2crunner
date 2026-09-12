@@ -221,11 +221,13 @@ class Sapiens2SegStep(Step):
     notion of where a face stops.
 
     inputs:  {"image": np.ndarray BGR}
+             or {"images": List[np.ndarray] BGR(A)} — the batched path, below
     outputs: {"mask": HxW float32 in [0,1] — the summed class probability
                       of `parts`, which is the soft silhouette alpha,
               "labels": HxW int32 — the argmax class map, all 29 classes,
               "box": (x0, y0, x1, y1) ints — the tight bounding box of the
                       selected region, for `crop_to_box`}
+             or {"labels": List[HxW uint8]} for the batched path
 
     **`mask` is a probability map, not a binary mask**, and that is what
     makes it a drop-in for `pointmap_splat`'s `mask` input: that step
@@ -243,9 +245,21 @@ class Sapiens2SegStep(Step):
     probabilities. The seg config squashes anisotropically with no padding,
     so there is no letterbox to undo.
 
-    Single image only, deliberately: both of its callers segment one
-    photograph, and `box` is not a per-batch concept. Ask for the batched
-    path when something needs it.
+    The single-image path serves the face branch (a matte and a box of one
+    photograph). The **batched path** (`images` in, `labels` out) exists for
+    the per-splat label vote: it segments every final-training frame and
+    hands the class maps to `brush` as the `labels/` sidecar (2026-09-11).
+    It returns the argmax map alone — `box` is not a per-batch concept and
+    a probability volume per frame is 29x the memory for nothing the vote
+    reads. Frames go through one at a time: the 1B model at its fixed
+    1024x768 input is 0.24 s/frame in bf16 on a 4070 Ti (19 s for 81
+    frames, 3.1 GB), and a batch of four in fp32 OOMs a 12 GB card on the
+    attention matrix, so batching buys nothing worth that risk. An RGBA
+    frame is composited on black, which is the ground the trainer sees.
+
+    `dtype` is `float32` by default so the face branch's matte does not
+    move; the workflow's batched instance runs `bfloat16` (4x faster, 2.5x
+    less VRAM), which masktest measured its face splat at.
 
     Loading is not shared between calls unless the workflow says
     `keep_loaded: true`. The face branch runs this step twice — once on the
@@ -266,6 +280,10 @@ class Sapiens2SegStep(Step):
         Param("checkpoint", str, DEFAULT_SEG_CHECKPOINT,
               "HF repo for the segmentation head; the family is 0.4b/0.8b/1b/5b",
               advanced=True),
+        Param("dtype", str, "float32",
+              "Weights and activations: float32 (the face branch's measured "
+              "setting) or bfloat16 (4x faster, 2.5x less VRAM; the batched "
+              "label pass runs it)", choices=("float32", "bfloat16"), advanced=True),
         Param("device", str, None, "Torch device; empty means cuda if available",
               advanced=True),
     )
@@ -275,6 +293,7 @@ class Sapiens2SegStep(Step):
         self._processor = None
         self._device = None
         self._checkpoint = None
+        self._dtype = None
         # Set by release_vram(), cleared by the next run(). A flag rather
         # than inferring it from `self._device == "cpu"`: that is also what
         # an explicit `device: cpu` looks like, and re-uploading the model
@@ -287,8 +306,9 @@ class Sapiens2SegStep(Step):
 
         checkpoint = params["checkpoint"]
         self._device = params["device"] or ("cuda" if torch.cuda.is_available() else "cpu")
+        self._dtype = getattr(torch, params["dtype"])
         self._processor = AutoImageProcessor.from_pretrained(checkpoint)
-        self._model = AutoModelForSemanticSegmentation.from_pretrained(checkpoint)
+        self._model = AutoModelForSemanticSegmentation.from_pretrained(checkpoint, dtype=self._dtype)
         self._model.to(self._device).eval()
         self._checkpoint = checkpoint
         self._on_cpu_for_eviction = False
@@ -306,31 +326,63 @@ class Sapiens2SegStep(Step):
         self._model = None
         self._processor = None
         self._checkpoint = None
+        self._dtype = None
         self._on_cpu_for_eviction = False
         import torch
 
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-    def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+    def _ready(self, params: Dict[str, Any]) -> None:
         import torch
-        from PIL import Image
 
-        if self._model is None or self._checkpoint != params["checkpoint"]:
+        if (self._model is None or self._checkpoint != params["checkpoint"]
+                or self._dtype != getattr(torch, params["dtype"])):
             self.load(params)
         elif self._on_cpu_for_eviction:
             # Came back from a release_vram(); put it on the card again.
             self._model.to(self._device)
             self._on_cpu_for_eviction = False
 
+    def _forward(self, image_bgr: np.ndarray):
+        """One frame through the model; the raw outputs, for either post-process."""
+        import torch
+        from PIL import Image
+
+        if image_bgr.ndim == 3 and image_bgr.shape[2] == 4:
+            # Composite on black: the ground every training view is on.
+            alpha = image_bgr[..., 3:4].astype(np.float32) / 255.0
+            image_bgr = (image_bgr[..., :3].astype(np.float32) * alpha).astype(np.uint8)
+        rgb = Image.fromarray(cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB))
+        processed = self._processor(images=[rgb], return_tensors="pt").to(self._device)
+        processed["pixel_values"] = processed["pixel_values"].to(self._dtype)
+        with torch.inference_mode():
+            return self._model(**processed)
+
+    def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+        self._ready(params)
+
+        if "images" in inputs:
+            labels = []
+            for image in inputs["images"]:
+                image_bgr = np.asarray(image)
+                height, width = image_bgr.shape[:2]
+                outputs = self._forward(image_bgr)
+                result = self._processor.post_process_semantic_segmentation(
+                    outputs, target_sizes=[(height, width)]
+                )[0]
+                # A tensor, or (with scores requested) a record carrying one.
+                seg = getattr(result, "segmentation", result)
+                labels.append(np.asarray(seg.cpu().numpy()).astype(np.uint8))
+            logger.info("sapiens2_seg: %d frame(s) labelled (%s)", len(labels), params["dtype"])
+            return {"labels": labels}
+
+        import torch
+
         parts = parse_parts(params["parts"])
         image_bgr = np.asarray(inputs["image"])
         height, width = image_bgr.shape[:2]
-
-        rgb = Image.fromarray(cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB))
-        processed = self._processor(images=[rgb], return_tensors="pt").to(self._device)
-        with torch.inference_mode():
-            outputs = self._model(**processed)
+        outputs = self._forward(image_bgr)
 
         result = self._processor.post_process_semantic_segmentation(
             outputs, target_sizes=[(height, width)], return_segmentation_scores=True
