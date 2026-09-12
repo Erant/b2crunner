@@ -213,7 +213,7 @@ def _run(job: RunJob, status_path: Path) -> int:
         if job.reference_image:
             dataset = Dataset.from_reference_image(job.reference_image, prompt=job.prompt or None)
             logger.info(
-                "starting from reference sheet %s (%dx%d)",
+                "starting from reference image %s (%dx%d)",
                 job.reference_image, *dataset.resolution,
             )
         else:

@@ -445,7 +445,9 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
                         "run per pair, fanned across every GPU. Add "
                         "`image1.yaml` (`settings:` / `step_params:`) beside a "
                         "pair to run just that one at its own settings;_\n"
-                        "- _a single **reference-sheet image** — one run._\n\n"
+                        "- _a single **image** — a front/back reference sheet or "
+                        "one frontal photo (the Input setting tells them apart) — "
+                        "one run._\n\n"
                         "_Either shape runs `fast_helical_native`._"
                     )
                     # No picker: there is only one shipped pipeline.
@@ -755,7 +757,7 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
             if not upload_file:
                 raise gr.Error(
                     "Upload something: a .zip of image/prompt pairs, or a "
-                    "single reference-sheet image."
+                    "single image (a front/back sheet or one frontal photo)."
                 )
             path = upload_file if isinstance(upload_file, str) else upload_file.name
             # Everything from here down is `pipeline.runs`, which the HTTP

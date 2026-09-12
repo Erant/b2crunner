@@ -1619,6 +1619,70 @@ class TestOnlyTheHelicalRerenderCapsTheShBands(unittest.TestCase):
         self.assertEqual(set(setting.values()), {None}, setting)
 
 
+class TestTheSingleViewInput(unittest.TestCase):
+    """A single frontal photo rides the same workflow as a sheet: the split
+    step decides which it is (`input_layout`, auto by default) and
+    publishes the verdict, and `pick_rear_view` reads that verdict after
+    pass 1 to fill the reference slot the photo could not. Neither is
+    gated — a `when:` resolves against globals before the run, so a
+    runtime verdict cannot switch a step off — and the wiring below is what
+    makes the two modes share one file (steps/reference_view.py)."""
+
+    def _spec(self):
+        from pipeline.cli import resolve_workflow
+        from pipeline.workflow import WorkflowSpec
+
+        return WorkflowSpec.from_yaml(resolve_workflow("fast_helical_native"))
+
+    def _step(self, spec, step_id):
+        return next(s for s in spec.steps if s.id == step_id)
+
+    def test_the_split_reads_the_setting_and_publishes_its_verdict(self):
+        spec = self._spec()
+        setting = next(p for p in spec.settings if p.name == "input_layout")
+        self.assertEqual(setting.default, "auto")
+        self.assertEqual(list(setting.choices), ["auto", "sheet", "single"])
+        split = self._step(spec, "split_sheet")
+        self.assertEqual(split.params.get("layout"), "${globals.input_layout}")
+        self.assertEqual(split.outputs.get("layout"), "scene.input_layout")
+
+    def test_pick_rear_view_sits_after_pass_1_and_before_the_training(self):
+        spec = self._spec()
+        order = [s.id for s in spec.steps]
+        pick = order.index("pick_rear_view")
+        self.assertGreater(pick, order.index("foreground_masks"), "it needs the mattes")
+        self.assertGreater(pick, order.index("adjust_denoised"), "the treated frames")
+        self.assertLess(pick, order.index("train_splat"))
+        self.assertLess(pick, order.index("denoise_pass2"))
+        step = self._step(spec, "pick_rear_view")
+        self.assertTrue(step.when is True, "runs in both modes; see the class docstring")
+        self.assertEqual(step.inputs.get("layout"), "scene.input_layout")
+        self.assertEqual(step.inputs.get("reference_image"), "dataset.reference_image")
+        self.assertEqual(step.outputs.get("reference_image"), "dataset.reference_image")
+        self.assertEqual(step.inputs.get("masks"), "dataset.masks")
+
+    def test_the_reference_has_exactly_two_writers(self):
+        """The split (the back panel, or None) and the pick (the rear view,
+        or the back panel again). A third would be a second opinion on
+        what pass 2 conditions on."""
+        spec = self._spec()
+        writers = [
+            s.id for s in spec.steps
+            if "dataset.reference_image" in s.outputs.values()
+        ]
+        self.assertEqual(writers, ["split_sheet", "pick_rear_view"])
+
+    def test_pass_2_reads_what_the_pick_wrote(self):
+        spec = self._spec()
+        order = [s.id for s in spec.steps]
+        for step_id in ("denoise_pass2",):
+            step = self._step(spec, step_id)
+            self.assertGreater(order.index(step_id), order.index("pick_rear_view"))
+            self.assertEqual(step.inputs.get("reference_image"), "dataset.reference_image")
+        # and pass 1 reads the slot BEFORE the pick, when a photo leaves it empty
+        self.assertLess(order.index("denoise_pass1"), order.index("pick_rear_view"))
+
+
 class TestThePixelOpsShipOff(unittest.TestCase):
     """`adjust_denoised` (pixel_ops) runs in the workflow, but every knob on
     it is off unless a setting turns it on. The SH cap on `rerender_splat`

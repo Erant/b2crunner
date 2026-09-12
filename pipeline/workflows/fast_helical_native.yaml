@@ -13,6 +13,22 @@
 # and reads the .ply optionally, so the branch being off leaves it with
 # nothing to composite rather than nothing to resolve.
 #
+# WHAT CHANGED (2026-09-11): **a single frontal photo is an accepted
+# input.** `split_sheet` takes the new `input_layout` setting (`auto`,
+# `sheet`, `single`; auto by default). Under `single` the whole upload is
+# the front, `dataset.reference_image` comes out None, and `denoise_pass1`
+# — which already runs without a reference (steps/wan22_vace_denoise.py
+# passes `reference_images=None`) — conditions on the injected photograph
+# alone. The new `pick_rear_view` after `adjust_denoised` then fills the
+# reference slot with the pass-1 frame most opposite the anchor about the
+# orbit target, matted over 0.5 grey, and `denoise_pass2` conditions on
+# THAT; on a sheet the step hands the back panel through. `auto` counts the
+# figures with MediaPipe's person detector (EfficientDet-Lite0, 14 MB, CPU,
+# ~15 ms), measured 27/27 on ~/datasets/cyberpunk2's sheets and on every
+# single photo tried before it was wired (steps/reference_sheet.py). The
+# mode rides the data rather than a `when:` because gates resolve against
+# globals before the run; both steps run in both modes.
+#
 # WHAT CHANGED (2026-09-10): **the face cap's supporting views carry their
 # colour past their mask** — `select_support_views` grew `bleed_px` (12,
 # the step's default; nothing is set here). A masked view's mask weights
@@ -310,13 +326,16 @@
 # additionally wants run_upscale on. The web UI's Outputs box drives all of
 # them plus the "Upscale dataset" toggle.
 #
-# The input is not a photo of the subject: it is the two-panel sheet a
-# diffusion model generates, subject facing front on the left and seen from
-# behind on the right. split_sheet cuts it down the middle — the front half
-# feeds the mesh and the anchor warp, the back half becomes
+# The input is usually not a photo of the subject: it is the two-panel
+# sheet a diffusion model generates, subject facing front on the left and
+# seen from behind on the right. split_sheet cuts it down the middle — the
+# front half feeds the mesh and the anchor warp, the back half becomes
 # dataset.reference_image, the one view wan22_vace_denoise conditions on.
-# cyber_6f's recorded reference.png is the whole sheet — the older
-# convention, from before anchor injection; not the target here.
+# A single frontal photo is accepted too (2026-09-11, `input_layout`): it
+# is the front whole, and the back view pass 2 conditions on is picked out
+# of pass 1's output by `pick_rear_view`. cyber_6f's recorded reference.png
+# is the whole sheet — the older convention, from before anchor injection;
+# not the target here.
 #
 # **Reading this file.** Three declaration blocks sit above `steps:`, and
 # they all feed one flat namespace that `${globals.x}` resolves against:
@@ -335,10 +354,11 @@
 # effective value of every one of them, defaults included.
 name: fast_helical_native
 description: >-
-  From a front/back reference sheet: split it, reconstruct a body, render its
-  own anchored views, then run the shared six-stage tail over that dataset —
-  denoise, train+re-render a splat, mask, denoise again, upscale, export a
-  COLMAP dataset and/or a flow-aligned .ply.
+  From a front/back reference sheet or a single frontal photo: split it (or
+  not), reconstruct a body, render its own anchored views, then run the
+  shared six-stage tail over that dataset — denoise, train+re-render a
+  splat, mask, denoise again, upscale, export a COLMAP dataset and/or a
+  flow-aligned .ply.
 
 settings:
   # The knobs the Run tab draws, in this order, straight from these
@@ -376,6 +396,22 @@ settings:
       head crop progressively tighter. Only the mesh reconstruction's skeleton
       makes the tighter presets available — `render` falls back to `full` for
       any it cannot compute, and rerender_splat follows.
+
+  - name: input_layout
+    label: Input
+    default: auto
+    choices: [auto, sheet, single]
+    help: >-
+      What the uploaded image is. `sheet`: the two-panel front/back sheet,
+      cut down the middle — the front half is the subject, the back half is
+      the reference both denoise passes condition on. `single`: one frontal
+      photo of the subject — there is no back view, so the first denoise
+      runs on the injected photograph alone and the second conditions on
+      the first's own rear-view frame (pick_rear_view). `auto` (the
+      default) counts the figures with a person detector: two, one each
+      side of the centre, is a sheet; one is a photo; anything else stops
+      the run and asks for this to be set. Measured 27/27 on the cyberpunk2
+      sheets and every single photo tried (steps/reference_sheet.py).
 
 
   - name: seed
@@ -626,7 +662,7 @@ steps:
   # Build the dataset the shared tail expects as its input. Everything from
   # `denoise_pass1` on is that tail.
 
-  # The input is the two-panel front/back sheet, not a photo of the subject.
+  # The input is the two-panel front/back sheet, or a single frontal photo.
   # Nothing downstream wants both panels, and the two halves go to opposite
   # places (steps/reference_sheet.py):
   #
@@ -639,16 +675,23 @@ steps:
   # view nothing else in the batch can supply. (cyber_6f's recorded
   # reference.png is the whole sheet — the older convention, from before
   # anchor injection. Don't take it as the target.)
+  #
+  # A single photo (`input_layout`, detected or declared) is the front whole
+  # and writes NONE over dataset.reference_image: denoise_pass1 then runs
+  # with no reference, and pick_rear_view below fills the slot from its
+  # output. The verdict is published as scene.input_layout for that step.
   - id: split_sheet
     step: split_reference_sheet
     dispatch: in_process
     inputs:
       sheet: dataset.reference_image
     params:
+      layout: ${globals.input_layout}
       front_side: left
     outputs:
       front: scene.front_image
       back: dataset.reference_image
+      layout: scene.input_layout
 
   - id: reconstruct_body
     step: sam3d_body
@@ -1780,6 +1823,31 @@ steps:
       specular_suppress: ${globals.specular_suppress}
     outputs:
       images: dataset.images
+
+  # The reference denoise_pass2 conditions on. On a sheet this is the back
+  # panel split_sheet already put in dataset.reference_image, handed
+  # through. On a single photo there is none, and this takes the pass-1
+  # frame whose camera is furthest round the orbit from the anchor — the
+  # subject from behind, as pass 1 painted it — cut with the matte
+  # foreground_masks just made and laid over the batch's own 0.5 grey.
+  # After adjust_denoised so the reference is the frame train_splat is
+  # trained on. Runs in both modes: scene.input_layout is a runtime verdict
+  # and a `when:` cannot read one (steps/reference_view.py).
+  - id: pick_rear_view
+    step: pick_rear_view
+    dispatch: in_process
+    inputs:
+      images: dataset.images
+      masks: dataset.masks
+      cameras: dataset.cameras
+      anchor_position: dataset.extras.anchor_position
+      orbit_target: dataset.extras.orbit_target
+      layout: scene.input_layout
+      reference_image: dataset.reference_image
+    params:
+      debug_dir: ${globals.output_root}/debug/rear_view
+    outputs:
+      reference_image: dataset.reference_image
 
   - id: normal_maps
     step: sapiens2_lite

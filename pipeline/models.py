@@ -169,21 +169,36 @@ def _probe_wan22_fp8() -> bool:
         return False
 
 
-def _fetch_mediapipe() -> str:
-    """The landmarker alone. The `blaze_face_short_range` detector that
-    used to sit beside it went on 2026-09-11: the face crop now comes from
-    the body mesh (see steps/face_landmarks.py)."""
-    from .steps.face_landmarks import (
-        LANDMARKER_MODEL_NAME, LANDMARKER_MODEL_URL, _ensure_model, _model_path,
+def _mediapipe_files():
+    """(name, url) of every MediaPipe model file a step fetches, in one place.
+
+    The face landmarker, and the person detector `split_reference_sheet`
+    counts figures with under `layout: auto` (2026-09-11). The
+    `blaze_face_short_range` face detector that used to sit here went the
+    same day: the face crop now comes from the body mesh (see
+    steps/face_landmarks.py).
+    """
+    from .steps.face_landmarks import LANDMARKER_MODEL_NAME, LANDMARKER_MODEL_URL
+    from .steps.reference_sheet import DETECTOR_MODEL_NAME, DETECTOR_MODEL_URL
+
+    return (
+        (LANDMARKER_MODEL_NAME, LANDMARKER_MODEL_URL),
+        (DETECTOR_MODEL_NAME, DETECTOR_MODEL_URL),
     )
 
-    return str(_ensure_model(LANDMARKER_MODEL_URL, _model_path(LANDMARKER_MODEL_NAME)).parent)
+
+def _fetch_mediapipe() -> str:
+    from .steps.face_landmarks import _ensure_model, _model_path
+
+    for name, url in _mediapipe_files():
+        path = _ensure_model(url, _model_path(name))
+    return str(path.parent)
 
 
 def _probe_mediapipe() -> bool:
-    from .steps.face_landmarks import LANDMARKER_MODEL_NAME, _model_path
+    from .steps.face_landmarks import _model_path
 
-    return _model_path(LANDMARKER_MODEL_NAME).exists()
+    return all(_model_path(name).exists() for name, _url in _mediapipe_files())
 
 
 def _fetch_colmap_onnx() -> str:
@@ -556,8 +571,9 @@ def _registry() -> List[ModelSource]:
             ("refine_cameras",), _fetch_colmap_onnx, _probe_colmap_onnx, approx_gb=0.07,
         ),
         ModelSource(
-            "mediapipe", "MediaPipe face landmarker",
-            ("detect_face_landmarks", "map_face_to_mesh"), _fetch_mediapipe, _probe_mediapipe, approx_gb=0.01,
+            "mediapipe", "MediaPipe face landmarker + person detector",
+            ("detect_face_landmarks", "map_face_to_mesh", "split_reference_sheet"),
+            _fetch_mediapipe, _probe_mediapipe, approx_gb=0.02,
         ),
     ]
 

@@ -225,7 +225,7 @@ def run_workflow(args: argparse.Namespace) -> int:
     if args.reference_image:
         dataset = Dataset.from_reference_image(args.reference_image, prompt=args.prompt)
         logger.info(
-            "starting from a reference sheet: %s (%dx%d)",
+            "starting from a reference image: %s (%dx%d)",
             args.reference_image, *dataset.resolution,
         )
     else:
