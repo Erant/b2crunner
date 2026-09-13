@@ -104,6 +104,7 @@ from .gpu_scheduler import GpuScheduler, detect_gpu_count
 from .models import registry
 from .paths import data_dir, output_dir, run_jobs_dir, upload_dir
 from .run_state import PREVIEW_FRAMES, RunState
+from .cli import available_workflows
 from .runs import (
     BUNDLE_NAME, IMAGE_SUFFIXES, WORKFLOW_NATIVE, SubmitError,
     build_bundle_zip, build_result_zip, completed_runs, resolve_upload,
@@ -448,12 +449,20 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
                         "- _a single **image** — a front/back reference sheet or "
                         "one frontal photo (the Input setting tells them apart) — "
                         "one run._\n\n"
-                        "_Either shape runs `fast_helical_native`._"
+                        "_Either shape runs the pipeline picked below._"
                     )
-                    # No picker: there is only one shipped pipeline.
+                    # Every workflow file in pipeline/workflows/, the shipped
+                    # default selected. The picker was fixed to the one
+                    # shipped pipeline until 2026-09-13, when the
+                    # experimental fast_helical_direct joined it; the
+                    # panel, the Outputs box and the summary all follow the
+                    # pick, and the per-run overrides are dropped on a
+                    # change because they are keyed to the workflow they
+                    # were drawn for.
                     workflow_in = gr.Dropdown(
-                        [WORKFLOW_NATIVE], value=default_workflow,
-                        label="Pipeline", interactive=False,
+                        [p.stem for p in available_workflows()],
+                        value=default_workflow,
+                        label="Pipeline", interactive=True,
                         info="The params panel and Outputs below follow it.",
                     )
                     prompt_in = gr.Textbox(
@@ -753,7 +762,7 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
             doctor_out = gr.Code(label="Report", lines=30)
 
         # -- wiring --------------------------------------------------------
-        def on_start(upload_file, prompt, params):
+        def on_start(upload_file, prompt, params, workflow):
             params = params or {}
             if not upload_file:
                 raise gr.Error(
@@ -770,7 +779,7 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
                 names = submit_runs(
                     scheduler, plan,
                     params.get("globals"), params.get("steps"),
-                    envs_path=envs_path,
+                    envs_path=envs_path, workflow=workflow or default_workflow,
                 )
             except SubmitError as exc:
                 raise gr.Error(str(exc)) from None
@@ -810,9 +819,17 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
 
         start_btn.click(
             on_start,
-            inputs=[upload_in, prompt_in, param_state],
+            inputs=[upload_in, prompt_in, param_state, workflow_in],
             outputs=[run_picker],
         ).then(stream, inputs=[run_picker], outputs=progress_outputs)
+
+        # A different pipeline: a different summary, and no overrides —
+        # the ones filed were against the other file's settings and step
+        # ids, and `submit_runs` would refuse them by name.
+        workflow_in.change(
+            lambda name: (workflow_summary(name), {"globals": {}, "steps": {}}),
+            inputs=[workflow_in], outputs=[summary_out, param_state],
+        )
 
         attach_btn.click(stream, inputs=[run_picker], outputs=progress_outputs)
         refresh_runs_btn.click(

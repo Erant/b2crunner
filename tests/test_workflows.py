@@ -268,9 +268,11 @@ class TestWorkflowFiles(unittest.TestCase):
                 if "debug_dir" in step.params:
                     wired[step.id] = step.params["debug_dir"]
             with self.subTest(workflow=path.name):
-                for step_id in ("refine_cameras", "refine_cameras_final",
-                                "face_splat", "face_splat_refined"):
-                    self.assertIn(step_id, wired)
+                # Every refinement and every face splat, however many a
+                # file has (fast_helical_direct refines once).
+                for step in spec.steps:
+                    if step.step in ("refine_cameras", "face_pointmap_splat"):
+                        self.assertIn(step.id, wired)
                 for step_id, value in wired.items():
                     self.assertTrue(
                         value.startswith("${globals.output_root}/debug/"),
@@ -805,20 +807,25 @@ class TestWorkflowFiles(unittest.TestCase):
                             f"{step.step} refuses that",
                         )
 
-    def test_the_supporting_views_reach_the_stage_2_training_only(self):
-        """The face splat's renders go into ONE brush training, the same
-        way in every file.
+    def test_the_supporting_views_reach_a_training_they_are_fresh_for(self):
+        """The face splat's renders go into a brush training the same way
+        in every file, and only into one they describe.
 
-        Three things, all of them wiring rather than code. The stage-2
-        training's reads are optional (`?`), which is what lets
-        `face_splat: false` turn the whole branch off without touching the
-        training. The paths on both sides have to be the same ones, or the
-        training silently gets nothing: an optional read of a path nothing
-        writes is exactly the failure this feature is built out of. And the
-        FINAL training must read none of them — `scene.support_views.*` is
-        still populated at that point, so an optional read there would
-        quietly succeed and fit the deliverable to renders taken along the
+        Three things, all of them wiring rather than code. A training's
+        reads are optional (`?`), which is what lets `face_splat: false`
+        turn the whole branch off without touching the training. The paths
+        on both sides have to be the same ones, or the training silently
+        gets nothing: an optional read of a path nothing writes is exactly
+        the failure this feature is built out of. And a training may read
+        them only if nothing REPLACED the dataset between the cap render
+        and the training — a `render_splat` that rebuilt the path, a
+        `seedvr2` that resized the frames and rescaled the cameras. The
+        native file's final training is the case: `scene.support_views.*`
+        is still populated by then, so an optional read would quietly
+        succeed and fit the deliverable to renders taken along the
         bootstrap's circular orbit, two denoise passes and an upscale ago.
+        The direct file's one training reads them, and may: its cap is
+        rendered after its upscale, along the cameras it trains on.
         """
         # brush's input name -> the output name select_support_views
         # publishes it under.
@@ -827,30 +834,50 @@ class TestWorkflowFiles(unittest.TestCase):
         for path in _workflows():
             spec = WorkflowSpec.from_yaml(str(path))
             by_id = {s.id: s for s in spec.steps}
+            order = {s.id: i for i, s in enumerate(spec.steps)}
             trainings = [s for s in spec.steps if s.step == "brush"]
             if not trainings:
                 continue
             with self.subTest(workflow=path.name):
+                readers = []
                 for step in trainings:
-                    final = step.id == "train_final_splat"
-                    for name in support:
-                        wired = step.inputs.get(name, "")
-                        if final:
-                            self.assertEqual(
-                                wired, "",
-                                f"{path.name}: '{step.id}' must not read "
-                                f"'{name}' — by then the dataset is the "
-                                f"helical re-render and these are the "
-                                f"circular bootstrap's renders",
-                            )
-                        else:
-                            self.assertTrue(
-                                wired.endswith("?"),
-                                f"{path.name}: '{step.id}' must read '{name}' "
-                                f"optionally — the branch that writes it is gated",
-                            )
+                    wired = [step.inputs.get(name, "") for name in support]
+                    if not any(wired):
+                        continue
+                    readers.append(step)
+                    for name, value in zip(support, wired):
+                        self.assertTrue(
+                            value.endswith("?"),
+                            f"{path.name}: '{step.id}' must read '{name}' "
+                            f"optionally — the branch that writes it is gated",
+                        )
+                    # Fresh: nothing between the cap render and this
+                    # training rebuilt the path or resized the frames.
+                    cap_at = order.get("render_face_support_views")
+                    self.assertIsNotNone(cap_at, f"{path.name}: no cap render")
+                    stale = [
+                        s.id for s in spec.steps
+                        if cap_at < order[s.id] < order[step.id] and (
+                            (s.step == "render_splat" and s.params.get("pattern")
+                             and "dataset.cameras" in s.outputs.values())
+                            or (s.step in ("seedvr2", "resize_batch")
+                                and "dataset.images" in s.outputs.values()))
+                    ]
+                    self.assertFalse(
+                        stale,
+                        f"{path.name}: '{step.id}' reads the face cap, but "
+                        f"{stale} replaced the dataset after the cap was "
+                        f"rendered — the views are renders along a path and "
+                        f"at a size the training no longer uses",
+                    )
+                self.assertLessEqual(
+                    len(readers), 1,
+                    f"{path.name}: the face cap is one training's evidence",
+                )
                 if "face_support_views" not in by_id:
                     continue
+                self.assertEqual(len(readers), 1)
+                training = readers[0]
                 selector = by_id["face_support_views"]
                 self.assertEqual(selector.step, "select_support_views")
                 self.assertEqual(selector.when, "${globals.face_splat}")
@@ -905,11 +932,10 @@ class TestWorkflowFiles(unittest.TestCase):
                 # edge silently does not apply, which is the failure mode
                 # worth a test: nothing raises, and the deliverable is
                 # fitted to renders of views it already has photographs of.
-                training = by_id["train_splat"]
                 self.assertEqual(
                     selector.inputs.get("path_cameras"), training.inputs["cameras"],
                     f"{path.name}: face_support_views must measure against the "
-                    f"same cameras train_splat trains on",
+                    f"same cameras '{training.id}' trains on",
                 )
                 self.assertEqual(
                     selector.inputs.get("splat_center"),
@@ -939,9 +965,7 @@ class TestWorkflowFiles(unittest.TestCase):
                     )
 
                 ids = [s.id for s in spec.steps]
-                for step in trainings:
-                    if step.id == "train_final_splat":
-                        continue
+                for step in readers:
                     self.assertLess(
                         ids.index("face_support_views"), ids.index("merge_support_views"),
                         f"{path.name}: the supporting views must be selected "
@@ -959,12 +983,19 @@ class TestWorkflowFiles(unittest.TestCase):
                             f"merge_support_views does not write",
                         )
 
-    def test_the_frames_yield_to_the_face_cap_in_the_stage_2_training_only(self):
+    def test_the_frames_yield_to_the_face_cap_in_the_training_that_reads_it(self):
         """The face cap wins: `face_priority` turns the refined face splat's
         coverage into per-pixel loss weights for the training views. All
         wiring, and all of it silent if wrong: an optional read of a path
         nothing writes trains at full weight, the old behaviour, with
         nothing in the log to say so.
+
+        The weights and the cap travel together: the training that reads
+        the supporting views reads the weights (or it hears the cap and the
+        frames at the same volume over the face), and one that reads no
+        cap reads no weights (there is nothing for its frames to yield to).
+        The native file's stage-2 training and the direct file's one
+        training are both that training.
 
         (The stage-1 shells had a `face_priority_shells` twin folding the
         same yield into their masks; both went with the shells on
@@ -973,7 +1004,7 @@ class TestWorkflowFiles(unittest.TestCase):
         for path in _workflows():
             spec = WorkflowSpec.from_yaml(str(path))
             by_id = {s.id: s for s in spec.steps}
-            if "train_splat" not in by_id:
+            if "face_priority" not in by_id:
                 continue
             with self.subTest(workflow=path.name):
                 priority = by_id["face_priority"]
@@ -1005,16 +1036,27 @@ class TestWorkflowFiles(unittest.TestCase):
                 self.assertEqual(selector.params.get("min_path_angle_deg"), 0.0)
 
                 weights = priority.outputs["weights"] + "?"
-                self.assertEqual(by_id["train_splat"].inputs.get("weights"), weights)
-                self.assertEqual(
-                    by_id["export_colmap_intermediate"].inputs.get("weights"), weights,
-                    "the debug export must train at the weighting train_splat did",
-                )
-                self.assertNotIn(
-                    "weights", by_id["train_final_splat"].inputs,
-                    "the final training takes no supporting views, so there is "
-                    "nothing for its frames to yield to",
-                )
+                for step in spec.steps:
+                    if step.step != "brush":
+                        continue
+                    if step.inputs.get("support_images"):
+                        self.assertEqual(
+                            step.inputs.get("weights"), weights,
+                            f"'{step.id}' reads the face cap and must read "
+                            f"the weights that make the frames yield to it",
+                        )
+                    else:
+                        self.assertNotIn(
+                            "weights", step.inputs,
+                            f"'{step.id}' takes no supporting views, so there "
+                            f"is nothing for its frames to yield to",
+                        )
+                if "export_colmap_intermediate" in by_id:
+                    self.assertEqual(
+                        by_id["export_colmap_intermediate"].inputs.get("weights"),
+                        weights,
+                        "the debug export must train at the weighting train_splat did",
+                    )
 
     def test_the_cameras_are_refined_before_anything_reads_them(self):
         """Camera refinement lands ahead of every consumer of a pose.
@@ -1296,6 +1338,10 @@ class TestWorkflowFiles(unittest.TestCase):
         which must read as pass 1 does or its silhouette is of a different
         subject. So this checks every one.
         """
+        # How many wan22_vace_denoise steps each file carries: the native
+        # file's two full-resolution passes plus the gated 480p re-outline
+        # pass; the direct file's one pass plus that same branch.
+        expected = {"fast_helical_native.yaml": 3, "fast_helical_direct.yaml": 2}
         workflows = _workflows()
         seen = 0
         for path in workflows:
@@ -1311,8 +1357,10 @@ class TestWorkflowFiles(unittest.TestCase):
                     self.assertEqual(
                         step.params.get("negative_prompt"), DENOISE_NEGATIVE_PROMPT
                     )
-            self.assertEqual(passes, 3, f"{path.name}: expected three denoise passes")
-        self.assertEqual(seen, 3 * len(workflows))
+            self.assertEqual(
+                passes, expected[path.name],
+                f"{path.name}: expected {expected[path.name]} denoise passes")
+        self.assertEqual(seen, sum(expected[p.name] for p in workflows))
 
     def test_every_render_with_a_backdrop_draws_the_same_room(self):
         """The backdrop was a pipeline SETTING until 2026-09-01, which made
@@ -1999,10 +2047,15 @@ class TestDeclaredSettings(unittest.TestCase):
         three unrelated samples. Four readers since 2026-09-08: the gated
         re-outline denoise draws the same seed as pass 1, so the silhouette
         it cuts is of the sample pass 1 would have drawn at 480p."""
+        stochastic = {"wan22_vace_denoise", "seedvr2"}
         for path in _workflows():
             spec = WorkflowSpec.from_yaml(str(path))
             readers = [step.id for step in spec.steps
                        if step.params.get("seed") == "${globals.seed}"]
+            expected = [step.id for step in spec.steps if step.step in stochastic]
             with self.subTest(workflow=path.name):
-                self.assertEqual(len(readers), 4, readers)
+                # Every denoise and the upscale, and nothing else: the
+                # native file's four, the direct file's three.
+                self.assertEqual(readers, expected)
+                self.assertGreaterEqual(len(readers), 3)
                 self.assertTrue(any("upscale" in r for r in readers))

@@ -44,10 +44,11 @@ from .workflow import Output, WorkflowSpec, apply_ui_overrides
 
 logger = logging.getLogger(__name__)
 
-# There is no workflow picker: every submission — an image, or a zip of
-# image/prompt/settings triples — runs this one workflow. The `workflow`
-# argument exists so a caller can be explicit, not so it can pick something
-# else.
+# The shipped default: every submission — an image, or a zip of
+# image/prompt/settings triples — runs this workflow unless the caller
+# names another (the UI's Pipeline picker, the API's `workflow` field). The
+# only other one is fast_helical_direct, an experiment (its header says
+# what it is); this stays the default until that has run.
 WORKFLOW_NATIVE = "fast_helical_native"
 
 
