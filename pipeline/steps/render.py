@@ -84,6 +84,16 @@ if sys.platform.startswith("linux") and "PYOPENGL_PLATFORM" not in os.environ:
         os.environ["PYOPENGL_PLATFORM"] = "egl"
     except OSError:
         os.environ["PYOPENGL_PLATFORM"] = "osmesa"
+    else:
+        # pyrender would take EGL device 0, which is the driver's ordering,
+        # not CUDA_VISIBLE_DEVICES', and on a rented pod may be a card this
+        # container cannot open. Pick ours (see egl_device.py); if nothing
+        # initialises at all, the promised OSMesa fallback applies.
+        from ..egl_device import configure as _configure_egl_device
+
+        _egl_devices, _egl_chosen = _configure_egl_device(target_cuda=0)
+        if _egl_devices is not None and _egl_chosen is None:
+            os.environ["PYOPENGL_PLATFORM"] = "osmesa"
 
 _FULL_FRAME_SENSOR_WIDTH_MM = 36.0
 

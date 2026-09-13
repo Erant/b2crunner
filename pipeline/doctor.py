@@ -187,6 +187,27 @@ def check_egl() -> Check:
         return Check("egl", FAIL, "libEGL.so.1 missing — `render` falls back to software or dies",
                      [*lines, str(exc)])
 
+    # The per-device walk that used to live only in vulkan_probe.sh section
+    # 5b: which devices the driver lists, which of them initialise, and which
+    # one `render` will use. pyrender defaults to index 0, which on a pod is
+    # often a host GPU this container cannot open (EGL_NOT_INITIALIZED).
+    from .egl_device import configure as configure_egl_device
+
+    devices, chosen = configure_egl_device(target_cuda=0)
+    if devices is None:
+        lines.append("EGL device enumeration unavailable; pyrender uses the default display")
+    else:
+        lines += [d.describe() for d in devices]
+        if chosen is None:
+            return Check(
+                "egl", FAIL,
+                f"none of the {len(devices)} EGL devices initialises — host-side "
+                "(driver's graphics userspace declined; see vulkan_probe.sh sections 2-3)",
+                lines)
+        lines.append(f"render uses egl device[{chosen.index}] (EGL_DEVICE_ID={os.environ.get('EGL_DEVICE_ID')})")
+        if not chosen.is_nvidia:
+            lines.append("no NVIDIA device initialises — whatever follows is software")
+
     try:
         import pyrender  # noqa: F401
     except ImportError:
@@ -197,6 +218,7 @@ def check_egl() -> Check:
         import pyrender
         from OpenGL import GL
 
+        os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
         renderer = pyrender.OffscreenRenderer(64, 64)
         vendor = GL.glGetString(GL.GL_VENDOR).decode()
         device = GL.glGetString(GL.GL_RENDERER).decode()
