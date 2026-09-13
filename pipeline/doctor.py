@@ -64,6 +64,22 @@ def _run(cmd: List[str], timeout: int = 60) -> subprocess.CompletedProcess:
 # individual checks
 # --------------------------------------------------------------------------
 
+def check_versions() -> Check:
+    """Which commit of b2crunner, body2colmap and b2ctrain this is.
+
+    Informational — an `unknown` is a WARN, never a FAIL: a run must not
+    stop over its own bookkeeping. pipeline/provenance.py says where each
+    answer comes from; the same line opens every run's log
+    (log_machine_banner), which is where it is actually read.
+    """
+    from .provenance import versions
+
+    found = versions()
+    status = WARN if any(rev.startswith("unknown") for rev in found.values()) else OK
+    return Check("versions", status, ", ".join(f"{k} {v}" for k, v in found.items()),
+                 [f"{k}: {v}" for k, v in found.items()])
+
+
 def check_environment() -> Check:
     interesting = [
         "B2C_DATA_DIR", "B2C_OUTPUT_DIR", "B2C_LOG_DIR", "B2C_MODELS_DIR", "TMPDIR",
@@ -776,6 +792,7 @@ def check_ffmpeg() -> Check:
 def run_checks(envs: Optional[Dict[str, Dict[str, Any]]] = None) -> List[Check]:
     """Run every check, never raising — a crashed check is itself a FAIL."""
     checks: List[tuple[str, Callable[[], Check]]] = [
+        ("versions", check_versions),
         ("environment", check_environment),
         ("disk", check_disk),
         ("nvidia-smi", check_nvidia_smi),
@@ -827,18 +844,19 @@ def worst_status(checks: List[Check]) -> str:
 
 
 def log_machine_banner() -> None:
-    """Three cheap lines at the top of every run's log saying what it ran on.
+    """A few cheap lines at the top of every run's log saying what it ran on.
 
     Deliberately not the full `doctor` sweep — that shells out to three
-    venvs and hits the network. This is GPU, torch and free space only, and
-    it exists because "which pod was this, and how much VRAM did it have"
-    is the first question asked of any log file after the fact, and the
-    answer is otherwise nowhere in it.
+    venvs and hits the network. This is the three commits (b2crunner,
+    body2colmap, b2ctrain — pipeline/provenance.py), GPU, torch and free
+    space only, and it exists because "which code was this, which pod, how
+    much VRAM" are the first questions asked of any log file after the
+    fact, and the answers were otherwise nowhere in it.
     """
     import logging
 
     log = logging.getLogger("pipeline.doctor")
-    for check in (check_nvidia_smi(), check_torch()):
+    for check in (check_versions(), check_nvidia_smi(), check_torch()):
         log.info("%s: %s", check.name, check.detail or check.status)
     disk = check_disk()
     for line in disk.lines:

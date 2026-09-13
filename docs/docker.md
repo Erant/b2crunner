@@ -75,6 +75,26 @@ how much space is on it, then (for the UI) runs `doctor --summary` so the
 pod's log records what the machine could actually do *before* anything
 depends on it.
 
+## Which code a run ran (2026-09-13)
+
+Every run's log — the `log.txt` in its result .zip — opens with a
+`versions:` line naming the three commits that decide the pixels:
+
+    pipeline.doctor: versions: b2crunner a81d396f1c2d, body2colmap 339a5983d9c3, b2ctrain b49480f8739c
+
+`pipeline/provenance.py` asks each part directly rather than trusting a
+pin: this repo through git when there is a checkout, else the
+`B2C_GIT_REVISION` ENV the Dockerfile bakes from the same `GIT_SHA` /
+`GIT_DIRTY` build args as the OCI label (a label is invisible from inside
+the container, and the image is built from a `git archive` with no .git);
+body2colmap from pip's `direct_url.json`, which records the commit a
+`git+https://` install resolved; b2ctrain from `b2ctrain --version`, which
+names its commit since its b49480f. An older trainer binary prints the bare
+version, and the log then shows the image's `B2CTRAIN_REF` pin marked as
+such. `doctor` runs the same check first, and an `unknown` is a WARN —
+bookkeeping never fails a run. Before this, telling two result archives
+apart meant dating their logs against `git log` and counting steps.
+
 The previous entrypoint was `python -m pipeline.cli` with no arguments,
 which meant a pod started with no start command printed an argparse usage
 error and exited. A pod whose container exits is a dead pod: no UI, no SSH,

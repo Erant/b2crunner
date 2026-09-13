@@ -56,6 +56,13 @@
 # not work. The .pth is the mechanism that does.
 
 
+# The trainer's pin, declared before the first FROM so two stages read it:
+# b2ctrain-builder clones and checks it, and the runtime stage bakes it as
+# an ENV for a run's log to fall back on (see "Build provenance" at the
+# bottom). A global ARG has no value inside a stage until the stage says
+# `ARG B2CTRAIN_REF` again, which both do. Bump it here, once.
+ARG B2CTRAIN_REF=b49480f8739c07f4157eab86441c0196b673aafd
+
 # =============================================================================
 # Stage 1: b2ctrain
 # =============================================================================
@@ -88,7 +95,8 @@
 # branch would keep serving the cached binary — and a COPY out of this
 # stage keys on the stage's cache key rather than on what it produced, so
 # a bumped pin needs `--no-cache-filter b2ctrain-builder,runtime` to reach
-# the runtime stage. Move B2CTRAIN_REF when the trainer moves, and re-run
+# the runtime stage. Move B2CTRAIN_REF (the global ARG above the first
+# FROM) when the trainer moves, and re-run
 # `pipeline.cli doctor` — check_trainer_binaries greps its --help for the
 # eight flags steps/brush.py's argv depends on.
 FROM nvidia/cuda:13.0.2-cudnn-devel-ubuntu24.04 AS b2ctrain-builder
@@ -99,7 +107,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 ARG B2CTRAIN_REPO=https://github.com/Erant/b2ctrain.git
 ARG B2CTRAIN_BRANCH=main
-ARG B2CTRAIN_REF=2977f0e88aa49c7208d793d823cfab28b44c990d
+ARG B2CTRAIN_REF
 RUN git clone --depth 1 --branch ${B2CTRAIN_BRANCH} ${B2CTRAIN_REPO} /src/b2ctrain \
     && cd /src/b2ctrain \
     && head="$(git rev-parse HEAD)" \
@@ -1025,6 +1033,15 @@ COPY --from=colmap-builder /opt/colmap /opt/colmap
 #
 # Read it back with:
 #   docker inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' b2c/pipeline:latest
+#
+# A label is visible to `docker inspect` and to nothing inside the
+# container, so the same revision is ALSO an ENV, B2C_GIT_REVISION, which is
+# what pipeline/provenance.py reads when there is no .git to ask (the image
+# is built from a `git archive`) — that is how the `versions:` line at the
+# top of every run's log names the b2crunner commit. B2CTRAIN_REF rides
+# along as the fallback for a trainer whose `--version` predates b49480f
+# and does not name its own commit. Neither ENV makes a filesystem layer;
+# both sit here, last, for the reason the LABEL does.
 
 # ---------------------------------------------------------------------------
 # Runtime configuration. LAST ON PURPOSE — same reasoning as the LABEL block
@@ -1176,10 +1193,13 @@ ENV MPLCONFIGDIR=/data/caches/mpl
 ARG GIT_SHA=""
 ARG GIT_DIRTY=""
 ARG BUILD_DATE=""
+ARG B2CTRAIN_REF
 LABEL org.opencontainers.image.title="b2c/pipeline" \
       org.opencontainers.image.source="https://github.com/Erant/b2crunner" \
       org.opencontainers.image.revision="${GIT_SHA}${GIT_DIRTY}" \
       org.opencontainers.image.created="${BUILD_DATE}"
+ENV B2C_GIT_REVISION="${GIT_SHA}${GIT_DIRTY}" \
+    B2CTRAIN_REF="${B2CTRAIN_REF}"
 
 # CMD, not a hardcoded ENTRYPOINT argument, so RunPod's "container start
 # command" (which replaces CMD) can select a different mode without having
