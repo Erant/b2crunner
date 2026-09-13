@@ -768,12 +768,44 @@ def _output_dirs(workflow: str = "") -> Dict[str, str]:
             )
     dirs: Dict[str, str] = {}
     for path in paths:
-        try:
-            spec = WorkflowSpec.from_yaml(path)
-        except (OSError, ValueError, KeyError):
-            continue
-        for name, directory in spec.output_dirs().items():
+        for name, directory in _spec_output_dirs(Path(path)).items():
             dirs.setdefault(name, directory)
+    return dirs
+
+
+# {workflow file -> ((mtime_ns, size) it was read at, its {output -> dir})}.
+# Parsing a workflow is ~40 ms, and a press of the All results tab asked
+# for it seven times per run — `completed_runs`, `run_contents`,
+# `wants_debug`, `archive_is_current`'s two walks, `build_result_zip` — so
+# a dozen finished runs cost three seconds of re-reading the same YAML
+# before touching the volume at all, and an archive that was reused rather
+# than rebuilt saved nothing noticeable. Keyed on the file's own stat so an
+# edited workflow is re-read on the next call rather than at the next
+# restart; nobody mutates the cached dict, `_output_dirs` merges into its
+# own.
+_SPEC_OUTPUT_DIRS: Dict[Path, Tuple[Tuple[int, int], Dict[str, str]]] = {}
+
+
+def _spec_output_dirs(path: Path) -> Dict[str, str]:
+    """One workflow file's {output name -> `dir:`}, parsed once per edit.
+
+    A file that does not parse contributes nothing, as it always has —
+    and that answer is cached against the same signature, so a broken
+    workflow is not re-parsed on every call either.
+    """
+    try:
+        stat = path.stat()
+    except OSError:
+        return {}
+    signature = (stat.st_mtime_ns, stat.st_size)
+    cached = _SPEC_OUTPUT_DIRS.get(path)
+    if cached is not None and cached[0] == signature:
+        return cached[1]
+    try:
+        dirs = WorkflowSpec.from_yaml(path).output_dirs()
+    except (OSError, ValueError, KeyError):
+        dirs = {}
+    _SPEC_OUTPUT_DIRS[path] = (signature, dirs)
     return dirs
 
 
@@ -960,6 +992,13 @@ def _write_run_members(
 ARCHIVE_FORMAT = b"b2c-result-1: outputs + debug/ + log.txt"
 
 
+# One run's share of an archive, as `_write_run_members` takes it:
+# (run_dir, workflow, log_path, prefix, debug). A per-run archive is one
+# of these with an empty prefix; the combined bundle is one per run under
+# its run name.
+_ArchivePart = Tuple[Path, str, Optional[Path], str, bool]
+
+
 def archive_is_current(
     archive: Path,
     run_dir: Path,
@@ -982,10 +1021,37 @@ def archive_is_current(
     are hundreds of megabytes of PNG, and the only writer is a run that
     has already finished.
     """
+    return _archive_holds(archive, [(Path(run_dir), workflow, log_path, "", debug)])
+
+
+def bundle_is_current(archive: Path, states: List[RunState]) -> bool:
+    """True when the combined bundle already holds these runs as they stand.
+
+    The same three checks as `archive_is_current`, over every run at
+    once. The member list is what catches the changes a per-run check
+    cannot see: a run that finished since the last press, or one pruned
+    off the volume, is a different list of names.
+    """
+    return _archive_holds(archive, _bundle_parts(states))
+
+
+def _bundle_parts(states: List[RunState]) -> List[_ArchivePart]:
+    """What `build_bundle_zip` writes for `states`, run by run."""
+    return [
+        (Path(state.output_dir), state.workflow, state.log_path, state.name,
+         wants_debug(state))
+        for state in states if state.output_dir
+    ]
+
+
+def _archive_holds(archive: Path, parts: List[_ArchivePart]) -> bool:
+    """The check behind `archive_is_current` and `bundle_is_current`."""
     if not archive.is_file():
         return False
     expected = [
-        name for name, _path, _c in _run_members(run_dir, workflow, log_path, debug=debug)
+        name
+        for run_dir, workflow, log_path, prefix, debug in parts
+        for name, _path, _c in _run_members(run_dir, workflow, log_path, prefix, debug)
     ]
     try:
         with zipfile.ZipFile(archive) as bundle:
@@ -1003,12 +1069,14 @@ def archive_is_current(
     except (OSError, zipfile.BadZipFile):
         return False  # truncated, or not an archive this module wrote
     stamp = archive.stat().st_mtime
-    sources = list(result_dirs(run_dir, workflow).values())
-    if debug:
-        sources += list(debug_dirs(run_dir).values())
-    log = run_log_path(run_dir, log_path)
-    if log:
-        sources.append(log)
+    sources: List[Path] = []
+    for run_dir, workflow, log_path, _prefix, debug in parts:
+        sources += list(result_dirs(run_dir, workflow).values())
+        if debug:
+            sources += list(debug_dirs(run_dir).values())
+        log = run_log_path(run_dir, log_path)
+        if log:
+            sources.append(log)
     for source in sources:
         # Directories as well as files, and the source root itself:
         # removing a file updates its parent's mtime and nothing else, so
@@ -1111,12 +1179,18 @@ def build_result_zip(
 BUNDLE_NAME = "all-results.zip"
 
 
-def build_bundle_zip(states: List[RunState]) -> Optional[str]:
+def build_bundle_zip(states: List[RunState], reuse: bool = False) -> Optional[str]:
     """Every run's deliverables in one archive, each under its own run name.
 
     Built from the run directories rather than by zipping up the per-run
     archives: a zip of zips would mean a second full copy of deliverables
     the volume is already holding twice.
+
+    With `reuse`, a bundle that `bundle_is_current` says already holds
+    exactly these runs is handed back as it is. It is the biggest single
+    copy the UI makes — every deliverable on the volume, again — and
+    until 2026-09-10 it was made on every press of the button whether or
+    not a run had finished since the last one.
     """
     archive = output_dir() / BUNDLE_NAME
     written = 0
@@ -1124,16 +1198,15 @@ def build_bundle_zip(states: List[RunState]) -> Optional[str]:
     # and for the same reason — this path is fixed, so two presses of the
     # button write the same file. See `build_result_zip`.
     with _archive_lock(archive):
+        if reuse and bundle_is_current(archive, states):
+            return str(archive)
         staging = archive.with_suffix(f".zip.{secrets.token_hex(4)}.part")
         try:
             with zipfile.ZipFile(staging, "w", compression=zipfile.ZIP_STORED) as bundle:
                 bundle.comment = ARCHIVE_FORMAT
-                for state in states:
-                    if not state.output_dir:
-                        continue
+                for run_dir, workflow, log_path, prefix, debug in _bundle_parts(states):
                     if _write_run_members(
-                        bundle, Path(state.output_dir), state.workflow, state.log_path,
-                        prefix=state.name, debug=wants_debug(state),
+                        bundle, run_dir, workflow, log_path, prefix=prefix, debug=debug,
                     ):
                         written += 1
             if not written:

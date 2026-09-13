@@ -358,6 +358,42 @@ class TestEveryRunOnTheVolume(_BundleCase):
         runs.build_result_zip(run, reuse=True)
         self.assertIn("ply/second.ply", self._names(str(archive)))
 
+    def test_reuse_keeps_an_up_to_date_bundle_and_rebuilds_a_changed_one(self):
+        """The combined .zip is the biggest copy the UI makes, and it was
+        remade on every press whether or not anything had changed."""
+        import os
+
+        first = _run_dir(self.runs, colmap=True, ply=False, name="run-a")
+        states = [runs.RunState(name=first.name, status="done", output_dir=first)]
+        archive = Path(runs.build_bundle_zip(states))
+        built = archive.stat().st_mtime
+        os.utime(archive, (built, built))
+
+        self.assertTrue(runs.bundle_is_current(archive, states))
+        self.assertEqual(runs.build_bundle_zip(states, reuse=True), str(archive))
+        self.assertEqual(archive.stat().st_mtime, built)
+
+        # A run that finished since the last press is a different list of
+        # members, which no per-run mtime can see.
+        second = _run_dir(self.runs, colmap=False, ply=True, name="run-b")
+        states.append(runs.RunState(name=second.name, status="done", output_dir=second))
+        self.assertFalse(runs.bundle_is_current(archive, states))
+        self.assertIn("run-b/ply/scene.ply",
+                      self._names(runs.build_bundle_zip(states, reuse=True)))
+
+        # And so is a deliverable written into a run it already holds.
+        _touch(first / "colmap" / "late.txt")
+        os.utime(first / "colmap" / "late.txt", (built + 60, built + 60))
+        self.assertFalse(runs.bundle_is_current(archive, states))
+        self.assertIn("run-a/colmap/late.txt",
+                      self._names(runs.build_bundle_zip(states, reuse=True)))
+
+        # A run pruned off the volume drops out of the list the same way.
+        states.pop(0)
+        self.assertFalse(runs.bundle_is_current(archive, states))
+        self.assertNotIn("run-a/colmap/cameras.txt",
+                         self._names(runs.build_bundle_zip(states, reuse=True)))
+
     def test_deleting_a_source_file_makes_the_archive_stale(self):
         """A files-only walk cannot see a deletion.
 
@@ -493,6 +529,36 @@ class TestOutputSelection(unittest.TestCase):
         self.addCleanup(os.unlink, bare)
         self.assertEqual(runs.workflow_outputs(bare), [])
         self.assertEqual(runs.result_subdirs(bare), [])
+
+    def test_a_workflows_deliverables_are_read_once_and_again_after_an_edit(self):
+        """One press of All results asked for this seven times per run,
+        and at ~40 ms a parse that was the whole cost of a rescan. The
+        cache keys on the file itself, so editing a workflow still lands
+        on the next call rather than the next restart."""
+        import os
+
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as handle:
+            handle.write(
+                "name: edited\nglobals: {}\nsteps:\n"
+                "  - id: a\n    step: rmbg\n    dispatch: in_process\n"
+                "outputs:\n  - name: ply\n    dir: ply\n"
+            )
+            path = handle.name
+        self.addCleanup(os.unlink, path)
+
+        with unittest.mock.patch.object(
+            runs.WorkflowSpec, "from_yaml", wraps=runs.WorkflowSpec.from_yaml
+        ) as parse:
+            self.assertEqual(runs.result_subdirs(path), ["ply"])
+            self.assertEqual(runs.result_subdirs(path), ["ply"])
+            self.assertEqual(parse.call_count, 1)
+
+            with open(path, "a") as handle:
+                handle.write("  - name: colmap\n    dir: colmap\n")
+            stat = os.stat(path)
+            os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))
+            self.assertEqual(sorted(runs.result_subdirs(path)), ["colmap", "ply"])
+            self.assertEqual(parse.call_count, 2)
 
     def test_which_workflows_can_start_from_a_photo(self):
         """The gate on the UI's photo input. It got this wrong once by

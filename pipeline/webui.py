@@ -701,8 +701,9 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
                 "One .zip per run, the same contents the Results tab hands "
                 "back for a single run.\n\n"
                 "_An archive that is already up to date is reused rather than "
-                "rebuilt, so a rescan after one new run costs one run's worth "
-                "of copying, not the whole volume's._"
+                "rebuilt — the combined .zip included — so a rescan after one "
+                "new run costs one run's worth of copying, not the whole "
+                "volume's, and a rescan after nothing costs nothing._"
             )
             with gr.Row():
                 all_refresh = gr.Button(
@@ -975,7 +976,7 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
             if bundle:
                 yield ("Building the combined .zip…", rows, archives,
                        gr.update(), thumbs)
-                path = build_bundle_zip(runs)
+                path = build_bundle_zip(runs, reuse=True)
                 if path:
                     combined = gr.update(visible=True, value=path)
                     info.append(
