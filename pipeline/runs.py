@@ -1109,6 +1109,35 @@ def _archive_lock(archive: Path) -> threading.Lock:
         return _ARCHIVE_LOCKS.setdefault(str(archive), threading.Lock())
 
 
+def result_archive_path(run_dir: Path) -> Path:
+    """Where `build_result_zip` puts this run's archive: one fixed path per run."""
+    return output_dir() / f"{Path(run_dir).name}-result.zip"
+
+
+def existing_result_zip(
+    run_dir: Optional[Path],
+    workflow: str = "",
+    log_path: Optional[Path] = None,
+    debug: bool = True,
+) -> Optional[str]:
+    """The run's archive if one is already built and still current, else None.
+
+    The read-only half of `build_result_zip(reuse=True)`: the Results tab
+    calls this every time a run is *looked at*, so that looking never
+    costs a packaging pass — that is a separate press. No lock is taken:
+    `build_result_zip` swaps its archive in with `os.replace`, so a reader
+    sees the old whole file or the new one, never a partial.
+    """
+    if not run_dir:
+        return None
+    archive = result_archive_path(run_dir)
+    if archive.is_file() and archive_is_current(
+        archive, Path(run_dir), workflow, log_path, debug
+    ):
+        return str(archive)
+    return None
+
+
 def build_result_zip(
     run_dir: Optional[Path],
     workflow: str = "",
@@ -1155,7 +1184,7 @@ def build_result_zip(
     if not result_dirs(run_dir, workflow):
         return None
 
-    archive = output_dir() / f"{Path(run_dir).name}-result.zip"
+    archive = result_archive_path(run_dir)
     with _archive_lock(archive):
         if reuse and archive_is_current(archive, Path(run_dir), workflow, log_path, debug):
             return str(archive)

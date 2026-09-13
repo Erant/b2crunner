@@ -51,13 +51,15 @@ The reference-sheet path is the least proven part of the pipeline — its
 front half (split / render / generate_firstlast / inject_anchor) has never
 executed end to end.
 
-**Each run is its own OS process, the UI only ever polls it.** A Gradio
-generator holds an SSE connection for as long as it yields, and a browser
-tab surviving a three-hour run over a pod proxy is not something to design
-around. So a `pipeline.run_worker` child owns the run, the UI reads a
-snapshot published as JSON, and closing the tab does nothing to the work.
-Reopening it and picking the run back up from the dropdown picks the view
-back up.
+**Each run is its own OS process, the UI only ever polls it.** A
+`pipeline.run_worker` child owns the run and publishes a JSON snapshot; the
+page reads it on a two-second `gr.Timer`, every tick a short event that
+sends only what changed. Nothing streams: a generator holding an SSE
+connection for the length of a three-hour run over a pod proxy is not
+something to design around, and the ones this page used to start from its
+buttons were never cancelled, so they stacked up and fought over the same
+outputs. Closing the tab does nothing to the work; reopening it shows the
+run again, because the picker is read off the volume, not this process.
 
 One run per idle GPU, automatically: `GpuScheduler` (pipeline/gpu_scheduler.py)
 spawns one `pipeline.run_worker` process per submitted run, `CUDA_VISIBLE_DEVICES`
@@ -75,12 +77,12 @@ dataset. The Results tab then offers exactly those: one .zip holding the
 `dir:` of every output that actually got written, plus the `log.txt` the run
 wrote, and nothing else.
 
-**All results** is that same archive for every run at once, and it reads the
-*volume* rather than this process: `GpuScheduler` keeps its runs in memory,
-so the Active-run picker empties on every UI restart while the runs sit in
-the output directory untouched. `discover_runs` picks them back up out of
-the status files the workers published — plus any output directory nobody
-published a status for at all, which is what a `pipeline.cli` run leaves.
+**All results** is that same archive for every run at once. Both it and
+the Active-run picker read the *volume*, not this process: `GpuScheduler`
+keeps its runs in memory and forgets them on a restart, so `merged_runs`
+lays its states over what `discover_runs` finds in the status files the
+workers published — plus any output directory nobody published a status
+for, which is what a `pipeline.cli` run leaves.
 
 **This module is the browser's view and nothing else.** What a submission
 means, how it is queued, and how a finished run is packaged all live in
@@ -103,13 +105,14 @@ from . import steps  # noqa: F401  registers every Step; the UI is an entrypoint
 from .gpu_scheduler import GpuScheduler, detect_gpu_count
 from .models import registry
 from .paths import data_dir, output_dir, run_jobs_dir, upload_dir
-from .run_state import PREVIEW_FRAMES, RunState
+from .run_state import PREVIEW_FRAMES, RunState, tail_lines
 from .cli import available_workflows
 from .runs import (
     BUNDLE_NAME, IMAGE_SUFFIXES, WORKFLOW_DEFAULT, SubmitError,
-    build_bundle_zip, build_result_zip, completed_runs, resolve_upload,
-    result_dirs, result_subdirs, run_contents, run_log_path, run_recency,
-    submit_runs, wants_debug, workflow_param_panel,
+    build_bundle_zip, build_result_zip, completed_runs, existing_result_zip,
+    find_run, merged_runs, resolve_upload, result_dirs, result_subdirs,
+    run_contents, run_log_path, run_recency, submit_runs, wants_debug,
+    workflow_param_panel,
 )
 from .step import Param
 from .workflow import WorkflowSpec, load_envs, truthy
@@ -122,6 +125,11 @@ logger = logging.getLogger(__name__)
 _GALLERY_MAX = 24
 
 PREVIEW_ALL = "All steps"
+
+# Run on every gallery's `preview_close` — see the note where it is wired.
+_EXIT_FULLSCREEN_JS = (
+    "() => { if (document.fullscreenElement) document.exitFullscreen(); }"
+)
 
 # Nothing about a particular workflow's settings or deliverables lives in
 # this module any more: the Outputs box, the Settings box and the download's
@@ -351,7 +359,8 @@ def _format_status(state: RunState) -> str:
         return f"### 🕓 queued — `{state.name}`\nWaiting for a free GPU."
 
     elapsed = (state.finished or time.time()) - state.started if state.started else 0.0
-    icon = {"running": "⏳", "done": "✅", "failed": "❌", "cancelled": "⛔"}.get(state.status, "")
+    icon = {"running": "⏳", "done": "✅", "failed": "❌", "cancelled": "⛔",
+            "unknown": "•"}.get(state.status, "")
     lines = [
         f"### {icon} {state.status} — `{state.name}`"
         + (f" · **GPU** {state.gpu_index}" if state.gpu_index is not None else ""),
@@ -381,15 +390,102 @@ def _fleet_status(scheduler: GpuScheduler) -> str:
 
 
 def _run_choices(scheduler: GpuScheduler) -> List[tuple[str, str]]:
-    icons = {"queued": "🕓", "running": "⏳", "done": "✅", "failed": "❌", "cancelled": "⛔"}
+    """The Active-run picker's rows: every run this box knows about.
+
+    `merged_runs`, not `scheduler.list_runs()`: the scheduler only holds
+    what this process submitted, so the picker used to come up empty on
+    every page load and stay empty after a UI restart while the runs sat
+    on the volume — which is what the old "Refresh run list" button and
+    half of the All-results tab's explanation existed to paper over.
+    """
+    icons = {"queued": "🕓", "running": "⏳", "done": "✅", "failed": "❌",
+             "cancelled": "⛔", "unknown": "•"}
     return [
         (
             f"{icons.get(s.status, '?')} {s.name}"
             + (f" (gpu {s.gpu_index})" if s.gpu_index is not None else ""),
             s.name,
         )
-        for s in reversed(scheduler.list_runs())
+        for s in merged_runs(scheduler)
     ]
+
+
+# What the Progress tab's log box is sent: enough to read what the run is
+# doing now, not the whole file. It used to be `tail_lines`' 4000-line /
+# 2 MB default, into a 24-line box, once a second, per open view — a real
+# run's log tails to ~330 KB, and several of those a second down one SSE
+# connection through a pod proxy is what made every other click on the page
+# feel hung. The whole log is one click away as a file.
+_LOG_TAIL_LINES = 300
+_LOG_TAIL_BYTES = 256_000
+
+
+def _log_tail(state: RunState) -> str:
+    path = run_log_path(state.output_dir, state.log_path)
+    if path is None:
+        return ""
+    return tail_lines(path, max_lines=_LOG_TAIL_LINES, max_bytes=_LOG_TAIL_BYTES)
+
+
+def _result_summary(state: RunState) -> tuple[str, List[str], Optional[str]]:
+    """What the Results tab says about a run: (markdown, final frames, archive).
+
+    Read-only. The archive is only reported when one is already built and
+    current (`existing_result_zip`); building one is the Package button's
+    job, so that looking at a run — which the picker now does on every
+    switch — never costs a multi-gigabyte copy.
+    """
+    directory = state.output_dir
+    if not directory or not Path(directory).exists():
+        return "No output directory yet — pick or start a run first.", [], None
+
+    directories = result_dirs(Path(directory), state.workflow)
+    if not directories:
+        # Distinguish "still running" from "ran and produced nothing":
+        # the second means the export steps were switched off or
+        # failed, and looking in the run directory is the next move.
+        note = (
+            "still running — the exports are the last steps"
+            if state.status in ("queued", "running")
+            else "the run produced neither; check the Progress tab's step list"
+        )
+        wanted = ", ".join(
+            f"`{sub}/`" for sub in result_subdirs(state.workflow)
+        ) or "any deliverable"
+        return (
+            f"### `{directory}`\n\nNo {wanted} here yet — {note}.",
+            gallery_images(directory),
+            None,
+        )
+
+    lines = []
+    for name, path in sorted(directories.items()):
+        files = [f for f in path.rglob("*") if f.is_file()]
+        size = sum(f.stat().st_size for f in files)
+        lines.append(f"- **`{name}/`** — {len(files)} files, {size / 1e9:.2f} GB")
+    if run_log_path(Path(directory), state.log_path):
+        lines.append("- **`log.txt`** — the log this run wrote")
+
+    archive = existing_result_zip(
+        Path(directory), state.workflow, state.log_path, debug=wants_debug(state),
+    )
+    verb = "contains" if archive else "will contain"
+    if archive:
+        tail = ""
+    elif state.status in ("queued", "running"):
+        tail = "\n\n_Still running — package it once it ends._"
+    else:
+        tail = (
+            "\n\n_No archive built yet, or the one on the volume is stale — "
+            "press **Package .zip**._"
+        )
+    info = (
+        f"### `{directory}`\n\nThe .zip {verb}:\n\n" + "\n".join(lines) + tail
+        + "\n\n_The full run directory — the final dataset's frames, the "
+        "point cloud, any intermediate brush training — stays on the volume "
+        "at the path above; only the deliverables are packaged._"
+    )
+    return info, gallery_images(directory), archive
 
 
 def _step_rows(state: RunState) -> List[List[Any]]:
@@ -418,14 +514,14 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
         # Shared across every tab: which run the Progress/Results controls
         # below are currently looking at. A run submitted on the Run tab
         # selects itself here automatically; picking a different one from
-        # the dropdown re-points every other tab at it.
-        with gr.Row():
-            run_picker = gr.Dropdown(
-                choices=[], value=None, label="Active run", scale=3,
-                info="Every run this session has seen, most recent first.",
-            )
-            refresh_runs_btn = gr.Button("Refresh run list", size="sm", scale=1)
-        fleet_out = gr.Markdown(_fleet_status(scheduler))
+        # the dropdown re-points every other tab at it. Its rows are every
+        # run on the volume, kept current by the timer wired at the bottom —
+        # there is no button to press.
+        run_picker = gr.Dropdown(
+            choices=[], value=None, label="Active run",
+            info="Every run on this volume, in flight first, then most recent.",
+        )
+        fleet_out = gr.Markdown()
 
         # Keeps the app object usable as a handle onto its own scheduler —
         # `launch()` needs it to forward a shutdown signal to every worker
@@ -664,32 +760,30 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
                 label="Steps",
             )
             log_out = gr.Textbox(
-                label="Log", lines=24, max_lines=24, autoscroll=True, interactive=False,
+                label=f"Log (last {_LOG_TAIL_LINES} lines)", lines=24, max_lines=24,
+                autoscroll=True, interactive=False,
             )
-            attach_btn = gr.Button(
-                "Attach / refresh",
-                variant="secondary",
-            )
+            log_file = gr.File(label="Full log", visible=False)
             gr.Markdown(
                 "_Each run is its own process, pinned to whichever GPU picked it up. "
-                "Closing this tab does not stop it — reopen the page, pick it from "
-                "**Active run** above, and press **Attach / refresh** to pick the view "
-                "back up._"
+                "Closing this tab does not stop it — reopen the page and pick it "
+                "from **Active run** above; this view follows the picker and "
+                "updates on its own while the run is going._"
             )
 
         with gr.Tab("Results"):
-            results_refresh = gr.Button("Load latest results", variant="primary")
             results_info = gr.Markdown()
-            results_zip = gr.File(label="Result (.zip)")
+            with gr.Row():
+                package_btn = gr.Button("Package .zip", variant="primary", scale=1)
+                results_zip = gr.File(label="Result (.zip)", scale=3)
             results_gallery = gr.Gallery(label="Final frames", columns=6, height=400)
 
             gr.Markdown(
                 f"### Per-step frames\n_{PREVIEW_FRAMES} frames spaced evenly "
                 "through the batch, captured after every step, so a step that "
                 "breaks the output can be identified by looking rather than by "
-                "reading the log. One row per step, in run order. These appear "
-                "while the run is going — the button above keeps refreshing "
-                "until it ends._"
+                "reading the log. One row per step, in run order. They appear "
+                "here as the run goes._"
             )
             preview_step_in = gr.Dropdown(
                 choices=[PREVIEW_ALL], value=PREVIEW_ALL, label="Step",
@@ -703,11 +797,8 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
         with gr.Tab("All results"):
             gr.Markdown(
                 "**Every run on this volume that produced deliverables**, "
-                "packaged in one press — including runs from before this UI "
-                "process started, which the **Active run** picker above has "
-                "never heard of (it only holds what this process submitted). "
-                "One .zip per run, the same contents the Results tab hands "
-                "back for a single run.\n\n"
+                "packaged in one press. One .zip per run, the same contents "
+                "the Results tab hands back for a single run.\n\n"
                 "_An archive that is already up to date is reused rather than "
                 "rebuilt — the combined .zip included — so a rescan after one "
                 "new run costs one run's worth of copying, not the whole "
@@ -760,7 +851,146 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
             doctor_btn = gr.Button("Run checks", variant="primary")
             doctor_out = gr.Code(label="Report", lines=30)
 
+        # Gradio 6.25's Gallery: its fullscreen button puts the component's
+        # block into browser fullscreen, and closing the enlarged image
+        # never leaves it — the page is left showing a fullscreened
+        # thumbnail grid, and the only way out is to open another image and
+        # press minimise. Its own code has no `exitFullscreen` at all, so
+        # the call is made here, on every gallery, the moment a preview
+        # closes. Frontend-only: no round trip, nothing to queue.
+        for gallery in (results_gallery, preview_gallery_out, all_gallery):
+            gallery.preview_close(None, js=_EXIT_FULLSCREEN_JS)
+
         # -- wiring --------------------------------------------------------
+        #
+        # One function paints everything the page shows about the selected
+        # run, and three short events call it: the page load, a change of
+        # the Active-run picker, and a two-second timer. Nothing streams.
+        #
+        # The previous shape — a per-button generator that polled until the
+        # run ended — was the source of most of what made this page feel
+        # broken. Started from two different buttons it ran twice, each
+        # painting a different run into the same outputs on alternating
+        # seconds; it was never cancelled, so switching runs added a third;
+        # a button whose generator was still running silently ignored the
+        # next click (Gradio's default `trigger_mode="once"`); and a fifth
+        # copy queued forever behind four immortal ones. A timer tick is one
+        # short event, Gradio drops a tick whose predecessor is still
+        # pending, and there is nothing to cancel because nothing lingers.
+        #
+        # `memo` is per-session bookkeeping so a tick sends only what
+        # changed: a finished run costs a few hundred bytes every two
+        # seconds, not a repaint of every table and gallery on the page.
+        memo = gr.State({})
+        view_outputs = [
+            fleet_out, status_out, progress_out, steps_out, log_out, log_file,
+            results_info, results_gallery, results_zip,
+            preview_step_in, preview_gallery_out, memo,
+        ]
+
+        def view(run_name: Optional[str], memo: Optional[dict], step_filter: str,
+                 force: bool) -> tuple:
+            """Everything about `run_name`, or `gr.update()` where nothing moved.
+
+            `force` repaints regardless — the page load and a picker change,
+            where the previous contents belonged to another run. A tick
+            repaints the live parts of a running run, and anything at all
+            only when the run's status, step or completion changed (`sig`).
+            """
+            memo = dict(memo or {})
+            keep = gr.update()
+            run_name = run_name or ""
+            state = (find_run(scheduler, run_name) if run_name else None) or RunState()
+            live = state.status in ("queued", "running")
+            sig = [run_name, state.status, state.current, state.total, int(state.finished)]
+            stale = force or sig != memo.get("sig")
+
+            fleet = _fleet_status(scheduler)
+            fleet_upd = keep if fleet == memo.get("fleet") else fleet
+            memo["fleet"] = fleet
+
+            if stale or live:
+                status_upd = _format_status(state)
+                progress_upd = gr.update(
+                    value=(state.current / state.total) if state.total else 0
+                )
+                steps_upd = _step_rows(state)
+                text = _log_tail(state)
+                log_sig = [run_name, len(text), hash(text)]
+                log_upd = keep if log_sig == memo.get("log") else text
+                memo["log"] = log_sig
+
+                choices = preview_step_choices(state)
+                chosen = step_filter if step_filter in choices else PREVIEW_ALL
+                items = preview_gallery(state, chosen)
+                preview_sig = [choices, chosen, [path for path, _ in items]]
+                if preview_sig == memo.get("previews"):
+                    filter_upd = previews_upd = keep
+                else:
+                    filter_upd = gr.update(choices=choices, value=chosen)
+                    previews_upd = items
+                memo["previews"] = preview_sig
+            else:
+                status_upd = progress_upd = steps_upd = log_upd = keep
+                filter_upd = previews_upd = keep
+
+            if stale:
+                info_upd, frames_upd, zip_upd = _result_summary(state)
+                path = run_log_path(state.output_dir, state.log_path)
+                log_file_upd = gr.update(
+                    value=str(path) if path else None, visible=path is not None,
+                )
+            else:
+                info_upd = frames_upd = zip_upd = log_file_upd = keep
+            memo["sig"] = sig
+
+            return (
+                fleet_upd, status_upd, progress_upd, steps_upd, log_upd, log_file_upd,
+                info_upd, frames_upd, zip_upd, filter_upd, previews_upd, memo,
+            )
+
+        def on_tick(run_name, memo, step_filter):
+            *painted, memo = view(run_name, memo, step_filter, force=False)
+            # The picker's rows carry each run's status icon, so they move
+            # as runs start and finish; resent only then, so an open
+            # dropdown is not redrawn under the pointer every two seconds.
+            choices = _run_choices(scheduler)
+            picker = gr.update() if choices == memo.get("choices") else gr.update(choices=choices)
+            memo["choices"] = choices
+            return (picker, *painted, memo)
+
+        def on_load(run_name, memo, step_filter):
+            """A fresh page: every run on the volume, the most recent selected."""
+            choices = _run_choices(scheduler)
+            names = [value for _, value in choices]
+            selected = run_name if run_name in names else (names[0] if names else None)
+            *painted, memo = view(selected, memo, step_filter, force=True)
+            memo["choices"] = choices
+            return (gr.update(choices=choices, value=selected), *painted, memo)
+
+        def on_change(run_name, memo, step_filter):
+            return view(run_name, memo, step_filter, force=True)
+
+        timer = gr.Timer(2.0)
+        timer.tick(
+            on_tick, inputs=[run_picker, memo, preview_step_in],
+            outputs=[run_picker, *view_outputs],
+        )
+        app.load(
+            on_load, inputs=[run_picker, memo, preview_step_in],
+            outputs=[run_picker, *view_outputs], show_progress="hidden",
+        )
+        # `.change`, not `.input`: a run submitted below selects itself
+        # programmatically, and that has to repaint too.
+        run_picker.change(
+            on_change, inputs=[run_picker, memo, preview_step_in],
+            outputs=view_outputs, show_progress="hidden",
+        )
+        preview_step_in.change(
+            on_change, inputs=[run_picker, memo, preview_step_in],
+            outputs=view_outputs, show_progress="hidden",
+        )
+
         def on_start(upload_file, prompt, params, workflow):
             params = params or {}
             if not upload_file:
@@ -782,45 +1012,16 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
                 )
             except SubmitError as exc:
                 raise gr.Error(str(exc)) from None
-            # Point the shared picker at the first run; the rest are one
+            # Point the shared picker at the first run — its `.change`
+            # paints the Progress and Results tabs — the rest are one
             # dropdown-hop away and already fanning out across the other GPUs.
             return gr.update(choices=_run_choices(scheduler), value=names[0])
-
-        def stream(run_name: Optional[str]):
-            """Poll the selected run until it ends, then one final update.
-
-            A generator rather than a Timer so it works the same on every
-            Gradio 4.x/5.x, and it deliberately reads shared state (a
-            `RunState` the scheduler last read off that run's `status.json`)
-            instead of driving the run: if this connection dies, the
-            `pipeline.run_worker` process it is watching does not.
-            """
-            if not run_name:
-                state = RunState()
-                yield (_format_status(state), gr.update(value=0), _step_rows(state),
-                       "", _fleet_status(scheduler))
-                return
-            while True:
-                state = scheduler.snapshot(run_name)
-                fraction = (state.current / state.total) if state.total else 0
-                yield (
-                    _format_status(state),
-                    gr.update(value=fraction),
-                    _step_rows(state),
-                    scheduler.log_text(run_name),
-                    _fleet_status(scheduler),
-                )
-                if state.status not in ("queued", "running"):
-                    break
-                time.sleep(1.0)
-
-        progress_outputs = [status_out, progress_out, steps_out, log_out, fleet_out]
 
         start_btn.click(
             on_start,
             inputs=[upload_in, prompt_in, param_state, workflow_in],
             outputs=[run_picker],
-        ).then(stream, inputs=[run_picker], outputs=progress_outputs)
+        )
 
         # A different pipeline: a different summary, and no overrides —
         # the ones filed were against the other file's settings and step
@@ -830,122 +1031,57 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
             inputs=[workflow_in], outputs=[summary_out, param_state],
         )
 
-        attach_btn.click(stream, inputs=[run_picker], outputs=progress_outputs)
-        refresh_runs_btn.click(
-            lambda: gr.update(choices=_run_choices(scheduler)), outputs=[run_picker]
-        )
-        cancel_btn.click(
-            lambda run_name: scheduler.cancel(run_name) if run_name else None,
-            inputs=[run_picker], outputs=[],
-        )
+        def on_cancel(run_name: Optional[str]) -> None:
+            live = scheduler.snapshot(run_name) if run_name else RunState()
+            if live.name != run_name or live.status not in ("queued", "running"):
+                # Only this server's own scheduler can stop a run; a run
+                # found on the volume, or one already over, has no process
+                # here to signal.
+                gr.Warning(f"`{run_name or '(none)'}` is not running in this server.")
+                return
+            scheduler.cancel(run_name)
+            gr.Info(f"Cancelling `{run_name}` — the Progress tab shows it stop.")
 
-        def on_results(run_name: Optional[str]):
-            state = scheduler.snapshot(run_name) if run_name else RunState()
-            directory = state.output_dir
-            if not directory or not Path(directory).exists():
-                return "No output directory yet — pick or start a run first.", [], None
+        cancel_btn.click(on_cancel, inputs=[run_picker], outputs=[])
 
-            directories = result_dirs(Path(directory), state.workflow)
-            if not directories:
-                # Distinguish "still running" from "ran and produced nothing":
-                # the second means the export steps were switched off or
-                # failed, and looking in the run directory is the next move.
-                note = (
-                    "still running — the exports are the last steps"
-                    if state.status in ("queued", "running")
-                    else "the run produced neither; check the Progress tab's step list"
+        def on_package(run_name: Optional[str]):
+            """Build (or reuse) the selected run's archive — the one slow press.
+
+            Separate from looking at a run on purpose: the first archive of
+            a fresh 2 GB run is minutes of copying, and it used to happen as
+            a side effect of opening the Results tab.
+            """
+            state = find_run(scheduler, run_name) if run_name else None
+            if state is None or not state.output_dir:
+                raise gr.Error("Pick a run above first.")
+            # Same test the API's /result makes: a status file left at
+            # `running` by a container that died is not a running run, but
+            # one this scheduler is still watching is.
+            if (state.status in ("queued", "running")
+                    and scheduler.snapshot(run_name).name == run_name):
+                raise gr.Error(
+                    "Still running — the exports are its last steps; package it "
+                    "once it ends."
                 )
-                wanted = ", ".join(
-                    f"`{sub}/`" for sub in result_subdirs(state.workflow)
-                ) or "any deliverable"
-                return (
-                    f"### `{directory}`\n\nNo {wanted} here yet — {note}.",
-                    gallery_images(directory),
-                    None,
-                )
-
-            lines = []
-            for name, path in sorted(directories.items()):
-                files = [f for f in path.rglob("*") if f.is_file()]
-                size = sum(f.stat().st_size for f in files)
-                lines.append(f"- **`{name}/`** — {len(files)} files, {size / 1e9:.2f} GB")
-
-            # `reuse=True` like every other caller: `archive_is_current`
-            # compares mtimes, so a run still writing is correctly seen as
-            # stale and rebuilt — while pressing Refresh again on a
-            # finished 2 GB run stops re-copying 2 GB to answer the same
-            # question.
             archive = build_result_zip(
-                Path(directory), state.workflow, state.log_path, reuse=True,
+                Path(state.output_dir), state.workflow, state.log_path, reuse=True,
                 debug=wants_debug(state),
             )
-            if run_log_path(Path(directory), state.log_path):
-                lines.append("- **`log.txt`** — the log this run wrote")
-            info = (
-                f"### `{directory}`\n\nThe .zip below contains:\n\n"
-                + "\n".join(lines)
-                + "\n\n_The full run directory — the final dataset's frames, the "
-                "point cloud, any intermediate brush training — stays on the volume "
-                "at the path above; only the deliverables are packaged._"
-            )
-            return info, gallery_images(directory), archive
+            if not archive:
+                raise gr.Error("This run produced no deliverables to package.")
+            info, _frames, _archive = _result_summary(state)
+            return info, archive
 
-        def stream_results(run_name: Optional[str], step_filter: str):
-            """Poll the Results tab for as long as the selected run is going.
-
-            Same shape as `stream()` on the Progress tab and for the same
-            reason: the per-step frames are worth watching *during* a
-            two-hour run, and a generator that reads shared state cannot
-            take the run down with it if the connection drops.
-
-            Only the previews change while a run is in flight — the archive
-            is not built until there is something to put in it — so the
-            expensive half is skipped until the end.
-            """
-            if not run_name:
-                yield ("Pick a run above.", [], None,
-                       gr.update(choices=[PREVIEW_ALL]), [])
-                return
-            while True:
-                state = scheduler.snapshot(run_name)
-                active = state.status in ("queued", "running")
-                if active:
-                    finished = (gr.update(), gr.update(), gr.update())
-                else:
-                    finished = on_results(run_name)
-                yield (
-                    *finished,
-                    gr.update(choices=preview_step_choices(state)),
-                    preview_gallery(state, step_filter),
-                )
-                if not active:
-                    break
-                time.sleep(3.0)
-
-        results_outputs = [results_info, results_gallery, results_zip,
-                           preview_step_in, preview_gallery_out]
-
-        results_refresh.click(
-            stream_results, inputs=[run_picker, preview_step_in], outputs=results_outputs
-        )
-
-        def on_preview_filter(run_name: Optional[str], step_filter: str):
-            state = scheduler.snapshot(run_name) if run_name else RunState()
-            return preview_gallery(state, step_filter)
-
-        preview_step_in.change(
-            on_preview_filter, inputs=[run_picker, preview_step_in],
-            outputs=preview_gallery_out,
-        )
+        package_btn.click(on_package, inputs=[run_picker], outputs=[results_info, results_zip])
 
         def on_all_results(bundle: bool):
             """Package every finished run on the volume, streaming as it goes.
 
-            A generator for the same reason the other two tabs are: the
-            first press on a volume holding a dozen runs copies tens of
-            gigabytes, and a button that returns nothing for four minutes
-            is indistinguishable from a hung one. Each run appears in the
-            table as its archive lands.
+            A generator, unlike everything else on the page: the first press
+            on a volume holding a dozen runs copies tens of gigabytes, and a
+            button that returns nothing for four minutes is indistinguishable
+            from a hung one. It ends when the packaging does, so it cannot
+            linger the way the old polling generators did.
             """
             icons = {"done": "✅", "failed": "❌", "cancelled": "⛔",
                      "unknown": "•"}
@@ -1147,16 +1283,16 @@ def launch(
     `scheduler.shutdown()` *before* asking uvicorn to wind down. That order
     is the whole point. A shutdown hook on the ASGI lifespan is not enough:
     uvicorn runs lifespan shutdown only after its graceful phase, which
-    loops while any connection is still open — and a browser left on the
-    Progress or Results tab is holding a Gradio SSE stream for the length
-    of the run. So a pod stop with one tab attached would sit in graceful
-    shutdown until SIGKILL, and every in-flight `pipeline.run_worker` would
-    be orphaned holding a CUDA context: exactly the failure the handler
-    exists to prevent, reintroduced by moving it. The lifespan hook stays
-    as well, for the shutdowns no signal announces.
+    loops while any connection is still open — and every open browser tab
+    holds Gradio's one SSE connection per session (`/queue/data`) for as
+    long as the page is up, timer or no timer. So a pod stop with one tab
+    open would sit in graceful shutdown until SIGKILL, and every in-flight
+    `pipeline.run_worker` would be orphaned holding a CUDA context: exactly
+    the failure the handler exists to prevent, reintroduced by moving it.
+    The lifespan hook stays as well, for the shutdowns no signal announces.
 
-    `timeout_graceful_shutdown` bounds the wait in any case — those streams
-    poll forever by design and will not close on their own.
+    `timeout_graceful_shutdown` bounds the wait in any case — that
+    connection is held by design and will not close on its own.
     """
     import signal
 

@@ -229,9 +229,10 @@ rather than by reading the log; it fills in while the run is going.
 The UI asks for a password when `B2C_API_TOKEN` is set: username `b2c`, the
 token as the password. With it unset there is no login and no HTTP API.
 
-The run happens in a background thread. **Closing the browser tab does not
-stop it** — reopen the page and press *Attach / refresh* on the Progress
-tab. Cancel takes effect at the next step boundary, not mid-step: a step is
+The run happens in its own process. **Closing the browser tab does not
+stop it** — reopen the page and it is in the *Active run* picker, which
+lists every run on the volume; the Progress and Results tabs follow the
+picker and update on their own. Cancel takes effect at the next step boundary, not mid-step: a step is
 one opaque call, often a subprocess holding the GPU, and tearing one down
 mid-flight risks leaving the card in a state the next run inherits.
 
