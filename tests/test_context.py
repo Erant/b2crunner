@@ -1,6 +1,6 @@
 """Context.set/get, including the auto-vivify fix for scratch namespaces.
 
-Found by trying to actually run fast_helical_native.yaml (never previously
+Found by trying to actually run helical.yaml (never previously
 executed — see that file's STATUS comment and pipeline/README.md): its
 first step writes to `scene.vertices`, but `scene` is never seeded in the
 initial context (cli.py seeds only `{"dataset": dataset}`). Context.set

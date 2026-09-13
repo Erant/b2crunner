@@ -1,7 +1,7 @@
 # Body refit: moving the MHR body onto the trained splat
 
 `pipeline/steps/body_refit.py` — two steps, `splat_surface` (main env) and
-`refit_body_to_splat` (sam3dbody env). Written and wired into `fast_helical_native.yaml` 2026-09-09.
+`refit_body_to_splat` (sam3dbody env). Written and wired into `helical.yaml` 2026-09-09.
 
 ## Why
 
@@ -54,7 +54,7 @@ come.
 
 ## Measured (2026-09-09, 4070 Ti)
 
-Local reproduction of the fast_helical_native run of 2026-09-09 (81 final
+Local reproduction of the helical run of 2026-09-09 (81 final
 views at 1080x1920, the delivered `scene.ply`, SAM-3D-Body re-run on the
 run's anchor and registered onto its points3D.txt). Surface: 300k points
 from 403k sampled at stride 8, 7.6 s. Fit: 87 s.
@@ -81,7 +81,7 @@ Effect on the hollow loss: see b2ctrain's docs/STATUS.md ("Body refit").
 
 ## Wiring
 
-In `fast_helical_native.yaml`, right after `load_trained_splat` (the
+In `helical.yaml`, right after `load_trained_splat` (the
 stage-2 splat) and before the second pass re-renders it: `splat_surface`
 (splat_path, dataset.cameras) -> `refit_body_to_splat` (mesh_output: scene,
 mesh_world, surface), which republishes scene.vertices / keypoints_3d /

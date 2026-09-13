@@ -125,7 +125,7 @@ class TestTheWorkflowVotesLabelsOntoTheFinalSplat(unittest.TestCase):
         from pipeline.cli import resolve_workflow
         from pipeline.workflow import WorkflowSpec
 
-        return WorkflowSpec.from_yaml(resolve_workflow("fast_helical_native"))
+        return WorkflowSpec.from_yaml(resolve_workflow("helical"))
 
     def _step(self, spec, step_id):
         return next(s for s in spec.steps if s.id == step_id)

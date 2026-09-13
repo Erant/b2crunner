@@ -153,21 +153,21 @@ class Dataset:
         """A Dataset carrying nothing but the one image the pipeline starts from.
 
         That image is the two-panel front/back sheet, not a photo of the
-        subject — `fast_helical_native.yaml`'s first step splits it and
+        subject — `helical.yaml`'s first step splits it and
         overwrites `reference_image` with the back half (see
         steps/reference_sheet.py). This constructor stays deliberately
         ignorant of that: it validates nothing about the panels, so the
         error for a single portrait photo comes from the step that can
         name the problem rather than from here.
 
-        `fast_helical_native.yaml` builds everything else itself — sam3d_body
+        `helical.yaml` builds everything else itself — sam3d_body
         reconstructs a mesh from the sheet's front half, and `render` populates
         images/cameras/points_3d/resolution from that mesh. But the dataclass
         requires all four up front, and `from_disk` is the only constructor
         there was, so "run the pipeline from a single photo" had no entry
         point at all: you had to hand-build a Context and call
         WorkflowRunner directly. That gap is called out in
-        fast_helical_native.yaml's own header and is what this closes.
+        helical.yaml's own header and is what this closes.
 
         Which fields it leaves empty is load-bearing beyond this file: the
         web UI decides whether a workflow can start from a photo at all by

@@ -125,7 +125,7 @@ on position is only durable against reordering, not against a re-render:
 where the frames came from a NEW camera path, that path must have been
 anchored (`render_splat`'s `override_cam_from_mesh`), and the
 `anchor_position` handed here must be the one that render published for it.
-fast_helical_native shipped with neither until 2026-09-04 — an unanchored
+helical shipped with neither until 2026-09-04 — an unanchored
 helical re-render, matched against an anchor `refine_cameras` had since
 moved — and the two failures compound: the nearest camera was 24x the
 tolerance away, so the stage-3 injection matched nothing, returned the

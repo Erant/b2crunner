@@ -63,7 +63,7 @@ B2CTRAIN = os.environ.get("B2CTRAIN", os.path.expanduser("~/Projects/b2ctrain/bu
 EVERY = 4
 ERODE = 5
 HEAD_FRAC = 0.16
-# rerender_splat's confidence flags (pipeline/workflows/fast_helical_native.yaml).
+# rerender_splat's confidence flags (pipeline/workflows/helical.yaml).
 CONTROL_FLAGS = ["--confidence", "--cull-color", "0.5,0.5,0.5",
                  "--conf-tau", "0.3", "--conf-angle-margin", "45"]
 

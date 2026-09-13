@@ -71,7 +71,7 @@ ARG B2CTRAIN_REF=b49480f8739c07f4157eab86441c0196b673aafd
 # numbers: ~3.9x brush's wall time at equal or better PSNR and splat count on
 # both example datasets, verified against the fork on an RTX 4070 Ti, and
 # through this pipeline's own step class on both trainings' argv). It is
-# what fast_helical_native.yaml's two trainings run since 2026-09-07, and
+# what helical.yaml's two trainings run since 2026-09-07, and
 # its `render` subcommand is what answers to `brush-splat-render` in the
 # runtime stage below.
 #
@@ -828,7 +828,7 @@ COPY --from=python-builder /opt/vendor /opt/vendor
 # 76a74bc ("Draw the outline from a supplied mask", 2026-09-08) adds
 # `mask=` to `Renderer.render_outline` and forwards `modes["outline"]["mask"]`
 # through `render_composite`. steps/render.py's `outline_masks` input — the
-# re-outline branch of fast_helical_native.yaml — passes a matte-derived
+# re-outline branch of helical.yaml — passes a matte-derived
 # silhouette per frame that way. An older commit ignores the key silently
 # (`render_composite` reads its options with `.get`) and draws the mesh
 # outline as before: a run that switched `re_outline` on would spend a third

@@ -245,14 +245,14 @@ class TestEveryRunOnTheVolume(_BundleCase):
         """Both sources see the same run; the one that knows its workflow,
         its timings and its log path is the one that must survive."""
         run = _run_dir(self.runs, colmap=True, ply=True, name="both")
-        self._status(run, status="cancelled", workflow="fast_helical_native")
+        self._status(run, status="cancelled", workflow="helical")
 
         with unittest.mock.patch.object(runs, "output_dir", lambda: self.runs):
             found = runs.discover_runs()
 
         self.assertEqual([s.name for s in found], ["both"])
         self.assertEqual(found[0].status, "cancelled")
-        self.assertEqual(found[0].workflow, "fast_helical_native")
+        self.assertEqual(found[0].workflow, "helical")
 
     def test_runs_come_back_newest_first(self):
         for name, finished in (("older", 100.0), ("newest", 300.0), ("middle", 200.0)):
@@ -482,7 +482,7 @@ class TestOutputSelection(unittest.TestCase):
     def test_the_shipped_workflow_declares_its_deliverables(self):
         """The Outputs box IS the workflow's `outputs:` block: its labels,
         its order, and the `dir:` each one lands in."""
-        outputs = runs.workflow_outputs("fast_helical_native")
+        outputs = runs.workflow_outputs("helical")
         self.assertEqual(
             [(o.name, o.directory) for o in outputs],
             [("export_colmap", "colmap"),
@@ -573,7 +573,7 @@ class TestOutputSelection(unittest.TestCase):
         import os
         import tempfile
 
-        self.assertFalse(runs.workflow_needs_a_dataset("fast_helical_native"))
+        self.assertFalse(runs.workflow_needs_a_dataset("helical"))
 
         with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as handle:
             handle.write(
@@ -607,7 +607,7 @@ class TestOutputSelection(unittest.TestCase):
         `WorkflowSpec.from_yaml` refuses it being declared twice, and the
         Settings box draws `settings:` only."""
         _spec, settings, outputs, _steps = runs.workflow_param_panel(
-            "fast_helical_native")
+            "helical")
         names = {s.name for s in settings}
         self.assertFalse(names & {o.name for o in outputs})
         self.assertIn("resolution", names)
@@ -615,10 +615,10 @@ class TestOutputSelection(unittest.TestCase):
 
     def test_a_step_param_wired_to_a_global_is_marked_read_only(self):
         """The render step's `resolution` is `${globals.resolution}` in
-        fast_helical_native. It has to stay a declared param (that is how the
+        helical. It has to stay a declared param (that is how the
         value crosses the dispatcher), so the panel is what keeps it from
         being a second editable home for the frame size."""
-        *_, steps = runs.workflow_param_panel("fast_helical_native")
+        *_, steps = runs.workflow_param_panel("helical")
         render = next(s for s in steps if s["step"] == "render")
         self.assertEqual(render["global_refs"].get("resolution"), "resolution")
 
@@ -639,7 +639,7 @@ class TestOutputSelection(unittest.TestCase):
         draws declarations only — so this is now structural rather than a
         denylist that could be forgotten."""
         spec, settings, outputs, _steps = runs.workflow_param_panel(
-            "fast_helical_native")
+            "helical")
         self.assertIn("output_root", spec.globals)
         drawn = {s.name for s in settings} | {o.name for o in outputs}
         self.assertNotIn("output_root", drawn)
@@ -657,7 +657,7 @@ class TestSettingWidgets(unittest.TestCase):
 
     def _setting(self, name):
         _spec, settings, _outputs, _steps = webui.workflow_param_panel(
-            "fast_helical_native")
+            "helical")
         return next(s for s in settings if s.name == name)
 
     def test_a_list_choice_round_trips_through_its_label(self):
@@ -763,7 +763,7 @@ class TestSettingWidgets(unittest.TestCase):
         self.assertEqual(self._setting("run_upscale").title, "Upscale dataset")
         # A step param has no label and falls back to the name you would
         # type after --param.
-        *_, steps = webui.workflow_param_panel("fast_helical_native")
+        *_, steps = webui.workflow_param_panel("helical")
         param = steps[0]["params"][0]
         self.assertEqual(param.title, param.name)
 
@@ -859,14 +859,14 @@ class TestTheDebugDirectoryRidesAlong(_BundleCase):
     def test_a_run_that_published_no_outputs_still_gets_its_debug(self):
         # Runs from before the switch existed. Losing content silently on
         # an upgrade would be the worse default.
-        state = RunState(name="old", workflow="fast_helical_native", status="done")
+        state = RunState(name="old", workflow="helical", status="done")
         self.assertTrue(runs.wants_debug(state))
 
     def test_the_published_switch_is_what_decides(self):
         for wanted in (True, False):
             with self.subTest(wanted=wanted):
                 state = RunState(
-                    name="r", workflow="fast_helical_native", status="done",
+                    name="r", workflow="helical", status="done",
                     outputs={"export_colmap": True, "export_debug": wanted},
                 )
                 self.assertEqual(runs.wants_debug(state), wanted)
@@ -876,7 +876,7 @@ class TestTheDebugDirectoryRidesAlong(_BundleCase):
         but the debug branch is what carries that directory — without
         keeping it out of `result_subdirs` every member would appear
         twice."""
-        self.assertNotIn("debug", runs.result_subdirs("fast_helical_native"))
+        self.assertNotIn("debug", runs.result_subdirs("helical"))
         run = _run_dir(self.root, colmap=True, ply=False, name="once")
         self._debug_files(run)
         names = self._names(runs.build_result_zip(run))

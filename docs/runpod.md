@@ -20,7 +20,7 @@ has and hasn't been verified on real hardware.
 | Volume mount path | **`/data`** | Not the `/workspace` default. See below. |
 | Volume size | 100 GB+ | HF checkpoints alone are ~60 GB, before any run output. |
 | Container disk | 20 GB | Only the image's own writable layer; nothing the pipeline writes should land here. |
-| **RAM** | **64 GB+** | Not optional for `fast_helical_native`. Its two denoise passes use `keep_loaded: true`, which holds ~47 GB of Wan weights resident in host RAM between them so they come off the volume once instead of twice. Too little and the worker is OOM-killed mid-run, which looks like a mysterious dead worker rather than a sizing mistake. `doctor` warns. Drop `keep_loaded` from the workflow if you must run smaller. |
+| **RAM** | **64 GB+** | Not optional for `helical`. Its two denoise passes use `keep_loaded: true`, which holds ~47 GB of Wan weights resident in host RAM between them so they come off the volume once instead of twice. Too little and the worker is OOM-killed mid-run, which looks like a mysterious dead worker rather than a sizing mistake. `doctor` warns. Drop `keep_loaded` from the workflow if you must run smaller. |
 | HTTP ports | `7860` | The web UI *and* the HTTP API, on one port. RunPod proxies it at `https://<pod-id>-7860.proxy.runpod.net`. |
 | TCP ports | `22` | SSH. Optional, but it is how you get a shell if the UI won't start. |
 
@@ -99,7 +99,7 @@ and what you put in it decides what runs — no input picker:
 - **A single reference-sheet image** — the from-scratch path. One square
   image with the subject facing front on the left and seen from behind on
   the right, as a diffusion model generates it. Runs
-  `fast_helical_native.yaml`, which splits it (front half to the
+  `helical.yaml`, which splits it (front half to the
   SAM-3D-Body reconstruction and the anchor warp, back half to the denoise
   pass as its reference view), renders its own anchored views, and then
   runs the workflow's own six-stage tail over that dataset — same
@@ -136,11 +136,11 @@ and what you put in it decides what runs — no input picker:
   unlike a stale control in the browser's own panel — and so is one whose
   name matches no image.
 
-Both shapes run `fast_helical_native` — there is no workflow picker. The
+Both shapes run `helical` — there is no workflow picker. The
 read-only **Pipeline** field just confirms it.
 
 **Settings** holds what the pipeline chose to put in front of you, which for
-`fast_helical_native` is four things: **Resolution**, **Framing**, **Seed**,
+`helical` is four things: **Resolution**, **Framing**, **Seed**,
 and — behind a *More settings* fold — **Face splat**. These are not typed as
 YAML and they are not a fixed list in the UI's code: the workflow file
 declares them, with their type, default, help text and choice list, in a
@@ -156,7 +156,7 @@ rather than because this pipeline tunes them, sit behind each section's
 **Advanced** fold. It is ~300 controls; on a normal run you open none of
 them.
 
-The per-step sections are why `fast_helical_native`'s two brush trainings and
+The per-step sections are why `helical`'s two brush trainings and
 two denoise passes can be configured apart: `train_splat` and
 `train_final_splat` get a section each. A param the workflow wires to a
 pipeline setting (`render`'s `resolution`, say) is not shown there at all —
@@ -239,21 +239,21 @@ The same runs are available from the CLI, which is what you want for
 anything long enough that you would rather have it survive in `tmux`:
 
 ```bash
-python -m pipeline.cli run fast_helical_native --reference-image /data/sheet.png \
+python -m pipeline.cli run helical --reference-image /data/sheet.png \
     --prompt "a woman in a red jacket"
 
 # a bare name is a workflow global (resolution is the only tunable one); a
 # dotted one is that step's own param, which is how the two brush trainings
 # and the two denoise passes are told apart
-python -m pipeline.cli run fast_helical_native --reference-image /data/sheet.png \
+python -m pipeline.cli run helical --reference-image /data/sheet.png \
     --param 'resolution=[720, 1280]' --param denoise_pass1.steps_low=6 \
     --param train_final_splat.total_steps=15000
 
 # what a run would actually use, defaults included
-python -m pipeline.cli params fast_helical_native --all
+python -m pipeline.cli params helical --all
 
 # without the upscaler, to see whether that is what is degrading the output
-python -m pipeline.cli run fast_helical_native --reference-image /data/sheet.png \
+python -m pipeline.cli run helical --reference-image /data/sheet.png \
     --param run_upscale=false
 
 # the same output switches the UI's Outputs box drives. export_debug is
@@ -261,7 +261,7 @@ python -m pipeline.cli run fast_helical_native --reference-image /data/sheet.png
 # colmap_intermediate/ is the dataset the FIRST brush training is handed
 # (denoised frames + their mattes and normals), colmap_preupscale/ the same
 # idea one stage before SeedVR2 (upscale runs only)
-python -m pipeline.cli run fast_helical_native --reference-image /data/sheet.png \
+python -m pipeline.cli run helical --reference-image /data/sheet.png \
     --param export_ply=false --param export_debug=true
 ```
 
@@ -298,7 +298,7 @@ python -m pipeline.cli api run sheet.png --prompt 'a woman in a red jacket' \
     -o results/
 ```
 ```
-run fast_helical_native-20260905-101500-a1b2c3
+run helical-20260905-101500-a1b2c3
   queued
   waiting for model download: wan22, seedvr2 (~48 GB)
   running
@@ -313,7 +313,7 @@ run fast_helical_native-20260905-101500-a1b2c3
 OK: complete — 81 frames in /data/output/...  (2h11m wall clock)
    50%  0.9 GB of 1.8 GB
   100%  1.8 GB of 1.8 GB
-saved results/fast_helical_native-20260905-101500-a1b2c3-result.zip (1.8 GB)
+saved results/helical-20260905-101500-a1b2c3-result.zip (1.8 GB)
 ```
 
 A failed run prints the last 40 log lines instead of a download, which is
@@ -324,7 +324,7 @@ The rest, one per route:
 
 ```bash
 python -m pipeline.cli api health              # slots, queue depth, model status
-python -m pipeline.cli api workflows fast_helical_native   # what --param accepts
+python -m pipeline.cli api workflows helical   # what --param accepts
 python -m pipeline.cli api submit sheet.png    # queue it and return the name
 python -m pipeline.cli api submit batch.zip    # one run per pair, fanned across GPUs
 python -m pipeline.cli api submit /data/uploads/sheet.png --remote   # already there
@@ -358,7 +358,7 @@ curl -sH "$AUTH" $POD/api/v1/openapi.json | jq '.paths | keys'
 # what can I set? — the workflow's own settings: and outputs: blocks,
 # with types, defaults and choice lists. These names are exactly what
 # `settings` below accepts; a name it does not list is refused, not ignored
-curl -sH "$AUTH" $POD/api/v1/workflows/fast_helical_native | jq '.settings[].name'
+curl -sH "$AUTH" $POD/api/v1/workflows/helical | jq '.settings[].name'
 
 # submit a reference sheet
 NAME=$(curl -sH "$AUTH" \
@@ -457,8 +457,8 @@ properties, in order of how much they matter:
 
   | Workflow | Blocks on | Total |
   |---|---|---|
-  | `fast_helical_native` (`run_upscale=false`) | rmbg, sapiens2, sapiens2_pointmap, sapiens2_seg, sam3dbody, moge2, mediapipe, wan22, wan22_fp8, wan22_lora | ~72.5 GB |
-  | `fast_helical_native` | rmbg, sapiens2, sapiens2_pointmap, sapiens2_seg, sam3dbody, moge2, mediapipe, wan22, wan22_fp8, wan22_lora, seedvr2 | ~78.5 GB |
+  | `helical` (`run_upscale=false`) | rmbg, sapiens2, sapiens2_pointmap, sapiens2_seg, sam3dbody, moge2, mediapipe, wan22, wan22_fp8, wan22_lora | ~72.5 GB |
+  | `helical` | rmbg, sapiens2, sapiens2_pointmap, sapiens2_seg, sam3dbody, moge2, mediapipe, wan22, wan22_fp8, wan22_lora, seedvr2 | ~78.5 GB |
 
   `wan22` is now only 11.9 GB — the base repo's text_encoder, VAE,
   tokenizer and scheduler. The transformers come from `wan22_fp8` (35.2 GB
@@ -700,6 +700,6 @@ The shutdown endpoint above is the deliberate case. For the unattended one,
 the image does **not** arm an auto-shutdown: `scripts/pod_bootstrap.sh` has
 one (`runpodctl stop pod` after `AUTO_SHUTDOWN_HOURS`) that predates the
 container, and it is worth copying onto the pod —
-`fast_helical_native.yaml` at production settings is hours of GPU time, and a
+`helical.yaml` at production settings is hours of GPU time, and a
 step that hangs bills exactly like a step that works, and neither `/shutdown`
 nor `--shutdown-when-done` fires for a run that never finishes.

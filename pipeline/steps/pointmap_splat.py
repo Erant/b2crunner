@@ -7,7 +7,7 @@ one oriented Gaussian per foreground pixel. What comes out is a 2.5-D
 shell — the side of the subject the camera can see, and nothing behind it
 — which is useless as a deliverable and valuable as a *source of views*.
 The two consumers it was built for, both of them now wired up in
-`workflows/fast_helical_native.yaml`'s bootstrap:
+`workflows/helical.yaml`'s bootstrap:
 
   * extra reference views for the VACE conditioning batch, rendered off
     the shell at angles the single photo does not cover;
@@ -60,7 +60,7 @@ shared verbatim, which is the point of the split.
 
 How it is wired
 ---------------
-As `face_pointmap_splat`, twice in `workflows/fast_helical_native.yaml`:
+As `face_pointmap_splat`, twice in `workflows/helical.yaml`:
 `face_splat` in the bootstrap (through SAM-3D-Body's camera at the origin)
 and `face_splat_refined` after `refine_cameras` (through the photograph's
 camera moved by the anchor's refinement delta). See that class. The

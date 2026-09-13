@@ -119,7 +119,7 @@ class TestInjectAnchorAgainstRecordedData(unittest.TestCase):
 
         The batch comes back intact and the run finishes; the only thing
         that changed is that nothing in it is marked as a real photograph.
-        fast_helical_native shipped in exactly that state — an unanchored
+        helical shipped in exactly that state — an unanchored
         helical re-render, whose nearest camera is 24x the tolerance from
         the anchor — and the port, unlike the ComfyUI node it was ported
         from, said nothing at all. So a WARNING naming the distance is part
@@ -341,7 +341,7 @@ class TestAnchorBorderColour(unittest.TestCase):
     camera's framing, which leaves border. That border travels all the way
     to denoise_pass2 as part of the anchor frame, sitting among renders on
     a mid-grey background — so white, the step's old effective value in
-    fast_helical_native.yaml, is the largest possible disagreement with
+    helical.yaml, is the largest possible disagreement with
     its neighbours.
 
     0.5 is pinned rather than a literal 127 or 128 because the recorded run
@@ -387,7 +387,7 @@ class TestAnchorBorderColour(unittest.TestCase):
 
     def test_the_step_still_defaults_to_white(self):
         """Unchanged: the default belongs to callers that render on white.
-        fast_helical_native.yaml overrides it via the render step's
+        helical.yaml overrides it via the render step's
         bg_color, which render.py publishes as image_warp["bg_color"]."""
         self.assertEqual(self._border((1.0, 1.0, 1.0)), [255, 255, 255])
 

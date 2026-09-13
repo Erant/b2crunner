@@ -209,36 +209,36 @@ pipeline/
 │   └── seedvr2/         requirements.txt + setup.sh (vendors
 │                      numz/ComfyUI-SeedVR2_VideoUpscaler)
 ├── workflows/
-│   └── fast_helical_native.yaml a bootstrap prologue from a front/back
-│                                sheet, then the full native port of the
-│                                ComfyUI `fast helical` pipeline verbatim.
-│                                `run_upscale: false` gates out the SeedVR2
-│                                upscale (and the camera rescale that
-│                                repairs what it invalidates) — the old
-│                                fast_helical.yaml — for isolating the
-│                                upscaler when output looks wrong. The
-│                                bootstrap: split → sam3d_body →
-│                                detect_face_landmarks → map_face_to_mesh →
-│                                fit_head_to_face (the mesh head re-fitted
-│                                to the photo's face, in the body model's
-│                                own parameters) → a face branch
-│                                (sapiens2_seg → crop_to_box → sapiens2_seg
-│                                → sapiens2_lite → face_pointmap_splat)
-│                                builds a Gaussian head from a crop of the
-│                                sheet's front half → render draws an
-│                                anchored circular orbit of
-│                                outline+skeleton+splat frames, putting that
-│                                face on every drawing within 60° of the
-│                                source view → generate_firstlast +
-│                                inject_anchor warp the photo onto the anchor
-│                                frame. Since 2026-08-29 the face splat has
-│                                replaced detect_face_landmarks; nothing else
-│                                about this bootstrap changed, deliberately —
-│                                it is the file for testing the face in
-│                                isolation. rmbg/
-│                                wan22_vace_denoise/sapiens2/sam3d_body
-│                                verified on real hardware, render's own
-│                                rasterisation not — see its STATUS note
+│   └── helical.yaml     a bootstrap prologue from a front/back
+│                        sheet, then the full native port of the
+│                        ComfyUI `fast helical` pipeline verbatim.
+│                        `run_upscale: false` gates out the SeedVR2
+│                        upscale (and the camera rescale that
+│                        repairs what it invalidates) — the old
+│                        fast_helical.yaml — for isolating the
+│                        upscaler when output looks wrong. The
+│                        bootstrap: split → sam3d_body →
+│                        detect_face_landmarks → map_face_to_mesh →
+│                        fit_head_to_face (the mesh head re-fitted
+│                        to the photo's face, in the body model's
+│                        own parameters) → a face branch
+│                        (sapiens2_seg → crop_to_box → sapiens2_seg
+│                        → sapiens2_lite → face_pointmap_splat)
+│                        builds a Gaussian head from a crop of the
+│                        sheet's front half → render draws an
+│                        anchored circular orbit of
+│                        outline+skeleton+splat frames, putting that
+│                        face on every drawing within 60° of the
+│                        source view → generate_firstlast +
+│                        inject_anchor warp the photo onto the anchor
+│                        frame. Since 2026-08-29 the face splat has
+│                        replaced detect_face_landmarks; nothing else
+│                        about this bootstrap changed, deliberately —
+│                        it is the file for testing the face in
+│                        isolation. rmbg/
+│                        wan22_vace_denoise/sapiens2/sam3d_body
+│                        verified on real hardware, render's own
+│                        rasterisation not — see its STATUS note
 └── tests/                 stdlib unittest, no pytest dependency. Run with
                            `python -m unittest discover -s tests -t .`.
                            Most tests are golden-output tests against
@@ -362,7 +362,7 @@ in-memory between steps; disk only enters the picture via a `save_dataset`/
 ### Workflow YAML
 
 ```yaml
-name: fast_helical_native
+name: helical
 
 settings:                    # the knobs the web UI draws, in this order
   - name: resolution
@@ -389,7 +389,7 @@ outputs:                     # the deliverables, and the switch each one is
     # disabled, when that one is off. Nothing shipped declares one today.
 
 globals:                     # plumbing with no control of its own
-  output_root: output/fast_helical_native
+  output_root: output/helical
 
 steps:
   - id: denoise               # unique within the workflow; also the params namespace
@@ -434,7 +434,7 @@ control which silently does nothing.
 Everything else belongs under the step that consumes it, where it overrides
 the default that step's class declares — so a param absent from the file is not unset, it is
 at its declared default. That split is what lets one workflow call the same
-step twice and configure the two calls apart: `fast_helical_native.yaml` trains
+step twice and configure the two calls apart: `helical.yaml` trains
 `brush` twice (`train_splat`, `train_final_splat`) and denoises twice
 (`denoise_pass1`, `denoise_pass2`), which under the old single flat `params:`
 block meant hand-prefixed names like `brush_total_steps` and no way to tune
@@ -475,7 +475,7 @@ the whole expression language — the debug bundle's pre-upscale COLMAP dump
 wants `export_debug` and `run_upscale` both on, and anything less
 mechanical than an `and` wants a global that already says what it means.
 
-See `pipeline/workflows/fast_helical_native.yaml` for a full multi-step,
+See `pipeline/workflows/helical.yaml` for a full multi-step,
 from-an-image example.
 
 ### envs.yaml
@@ -506,14 +506,14 @@ uv pip install -e .                              # this pipeline package, so `pi
 ## Running today
 
 ```bash
-python -m pipeline.cli run fast_helical_native \
+python -m pipeline.cli run helical \
     --reference-image path/to/sheet.png -v
 
 # Validate a workflow references only real, registered steps (doesn't execute)
 python -c "
 from pipeline import steps
 from pipeline.workflow import WorkflowSpec
-spec = WorkflowSpec.from_yaml('pipeline/workflows/fast_helical_native.yaml')
+spec = WorkflowSpec.from_yaml('pipeline/workflows/helical.yaml')
 print(spec.name, [s.step for s in spec.steps])
 "
 ```
@@ -599,7 +599,7 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   position); the no-`anchor_image` case passes inputs through with an
   all-1.0 mask instead of failing. Not yet run against a real `render`
   output (`render` itself is unverified — see below). Both are wired into
-  `fast_helical_native.yaml`; the `fast_helical` files use `inject_anchor`
+  `helical.yaml`; the `fast_helical` files use `inject_anchor`
   only, since they start from a dataset that already has its anchor.
 
 - `split_reference_sheet` (`reference_sheet.py`) — new step, no node
@@ -984,7 +984,7 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   (`export_evidence`), replacing the `mask_splat` stage that used to
   threshold rendered alpha afterwards. It changes the binary's output
   contract, which is the part to be careful with: the RGB is composited
-  over `cull_color` (0.5 grey by default; `fast_helical_native` sets black)
+  over `cull_color` (0.5 grey by default; `helical` sets black)
   rather than `bg_color`, `--background` is ignored and therefore not
   passed, and the alpha that comes back is the gate
   `smoothstep(gate_lo, gate_hi, C)` rather than accumulated opacity.
@@ -994,7 +994,7 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   refuses it; the `+splat` compositing passes its own background and cannot
   be got wrong this way). `confidence_sidecar` keeps the raw per-pixel confidence
   under the log dir for tuning; `conf_args` passes `--conf-*` flags
-  through verbatim — `fast_helical_native` sends `--conf-tau 0.3
+  through verbatim — `helical` sends `--conf-tau 0.3
   --conf-angle-margin 45`, both measured (`docs/intermediate-splat-guide.md`). Argv-level tests only (`tests/test_splat.py`,
   `tests/test_workflows.py`) — the gating itself is the renderer's, and
   has not been through this pipeline on a pod.
@@ -1251,7 +1251,7 @@ that sheet in `split_reference_sheet` and keep only the back half as
 | `outline.json` | yes | adds `filter_fov` + `rotate_views` + `replace_views` |
 
 Every stage of every ComfyUI pipeline YAML now has a native equivalent, and
-`pipeline/workflows/fast_helical_native.yaml`'s tail (from `denoise_pass1`
+`pipeline/workflows/helical.yaml`'s tail (from `denoise_pass1`
 on) is the full six-stage port of `workflows/pipeline/fast helical.yaml`.
 **None of it has been executed
 end-to-end** — that is the next milestone. `brush` and `render`'s
@@ -1291,7 +1291,7 @@ binary call and through the actual pipeline step against all 81 of
 `cyber_6f`'s real cameras. That reframes the list below: it's no longer
 "everything needs a GPU pod", RunPod-specific provisioning questions aside.
 
-1. **Run `fast_helical_native.yaml` end to end.** Every stage now has a
+1. **Run `helical.yaml` end to end.** Every stage now has a
    native step, each has run individually, but the full sequence never
    has. Expect to debug it stage by stage — insert `save_dataset` steps
    between stages while doing so, since there is no resume-from-stage
@@ -1309,7 +1309,7 @@ binary call and through the actual pipeline step against all 81 of
    toolkit need the same driver-library completeness this box needed", not
    a capabilities-flag question.
 3. **DONE — Wan weights: 81 GB read twice per run -> 47 GB read once.**
-   `fast_helical_native` invokes `wan22_vace_denoise` twice
+   `helical` invokes `wan22_vace_denoise` twice
    (`denoise_pass1`, `denoise_pass2`), and the two cannot be merged: brush
    training, splat render, `inject_anchor` and `mask_splat` sit between
    them. Fixed from both ends:
@@ -1355,7 +1355,7 @@ binary call and through the actual pipeline step against all 81 of
    pulls — `text_encoder/` is 11.36 GB of the remaining 47, a ~5.7B-param
    UMT5EncoderModel in bf16 — and all it does is turn a prompt into an
    embedding. It is loaded, used for a few hundred tokens, and then sits in
-   memory for the whole run. `fast_helical_native` also sets `cfg: 1.0` (the
+   memory for the whole run. `helical` also sets `cfg: 1.0` (the
    Lightning distill LoRA is what makes 6-step cfg-1.0 sampling work), so
    there is no classifier-free guidance and the negative prompt is encoded
    and then contributes nothing at all.

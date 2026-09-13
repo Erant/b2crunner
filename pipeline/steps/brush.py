@@ -101,7 +101,7 @@ dataset reload and, on a 4070 Ti, about 2 minutes.
 
 Past tense on purpose: **no shipped workflow polishes any more.** Every one
 of those figures is brush's, and re-measured on b2ctrain (2026-09-07, both
-trainings) the polish did not improve quality — so `fast_helical_native`
+trainings) the polish did not improve quality — so `helical`
 sets `polish_steps: 0` on both. The machinery stays because the finding is
 about a trainer rather than about the idea: a trainer whose schedule leaves
 headroom at the end of a cold run can still be worth restarting, and this is

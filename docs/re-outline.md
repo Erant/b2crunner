@@ -1,7 +1,7 @@
 # Re-outline: the silhouette from a matte, not the mesh
 
 *2026-09-08. Experimental, off by default (`re_outline` in
-fast_helical_native.yaml). Never yet run on a pod.*
+helical.yaml). Never yet run on a pod.*
 
 ## The problem
 

@@ -614,7 +614,7 @@ def check_model_caches() -> Check:
 
     The pipeline downloads every checkpoint lazily, on the first run that
     reaches the step needing it — so a fresh pod's first
-    `fast_helical_native` spends its opening half-hour downloading, and it is
+    `helical` spends its opening half-hour downloading, and it is
     worth being able to see that state rather than inferring it from a
     stalled progress bar.
     """
@@ -652,7 +652,7 @@ def check_model_caches() -> Check:
 def check_host_ram() -> Check:
     """Enough DRAM to hold a resident model set, which is a NEW requirement.
 
-    `keep_loaded: true` (fast_helical_native's two denoise passes) keeps the
+    `keep_loaded: true` (helical's two denoise passes) keeps the
     Wan pipeline alive in host RAM between invocations instead of re-reading
     ~47 GB off the network volume. That is the whole point — but it means
     the pod must actually have the RAM. A pod that doesn't gets its worker

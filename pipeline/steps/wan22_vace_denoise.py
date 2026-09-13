@@ -1068,7 +1068,7 @@ class Wan22VaceDenoiseStep(Step):
     # `solver_order`, `handoff_reset`,
     # `reference_fit`, `cfg`, `seed`, `prompt`, `negative_prompt`, `width`,
     # `height`, `subject_desc`. That is the whole point —
-    # fast_helical_native's two passes differ only by `strength`, so listing
+    # helical's two passes differ only by `strength`, so listing
     # it here would rebuild the pipeline between them and buy nothing at
     # all. Both strength knobs reach the pipeline through the call and
     # pre-hooks that read the step per call, never through the loaded
@@ -1430,7 +1430,7 @@ class Wan22VaceDenoiseStep(Step):
 
         Called by the resident worker after every job so `brush` — which
         runs on the GPU between this step's two passes in
-        fast_helical_native — finds an empty card. Without this override the
+        helical — finds an empty card. Without this override the
         base-class no-op leaves the experts resident and brush OOMs; see
         Step.release_vram.
 

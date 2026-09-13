@@ -25,7 +25,7 @@ the culling properly — it gates on each Gaussian's multi-view evidence, in
 threshold path is not what any shipped workflow runs. What it left behind
 was the *compositing*, and `mode: composite` (2026-09-05) is that half on
 its own: the frames alpha-blended over `bg_color` with whatever matte
-`dataset.masks` arrives carrying. In fast_helical_native that matte is
+`dataset.masks` arrives carrying. In helical that matte is
 rmbg's, run over the re-render, rather than the render's own alpha —
 a matte measured against the frames beats one accumulated from the
 Gaussians that drew them, and the re-render is now made on black so the

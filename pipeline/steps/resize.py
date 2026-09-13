@@ -11,7 +11,7 @@ params named, is then letterboxed into that 464-wide frame between white
 bars. Resizing the batch to exactly 480x832 here first is what makes the
 pass run at the size its params say, with nothing for diffusers to fit.
 
-The re-outline branch of fast_helical_native.yaml uses it twice: once to
+The re-outline branch of helical.yaml uses it twice: once to
 take the stage-1 control video down to 480x832 for the extra denoise, and
 once to bring rmbg's mattes of that denoise's output back up to the render
 size so `render` can draw the outline from them. Both resizes are PLAIN

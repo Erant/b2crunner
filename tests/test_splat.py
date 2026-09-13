@@ -508,7 +508,7 @@ class TestRenderSplatCameras(unittest.TestCase):
         return float(d.mean()), float(d.std())
 
     def test_a_framing_preset_reaims_and_tightens_the_orbit(self):
-        """fast_helical_native threads one `framing` global through both the
+        """helical threads one `framing` global through both the
         mesh `render` and this step, so a non-'full' preset is rendered onto
         cameras re-aimed at that preset and the splat is trained there. This
         step must rebuild its orbit around the SAME box — centred on it, with

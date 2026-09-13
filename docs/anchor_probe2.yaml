@@ -1,5 +1,5 @@
 name: anchor_probe
-description: fast_helical_native up to the injected anchor, then saved
+description: helical up to the injected anchor, then saved
 settings:
 - name: resolution
   label: Resolution
@@ -50,7 +50,7 @@ settings:
     \ on top of the normal head, plus the pointmap head the splat itself needs."
 outputs: []
 globals:
-  output_root: output/fast_helical_native
+  output_root: output/helical
 steps:
 - id: split_sheet
   step: split_reference_sheet

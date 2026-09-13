@@ -53,7 +53,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from .gpu_scheduler import GpuScheduler
 from .run_state import tail_lines
 from .runs import (
-    WORKFLOW_NATIVE, SubmitError, build_result_zip, check_submission,
+    WORKFLOW_DEFAULT, SubmitError, build_result_zip, check_submission,
     discover_runs, find_run, merged_runs, wants_debug,
     resolve_upload, run_log_path, submit_runs, workflow_param_panel,
 )
@@ -246,7 +246,7 @@ class SubmitBody(BaseModel):
     step_params: Dict[str, Dict[str, Any]] = Field(
         default_factory=dict, description='Per-step overrides: {"step_id": {"param": value}}.',
     )
-    workflow: str = WORKFLOW_NATIVE
+    workflow: str = WORKFLOW_DEFAULT
 
 
 def _parse_json_field(
@@ -391,7 +391,7 @@ def build_router(
 
         return {
             "workflows": [p.stem for p in available_workflows()],
-            "default": WORKFLOW_NATIVE,
+            "default": WORKFLOW_DEFAULT,
         }
 
     @router.get("/workflows/{name}")
@@ -430,7 +430,7 @@ def build_router(
         prompt: str = Form(""),
         settings: Optional[str] = Form(None, description="A JSON object of workflow settings."),
         step_params: Optional[str] = Form(None, description="A JSON object of per-step overrides."),
-        workflow: str = Form(WORKFLOW_NATIVE),
+        workflow: str = Form(WORKFLOW_DEFAULT),
     ) -> Dict[str, Any]:
         """Queue one run, or one per image in an uploaded .zip.
 

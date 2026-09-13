@@ -274,7 +274,7 @@ class WorkflowRunner:
     def _get_dispatcher(self, step_spec: StepSpec) -> Dispatcher:
         # keep_loaded is part of the key, not just an argument to the first
         # build: two steps sharing an env is exactly how residency happens
-        # (fast_helical_native's denoise_pass1 and denoise_pass2 are both
+        # (helical's denoise_pass1 and denoise_pass2 are both
         # subprocess/wan22, so they share one dispatcher and therefore one
         # resident worker). Without keep_loaded in the key, a third step on
         # the same env that did *not* ask for residency would inherit — or

@@ -120,7 +120,7 @@ class ApiTestCase(unittest.TestCase):
         return self.post(files={"file": ("sheet.png", _png(), "image/png")}, data=data)
 
     def finished_run(
-        self, name="fast_helical_native-20260904-101500-abc123",
+        self, name="helical-20260904-101500-abc123",
         status="done", deliverables=True, log=True,
     ) -> Path:
         """A run on the volume as a worker would have left it."""
@@ -136,7 +136,7 @@ class ApiTestCase(unittest.TestCase):
             log_path = runs.log_dir() / f"{name}.log"
             log_path.write_text("\n".join(f"line {i}" for i in range(500)))
         state = RunState(
-            name=name, workflow="fast_helical_native", status=status,
+            name=name, workflow="helical", status=status,
             output_dir=run_dir, log_path=log_path, started=1.0, finished=2.0,
         )
         (runs.run_jobs_dir() / f"{name}.status.json").write_text(
@@ -193,12 +193,12 @@ class TestSubmitting(ApiTestCase):
 
         names = [run["name"] for run in response.json()["runs"]]
         self.assertEqual(len(names), 1)
-        self.assertTrue(names[0].startswith("fast_helical_native-"))
+        self.assertTrue(names[0].startswith("helical-"))
 
         self.assertEqual(len(self.submitted), 1)
         job = self.submitted[0]
         self.assertEqual(job.prompt, "a woman in a red jacket")
-        self.assertEqual(job.workflow_name, "fast_helical_native")
+        self.assertEqual(job.workflow_name, "helical")
         self.assertEqual(job.output_dir, str(runs.output_dir() / names[0]))
 
     def test_the_sheet_is_copied_onto_the_volume_exactly_once(self):
@@ -259,7 +259,7 @@ class TestSubmitting(ApiTestCase):
             [("a portrait of alice", "alice"), ("a portrait of bob", "bob")],
         )
         for job, stem in zip(self.submitted, ("alice", "bob")):
-            self.assertIn(f"fast_helical_native-{stem}-", job.run_name)
+            self.assertIn(f"helical-{stem}-", job.run_name)
 
     def test_only_one_run_starts_when_there_is_one_gpu(self):
         buffer = io.BytesIO()
@@ -535,7 +535,7 @@ class TestWatching(ApiTestCase):
 class TestWhatAWorkflowDeclares(ApiTestCase):
     def test_the_settings_are_published_with_their_types_and_choices(self):
         body = self.client.get(
-            f"{API_PREFIX}/workflows/fast_helical_native", headers=AUTH
+            f"{API_PREFIX}/workflows/helical", headers=AUTH
         ).json()
         by_name = {s["name"]: s for s in body["settings"]}
         self.assertEqual(by_name["seed"]["type"], "int")
@@ -550,7 +550,7 @@ class TestWhatAWorkflowDeclares(ApiTestCase):
         # is what declaring it as an output buys — and what a client
         # reading this schema needs in order to turn it off.
         body = self.client.get(
-            f"{API_PREFIX}/workflows/fast_helical_native", headers=AUTH
+            f"{API_PREFIX}/workflows/helical", headers=AUTH
         ).json()
         debug = next(o for o in body["outputs"] if o["name"] == "export_debug")
         self.assertEqual(debug["dir"], "debug")
@@ -562,7 +562,7 @@ class TestWhatAWorkflowDeclares(ApiTestCase):
 
     def test_the_outputs_are_published_with_their_directories_and_requires(self):
         body = self.client.get(
-            f"{API_PREFIX}/workflows/fast_helical_native", headers=AUTH
+            f"{API_PREFIX}/workflows/helical", headers=AUTH
         ).json()
         by_name = {o["name"]: o for o in body["outputs"]}
         self.assertEqual(by_name["export_colmap"]["dir"], "colmap")
@@ -579,7 +579,7 @@ class TestWhatAWorkflowDeclares(ApiTestCase):
         # takes. A drift here means a client reading the schema builds a
         # submission the strict check then refuses.
         body = self.client.get(
-            f"{API_PREFIX}/workflows/fast_helical_native", headers=AUTH
+            f"{API_PREFIX}/workflows/helical", headers=AUTH
         ).json()
         response = self.submit_sheet(settings=json.dumps(
             {s["name"]: s["default"] for s in body["settings"]}
@@ -588,8 +588,8 @@ class TestWhatAWorkflowDeclares(ApiTestCase):
 
     def test_the_shipped_workflows_are_listed(self):
         body = self.client.get(f"{API_PREFIX}/workflows", headers=AUTH).json()
-        self.assertIn("fast_helical_native", body["workflows"])
-        self.assertEqual(body["default"], "fast_helical_native")
+        self.assertIn("helical", body["workflows"])
+        self.assertEqual(body["default"], "helical")
 
     def test_an_unknown_workflow_is_a_404(self):
         self.assertEqual(

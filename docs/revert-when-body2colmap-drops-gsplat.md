@@ -129,7 +129,7 @@ reverting — this project only ever added to it.
    and passes it to the `render_composite` call it already makes. The
    `render_mode` param gains `outline+skeleton+splat`.
 
-3. **`pipeline/workflows/fast_helical_native.yaml`** *and*
+3. **`pipeline/workflows/helical.yaml`** *and*
    **`fast_helical_shell.yaml`** — both carry the face branch, and in both
    the `render_face_views` and `composite_face` steps come out, with
    `render_initial_views` taking `splat_path: scene.face_splat_path` plus

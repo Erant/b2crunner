@@ -9,14 +9,14 @@ ships:
 
 | workflow | starts from | stages |
 |---|---|---|
-| `fast_helical_native` | a front/back reference sheet | a bootstrap prologue — split the sheet, reconstruct a body, nod the craned head back, build a Gaussian splat of the subject's face from a crop of the front half and composite it onto a circular orbit of outline+skeleton renders, warp the photo onto the anchor frame — then the full native port of the ComfyUI `fast helical` pipeline: two denoise passes and two splat trainings around a helical re-render. The first of those trainings also gets *supporting views* — a cap of renders of the face splat, which is what carries the photographed face through two denoise passes (the stage-1 body shells that used to join it were measured to cost more than they bought and left the workflow on 2026-09-06). `--param run_upscale=false` drops the SeedVR2 upscale (the old `fast_helical` workflow) to isolate it when output looks wrong |
+| `helical` | a front/back reference sheet | a bootstrap prologue — split the sheet, reconstruct a body, nod the craned head back, build a Gaussian splat of the subject's face from a crop of the front half and composite it onto a circular orbit of outline+skeleton renders, warp the photo onto the anchor frame — then the full native port of the ComfyUI `fast helical` pipeline: two denoise passes and two splat trainings around a helical re-render. The first of those trainings also gets *supporting views* — a cap of renders of the face splat, which is what carries the photographed face through two denoise passes (the stage-1 body shells that used to join it were measured to cost more than they bought and left the workflow on 2026-09-06). `--param run_upscale=false` drops the SeedVR2 upscale (the old `fast_helical` workflow) to isolate it when output looks wrong |
 
 An alternative bootstrap — the photo-to-splat *shell*, a body-wide
 Gaussian shell with a pose refit against it and a band of frames rendered
 off it (`fast_helical_shell.yaml`) — was tried alongside and retired on
 2026-09-04; it lives in git history.
 
-**`fast_helical_native` has not been run end-to-end on a pod** — its
+**`helical` has not been run end-to-end on a pod** — its
 bootstrap prologue has never executed on real hardware. The
 [coverage section](pipeline/README.md#coverage-vs-the-comfyui-node-pack)
 tracks what is verified against what.
@@ -52,7 +52,7 @@ The Gaussian-splat steps additionally need `plyfile` for PLY I/O, and
 image that name is a shim over `b2ctrain render`, the CUDA trainer both
 trainings run (`docker/Dockerfile`, docs/docker.md) — see `requirements.txt`.
 Face-landmark detection needs `mediapipe` (CPU-only); no shipped workflow
-uses it any more — `fast_helical_native`'s face splat replaced it — but the
+uses it any more — `helical`'s face splat replaced it — but the
 step and its `render` params are still there. The `pointmap_splat` family
 needs `scipy`, which arrives anyway as a transitive dependency of
 `body2colmap` (via `pyrender`).
@@ -62,25 +62,25 @@ needs `scipy`, which arrives anyway as a transitive dependency of
 ```bash
 # from a front/back reference sheet (subject facing front on the left, seen
 # from behind on the right) — the workflow splits it and renders its own views
-python -m pipeline.cli run fast_helical_native --reference-image sheet.png \
+python -m pipeline.cli run helical --reference-image sheet.png \
     --prompt "a woman in a red jacket"
 
 # the same thing without the upscaler
-python -m pipeline.cli run fast_helical_native --reference-image sheet.png \
+python -m pipeline.cli run helical --reference-image sheet.png \
     --param run_upscale=false
 
 # just the COLMAP dataset — skips a 30,000-iteration brush training
-python -m pipeline.cli run fast_helical_native --reference-image sheet.png \
+python -m pipeline.cli run helical --reference-image sheet.png \
     --param export_ply=false
 
 # the form the pipeline declares — its settings and its outputs — then
 # every step's own params (add --all for the ones nothing overrides)
-python -m pipeline.cli params fast_helical_native
+python -m pipeline.cli params helical
 
 # without the debug bundle: no debug/ in the .zip, and neither of the two
 # debug COLMAP datasets — including the one the first brush training is
 # handed, which is what to look at when the helical re-render comes out wrong
-python -m pipeline.cli run fast_helical_native --reference-image sheet.png \
+python -m pipeline.cli run helical --reference-image sheet.png \
     --param export_debug=false
 
 # what can this machine actually run? (GPU, Vulkan, EGL, venvs, HF access)

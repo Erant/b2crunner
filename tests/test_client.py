@@ -138,7 +138,7 @@ class TestAgainstAServer(unittest.TestCase):
         log = runs.log_dir() / f"{name}.log"
         log.write_text("\n".join(f"line {i}" for i in range(200)))
         (runs.run_jobs_dir() / f"{name}.status.json").write_text(json.dumps(RunState(
-            name=name, workflow="fast_helical_native", status="done",
+            name=name, workflow="helical", status="done",
             message="complete", output_dir=run_dir, log_path=log,
             started=100.0, finished=700.0,
         ).to_dict()))
@@ -148,10 +148,10 @@ class TestAgainstAServer(unittest.TestCase):
 
     def test_health_and_workflows(self):
         self.assertEqual(self.client.health()["gpu_count"], 1)
-        self.assertIn("fast_helical_native", self.client.workflows()["workflows"])
+        self.assertIn("helical", self.client.workflows()["workflows"])
 
     def test_the_workflow_schema_names_settings_a_submission_may_carry(self):
-        body = self.client.workflow("fast_helical_native")
+        body = self.client.workflow("helical")
         names = [setting["name"] for setting in body["settings"]]
         self.assertIn("resolution", names)
         # What the endpoint publishes has to be what `submit` accepts —

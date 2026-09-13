@@ -290,7 +290,7 @@ class RenderSplatStep(Step):
         Param("height", int, 1280, "Render height", minimum=1),
         Param("framing", str, "full",
               "Which of the source render's framing presets to reuse for the "
-              "bounds. fast_helical_native threads one `framing` global through "
+              "bounds. helical threads one `framing` global through "
               "both the mesh `render` and this step, so a non-'full' preset "
               "re-renders the splat on the same re-aimed, tighter-framed orbit "
               "the mesh render used and the splat was trained on",
@@ -965,7 +965,7 @@ def _resolve_cameras(
     # bounds. Using the mesh render's bounds is what keeps a re-render framed
     # identically to the render it is replacing.
     #
-    # The mesh render applies the SAME `framing` preset (fast_helical_native
+    # The mesh render applies the SAME `framing` preset (helical
     # threads one `framing` global through both `render` and this step), so a
     # non-"full" preset here re-aims the orbit at that preset's centre and
     # sizes the radius from that preset's box — the orbit the splat was
@@ -1285,7 +1285,7 @@ def _carry_anchor_refinement(cameras, anchor_frame_index: int, dataset,
     it is the right pose as long as the splat being rendered was trained
     with the photograph's camera there. After `refine_cameras` it was not:
     the refinement moves the anchor camera off the origin — 0.9-1.6 deg and
-    41-68 mm in every fast_helical_native run since 2026-09-04; it is the
+    41-68 mm in every helical run since 2026-09-04; it is the
     one real frame, outvoted by 80 painted ones — the training runs on the
     moved cameras, and the splat's subject sits where THOSE cameras say.
     Rendered from the origin it then disagrees with the photograph injected

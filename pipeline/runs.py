@@ -46,10 +46,12 @@ logger = logging.getLogger(__name__)
 
 # The shipped default: every submission — an image, or a zip of
 # image/prompt/settings triples — runs this workflow unless the caller
-# names another (the UI's Pipeline picker, the API's `workflow` field). The
-# only other one is fast_helical_direct, an experiment (its header says
-# what it is); this stays the default until that has run.
-WORKFLOW_NATIVE = "fast_helical_native"
+# names another (the UI's Pipeline picker, the API's `workflow` field). It
+# is the only workflow shipped — `fast_helical_direct`, the one-denoise
+# experiment that briefly sat beside it, was a dead end and is gone
+# (2026-09-13) — but the picker and the field stay, so the next one
+# needs no new wiring.
+WORKFLOW_DEFAULT = "helical"
 
 
 class SubmitError(Exception):
@@ -172,7 +174,7 @@ def workflow_param_panel(
         `overrides` is what this workflow set on top, already
         template-expanded so a field shows the value the run would really
         use, and keyed by the step's `id:` — which is the whole point: the
-        two `brush` trainings in fast_helical_native get their own section
+        two `brush` trainings in helical get their own section
         and their own controls.
     """
     from .cli import resolve_workflow
@@ -557,7 +559,7 @@ def _refuse_unknown_overrides(
 def check_submission(
     global_overrides: Optional[Dict[str, Any]] = None,
     step_overrides: Optional[Dict[str, Dict[str, Any]]] = None,
-    workflow: str = WORKFLOW_NATIVE,
+    workflow: str = WORKFLOW_DEFAULT,
     strict: bool = False,
 ) -> None:
     """Raise `SubmitError` for anything `submit_runs` would refuse.
@@ -592,7 +594,7 @@ def submit_runs(
     global_overrides: Optional[Dict[str, Any]] = None,
     step_overrides: Optional[Dict[str, Dict[str, Any]]] = None,
     envs_path: str = "",
-    workflow: str = WORKFLOW_NATIVE,
+    workflow: str = WORKFLOW_DEFAULT,
     strict: bool = False,
 ) -> List[str]:
     """Queue one run per `PlannedRun` in `plan`; return their names.
@@ -693,7 +695,7 @@ def submit_runs(
             raise SubmitError(blame + str(exc)) from None
 
         # A fanned-out batch names each run after its image so the picker
-        # reads `fast_helical_native-image1-...`; a single run keeps the bare
+        # reads `helical-image1-...`; a single run keeps the bare
         # workflow prefix it always had. The stem is squeezed to
         # filename-safe chars — it becomes a directory and a log-file name.
         prefix = spec.name

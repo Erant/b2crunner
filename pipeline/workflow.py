@@ -60,7 +60,7 @@ Everything else belongs in the step that consumes it, under that step's own
 `params:`, where it overrides the default the Step class declares (see
 `Step.PARAMS` in pipeline/step.py). A step's params are therefore namespaced
 by its `id:`, which is what lets one workflow call the same step twice and
-configure the two calls apart — `fast_helical_native.yaml` trains `brush`
+configure the two calls apart — `helical.yaml` trains `brush`
 twice and denoises twice.
 
 A declared setting reaches the steps the way it always has, as
@@ -247,7 +247,7 @@ class StepSpec:
     # sitting in memory for the rest of the run.
     #
     # Turn it on when the same `step:` appears more than once in a workflow
-    # and its load() is expensive — fast_helical_native.yaml's two
+    # and its load() is expensive — helical.yaml's two
     # `wan22_vace_denoise` passes are the case this exists for, where a
     # reload is ~47 GB re-read off a pod's network volume.
     #
@@ -269,7 +269,7 @@ class StepSpec:
     # Run this step only if this resolves truthy. Anything `params:` accepts
     # works — a literal `false`, or a `${globals.x}` reference, which is the
     # case it exists for: a workflow that ends in several optional exports
-    # (fast_helical_native.yaml's COLMAP dataset and trained .ply) needs the
+    # (helical.yaml's COLMAP dataset and trained .ply) needs the
     # caller to pick which ones to pay for, and a 30,000-iteration brush run
     # is not something to start and throw away.
     #

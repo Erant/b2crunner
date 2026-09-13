@@ -813,7 +813,7 @@ RAM, 12 GB VRAM). RMBG-2.0 over 81 frames OOMs at 12 GB.
 
 Two traps: mounting `pipeline/` over the image hides the image's env
 registry, so `docker/envs.docker.yaml` must be mounted back over
-`pipeline/envs/envs.yaml`; and the probe YAML is `fast_helical_native`
+`pipeline/envs/envs.yaml`; and the probe YAML is `helical`
 truncated after `reinject_anchor_initial` (a copy is at `docs/anchor_probe2.yaml`) with a `save_dataset` step
 before the warp (`pre_inject/`) and one after (`initial/`), its
 `settings` reduced to the globals those steps read and `outputs: []`.

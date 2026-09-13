@@ -350,9 +350,9 @@
 # Everything else lives under the step that consumes it, as an override on
 # the default that step's own class declares (pipeline/step.py's
 # `Step.PARAMS`), and reaches the UI only behind the "Per-step settings"
-# fold. `python -m pipeline.cli params fast_helical_native --all` prints the
+# fold. `python -m pipeline.cli params helical --all` prints the
 # effective value of every one of them, defaults included.
-name: fast_helical_native
+name: helical
 description: >-
   From a front/back reference sheet or a single frontal photo: split it (or
   not), reconstruct a body, render its own anchored views, then run the
@@ -670,7 +670,7 @@ globals:
   # a bare `WorkflowRunner` with no CLI: relative to the working directory,
   # which on a pod is the container's writable layer — small, and gone when
   # the pod is recycled.
-  output_root: output/fast_helical_native
+  output_root: output/helical
 
 steps:
   # ================================================================ bootstrap

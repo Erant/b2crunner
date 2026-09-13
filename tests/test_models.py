@@ -284,7 +284,7 @@ class TestRequiredForSteps(unittest.TestCase):
             # dinov3 SOURCE that sam_3d_body's backbone pulls from GitHub
             # through torch.hub, which was the one thing sam3d_body still
             # downloaded lazily inside Step.load().
-            "fast_helical_native": {"rmbg", "sapiens2", "sapiens2_pointmap",
+            "helical": {"rmbg", "sapiens2", "sapiens2_pointmap",
                                     "sapiens2_seg", "sam3dbody", "moge2",
                                     "dinov3_hub", "mediapipe", "wan22",
                                     "wan22_fp8", "wan22_lora", "seedvr2",
@@ -302,7 +302,7 @@ class TestRequiredForSteps(unittest.TestCase):
         prefetch scans enabled_steps(), so with the upscale gated off,
         blocking on the upscaler's 6 GB before the run starts would defeat
         the point of turning it off."""
-        spec = WorkflowSpec.from_yaml(resolve_workflow("fast_helical_native"))
+        spec = WorkflowSpec.from_yaml(resolve_workflow("helical"))
         spec.globals["run_upscale"] = False
         self.assertNotIn(
             "seedvr2",
@@ -312,7 +312,7 @@ class TestRequiredForSteps(unittest.TestCase):
     def test_a_when_skipped_step_is_not_waited_on(self):
         """The prefetch reads enabled_steps(), so switching an output off
         also drops whatever only that output needed."""
-        spec = WorkflowSpec.from_yaml(resolve_workflow("fast_helical_native"))
+        spec = WorkflowSpec.from_yaml(resolve_workflow("helical"))
         spec.globals["export_colmap"] = False
         spec.globals["export_ply"] = False
         # Nothing outside stage 2 has used sapiens2 since 2026-09-06 (the

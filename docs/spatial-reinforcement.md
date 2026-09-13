@@ -47,7 +47,7 @@ denoise_pass1 -> colmap_export -> brush (train, --export-evidence,
               -> denoise_pass2   (strength 0.8)
 ```
 
-In `fast_helical_native.yaml`.
+In `helical.yaml`.
 
 Before 2026-08-30 the middle two lines read `BLACK bg` and `filter_size
 6, dilation 2`, and that is what sections 1-3 describe.

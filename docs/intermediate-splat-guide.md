@@ -4,7 +4,7 @@
 > below was measured on the Erant/brush fork, which the pipeline no longer
 > uses — b2ctrain replaced it (docs/docker.md). Re-measured there, the
 > growth-off 9000-step warm start that §2 and §4 call the biggest lever
-> does not improve quality, so `fast_helical_native` sets `polish_steps: 0`
+> does not improve quality, so `helical` sets `polish_steps: 0`
 > on both trainings. Everything else in this guide still describes what
 > ships.
 
@@ -196,7 +196,7 @@ different subject.
    `docs/splat-confidence.md`, `crates/brush-bench-test/tests/evidence.rs`) on
    `normal-map-supervision`, push to `Erant/brush`, bump `BRUSH_REF` in `docker/Dockerfile`
    (currently `debff989`, already one commit behind the pushed `f80b23b8`), rebuild the image.
-2. **`rerender_splat`** in `pipeline/workflows/fast_helical_native.yaml`: add
+2. **`rerender_splat`** in `pipeline/workflows/helical.yaml`: add
    `conf_args: ["--conf-tau", "0.3", "--conf-angle-margin", "45"]` (the `render_splat` step
    already passes `conf_args` verbatim). Leave `gate_lo`/`gate_hi` at 0.45/0.65. Amend the
    comment that the gate replaces `mask_splat`'s thresholding: it does, with the fixed evidence.

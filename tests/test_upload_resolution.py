@@ -392,7 +392,7 @@ class OutputSwitchTests(unittest.TestCase):
         from pipeline.cli import resolve_workflow
         from pipeline.workflow import WorkflowSpec
 
-        spec = WorkflowSpec.from_yaml(resolve_workflow("fast_helical_native"))
+        spec = WorkflowSpec.from_yaml(resolve_workflow("helical"))
         spec.globals.update(globals_)
         return spec
 

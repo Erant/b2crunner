@@ -11,7 +11,7 @@ One upload box, and what it holds decides what runs — there is no input
 picker (`resolve_upload`). Two shapes are understood:
 
   * **a single reference-sheet image** — the from-scratch path, via
-    `Dataset.from_reference_image` and `fast_helical_native.yaml`. One
+    `Dataset.from_reference_image` and `helical.yaml`. One
     square image with the subject facing front on the left and seen from
     behind on the right, as a diffusion model generates it; the workflow's
     first step halves it (see steps/reference_sheet.py). One run.
@@ -30,7 +30,7 @@ picker (`resolve_upload`). Two shapes are understood:
     twelve runs differing by exactly the knob under test. See
     `runs.read_settings_sidecar`.
 
-Both shapes run the same workflow, `fast_helical_native`, so there is no
+Both shapes run the same workflow, `helical`, so there is no
 workflow picker either.
 
 **The form is the pipeline's, not this module's.** A workflow declares what
@@ -106,7 +106,7 @@ from .paths import data_dir, output_dir, run_jobs_dir, upload_dir
 from .run_state import PREVIEW_FRAMES, RunState
 from .cli import available_workflows
 from .runs import (
-    BUNDLE_NAME, IMAGE_SUFFIXES, WORKFLOW_NATIVE, SubmitError,
+    BUNDLE_NAME, IMAGE_SUFFIXES, WORKFLOW_DEFAULT, SubmitError,
     build_bundle_zip, build_result_zip, completed_runs, resolve_upload,
     result_dirs, result_subdirs, run_contents, run_log_path, run_recency,
     submit_runs, wants_debug, workflow_param_panel,
@@ -410,7 +410,7 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
         gpu_count=gpu_count if gpu_count is not None else detect_gpu_count(),
         work_dir=run_jobs_dir(),
     )
-    default_workflow = WORKFLOW_NATIVE
+    default_workflow = WORKFLOW_DEFAULT
 
     with gr.Blocks(title="b2c_runner", analytics_enabled=False) as app:
         gr.Markdown("# b2c_runner\nBody2COLMAP pipeline — submit a run, watch it, collect the output.")
@@ -452,13 +452,12 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
                         "_Either shape runs the pipeline picked below._"
                     )
                     # Every workflow file in pipeline/workflows/, the shipped
-                    # default selected. The picker was fixed to the one
-                    # shipped pipeline until 2026-09-13, when the
-                    # experimental fast_helical_direct joined it; the
-                    # panel, the Outputs box and the summary all follow the
-                    # pick, and the per-run overrides are dropped on a
-                    # change because they are keyed to the workflow they
-                    # were drawn for.
+                    # default selected. One entry today; the picker stays
+                    # (added 2026-09-13 for an experiment since removed) so
+                    # a second workflow needs no new wiring. The panel, the
+                    # Outputs box and the summary all follow the pick, and
+                    # the per-run overrides are dropped on a change because
+                    # they are keyed to the workflow they were drawn for.
                     workflow_in = gr.Dropdown(
                         [p.stem for p in available_workflows()],
                         value=default_workflow,

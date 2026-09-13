@@ -35,7 +35,7 @@ VALID_DISPATCH = {"in_process", "subprocess", "service", "docker"}
 # lighting was anchored to the room instead of to the camera, and on
 # 2026-09-01 the room itself replaced the seamless backdrop, to match the
 # `background` render setting. See the comment on denoise_pass1 in
-# fast_helical_native.yaml for why.
+# helical.yaml for why.
 #
 # Pinned here because the failure mode is silent: YAML's folded `>-`
 # scalar turns each line break into a space, and a continuation line
@@ -127,7 +127,7 @@ BOOTSTRAPS = {
     # The shipped default: the older, better-proven bootstrap — circular
     # orbit, anchor warp and injection — with the head re-fitted to the
     # photo and the face splat composited on. Everything else is as it was.
-    "fast_helical_native": [
+    "helical": [
         "split_sheet", "reconstruct_body",
         "detect_face", "map_face_to_mesh", "fit_head_to_face",
         "locate_face", "crop_face", "face_seg", "face_mask",
@@ -269,7 +269,7 @@ class TestWorkflowFiles(unittest.TestCase):
                     wired[step.id] = step.params["debug_dir"]
             with self.subTest(workflow=path.name):
                 # Every refinement and every face splat, however many a
-                # file has (fast_helical_direct refines once).
+                # file has.
                 for step in spec.steps:
                     if step.step in ("refine_cameras", "face_pointmap_splat"):
                         self.assertIn(step.id, wired)
@@ -350,7 +350,7 @@ class TestWorkflowFiles(unittest.TestCase):
         this one file (which also rescales the dataset's cameras as part
         of the same step — see steps/seedvr2.py). Off -> it drops out of
         enabled_steps(); on (the default) -> it runs."""
-        spec = WorkflowSpec.from_yaml(str(WORKFLOW_DIR / "fast_helical_native.yaml"))
+        spec = WorkflowSpec.from_yaml(str(WORKFLOW_DIR / "helical.yaml"))
         gated = {"upscale"}
         self.assertTrue(gated <= {s.id for s in spec.enabled_steps()})
         spec.globals["run_upscale"] = False
@@ -369,7 +369,7 @@ class TestWorkflowFiles(unittest.TestCase):
         output of its own, up to 2026-09-08.
         """
         preupscale = {"export_masks_preupscale", "export_colmap_preupscale"}
-        spec = WorkflowSpec.from_yaml(str(WORKFLOW_DIR / "fast_helical_native.yaml"))
+        spec = WorkflowSpec.from_yaml(str(WORKFLOW_DIR / "helical.yaml"))
         for step in spec.steps:
             if step.id in preupscale:
                 self.assertEqual(
@@ -564,7 +564,7 @@ class TestWorkflowFiles(unittest.TestCase):
         over black and not bilateral-filtered, which only happens if the
         stage-3 inject_anchor runs *after* mask_splat.
 
-        Two distinct checks, because fast_helical_native legitimately has a
+        Two distinct checks, because helical legitimately has a
         SECOND inject_anchor: the pre-denoise one in its bootstrap, which
         builds the anchored dataset the fast_helical files are handed
         ready-made. That one belongs before everything here.
@@ -612,7 +612,7 @@ class TestWorkflowFiles(unittest.TestCase):
         The step matches the anchor by camera POSITION, so it is only ever
         as good as the path the batch was rendered along. A `render_splat`
         that builds a fresh orbit without anchoring it puts no camera on the
-        anchor at all — measured on cyber_6f with fast_helical_native's own
+        anchor at all — measured on cyber_6f with helical's own
         params, the nearest unanchored helical camera is 0.1408 from it
         against a 0.00593 tolerance, 24x — so the injection matches zero
         frames, returns the batch untouched and the run carries on. That was
@@ -820,7 +820,7 @@ class TestWorkflowFiles(unittest.TestCase):
         them only if nothing REPLACED the dataset between the cap render
         and the training — a `render_splat` that rebuilt the path, a
         `seedvr2` that resized the frames and rescaled the cameras. The
-        native file's final training is the case: `scene.support_views.*`
+        final training is the case: `scene.support_views.*`
         is still populated by then, so an optional read would quietly
         succeed and fit the deliverable to renders taken along the
         bootstrap's circular orbit, two denoise passes and an upscale ago.
@@ -994,8 +994,7 @@ class TestWorkflowFiles(unittest.TestCase):
         the supporting views reads the weights (or it hears the cap and the
         frames at the same volume over the face), and one that reads no
         cap reads no weights (there is nothing for its frames to yield to).
-        The native file's stage-2 training and the direct file's one
-        training are both that training.
+        The stage-2 training is that training.
 
         (The stage-1 shells had a `face_priority_shells` twin folding the
         same yield into their masks; both went with the shells on
@@ -1338,10 +1337,9 @@ class TestWorkflowFiles(unittest.TestCase):
         which must read as pass 1 does or its silhouette is of a different
         subject. So this checks every one.
         """
-        # How many wan22_vace_denoise steps each file carries: the native
-        # file's two full-resolution passes plus the gated 480p re-outline
-        # pass; the direct file's one pass plus that same branch.
-        expected = {"fast_helical_native.yaml": 3, "fast_helical_direct.yaml": 2}
+        # How many wan22_vace_denoise steps each file carries: the two
+        # full-resolution passes plus the gated 480p re-outline pass.
+        expected = {"helical.yaml": 3}
         workflows = _workflows()
         seen = 0
         for path in workflows:
@@ -1375,7 +1373,7 @@ class TestWorkflowFiles(unittest.TestCase):
         and would recover the room as the face's own colour.
 
         No render drawing one at all satisfies this the other way, and is
-        what fast_helical_native has done since 2026-09-05: the grid came
+        what helical has done since 2026-09-05: the grid came
         off the first denoise's frames on 09-04 and off the re-render the
         day after, so the passes agree on emptiness. The invariant is that
         the rooms agree, not that there is a room.
@@ -1565,7 +1563,7 @@ class TestTheIntermediateSplatIsKept(unittest.TestCase):
         from pipeline.templating import resolve
         from pipeline.workflow import WorkflowSpec
 
-        spec = WorkflowSpec.from_yaml(resolve_workflow("fast_helical_native"))
+        spec = WorkflowSpec.from_yaml(resolve_workflow("helical"))
         scope = {"globals": dict(spec.globals, output_root="/out")}
         trainings = {
             step.id: resolve(step.params, scope)
@@ -1584,7 +1582,7 @@ class TestTheIntermediateSplatIsKept(unittest.TestCase):
         from pipeline.templating import resolve
         from pipeline.workflow import WorkflowSpec
 
-        spec = WorkflowSpec.from_yaml(resolve_workflow("fast_helical_native"))
+        spec = WorkflowSpec.from_yaml(resolve_workflow("helical"))
         scope = {"globals": dict(spec.globals, output_root="/out")}
         exports = [
             (resolve(step.params, scope).get("export_dir"),
@@ -1610,7 +1608,7 @@ class TestTheFirstDenoiseInputIsKept(unittest.TestCase):
         from pipeline.cli import resolve_workflow
         from pipeline.workflow import WorkflowSpec
 
-        return WorkflowSpec.from_yaml(resolve_workflow("fast_helical_native"))
+        return WorkflowSpec.from_yaml(resolve_workflow("helical"))
 
     def test_the_dataset_is_saved_under_debug(self):
         from pipeline.templating import resolve
@@ -1659,7 +1657,7 @@ class TestOnlyTheHelicalRerenderCapsTheShBands(unittest.TestCase):
         from pipeline.cli import resolve_workflow
         from pipeline.workflow import WorkflowSpec
 
-        spec = WorkflowSpec.from_yaml(resolve_workflow("fast_helical_native"))
+        spec = WorkflowSpec.from_yaml(resolve_workflow("helical"))
         renders = [s for s in spec.steps if s.step == "render_splat"]
         self.assertGreater(len(renders), 1)
         setting = {s.id: s.params.get("sh_degree") for s in renders}
@@ -1680,7 +1678,7 @@ class TestTheSingleViewInput(unittest.TestCase):
         from pipeline.cli import resolve_workflow
         from pipeline.workflow import WorkflowSpec
 
-        return WorkflowSpec.from_yaml(resolve_workflow("fast_helical_native"))
+        return WorkflowSpec.from_yaml(resolve_workflow("helical"))
 
     def _step(self, spec, step_id):
         return next(s for s in spec.steps if s.id == step_id)
@@ -1742,7 +1740,7 @@ class TestThePixelOpsShipOff(unittest.TestCase):
         from pipeline.cli import resolve_workflow
         from pipeline.workflow import WorkflowSpec
 
-        spec = WorkflowSpec.from_yaml(resolve_workflow("fast_helical_native"))
+        spec = WorkflowSpec.from_yaml(resolve_workflow("helical"))
         setting = next(s for s in spec.settings if s.name == "specular_suppress")
         self.assertEqual(setting.default, 0.0)
         step = next(s for s in spec.steps if s.id == "adjust_denoised")
@@ -1764,7 +1762,7 @@ class TestTheDenoiseSettingsAreTheMeasuredOnes(unittest.TestCase):
         from pipeline.cli import resolve_workflow
         from pipeline.workflow import WorkflowSpec
 
-        spec = WorkflowSpec.from_yaml(resolve_workflow("fast_helical_native"))
+        spec = WorkflowSpec.from_yaml(resolve_workflow("helical"))
         return next(s for s in spec.steps if s.id == step_id)
 
     def test_pass_1_is_run_e4(self):
@@ -1808,7 +1806,7 @@ class TestTheReoutlineBranch(unittest.TestCase):
     def _spec(self):
         from pipeline.cli import resolve_workflow
 
-        return WorkflowSpec.from_yaml(resolve_workflow("fast_helical_native"))
+        return WorkflowSpec.from_yaml(resolve_workflow("helical"))
 
     def _step(self, spec, step_id):
         return next(s for s in spec.steps if s.id == step_id)
@@ -2036,7 +2034,7 @@ class TestDeclaredSettings(unittest.TestCase):
     def test_a_settings_value_is_coerced_the_way_a_step_param_is(self):
         """`--param run_upscale=no` and a text box both hand over strings,
         and `bool("no")` is True."""
-        spec = WorkflowSpec.from_yaml(str(WORKFLOW_DIR / "fast_helical_native.yaml"))
+        spec = WorkflowSpec.from_yaml(str(WORKFLOW_DIR / "helical.yaml"))
         self.assertIs(spec.coerce_global("run_upscale", "no"), False)
         self.assertEqual(spec.coerce_global("seed", "7"), 7)
         # An undeclared global has no type to be brought to.
@@ -2054,8 +2052,7 @@ class TestDeclaredSettings(unittest.TestCase):
                        if step.params.get("seed") == "${globals.seed}"]
             expected = [step.id for step in spec.steps if step.step in stochastic]
             with self.subTest(workflow=path.name):
-                # Every denoise and the upscale, and nothing else: the
-                # native file's four, the direct file's three.
+                # Every denoise and the upscale, and nothing else: four.
                 self.assertEqual(readers, expected)
                 self.assertGreaterEqual(len(readers), 3)
                 self.assertTrue(any("upscale" in r for r in readers))

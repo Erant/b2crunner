@@ -51,7 +51,7 @@ docker compose -f docker/docker-compose.yml up
 # or one-shot CLI runs
 docker compose -f docker/docker-compose.yml run --rm pipeline doctor
 docker compose -f docker/docker-compose.yml run --rm pipeline \
-    run fast_helical_native --reference-image /data/sheet.png
+    run helical --reference-image /data/sheet.png
 docker compose -f docker/docker-compose.yml run --rm pipeline bash
 ```
 
@@ -102,7 +102,7 @@ and the only diagnosis available is that same usage error.
 
 ## b2ctrain replaced brush entirely (2026-09-07)
 
-Both trainings in `fast_helical_native.yaml` — and every splat render in
+Both trainings in `helical.yaml` — and every splat render in
 the pipeline — run **b2ctrain**: a C++/CUDA trainer with brush's CLI,
 dataset layout (`init.ply`, `masks/`, `normals/`, `weights/`) and .ply
 contract (the `ev_*` evidence block included), built in its own

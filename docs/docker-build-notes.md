@@ -540,7 +540,7 @@ error: unexpected argument '--total-steps' found
 ```
 
 Fixed in `pipeline/steps/brush.py`. Note the *pipeline param* is still
-`total_steps` — `fast_helical_full.yaml` and `fast_helical_native.yaml`
+`total_steps` — `fast_helical_full.yaml` and `helical.yaml`
 pass `total_steps:` and that is unchanged; only the CLI flag string moved.
 
 With the branch fix, all twelve flags the step passes are present.
@@ -986,7 +986,7 @@ in combination — now runs cleanly together on real GPU hardware.
 The remaining items below still need a run this session didn't attempt:
 
 - `generate_firstlast`'s warp against a real `render` output (front-half
-  wiring — see `pipeline/workflows/fast_helical_native.yaml`'s
+  wiring — see `pipeline/workflows/helical.yaml`'s
   `render_initial_views`/`warp_reference_to_anchor` steps, added this
   session but not yet run: there's no CLI/Dataset bootstrap path for
   starting from a bare reference photo yet, only for an existing on-disk
