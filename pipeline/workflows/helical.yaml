@@ -1328,16 +1328,13 @@ steps:
       sampler_high: uni_pc
       sampler_shift: 5
       strength: [1, 1, 0.5, 0.5, 0.5, 0.5]
-      prompt: "人工光、柔光、低对比度、环绕运镜，镜头从人物正面出发，经侧面运镜至\
-        背面，再经另一侧运镜回到正面，完整环绕一周。时间静止，人物完全静止。身体\
+      prompt: "人工光、柔光、低对比度、环绕运镜。时间静止，人物完全静止。身体\
         如雕塑般僵硬，胸口没有起伏，头部保持固定角度，面部肌肉完全不动，维持单\
         一的中性表情。双眼一眨不眨，眼睑保持张开且稳定，目光空洞而固定，锁定远\
         处墙面上的一个点，对镜头毫无察觉、毫无反应。人物站在一间空房间里：灰色\
         墙面上有均匀的网格线，深色地板，浅色天花板，墙面相交处有清晰的墙角。房\
         间本身固定不动，镜头以匀速、固定焦距围绕主体平滑移动，墙角依次从画面中\
-        掠过。镜头运镜至人物背面时，画面中只有人物的后脑、后背与背影，随后镜头继\
-        续绕行，人物的侧脸与正面依次重新出现。灯光属于房间本身，位置固定：主光始\
-        终来自人物自身的左前方，右侧是\
+        掠过。灯光属于房间本身，位置固定：主光始终来自人物自身的左前方，右侧是\
         柔和的补光。人物身上的明暗、阴影与高光始终停留在同一片皮肤和衣物上，每\
         一帧完全相同——左侧始终是受光面，右侧始终是柔和的暗面；镜头绕到人物右侧\
         时，看到的正是那一侧的暗面。房间里的阴影同样固定：墙面上的明暗、以及人\
@@ -1351,11 +1348,7 @@ steps:
         walls ruled with an even grid, a dark floor and a lighter ceiling, \
         meeting at clear corners. The room is fixed in place and the camera \
         travels through it, so the walls and their corners sweep past the \
-        frame while the room itself never turns. The camera sets out in front \
-        of the subject, arcs round past their side to directly behind them, \
-        where only the back of their head and their back are in view, and \
-        continues round the other side to end where it began, one full \
-        circle. Soft, low-contrast studio \
+        frame while the room itself never turns. Soft, low-contrast studio \
         light: the key sits high on the subject's own left, a soft fill on \
         their right, both fixed to the room and holding still while the \
         camera arcs around. Every highlight and shadow stays welded to the \
@@ -1765,32 +1758,24 @@ steps:
       # tests/test_workflows.py pins the string character for character, so
       # it moves together with that pin.
       #
-      # What diverged a third time (2026-09-13): the orbit's ROUTE. Runs
-      # were coming back with an incomplete turn — the subject swings out
-      # to the profile and comes back round to face the lens — and at the
-      # profile the control drawing is nearly its own mirror image, so the
-      # face prior decides. The prompt gave it nothing to decide with: 环绕
-      # 运镜 alone is an arc of no stated extent, and "the whole circle" sat
-      # in an English lighting clause. Wan's own guide files 环绕运镜 under
-      # 高级运镜 with one example, and that example states the route by the
-      # subject's sides — 镜头跟随人物背面运镜至正面 — so this borrows the
-      # construction: the camera sets out from the 正面, passes the 侧面 to
-      # the 背面 and returns by the other side, 完整环绕一周; and at the
-      # 背面 the frame holds only 后脑、后背与背影, a positive description of
-      # the rear where before there was only the absence of a face. Said in
-      # both languages, affirmatively, three insertions and nothing removed.
-      # UNVERIFIED on a pod: the measure is one contiguous face-free run of
-      # frames centred on the rear view instead of two short ones.
-      prompt: "人工光、柔光、低对比度、环绕运镜，镜头从人物正面出发，经侧面运镜至\
-        背面，再经另一侧运镜回到正面，完整环绕一周。时间静止，人物完全静止。身体\
+      # TRIED AND REVERTED (2026-09-13, `0cad3dd`, one pod run): naming the
+      # orbit's route (镜头从人物正面出发，经侧面运镜至背面，再经另一侧运镜回到
+      # 正面，完整环绕一周) and describing the rear view (画面中只有人物的后脑、
+      # 后背与背影), in both languages, in both passes. The run lost the
+      # subject's clothing in THIS pass — fringed skirt, knee armour and
+      # boots came back as painted stripes and black shoes, and the ruled
+      # wall as marble — and the 28 px common-mode pitch refine_cameras had
+      # to remove says the frames sat off the drawings as a whole. The same
+      # run also changed sampler_high (euler -> uni_pc) and outline_strength
+      # (12.6 -> 5), so the prompt is not proven the cause; it is the one
+      # of the three that is code, so it is the one taken back.
+      prompt: "人工光、柔光、低对比度、环绕运镜。时间静止，人物完全静止。身体\
         如雕塑般僵硬，胸口没有起伏，头部保持固定角度，面部肌肉完全不动，维持单\
         一的中性表情。双眼一眨不眨，眼睑保持张开且稳定，目光空洞而固定，锁定远\
         处墙面上的一个点，对镜头毫无察觉、毫无反应。人物站在一间空房间里：灰色\
         墙面上有均匀的网格线，深色地板，浅色天花板，墙面相交处有清晰的墙角。房\
         间本身固定不动，镜头以匀速、固定焦距围绕主体平滑移动，墙角依次从画面中\
-        掠过。镜头运镜至人物背面时，画面中只有人物的后脑、后背与背影，随后镜头继\
-        续绕行，人物的侧脸与正面依次重新出现。灯光属于房间本身，位置固定：主光始\
-        终来自人物自身的左前方，右侧是\
+        掠过。灯光属于房间本身，位置固定：主光始终来自人物自身的左前方，右侧是\
         柔和的补光。人物身上的明暗、阴影与高光始终停留在同一片皮肤和衣物上，每\
         一帧完全相同——左侧始终是受光面，右侧始终是柔和的暗面；镜头绕到人物右侧\
         时，看到的正是那一侧的暗面。房间里的阴影同样固定：墙面上的明暗、以及人\
@@ -1804,11 +1789,7 @@ steps:
         walls ruled with an even grid, a dark floor and a lighter ceiling, \
         meeting at clear corners. The room is fixed in place and the camera \
         travels through it, so the walls and their corners sweep past the \
-        frame while the room itself never turns. The camera sets out in front \
-        of the subject, arcs round past their side to directly behind them, \
-        where only the back of their head and their back are in view, and \
-        continues round the other side to end where it began, one full \
-        circle. Soft, low-contrast studio \
+        frame while the room itself never turns. Soft, low-contrast studio \
         light: the key sits high on the subject's own left, a soft fill on \
         their right, both fixed to the room and holding still while the \
         camera arcs around. Every highlight and shadow stays welded to the \
@@ -2919,16 +2900,13 @@ steps:
       sampler_high: euler
       sampler_shift: 2.5
       strength: [0.8, 0.8, 0.8, 0.8, 0.8, 0.8]
-      prompt: "人工光、柔光、低对比度、环绕运镜，镜头从人物正面出发，经侧面运镜至\
-        背面，再经另一侧运镜回到正面，完整环绕一周。时间静止，人物完全静止。身体\
+      prompt: "人工光、柔光、低对比度、环绕运镜。时间静止，人物完全静止。身体\
         如雕塑般僵硬，胸口没有起伏，头部保持固定角度，面部肌肉完全不动，维持单\
         一的中性表情。双眼一眨不眨，眼睑保持张开且稳定，目光空洞而固定，锁定远\
         处墙面上的一个点，对镜头毫无察觉、毫无反应。人物站在一间空房间里：灰色\
         墙面上有均匀的网格线，深色地板，浅色天花板，墙面相交处有清晰的墙角。房\
         间本身固定不动，镜头以匀速、固定焦距围绕主体平滑移动，墙角依次从画面中\
-        掠过。镜头运镜至人物背面时，画面中只有人物的后脑、后背与背影，随后镜头继\
-        续绕行，人物的侧脸与正面依次重新出现。灯光属于房间本身，位置固定：主光始\
-        终来自人物自身的左前方，右侧是\
+        掠过。灯光属于房间本身，位置固定：主光始终来自人物自身的左前方，右侧是\
         柔和的补光。人物身上的明暗、阴影与高光始终停留在同一片皮肤和衣物上，每\
         一帧完全相同——左侧始终是受光面，右侧始终是柔和的暗面；镜头绕到人物右侧\
         时，看到的正是那一侧的暗面。房间里的阴影同样固定：墙面上的明暗、以及人\
@@ -2942,11 +2920,7 @@ steps:
         walls ruled with an even grid, a dark floor and a lighter ceiling, \
         meeting at clear corners. The room is fixed in place and the camera \
         travels through it, so the walls and their corners sweep past the \
-        frame while the room itself never turns. The camera sets out in front \
-        of the subject, arcs round past their side to directly behind them, \
-        where only the back of their head and their back are in view, and \
-        continues round the other side to end where it began, one full \
-        circle. Soft, low-contrast studio \
+        frame while the room itself never turns. Soft, low-contrast studio \
         light: the key sits high on the subject's own left, a soft fill on \
         their right, both fixed to the room and holding still while the \
         camera arcs around. Every highlight and shadow stays welded to the \

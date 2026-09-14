@@ -31,28 +31,23 @@ VALID_DISPATCH = {"in_process", "subprocess", "service", "docker"}
 # wan22_vace_denoise steps carry them. The negative is still
 # ComfyUI-Body2COLMAP's workflows/api/denoise.json node 7; the positive
 # started as node 188's string (before StringReplace fills in
-# $SUBJECT_DESC$) and deliberately diverged three times: on 2026-08-31 its
-# lighting was anchored to the room instead of to the camera, on
+# $SUBJECT_DESC$) and deliberately diverged twice: on 2026-08-31 its
+# lighting was anchored to the room instead of to the camera, and on
 # 2026-09-01 the room itself replaced the seamless backdrop, to match the
-# `background` render setting, and on 2026-09-13 the orbit was given its
-# route (正面 → 侧面 → 背面 → 正面, one full circle) and the rear view a
-# positive description. See the comment on denoise_pass1 in helical.yaml
-# for why.
+# `background` render setting. See the comment on denoise_pass1 in
+# helical.yaml for why.
 #
 # Pinned here because the failure mode is silent: YAML's folded `>-`
 # scalar turns each line break into a space, and a continuation line
 # starting with a space loses it to indentation stripping — either way
 # the prompt still loads, still runs, and is not the one intended.
 DENOISE_PROMPT = (
-    "人工光、柔光、低对比度、环绕运镜，镜头从人物正面出发，经侧面运镜至背面，"
-    "再经另一侧运镜回到正面，完整环绕一周。时间静止，人物完全静止。身体如雕塑般"
+    "人工光、柔光、低对比度、环绕运镜。时间静止，人物完全静止。身体如雕塑般"
     "僵硬，胸口没有起伏，头部保持固定角度，面部肌肉完全不动，维持单一的中性"
     "表情。双眼一眨不眨，眼睑保持张开且稳定，目光空洞而固定，锁定远处墙面上"
     "的一个点，对镜头毫无察觉、毫无反应。人物站在一间空房间里：灰色墙面上有"
     "均匀的网格线，深色地板，浅色天花板，墙面相交处有清晰的墙角。房间本身固"
-    "定不动，镜头以匀速、固定焦距围绕主体平滑移动，墙角依次从画面中掠过。镜"
-    "头运镜至人物背面时，画面中只有人物的后脑、后背与背影，随后镜头继续绕行，"
-    "人物的侧脸与正面依次重新出现。灯"
+    "定不动，镜头以匀速、固定焦距围绕主体平滑移动，墙角依次从画面中掠过。灯"
     "光属于房间本身，位置固定：主光始终来自人物自身的左前方，右侧是柔和的补"
     "光。人物身上的明暗、阴影与高光始终停留在同一片皮肤和衣物上，每一帧完全"
     "相同——左侧始终是受光面，右侧始终是柔和的暗面；镜头绕到人物右侧时，看到"
@@ -67,11 +62,7 @@ DENOISE_PROMPT = (
     "even grid, a dark floor and a lighter ceiling, meeting at clear "
     "corners. The room is fixed in place and the camera travels through "
     "it, so the walls and their corners sweep past the frame while the "
-    "room itself never turns. The camera sets out in front of the subject, "
-    "arcs round past their side to directly behind them, where only the "
-    "back of their head and their back are in view, and continues round "
-    "the other side to end where it began, one full circle. Soft, "
-    "low-contrast studio light: the key "
+    "room itself never turns. Soft, low-contrast studio light: the key "
     "sits high on the subject's own left, a soft fill on their right, both "
     "fixed to the room and holding still while the camera arcs around. "
     "Every highlight and shadow stays welded to the same patch of skin and "
