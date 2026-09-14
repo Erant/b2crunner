@@ -2,9 +2,10 @@
 
 Four steps before the final training (`face_refine`, on by default; needs
 `refit_body`): fit the refit body's head to every frame that shows the
-face, hand the trainer that per-view face geometry the way the body rig
-hands it the arms, and replace the frames' eyes with eyeballs textured from
-the anchor photograph. Code: `pipeline/steps/face_views.py`, the rig side
+face, replace the frames' eyes with eyeballs textured from the anchor
+photograph, and — behind the separate `face_rig` switch, off by default —
+hand the trainer that per-view face geometry the way the body rig hands it
+the arms. Code: `pipeline/steps/face_views.py`, the rig side
 in `pipeline/body_rig.py` and `steps/body_rig.py` (`build_face_rig`);
 measurements in b2ctrain's docs/STATUS.md, "The face per view, and the
 anchor's eyes injected" (2026-09-11).
@@ -73,8 +74,9 @@ and that explain each frame's lids when fitted.
    `train_final_splat` both see them. `debug/eyes/panel.jpg` is the eye
    region before/after per frame; `eyes.json` says what was drawn and
    skipped and why.
-4. **`build_face_rig`** (main env). The fit as the rig's per-view vertex
-   displacements: fitted head minus canonical head at the rig's vertices,
+4. **`build_face_rig`** (main env; **off by default** since 2026-09-14,
+   the `face_rig` setting — see "The profile" below). The fit as the rig's
+   per-view vertex displacements: fitted head minus canonical head at the rig's vertices,
    written as a **v3 rig** (`B2CRIG3`: the v2 file plus
    `[views][verts] float3`), which b2ctrain e8f43ac+ adds to a bound splat
    BEFORE the skinning blend, so it rides the learned joint rotations. This
@@ -116,6 +118,22 @@ sharpness stays within +-2.5% of base (the metric's resolution); the hair
 is untouched; the swim drops 3x where the subject swims. Whole-head deltas
 give somewhat better eyes on the good-face subject (42 against 52) at 3%
 of its hair — `face_motion_cm: 0` on `build_face_rig` is that option.
+
+## The profile (2026-09-14): why the deltas are off
+
+The four-subject table above looked at frontal novel views. At 70-110
+degrees the delivered face was a smear whose head orientation matched no
+frame, on the upscaled and the pre-upscale frames alike (b2ctrain
+`out/preup/`, `variants_profile.jpg`, `profile_1080.jpg`). The frames
+themselves are sharp there; the smear came from the deltas of the FITTED
+60-85 degree views, where MediaPipe's landmarks put the face in the wrong
+place (removing only the held deltas changed nothing; restricting the fit
+to 60 degrees or dropping the deltas gave a clean profile). Without the
+deltas the frontal face, the hair and the eyes are unchanged — the eyes
+are pasted into the frames and do not depend on the deltas — so the v2 rig
+is the default again and `face_rig: true` restores the deltas. Seeding the
+rig's learned head rotations from the fit, or learning them coarse-to-fine,
+moved the head towards the landmarks but sharpened nothing (same notes).
 
 ## Open
 

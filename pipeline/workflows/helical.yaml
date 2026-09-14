@@ -528,11 +528,29 @@ settings:
       frame's fitted lids (pipeline/steps/face_views.py, docs/face-refine.md).
       Measured on four subjects (b2ctrain docs/STATUS.md, "The face per
       view"): eye error against the eye model 51-82 -> 28-56, closed slits
-      and blue smears become open eyes with an iris at every novel view;
-      face sharpness within the metric's resolution of the baseline; the
-      hair untouched (the deltas are restricted to the face core). Needs the
-      body refit. Off, the final training sees the frames as the upscale
-      left them and the face renders canonical.
+      and blue smears become open eyes with an iris at every novel view.
+      Needs the body refit. Off, the final training sees the frames as the
+      upscale left them. Whether the fit also DEFORMS the splat's face per
+      view is the separate `face_rig` switch below.
+
+  - name: face_rig
+    label: Per-view face deltas in the rig (rig v3)
+    type: bool
+    default: false
+    help: >-
+      Hand the trainer the per-view head fit as vertex displacements of the
+      rig's face core (`build_face_rig`, rig v3), so the canonical face
+      follows each frame's fitted expression and pose. OFF by default since
+      2026-09-14: the fit is landmark-driven, and MediaPipe's landmarks on
+      the 60-85 degree views put the face in the wrong place, so those
+      views drag the canonical face apart — the deliverable's face at
+      70-110 degrees was a smear with a head orientation matching no frame
+      (b2ctrain out/preup, variants_profile.jpg). Without the deltas the
+      profile is clean and the frontal face, the hair and the pasted eyes
+      are unchanged (the eyes live in the frames, not in the deltas). The
+      four-subject measurement that motivated the deltas looked at frontal
+      novel views only. On, the old behaviour; `face_motion_cm` and `hold`
+      on `build_face_rig` are its knobs.
 
   - name: specular_suppress
     label: Highlight suppression
@@ -3196,12 +3214,14 @@ steps:
   # 4. The fit as the rig's per-view vertex displacements (rig v3,
   #    pipeline/body_rig.py), face core only, unfitted frames holding their
   #    fitted neighbour. Republishes scene.body_rig, which train_final_splat
-  #    already reads.
+  #    already reads. Off by default (`face_rig`): the 60-85 degree fits
+  #    smear the profile; see the setting's help.
   - id: build_face_rig
     step: build_face_rig
     dispatch: in_process
     when:
       - ${globals.face_refine}
+      - ${globals.face_rig}
       - ${globals.refit_body}
       - ${globals.export_ply}
     inputs:
@@ -3287,7 +3307,7 @@ steps:
       body_params: scene.body_params?
       # The per-view deformation rig (build_body_rig): --body-rig on the
       # trainer, per-view joint rotations, canonical export. With
-      # face_refine on it also carries build_face_rig's per-view face
+      # face_rig on it also carries build_face_rig's per-view face
       # deltas (rig v3).
       body_rig: scene.body_rig?
       # The per-frame class maps (segment_views): the trainer votes them
