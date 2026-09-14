@@ -1767,8 +1767,11 @@ steps:
       # wall as marble — and the 28 px common-mode pitch refine_cameras had
       # to remove says the frames sat off the drawings as a whole. The same
       # run also changed sampler_high (euler -> uni_pc) and outline_strength
-      # (12.6 -> 5), so the prompt is not proven the cause; it is the one
-      # of the three that is code, so it is the one taken back.
+      # (12.6 -> 5), so the prompt was taken back first as the one of the
+      # three that is code — and the re-run on the reverted prompt (this
+      # text, `026df4c`) came back good: the route sentences were the cause.
+      # Stating where the camera goes and what the rear view holds costs
+      # the subject their clothes; leave the orbit as 环绕运镜 alone.
       prompt: "人工光、柔光、低对比度、环绕运镜。时间静止，人物完全静止。身体\
         如雕塑般僵硬，胸口没有起伏，头部保持固定角度，面部肌肉完全不动，维持单\
         一的中性表情。双眼一眨不眨，眼睑保持张开且稳定，目光空洞而固定，锁定远\
