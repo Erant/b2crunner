@@ -479,7 +479,7 @@ RUN make-child-venv /opt/venv_main \
 # compile — see the sage layer's own comment for why.
 RUN make-child-venv /opt/venv_wan22 \
     && /opt/venv_wan22/bin/pip install \
-        'diffusers>=0.36.0' \
+        'diffusers>=0.38.0' \
         'accelerate>=1.0.0' \
         'peft>=0.13.0' \
         ftfy \

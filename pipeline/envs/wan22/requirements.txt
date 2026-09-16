@@ -4,7 +4,8 @@
 # uv pip install -e .   # so `python -m pipeline.worker` is importable here
 
 torch>=2.4.0
-diffusers>=0.36.0
+# >= 0.38: Flux2KleinInpaintPipeline for refine_texture (steps/refine_texture.py); the denoise itself needs 0.36.
+diffusers>=0.38.0
 transformers>=4.46.0
 accelerate>=1.0.0
 peft>=0.13.0

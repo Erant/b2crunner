@@ -20,11 +20,13 @@ from . import face_views  # noqa: F401
 from . import face_landmarks  # noqa: F401
 from . import head_fit  # noqa: F401
 from . import mask_splat  # noqa: F401
+from . import meshify  # noqa: F401
 from . import pixel_ops  # noqa: F401
 from . import pointmap_splat  # noqa: F401
 from . import reference_sheet  # noqa: F401
 from . import reference_view  # noqa: F401
 from . import refine_cameras  # noqa: F401
+from . import refine_texture  # noqa: F401
 from . import render  # noqa: F401
 from . import resize  # noqa: F401
 from . import rmbg  # noqa: F401

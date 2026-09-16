@@ -284,11 +284,17 @@ class TestRequiredForSteps(unittest.TestCase):
             # dinov3 SOURCE that sam_3d_body's backbone pulls from GitHub
             # through torch.hub, which was the one thing sam3d_body still
             # downloaded lazily inside Step.load().
+            #
+            # 2026-09-16: flux2_klein + flux2_klein_fp8 joined it — the
+            # texture refinement's model (steps/refine_texture.py). The
+            # step is gated off by default, but this set is what the
+            # workflow's STEPS can want, not what a given run enables.
             "helical": {"rmbg", "sapiens2", "sapiens2_pointmap",
                                     "sapiens2_seg", "sam3dbody", "moge2",
                                     "dinov3_hub", "mediapipe", "wan22",
                                     "wan22_fp8", "wan22_lora", "seedvr2",
-                                    "colmap_onnx"},
+                                    "colmap_onnx", "flux2_klein",
+                                    "flux2_klein_fp8"},
         }
         for workflow, expected in cases.items():
             with self.subTest(workflow=workflow):

@@ -169,6 +169,27 @@ def _probe_wan22_fp8() -> bool:
         return False
 
 
+def _fetch_klein_fp8() -> str:
+    """The klein 4B fp8 transformer, one 3.8 GB file, through the step's own constants."""
+    from huggingface_hub import hf_hub_download
+
+    from .steps.refine_texture import DEFAULT_FP8_FILE, DEFAULT_FP8_REPO
+
+    return hf_hub_download(DEFAULT_FP8_REPO, DEFAULT_FP8_FILE)
+
+
+def _probe_klein_fp8() -> bool:
+    from huggingface_hub import hf_hub_download
+
+    from .steps.refine_texture import DEFAULT_FP8_FILE, DEFAULT_FP8_REPO
+
+    try:
+        hf_hub_download(DEFAULT_FP8_REPO, DEFAULT_FP8_FILE, local_files_only=True)
+        return True
+    except Exception:
+        return False
+
+
 def _mediapipe_files():
     """(name, url) of every MediaPipe model file a step fetches, in one place.
 
@@ -451,6 +472,7 @@ def _registry() -> List[ModelSource]:
     from .steps.sapiens2 import DEFAULT_CHECKPOINT as SAPIENS
     from .steps.sapiens2 import DEFAULT_SEG_CHECKPOINT as SAPIENS_SEG
     from .steps.wan22_vace_denoise import DEFAULT_CHECKPOINT as WAN22
+    from .steps.refine_texture import DEFAULT_REPO as KLEIN, KLEIN_ALLOW_PATTERNS
 
     # allow_patterns, or these pull the whole repo including formats the
     # pipeline never loads. Measured against the live repos:
@@ -470,6 +492,7 @@ def _registry() -> List[ModelSource]:
     seg_fetch, seg_probe = _hf_snapshot(SAPIENS_SEG, _WEIGHTS_ONLY)
     sam3d_fetch, sam3d_probe = _hf_snapshot(SAM3D)
     wan22_fetch, wan22_probe = _hf_snapshot(WAN22, WAN22_ALLOW_PATTERNS)
+    klein_fetch, klein_probe = _hf_snapshot(KLEIN, KLEIN_ALLOW_PATTERNS)
 
     return [
         ModelSource(
@@ -562,6 +585,19 @@ def _registry() -> List[ModelSource]:
         ModelSource(
             "seedvr2", "SeedVR2 3B fp8 DiT + VAE (upscale)", ("seedvr2",),
             _fetch_seedvr2, _probe_seedvr2, approx_gb=6.0,
+        ),
+        ModelSource(
+            # The texture refinement's klein: the Qwen3 text encoder (~8 GB),
+            # the VAE and the configs from the bf16 repo — its transformer
+            # weights are NOT pulled (8 GB nothing opens; the fp8 file
+            # below is what loads). Only `refine_texture` wants it, and
+            # that step is off by default until the pod A/B.
+            "flux2_klein", f"{KLEIN} (texture refinement: text encoder, vae)",
+            ("refine_texture",), klein_fetch, klein_probe, approx_gb=8.5,
+        ),
+        ModelSource(
+            "flux2_klein_fp8", "black-forest-labs/FLUX.2-klein-4b-fp8 transformer (fp8)",
+            ("refine_texture",), _fetch_klein_fp8, _probe_klein_fp8, approx_gb=3.8,
         ),
         ModelSource(
             # ~65 MB for the pair. Small enough that the prefetch barely
