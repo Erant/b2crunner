@@ -487,7 +487,9 @@ class TestOutputSelection(unittest.TestCase):
             [(o.name, o.directory) for o in outputs],
             [("export_colmap", "colmap"),
              ("export_ply", "ply"),
-             ("export_debug", "debug")],
+             ("export_debug", "debug"),
+             # 2026-09-16: the textured mesh (steps/meshify.py), off by default.
+             ("export_mesh", "mesh")],
         )
         self.assertTrue(all(o.label and o.help for o in outputs))
         # The two debug COLMAP datasets had a checkbox each until
