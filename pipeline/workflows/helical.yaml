@@ -142,6 +142,15 @@
 # face_splat_refined's `given_camera` — that input is required now, and the
 # step refuses `cameras` without it. This is the one workflow file.
 #
+# WHAT CHANGED (2026-09-16, later): **the klein texture pass is on, with the
+# face kept as the photograph's pixels.** `refine_texture` defaults to true
+# (behind `export_mesh`) and `face_policy` to `protect_cap` — mesh-plan.md
+# decision 4, settled: the cap's texels carry +inf claim weight so no view
+# ever repaints them, klein sharpens everything else. The mesh deliverable
+# is mesh/mesh_klein.obj + texture_final.png beside the baked
+# atlas/mesh_uv.obj; the per-view renders / masks / repaints go to
+# debug/refine_texture.
+#
 # WHAT CHANGED (2026-09-16): **the refined face cap is the body model's
 # head carrying the photograph** (b2ctrain out/mesh/FACE_GUIDE.md, the
 # recipe validated on 00307 and F3 in b2ctrain out/mesh). Four things:
@@ -586,28 +595,30 @@ settings:
   - name: refine_texture
     label: Refine the mesh texture with klein
     type: bool
-    default: false
+    default: true
     help: >-
       With the textured mesh on: sharpen its texture with FLUX.2 klein 4B,
       view by view (steps/refine_texture.py) — each view of the mesh is
       repainted as img2img at strength 0.8 inside the pixels it sees best,
-      the front and back photo panels as references, and baked back. ~6
-      minutes for 11 views on a 4070 Ti-class card, 7 GB of VRAM, and two
-      more models on the volume (the klein text encoder and its fp8
-      transformer, ~12 GB). Off until the pod A/B decides the face policy.
+      the front and back photo panels as references, and baked back. The
+      face is left alone (`face_policy`). ~4 minutes for 11 views on a
+      4070 Ti-class card, 7 GB of VRAM, and two more models on the volume
+      (the klein text encoder and its fp8 transformer, ~12 GB). The mesh
+      lands twice: mesh/atlas/mesh_uv.obj with the baked texture and
+      mesh/mesh_klein.obj with the refined one. Off: the baked texture only.
 
   - name: face_policy
     label: Face policy of the texture refinement
     default: protect_cap
     choices: [protect_cap, protect_head, none]
     help: >-
-      What klein never repaints. protect_cap: the projected photograph's own
-      footprint on the face, so the identity is exactly the photo's, with a
-      sharpness / tone step where klein's ring meets it. protect_head: the
-      wider face band. none: klein repaints the face too, head views first,
-      seamless with a mild identity drift (rounder eyes, retouched skin).
-      Measured on two subjects (b2crunner memory uv_texture_klein_refine);
-      the pod A/B decides.
+      What klein never repaints. protect_cap (the decision, 2026-09-16): the
+      projected photograph's own footprint on the face, so the identity is
+      exactly the photo's, with a sharpness / tone step where klein's ring
+      meets it. protect_head: the wider face band. none: klein repaints the
+      face too, head views first, seamless with a mild identity drift
+      (rounder eyes, retouched skin). Measured on two subjects (b2crunner
+      memory uv_texture_klein_refine); the other two stay for an A/B.
 
   - name: specular_suppress
     label: Highlight suppression
@@ -746,9 +757,10 @@ outputs:
       fused with the body model as the prior, the surface refined to the
       Sapiens normal maps, the face cap's photograph projected onto the face.
       Lands as mesh/atlas/mesh_uv.obj + texture.png with the position /
-      normal / mask maps and the protection masks. Off by default until the
-      pod A/B (it costs ~2 minutes; the unwrap is most of it). See
-      `refine_texture` below for the diffusion pass over its texture.
+      normal / mask maps and the protection masks, then the klein pass over
+      that texture (`refine_texture`, mesh/mesh_klein.obj + texture_final.png).
+      Off by default (it costs ~2 minutes for the mesh, the unwrap is most
+      of it, and ~4 more for the klein pass).
 
 globals:
   # What has no control of its own, and therefore no `settings:` entry.
@@ -2754,7 +2766,8 @@ steps:
       mesh_dir: scene.mesh_dir
       mesh_stats: scene.mesh_stats
 
-  # klein over the atlas (steps/refine_texture.py). In the wan22 env: the
+  # klein over the atlas (steps/refine_texture.py), the face left as the
+  # photograph's pixels (`face_policy: protect_cap`). In the wan22 env: the
   # same diffusers / torchao the denoise runs on, and the same fp8 loading
   # (pipeline/flux2_fp8.py). The raster halves are b2ctrain calls from
   # inside the step; klein loads once for the whole loop.
@@ -2776,6 +2789,8 @@ steps:
     params:
       output_dir: ${globals.output_root}/mesh
       face_policy: ${globals.face_policy}
+      # Every view's render, repaint mask and repaint, for the eye.
+      debug_dir: ${globals.output_root}/debug/refine_texture
     outputs:
       texture_path: scene.mesh_texture_path
       mesh_path: scene.mesh_klein_path

@@ -22,11 +22,12 @@ capped at 1 MP by the pipeline, silently, so the views are 704 x 1408 and
 mask with a prompt naming a person makes klein paint a whole figure into
 the hair; the body views cover the back of the head.
 
-`face_policy` decides what klein never touches (the open question the pod
-A/B settles, mesh-plan.md decision 4):
-  protect_cap   the projected photograph's own footprint (the cap's texels,
-                closed and eroded): identity kept exactly, a tone / sharpness
-                step where klein's ring meets the photograph.
+`face_policy` decides what klein never touches (mesh-plan.md decision 4;
+settled 2026-09-16 on `protect_cap`: the face stays the photograph's
+pixels, the other two are kept for an A/B):
+  protect_cap   the projected photograph's own footprint (the cap's
+                coverage, closed and eroded): identity kept exactly, a tone
+                / sharpness step where klein's ring meets the photograph.
   protect_head  the wider face band about the head centre.
   none          klein repaints the face too, head views first, so it is one
                 coherent 1024 px pass: seamless, mild identity drift.
@@ -38,8 +39,10 @@ the text encoder runs on the CPU when the card has less than 9 GB free
 (one prompt, a few seconds). ~17 s a view.
 
 Outputs, under `output_dir` beside the atlas: `texture_final.png`,
-`mesh_klein.obj` + `.mtl` naming it, `best.f32` (the final weight map),
-`views/<i>_<name>/` with the render, the mask and the repaint of every view.
+`mesh_klein.obj` + `.mtl` naming it, `refine_texture.json` (per view: what
+it claimed, how long klein took, how much it changed). With `debug_dir`
+set, `<i>_<name>/` there keeps every view's render, repaint mask and
+repaint (the PNGs; the float maps and the working texture are not kept).
 """
 
 from __future__ import annotations
@@ -262,7 +265,7 @@ class RefineTextureStep(Step):
         Param("fp8_repo", str, DEFAULT_FP8_REPO, "The fp8 transformer's repo", advanced=True),
         Param("fp8_file", str, DEFAULT_FP8_FILE, "The fp8 transformer's file", advanced=True),
         Param("text_encoder_device", str, "auto", "cuda | cpu | auto (cuda with 9 GB free)", advanced=True),
-        Param("keep_views", bool, True, "Keep every view's render / mask / repaint under output_dir/views"),
+        Param("debug_dir", str, "", "Keep every view's render / repaint mask / repaint (PNGs) under this directory"),
     )
 
     def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
@@ -282,8 +285,11 @@ class RefineTextureStep(Step):
         caption = str(inputs.get("caption") or "the person").strip()
         device = str(params["device"])
         out = Path(params["output_dir"])
+        # The per-view working files (renders with their float maps, the working texture) live
+        # here for the loop and go at the end; the PNGs worth a look are copied to debug_dir.
         views_dir = out / "views"
         views_dir.mkdir(parents=True, exist_ok=True)
+        debug = Path(params["debug_dir"]) if params["debug_dir"] else None
         t0 = time.time()
 
         def run(cmd: List[str], name: str) -> None:
@@ -366,11 +372,17 @@ class RefineTextureStep(Step):
             entry_log = {"view": entry["name"], "kind": kind, "claimed_px": int(claim.sum()), "subject_px": int((alpha > 127).sum())}
             logger.info("refine_texture [%d/%d] %s: repaint %.0f%% of the subject", i + 1, len(views), entry["name"],
                         100.0 * claim.sum() / max((alpha > 127).sum(), 1))
+            mask_u8 = painted.astype(np.uint8) * 255
+            if debug is not None:
+                d = debug / it.name
+                d.mkdir(parents=True, exist_ok=True)
+                shutil.copy(render_dir / f"{stem}.png", d / "render.png")
+                cv2.imwrite(str(d / "repaint_mask.png"), mask_u8)
             if claim.sum() < params["min_repaint"]:
                 entry_log["skipped"] = True
                 log.append(entry_log)
+                shutil.rmtree(it, ignore_errors=True)
                 continue
-            mask_u8 = painted.astype(np.uint8) * 255
             render_rgb = cv2.cvtColor(rgba[..., :3], cv2.COLOR_BGR2RGB)
             t1 = time.time()
             repainted = klein.repaint(render_rgb, mask_u8, prompts[kind], params["strength"], params["steps"], params["guidance"], params["seed"])
@@ -383,11 +395,15 @@ class RefineTextureStep(Step):
             diff = float(np.abs(composed.astype(np.float32) - render_rgb.astype(np.float32))[alpha > 127].mean())
             entry_log.update({"klein_seconds": round(time.time() - t1, 1), "mean_change": round(diff, 2)})
             log.append(entry_log)
-            if not params["keep_views"]:
-                shutil.rmtree(it, ignore_errors=True)
+            if debug is not None:
+                shutil.copy(refined_dir / entry["name"], debug / it.name / "refined.png")
+            shutil.rmtree(it, ignore_errors=True)
 
         final = out / "texture_final.png"
         shutil.move(str(texture), str(final))
+        shutil.rmtree(views_dir, ignore_errors=True)
+        for leftover in (best_path, body_json, head_json):
+            leftover.unlink(missing_ok=True)
         mesh_obj = out / "mesh_klein.obj"
         obj_text = (atlas / "mesh_uv.obj").read_text().replace("mtllib mesh_uv.mtl", "mtllib mesh_klein.mtl", 1)
         mesh_obj.write_text(obj_text)
