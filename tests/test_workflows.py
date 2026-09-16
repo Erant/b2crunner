@@ -1097,6 +1097,16 @@ class TestWorkflowFiles(unittest.TestCase):
                 )
                 for step in refiners:
                     self.assertEqual(step.outputs.get("cameras"), "dataset.cameras")
+                    # Trap 6: the gauge is chosen from the subject, which
+                    # needs the body mesh the cameras were drawn around.
+                    # Without it the step falls back to the orbit's gauge
+                    # and a subject that slid along the anchor's ray stays
+                    # slid — 3 cm on helical-splat_00307.
+                    self.assertEqual(
+                        step.inputs.get("mesh_world"), "scene.mesh_world?",
+                        f"{path.name}: '{step.id}' must wire the body mesh so the "
+                        f"refined cameras carry the subject's gauge",
+                    )
                     for name in refine_inputs:
                         wired = step.inputs.get(name, "")
                         self.assertTrue(

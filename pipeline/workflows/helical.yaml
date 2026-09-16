@@ -142,6 +142,20 @@
 # face_splat_refined's `given_camera` — that input is required now, and the
 # step refuses `cameras` without it. This is the one workflow file.
 #
+# WHAT CHANGED (2026-09-15): **refine_cameras publishes the SUBJECT's gauge.**
+# Both instances take `mesh_world: scene.mesh_world?`; after the Sim(3) on
+# camera centres the step projects the mesh through the given cameras,
+# triangulates those pixels with the refined ones, and moves the refined
+# cameras by the similarity that puts the result back on the mesh (the
+# step's trap 6). Measured on helical-splat_00307: the refined ring
+# converged 3.5 cm behind the mesh centre with no centre moved and no
+# shared rotation, so the cap built at the mesh's depth stood 3 cm in front
+# of the frames' face and a mesh fused from the intermediate splat carried
+# it as a plate; with the subject's gauge the ring converges on the mesh
+# centre to 1 mm and the refined orbit's radial jitter about the drawn one
+# drops from 33 mm to 9 mm. The common-mode removal (trap 4) is now a
+# measurement inside that fit rather than a correction of its own.
+#
 # WHAT CHANGED (2026-09-04, later still): **the refined face cap is hung on
 # the photograph's camera, moved by the refinement's delta** — not on the
 # refined anchor camera itself. `face_splat_refined` takes
@@ -1999,6 +2013,18 @@ steps:
       # Which frame is the photograph, so the step can republish where the
       # refinement put it. Falls back to frame 0, the circular anchor.
       anchor_frame_index: dataset.extras.anchor_frame_index?
+      # The body the cameras were drawn around, so the refined poses come
+      # back in the SUBJECT's gauge rather than the orbit's (the step's
+      # trap 6): the mesh projected through the given cameras and
+      # triangulated with the refined ones says where the refinement put
+      # the subject, and the cameras are moved so that is on the mesh
+      # again. On helical-splat_00307 the refined ring converged 3.5 cm
+      # behind the mesh centre with no centre moved and no shared
+      # rotation, and the face cap — built at the mesh's depth through the
+      # refined anchor — stood 3 cm in front of the frames' face. Every
+      # reader of the mesh after this step (face_splat_refined, the hollow
+      # proxy, the rig, the head fit) needs the frames' subject ON it.
+      mesh_world: scene.mesh_world?
     params:
       # given/ + refined/ COLMAP models and stats.json, into the result .zip.
       debug_dir: ${globals.output_root}/debug/refine_cameras
@@ -3224,6 +3250,10 @@ steps:
       # are about the photograph, not frame 0. Until 2026-09-08 this was
       # unwired and both described a synthetic frame.
       anchor_frame_index: dataset.extras.anchor_frame_index?
+      # The subject's gauge again (trap 6, see the stage-2 instance). The
+      # mesh here is the refit body, which is where the helix frames'
+      # subject is by construction: the helix was rendered around it.
+      mesh_world: scene.mesh_world?
     params:
       debug_dir: ${globals.output_root}/debug/refine_cameras_final
     outputs:

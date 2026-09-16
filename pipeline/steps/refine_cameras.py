@@ -35,8 +35,14 @@ The recipe, in six parts
     reform against the corrected poses. Converges by the third round.
 5.  **Put the gauge back** — a Sim(3) (Umeyama, with scale) from the refined
     camera centres onto the given ones. Non-negotiable; see trap 1. Then
-    the one thing a fit on centres cannot see: the rotation every camera
-    shares about its OWN centre, taken out as a mean. See trap 4.
+    what a fit on centres cannot see: where the refined cameras put the
+    SUBJECT. With the body mesh wired in, the mesh is projected through
+    the given cameras, those pixels are triangulated with the refined
+    ones, and the refined cameras are moved by the similarity that puts
+    the result back on the mesh (`_align_to_structure`) — see trap 6.
+    Without a mesh, the rotation every camera shares about its own
+    centre is taken out as a mean instead (trap 4), which is the one
+    slice of trap 6 that needs no mesh to see.
 6.  Rebuild `Camera` objects from the aligned poses, intrinsics untouched.
 
 **Foreground-only, deliberately.** Letting features land on the backdrop
@@ -135,6 +141,48 @@ refined. The model is therefore written AFTER the extractor, in the
 database's image order (`_database_image_order`), which makes the rewrite
 the identity. Reading the poses back is by name, so the order is invisible
 downstream.
+
+Trap 6 — the ring's other valleys: the subject slides, no centre moves
+----------------------------------------------------------------------
+Trap 4 is one direction of a family. Every way the subject can move as a
+whole — down (every camera pitches), along the anchor's ray (the cameras
+at the sides yaw, the front and back ones see it a little smaller and
+larger), a little bigger — is, for a ring of cameras with their centres
+pinned by step 5's Sim(3), a small turn of each camera about its own
+centre, and only the pitch is *common* to all of them. Bundle
+`helical-splat_00307` (2026-09-15, the mesh-from-the-intermediate-views
+experiment in b2ctrain's out/mesh) came back with no centre moved, no
+shared rotation, every check green — and the ring converging 3.5 cm
+BEHIND the mesh centre, where the given ring converges on it exactly.
+The face cap, unprojected at the mesh's depth through the refined anchor,
+stood 3 cm in front of the frames' face (the frames-only splat at the
+GIVEN cameras had it 6 mm behind; at the refined ones, 30 mm); in the
+splat that is invisible (the cap wins frontally, the frames elsewhere),
+in a mesh fused from the splat it is a plate with a 3 cm rim.
+
+The gauge is a choice, and the orbit's is the wrong one: everything the
+pipeline builds after this step is built from the mesh, so the gauge has
+to be the one in which the frames' subject is ON the mesh. That is what
+`_align_to_structure` picks: the mesh projected through the given cameras
+is the drawings' subject, pixel for pixel; triangulated with the refined
+cameras it is where the refined orbit has that subject; the Umeyama
+similarity from there back onto the mesh, applied to the refined cameras,
+is the gauge. A per-camera correction is not a similarity of the subject
+and survives untouched; a rigid motion of the rig never reaches it (step
+5 took it); trap 4's pitch is a translation of the subject and goes with
+the rest. Fitted on up to 2000 mesh vertices, residual 1 mm on the run
+above (0.5 mm in the experiment's own fit), subject offset (0.2, -0.1,
+-3.6) cm at scale 1.0005 and 0.5 deg. In that gauge the refined ring's
+radial jitter about the drawn one drops from 33 mm to 9 mm, and its
+convergence point lands on the mesh centre to 1 mm.
+
+What it cannot see: a subject the frames simply painted somewhere else
+with the cameras otherwise agreeing — that is a pure translation of the
+rig and step 5 has already folded it in. It measured 6 mm here (the
+frames-only splat at the given cameras against the initial cap), and it
+is `refit_body`'s job, which moves the body onto the trained splat.
+`max_subject_shift` (a tenth of the scene radius) refuses a solve whose
+subject offset is not a drift but a lost subject.
 
 What the ceiling is
 -------------------
@@ -308,7 +356,11 @@ class RefineCamerasStep(Step):
              "images": List[np.ndarray] BGR(A),
              "masks": Optional[List[np.ndarray]] float32 [0,1], foreground=1,
              "anchor_frame_index": Optional[int] — which frame is the
-             photograph; default 0}
+             photograph; default 0,
+             "mesh_world": Optional[(vertices, faces)] — the body mesh the
+             cameras were drawn around. With it the gauge is the subject's
+             (`_align_to_structure`, trap 6); without it the orbit's, with
+             the shared rotation removed (trap 4), as before 2026-09-15}
     outputs: {"cameras": List[Camera], "stats": dict,
               "anchor_position": List[float] (3,) — that frame's REFINED
               position, for `dataset.extras.anchor_position`}
@@ -386,6 +438,15 @@ class RefineCamerasStep(Step):
               "found it and 0.2 on two others; several degrees is BA having "
               "lost the scene, not drifted along its valley",
               minimum=0.0, advanced=True),
+        Param("max_subject_shift", float, 0.1,
+              "Refuse a result whose subject — the body mesh projected "
+              "through the given cameras and triangulated with the refined "
+              "ones — sits more than this fraction of the scene radius from "
+              "the mesh (trap 6). 3.8 cm of 2.2 m, 1.7%, on the run that "
+              "found it; a tenth of the radius is not a drift but a solve "
+              "that lost the subject. Only applies when `mesh_world` is "
+              "wired",
+              minimum=0.0, advanced=True),
         Param("on_check_failure", str, "keep_given",
               "What a failed check does. `keep_given` logs the failure and "
               "publishes the poses unchanged — the behaviour the pipeline had "
@@ -417,6 +478,8 @@ class RefineCamerasStep(Step):
         images = list(inputs["images"])
         masks = inputs.get("masks")
         anchor_index = int(inputs.get("anchor_frame_index") or 0)
+        mesh_world = inputs.get("mesh_world")
+        subject = _subject_points(mesh_world) if mesh_world is not None else None
         label = self.STEP_NAME or type(self).__name__
         if cameras and not 0 <= anchor_index < len(cameras):
             raise ValueError(
@@ -443,11 +506,11 @@ class RefineCamerasStep(Step):
                 shutil.rmtree(root)
             root.mkdir(parents=True)
             result = self._refine(root, cameras, image_names, images, masks, params,
-                                  label, anchor_index)
+                                  label, anchor_index, subject)
         else:
             with tempfile.TemporaryDirectory(prefix="b2c_refine_") as temp_dir:
                 result = self._refine(Path(temp_dir), cameras, image_names, images,
-                                      masks, params, label, anchor_index)
+                                      masks, params, label, anchor_index, subject)
         if params["debug_dir"]:
             self._write_debug(Path(params["debug_dir"]), cameras, result, image_names)
         return result
@@ -491,6 +554,7 @@ class RefineCamerasStep(Step):
         params: Dict[str, Any],
         label: str,
         anchor_index: int,
+        subject: Optional[np.ndarray] = None,
     ) -> Dict[str, Any]:
         from ..proc import ProcessFailed
 
@@ -540,10 +604,26 @@ class RefineCamerasStep(Step):
                                  anchor_index=anchor_index)
 
         aligned, transform = _align_to(refined, cameras)
-        aligned, common_mode = _remove_common_mode(aligned, cameras)
+        # The orbit's gauge, for the checks: they describe how far BA moved
+        # the cameras from the drawings, which the subject's gauge below
+        # would fold a legitimate shift of the subject into.
         stats = _movement(aligned, cameras, transform)
         stats["reprojection_px"] = reprojection
         stats["frames"] = len(cameras)
+        if subject is not None:
+            # Trap 6: the gauge the mesh needs. The shared rotation is
+            # measured on the orbit-gauge cameras for the trap-4 gate and
+            # otherwise left to the structure fit, which accounts for it.
+            _, common_mode = _remove_common_mode(aligned, cameras)
+            try:
+                aligned, structure = _align_to_structure(aligned, cameras, subject)
+            except BadSolve as exc:
+                return self._give_up(cameras, params, label, str(exc), stats,
+                                     anchor_index=anchor_index)
+            stats["subject_gauge"] = structure
+        else:
+            aligned, common_mode = _remove_common_mode(aligned, cameras)
+            stats["subject_gauge"] = None
         stats["common_mode_rotation"] = common_mode
         stats["anchor_residual"] = _residual_rotation(
             aligned[anchor_index], cameras[anchor_index])
@@ -560,14 +640,33 @@ class RefineCamerasStep(Step):
             stats["centre_shift"]["max_frac"] * 100.0, stats["scene_radius"],
             stats["rotation_deg"]["mean"], stats["rotation_deg"]["max"],
         )
-        logger.info(
-            "%s: common-mode rotation removed %.3f deg (%.1f px at the image "
-            "centre, axis %s in camera coords) — trap 4; the anchor frame is "
-            "left %.3f deg (%.1f px) from its given pose",
-            label, common_mode["deg"], common_mode["px_at_centre"],
-            np.round(common_mode["axis_camera"], 3).tolist(),
-            stats["anchor_residual"]["deg"], stats["anchor_residual"]["px_at_centre"],
-        )
+        if subject is not None:
+            structure = stats["subject_gauge"]
+            logger.info(
+                "%s: the refined orbit had the subject %s m (%.1f mm) from the "
+                "mesh, at scale %.5f and %.3f deg — trap 6; the cameras now "
+                "carry the subject's gauge (fit on %d mesh points, residual "
+                "%.2f mm mean / %.2f mm p90). The shared rotation of %.3f deg "
+                "(%.1f px at the image centre) is inside that fit; the anchor "
+                "frame is left %.3f deg (%.1f px) from its given pose",
+                label, np.round(structure["subject_offset"], 4).tolist(),
+                structure["subject_offset_norm"] * 1000.0, structure["scale"],
+                structure["rotation_deg"], structure["points"],
+                structure["residual"]["mean"] * 1000.0, structure["residual"]["p90"] * 1000.0,
+                common_mode["deg"], common_mode["px_at_centre"],
+                stats["anchor_residual"]["deg"], stats["anchor_residual"]["px_at_centre"],
+            )
+        else:
+            logger.info(
+                "%s: common-mode rotation removed %.3f deg (%.1f px at the image "
+                "centre, axis %s in camera coords) — trap 4; the anchor frame is "
+                "left %.3f deg (%.1f px) from its given pose. No mesh was wired, "
+                "so the gauge is the orbit's and a subject that slid along the "
+                "anchor's ray stays slid (trap 6)",
+                label, common_mode["deg"], common_mode["px_at_centre"],
+                np.round(common_mode["axis_camera"], 3).tolist(),
+                stats["anchor_residual"]["deg"], stats["anchor_residual"]["px_at_centre"],
+            )
 
         failure = _check(stats, params)
         if failure:
@@ -971,6 +1070,126 @@ def _umeyama(source: np.ndarray, target: np.ndarray) -> Tuple[float, np.ndarray,
     return scale, rotation, mu_target - scale * rotation @ mu_source
 
 
+def _projection_matrix(camera: Any) -> np.ndarray:
+    """3x4 pinhole matrix (float64) with `Camera.project`'s conventions.
+
+    `Camera.rotation` is camera-to-world in OpenGL axes (looks down -z);
+    the pixel is taken in OpenCV axes (looks down +z), so the y and z rows
+    flip before the intrinsics. Same arithmetic as `Camera.project`, in
+    float64 so the triangulation below is not fighting float32 noise.
+    """
+    rotation = np.asarray(camera.rotation, dtype=np.float64)
+    position = np.asarray(camera.position, dtype=np.float64).reshape(3)
+    w2c = np.hstack([rotation.T, (-rotation.T @ position)[:, None]])
+    intrinsics = np.array([[float(camera.fx), 0.0, float(camera.cx)],
+                           [0.0, float(camera.fy), float(camera.cy)],
+                           [0.0, 0.0, 1.0]])
+    return intrinsics @ np.diag([1.0, -1.0, -1.0]) @ w2c
+
+
+def _project(camera: Any, points: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Pixels (N, 2) of world points through `camera`, and which of them
+    land in front of it inside the image."""
+    matrix = _projection_matrix(camera)
+    homogeneous = np.hstack([points, np.ones((len(points), 1))]) @ matrix.T
+    depth = homogeneous[:, 2]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        pixels = homogeneous[:, :2] / depth[:, None]
+    visible = (depth > 1e-6) & (pixels[:, 0] >= 0) & (pixels[:, 0] < camera.width) \
+        & (pixels[:, 1] >= 0) & (pixels[:, 1] < camera.height)
+    return pixels, visible
+
+
+def _triangulate(matrices: Sequence[np.ndarray], pixels: np.ndarray,
+                 visible: np.ndarray) -> np.ndarray:
+    """DLT, one point per column set: `pixels` (cameras, N, 2), `visible`
+    (cameras, N) says which observations count. Points seen by fewer
+    than two cameras come back NaN."""
+    count = pixels.shape[1]
+    rows = []
+    for matrix, uv, ok in zip(matrices, pixels, visible):
+        weight = ok.astype(np.float64)[:, None]
+        rows.append(weight * (uv[:, 0:1] * matrix[2][None, :] - matrix[0][None, :]))
+        rows.append(weight * (uv[:, 1:2] * matrix[2][None, :] - matrix[1][None, :]))
+    system = np.stack(rows, axis=1)  # (N, 2 * cameras, 4)
+    _, _, vt = np.linalg.svd(system, full_matrices=False)
+    solution = vt[:, -1, :]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        points = solution[:, :3] / solution[:, 3:4]
+    points[visible.sum(0) < 2] = np.nan
+    return points
+
+
+def _subject_points(mesh_world: Any, limit: int = 2000) -> np.ndarray:
+    """Up to `limit` vertices of the body mesh, evenly strided, float64."""
+    vertices = mesh_world[0] if isinstance(mesh_world, (tuple, list)) else mesh_world
+    vertices = np.asarray(vertices, dtype=np.float64).reshape(-1, 3)
+    if len(vertices) > limit:
+        vertices = vertices[:: int(np.ceil(len(vertices) / limit))]
+    return vertices
+
+
+def _align_to_structure(refined: Sequence[Any], given: Sequence[Any],
+                        points: np.ndarray) -> Tuple[List[Any], Dict[str, Any]]:
+    """Choose the gauge from the subject, not from the orbit — step 5b.
+
+    `_align_to` matched camera CENTRES, and a bundle adjustment that came
+    back with every camera turned a little about its own centre passes
+    through that untouched (trap 4 was the pitch; trap 6 is the general
+    case). What such a turn means is that the refined cameras see the
+    drawn subject somewhere else: project the body mesh through the GIVEN
+    cameras — the pixels the drawings put it at — and triangulate those
+    pixels with the REFINED cameras, and the result is where the refined
+    orbit has the subject. The Sim(3) (Umeyama, with scale) from that
+    structure back onto the mesh, applied to the refined cameras, is the
+    gauge in which the subject is on the mesh again — which is the one
+    everything built from the mesh needs. A per-camera correction is not a
+    similarity of the structure and survives; a rotation shared by every
+    camera, a slide of the subject along the anchor's ray, a scale of it,
+    all are and all go. Cameras that do not see a point leave it to the
+    others; the residual of the fit says how far the refinement was from a
+    similarity of the subject (0.5 mm on the run that motivated this).
+    """
+    from body2colmap.camera import Camera
+
+    pixels, visible = zip(*(_project(camera, points) for camera in given))
+    pixels, visible = np.stack(pixels), np.stack(visible)
+    structure = _triangulate([_projection_matrix(c) for c in refined], pixels, visible)
+    ok = np.isfinite(structure).all(1)
+    if ok.sum() < 3:
+        raise BadSolve("the body mesh projects into fewer than two given cameras; "
+                       "nothing to fit the subject's gauge on")
+    scale, rotation, translation = _umeyama(structure[ok], points[ok])
+
+    moved = scale * structure[ok] @ rotation.T + translation
+    residual = np.linalg.norm(moved - points[ok], axis=1)
+    offset = structure[ok] - points[ok]
+    angle, axis = _angle_axis(rotation)
+    aligned = [
+        Camera(
+            focal_length=(camera.fx, camera.fy),
+            image_size=(camera.width, camera.height),
+            principal_point=(camera.cx, camera.cy),
+            position=scale * (rotation @ np.asarray(camera.position, dtype=np.float64)) + translation,
+            rotation=rotation @ np.asarray(camera.rotation, dtype=np.float64),
+        )
+        for camera in refined
+    ]
+    return aligned, {
+        "points": int(ok.sum()),
+        # Where the refined orbit had the subject, relative to the mesh,
+        # before this: the mean over the points (scene units) and its size.
+        "subject_offset": [float(v) for v in offset.mean(0)],
+        "subject_offset_norm": float(np.linalg.norm(offset.mean(0))),
+        "scale": float(scale),
+        "rotation_deg": float(angle),
+        "rotation_axis": [float(v) for v in axis],
+        "translation": [float(v) for v in translation],
+        "residual": {"mean": float(residual.mean()), "p90": float(np.percentile(residual, 90)),
+                     "max": float(residual.max())},
+    }
+
+
 def _rotation_about_own_centre(refined: Any, given: Any) -> np.ndarray:
     """The rotation `given` needs, in ITS OWN frame, to become `refined`.
 
@@ -1115,6 +1334,17 @@ def _check(stats: Dict[str, Any], params: Dict[str, Any]) -> str:
             f"Trap 4's valley is a fraction of a degree deep; this is BA having "
             f"lost the scene"
         )
+    subject = stats.get("subject_gauge")
+    if subject is not None and stats["scene_radius"]:
+        shift = subject["subject_offset_norm"] / stats["scene_radius"]
+        if shift > params["max_subject_shift"]:
+            return (
+                f"the refined orbit had the subject "
+                f"{subject['subject_offset_norm'] * 1000:.0f} mm from the mesh, "
+                f"{shift * 100:.1f}% of the scene radius, over the "
+                f"{params['max_subject_shift'] * 100:.1f}% allowed. A drift along "
+                f"trap 6's valley is centimetres; this is BA having lost the subject"
+            )
     return ""
 
 

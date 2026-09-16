@@ -24,9 +24,9 @@ from body2colmap.camera import Camera
 
 from pipeline.steps import refine_cameras
 from pipeline.steps.refine_cameras import (
-    ONNX_MODELS, BadSolve, RefineCamerasStep, _align_to, _check, ensure_onnx_model,
-    _movement, _quaternion_to_rotation, _read_images_txt, _remove_common_mode,
-    _residual_rotation, onnx_options_for,
+    ONNX_MODELS, BadSolve, RefineCamerasStep, _align_to, _align_to_structure, _check,
+    ensure_onnx_model, _movement, _project, _quaternion_to_rotation, _read_images_txt,
+    _remove_common_mode, _residual_rotation, _subject_points, onnx_options_for,
 )
 
 TARGET = np.array([0.0, 0.9, 0.0])
@@ -211,6 +211,117 @@ class TestCommonMode(unittest.TestCase):
         residual = _residual_rotation(rolled, given[0])
         self.assertAlmostEqual(residual["deg"], 2.0, places=3)   # float32 Camera
         self.assertLess(residual["px_at_centre"], 0.1)
+
+
+def _subject(count=400, seed=0):
+    """A body-sized cloud of points around TARGET — the mesh's stand-in."""
+    rng = np.random.default_rng(seed)
+    return TARGET + rng.uniform([-0.25, -0.8, -0.25], [0.25, 0.8, 0.25], size=(count, 3))
+
+
+def _aimed(cameras, target):
+    """Every camera turned about its OWN centre to look at `target` — the
+    shape a BA solve takes when the frames put the subject somewhere else
+    and the centre fit has pinned the ring: trap 6's mode."""
+    aimed = []
+    for camera in cameras:
+        copy = Camera(focal_length=(camera.fx, camera.fy), image_size=(camera.width, camera.height),
+                      position=np.asarray(camera.position, dtype=np.float64))
+        copy.look_at(np.asarray(target, dtype=np.float64))
+        aimed.append(copy)
+    return aimed
+
+
+class TestSubjectGauge(unittest.TestCase):
+    """Trap 6: the gauge is the subject's, not the orbit's.
+
+    Bundle `helical-splat_00307` (2026-09-15) came back with its ring of
+    cameras converging 3.5 cm behind the mesh centre — no centre moved
+    (the Sim(3) on centres saw nothing), no shared rotation (trap 4 saw
+    nothing), and the face cap, built at the mesh's depth, sat 3 cm in
+    front of the frames' face. `_align_to_structure` projects the mesh
+    through the given cameras, triangulates those pixels with the refined
+    ones, and moves the refined cameras by the Sim(3) that puts the result
+    back on the mesh.
+    """
+
+    def test_a_ring_aimed_past_the_mesh_is_brought_back_onto_it(self):
+        given = _orbit(count=24)
+        subject = _subject()
+        shift = np.array([0.0, 0.0, -0.035])
+        refined = _aimed(given, TARGET + shift)
+
+        aligned, stats = _align_to_structure(refined, given, subject)
+
+        # The ring now converges on the mesh: the given pixels of the
+        # subject, re-triangulated with the aligned cameras, land on it.
+        pixels, visible = zip(*(_project(c, subject) for c in given))
+        matrices = [refine_cameras._projection_matrix(c) for c in aligned]
+        back = refine_cameras._triangulate(matrices, np.stack(pixels), np.stack(visible))
+        self.assertLess(np.linalg.norm(back - subject, axis=1).mean(), 0.004)
+        # ... and it says where the subject had been.
+        np.testing.assert_allclose(stats["subject_offset"], shift, atol=0.004)
+        self.assertLess(stats["residual"]["mean"], 0.004)
+        self.assertEqual(stats["points"], len(subject))
+
+    def test_a_uniform_pitch_is_a_subject_shift_too(self):
+        """Trap 4's mode, seen from the subject: every camera pitched up
+        is the subject sitting lower. The structure gauge has it without
+        `_remove_common_mode`."""
+        given = _orbit(count=24)
+        subject = _subject()
+        refined = _pitched(given, 0.94)
+
+        aligned, stats = _align_to_structure(refined, given, subject)
+
+        pixels, visible = zip(*(_project(c, subject) for c in given))
+        matrices = [refine_cameras._projection_matrix(c) for c in aligned]
+        back = refine_cameras._triangulate(matrices, np.stack(pixels), np.stack(visible))
+        # The ring looks up at TARGET at ~26 deg, so a pitch is not exactly
+        # a translation of the subject; within a centimetre is the claim.
+        self.assertLess(np.linalg.norm(back - subject, axis=1).mean(), 0.01)
+        # Cameras turned to look up see the drawn pixels higher up: the
+        # subject the refined ring had was above the mesh (2 m x tan 0.94).
+        self.assertGreater(stats["subject_offset"][1], 0.02)
+
+    def test_nothing_to_correct_is_the_identity(self):
+        given = _orbit()
+        aligned, stats = _align_to_structure(list(given), given, _subject())
+        for camera, expected in zip(aligned, given):
+            np.testing.assert_allclose(camera.position, expected.position, atol=1e-5)
+            np.testing.assert_allclose(camera.rotation, expected.rotation, atol=1e-6)
+        self.assertLess(stats["subject_offset_norm"], 1e-4)
+        self.assertAlmostEqual(stats["scale"], 1.0, places=5)
+
+    def test_a_single_camera_correction_survives(self):
+        """One camera turned 1.5 deg is not a similarity of the subject
+        and keeps its turn; the rest barely move."""
+        given = _orbit(count=24)
+        refined = list(given)
+        refined[4] = _pitched([given[4]], 1.5)[0]
+
+        aligned, stats = _align_to_structure(refined, given, _subject())
+
+        self.assertGreater(_residual_rotation(aligned[4], given[4])["deg"], 1.3)
+        others = [_residual_rotation(a, g)["deg"] for i, (a, g) in enumerate(zip(aligned, given)) if i != 4]
+        self.assertLess(max(others), 0.15)
+        self.assertLess(stats["subject_offset_norm"], 0.01)
+
+    def test_the_step_reports_and_gates_the_subject_shift(self):
+        params = RefineCamerasStep.resolve_params({})
+        given = _orbit(count=24)
+        aligned, transform = _align_to(_aimed(given, TARGET + [0.0, 0.0, -0.035]), given)
+        stats = _movement(aligned, given, transform)
+        aligned, stats["subject_gauge"] = _align_to_structure(aligned, given, _subject())
+        self.assertEqual(_check(stats, params), "")
+
+        stats["subject_gauge"] = dict(stats["subject_gauge"], subject_offset_norm=0.4)
+        self.assertIn("lost the subject", _check(stats, params))
+
+    def test_a_mesh_is_strided_down_to_the_limit(self):
+        vertices = np.zeros((10001, 3))
+        self.assertLessEqual(len(_subject_points((vertices, None), limit=2000)), 2000)
+        self.assertEqual(len(_subject_points(vertices[:50], limit=2000)), 50)
 
 
 class TestChecks(unittest.TestCase):
@@ -428,7 +539,7 @@ class TestRunDrivesRefine(unittest.TestCase):
     `run`, so both of `_refine`'s exits are compiled *and* run.
     """
 
-    def _run(self, step, *, anchor_index):
+    def _run(self, step, *, anchor_index, mesh_world=None):
         import tempfile
         from pathlib import Path
 
@@ -441,7 +552,8 @@ class TestRunDrivesRefine(unittest.TestCase):
                 {"work_dir": str(Path(tmp) / "scratch")})
             return given, step.run(
                 {"cameras": given, "image_names": names, "images": images,
-                 "masks": masks, "anchor_frame_index": anchor_index},
+                 "masks": masks, "anchor_frame_index": anchor_index,
+                 "mesh_world": mesh_world},
                 params)
 
     def test_a_colmap_failure_keeps_the_given_anchor(self):
@@ -483,9 +595,47 @@ class TestRunDrivesRefine(unittest.TestCase):
         given, result = self._run(Solving(), anchor_index=5)
 
         self.assertTrue(result["stats"]["accepted"])
+        self.assertIsNone(result["stats"]["subject_gauge"])
         # `_align_to` undoes the 1.19x, so the anchor lands back on the
         # given orbit — read out of the ALIGNED list, not the given one.
         np.testing.assert_allclose(result["anchor_position"], given[5].position,
+                                   atol=1e-6)
+
+    def test_with_a_mesh_the_solve_carries_the_subjects_gauge(self):
+        """Trap 6 through `run`: a ring that came back aimed 3.5 cm past
+        the mesh is moved so the mesh is where it converges, and the
+        stats say by how much."""
+        subject = _subject()
+        refined = _transform(_aimed(_orbit(), TARGET + [0.0, 0.0, -0.035]), 1.19, 5.0, [0.1, 0.1, 0.1])
+
+        class Solving(RefineCamerasStep):
+            def _extract(self, *a, **k):
+                pass
+
+            @staticmethod
+            def _database_image_order(database, image_names, label):
+                return list(range(len(image_names)))
+
+            def _match(self, *a, **k):
+                pass
+
+            def _triangulate_and_adjust(self, colmap, work, images_dir, params, label):
+                return work, 0.42
+
+            @staticmethod
+            def _read_poses(images_txt, image_names, cameras, label):
+                return refined
+
+        given, result = self._run(Solving(), anchor_index=5, mesh_world=(subject, None))
+
+        self.assertTrue(result["stats"]["accepted"])
+        gauge = result["stats"]["subject_gauge"]
+        np.testing.assert_allclose(gauge["subject_offset"], [0.0, 0.0, -0.035], atol=0.004)
+        # The cameras moved off the given orbit by about the shift.
+        moved = np.linalg.norm(np.array([c.position for c in result["cameras"]])
+                               - np.array([c.position for c in given]), axis=1)
+        self.assertGreater(np.median(moved), 0.02)
+        np.testing.assert_allclose(result["anchor_position"], result["cameras"][5].position,
                                    atol=1e-6)
 
 

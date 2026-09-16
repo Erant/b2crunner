@@ -197,6 +197,12 @@ poses, then alternate BA with retriangulation, then put the gauge back.
 5.  **Put the gauge back.** Fit a similarity transform (Umeyama, with
     scale) from the refined camera centres onto the original ones and
     apply it to the refined poses. Non-negotiable; see the next section.
+    Then choose the gauge from the subject: project the body mesh through
+    the given cameras, triangulate those pixels with the refined ones, and
+    move the refined cameras by the similarity that puts the result back
+    on the mesh (trap 6; the step's `_align_to_structure`, since
+    2026-09-15). Without a mesh the step takes out the rotation every
+    camera shares about its own centre instead (trap 4).
 
 6.  **Write a dataset that differs only in poses.** `cameras.txt` and the
     original `points3D.txt` copied across untouched.
@@ -334,6 +340,42 @@ correction keeps all but its 1/N share; a rigid motion never reaches it.
 `max_common_mode_rotation_deg` (3) refuses a mean that says BA lost the
 scene rather than drifted along the valley.
 
+Superseded in the step (2026-09-15) by trap 6's fix, which handles this
+mode with the rest of its family; the common-mode angle is still measured
+and gated, and is still what a run without a mesh wired gets.
+
+## Trap 6 — the ring's other valleys: the subject slides, no centre moves
+
+Found on bundle `helical-splat_00307` (2026-09-15) by fusing a mesh from
+the intermediate splat: the face cap came out as a plate 3 cm in front of
+the frames' face. The refined cameras had passed every check — no centre
+moved, no shared rotation — and converged 3.5 cm behind the mesh centre,
+where the given ring converges on it exactly (the frames-only splat at
+the given cameras put the frames' face 6 mm behind the initial cap; at
+the refined cameras, 30 mm).
+
+Trap 4 is one member of a family: every way the subject can move as a
+whole — down, along the anchor's ray, a little bigger — is, for a ring
+whose centres the Sim(3) has pinned, a small turn of each camera about
+its own centre, and only the pitch is common to all of them. The gauge is
+a choice; the orbit's is the wrong one, because everything built after
+this step is built from the mesh. The fix picks the subject's gauge: the
+mesh projected through the given cameras is the drawings' subject,
+triangulated with the refined cameras it is where the refinement has
+that subject, and the Umeyama similarity from there back onto the mesh
+moves the refined cameras. Measured on that bundle: subject offset
+(0.2, -0.1, -3.6) cm, scale 1.0005, 0.5 deg, residual 1 mm over 1844
+vertices; afterwards the ring converges on the mesh centre to 1 mm and
+its radial jitter about the drawn orbit drops from 33 mm to 9 mm. A
+per-camera correction is not a similarity of the subject and survives.
+The experiment's own version of the same move (the mesh, cap and rig
+carried INTO the refined gauge instead) put the cap 2.4 mm from the
+frames' face, from 30. `max_subject_shift` (a tenth of the scene radius)
+refuses a solve whose offset is a lost subject rather than a drift. What
+it cannot see — the frames painting the subject elsewhere with the
+cameras otherwise agreeing, a pure translation the Sim(3) already folded
+in — measured 6 mm here and is `refit_body`'s job.
+
 ## Trap 5 — the input model's image ids have to be the database's
 
 `point_triangulator` maps the model's images onto the database's by name
@@ -412,6 +454,11 @@ Cheap, in the order they catch things:
   residual rotation, both logged in degrees and px at the image centre —
   **a fraction of a degree, a few px** (catches trap 4; 19 px is what run
   9cc643 would have printed. None of the checks above can see it)
+- the subject offset the step's `subject_gauge` stat reports (where the
+  refined ring had the mesh's subject, before the fix) — **centimetres**,
+  and the fit's residual **millimetres** (catches trap 6; 3.6 cm at 1 mm
+  residual on helical-splat_00307, which the four checks above all passed.
+  The step gates at a tenth of the scene radius)
 - the loader's reported train/eval split — **70 / 11** here
 
 ## Porting

@@ -893,7 +893,12 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   Foreground-masked ALIKED + LightGlue, triangulate against the given poses,
   three rounds of (bundle adjust → retriangulate) with every intrinsic
   frozen, then a Sim(3) from the refined camera centres back onto the given
-  ones. That last part is not optional: `bundle_adjuster` pins the gauge
+  ones, then — with `mesh_world` wired, which both workflow instances do —
+  the similarity that puts the SUBJECT back on the mesh (the body projected
+  through the given cameras, triangulated with the refined ones; the step's
+  trap 6, 2026-09-15: a ring converging 3.5 cm behind the mesh passed every
+  check and put the face cap 3 cm in front of the frames' face). The centre
+  Sim(3) is not optional: `bundle_adjuster` pins the gauge
   with one cam1↔cam2 baseline, so the model comes back **15-26% larger**
   with nothing anywhere saying so — a splat a fifth off scale in a frame its
   `points3D.txt` init no longer matches. The checks are assertions, and a
