@@ -142,6 +142,23 @@
 # face_splat_refined's `given_camera` — that input is required now, and the
 # step refuses `cameras` without it. This is the one workflow file.
 #
+# WHAT CHANGED (2026-09-16): **the refined face cap is the body model's
+# head carrying the photograph** (b2ctrain out/mesh/FACE_GUIDE.md, the
+# recipe validated on 00307 and F3 in b2ctrain out/mesh). Four things:
+# `face_splat_refined` runs with `depth_prior: mesh_surface` — every cap
+# Gaussian on the model's surface along the photograph's ray, no Sapiens
+# relief (the relief measured brows ~10 mm proud and the nose 5-8 mm
+# behind the head; as geometry, a concave profile in the mesh fused from
+# the stage-2 splat); `render_face_support_views` samples a 60-degree cap
+# (x2) and renders each view without the Gaussians the head hides from it
+# (`cull_mesh`); `face_priority_weights` measures its coverage the same
+# culled way; `meshify`'s face policy is `splat` — the face's shape is in
+# the splat's own depth now, so the fusion needs no protection and the
+# refine only keeps the cap's footprint as fused. Together with the
+# subject's gauge below, this is what puts the face on the mesh where the
+# frames have it (the cap was 30 mm in front of the frames' face, then a
+# plate with a 3 cm rim; now -1.4 mm from the fused surface).
+#
 # WHAT CHANGED (2026-09-15): **refine_cameras publishes the SUBJECT's gauge.**
 # Both instances take `mesh_world: scene.mesh_world?`; after the Sim(3) on
 # camera centres the step projects the mesh through the given cameras,
@@ -2114,6 +2131,19 @@ steps:
     params:
       filepath: ${globals.output_root}/face/face_refined.ply
       debug_dir: ${globals.output_root}/debug/face_splat_refined
+      # The cap's SHAPE is the body model's head, not the Sapiens pointmap's
+      # relief: every Gaussian sits on the model's surface along the
+      # photograph's ray through its pixel, as a disc in that surface's
+      # tangent plane (b2ctrain out/mesh/FACE_GUIDE.md, 2026-09-16). The
+      # relief was measured wrong against the head (brows ~10 mm proud,
+      # nose 5-8 mm behind), and as geometry that is a concave profile in
+      # the mesh fused from this training's splat; as the model's shape the
+      # splat's face depth, the fused mesh and the projected photograph
+      # agree on one surface. The bootstrap's `face_splat` keeps the
+      # pointmap: its cap is composited onto the drawings and is denoised
+      # twice, and only this one is trained on. The pointmap head is not run
+      # here; face_normals is wired and unread.
+      depth_prior: mesh_surface
     outputs:
       splat_path: scene.face_splat_path
       splat_stats: scene.face_splat_stats
@@ -2158,10 +2188,22 @@ steps:
     inputs:
       splat_path: scene.face_splat_path
       dataset: dataset
+      # The body, so each view leaves out the cap Gaussians the head hides
+      # from it: on the model's surface the cap has no open rim, but 60
+      # degrees round it shows its far cheek through the temple, where it
+      # has nothing of its own to occlude it, and a support view of that
+      # trains the cheek onto the side of the head. Optional only for a
+      # workflow without a mesh; here there always is one.
+      cull_mesh: scene.mesh_world?
     params:
       pattern: cap
       n_frames: 36
-      cap_radius_deg: 30.0
+      # 60, not the 30 of a pointmap cap: the disc of support cameras
+      # widened x2 about the photograph's direction was part of every
+      # validated run of the surface cap (FACE_GUIDE.md step C.2) — a cap
+      # on the model's head reads cleanly to the side, a 2.5-D relief
+      # sheet does not.
+      cap_radius_deg: 60.0
       bounds_source: splat
       fill_ratio: 0.8
       width: ${globals.resolution.0}
@@ -2311,6 +2353,12 @@ steps:
       anchor_frame_index: dataset.extras.anchor_frame_index?
       anchor_position: dataset.extras.anchor_position?
       splat_center: scene.face_splat_stats.world_center
+      # The coverage a frame yields over is the cap as the head lets that
+      # frame see it (render_face_support_views' cull, the same margin):
+      # 40 degrees round, the far cheek's Gaussians are behind the temple,
+      # and fading the frame there would silence it over a ring the cap
+      # never paints — a void under the chin, measured 2026-09-15.
+      mesh_world: scene.mesh_world?
     params: {}
     outputs:
       weights: scene.face_priority.weights

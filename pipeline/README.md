@@ -951,6 +951,32 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   `refine_cameras`' `given_cameras` output and its tests are gone; the
   ordering rule — every supporting view built after the last refinement
   ahead of the merge, its splat too — is what tests/test_workflows.py pins.
+  **Update (2026-09-16): the refined cap's SHAPE is the body model's
+  head.** `face_splat_refined` runs with `depth_prior: mesh_surface`: no
+  pointmap at all, every Gaussian on the model's surface along the
+  photograph's ray through its pixel (a z-buffer of the mesh at the
+  photograph's camera, `pipeline/mesh_raster.py`), as a disc in that
+  surface's tangent plane; a ray past the head's silhouette (the hair rim)
+  takes the nearest hitting pixel's depth. The Sapiens relief was
+  measured against the head on two subjects (brows ~10 mm proud, nose tip
+  and lips 5-8 mm behind); as colour it never mattered, as geometry it
+  made the mesh fused from the stage-2 splat a concave profile with a
+  nose sliver. With the model's shape in the cap, the splat's face depth,
+  the fused mesh and the projected photograph agree on one surface — the
+  recipe validated in b2ctrain out/mesh (`FACE_GUIDE.md`, `tools/sam_cap.py`,
+  which the step reproduces to 0.4 mm at p99 on 00307). Two consequences
+  in the same commit: `render_face_support_views` samples a 60-degree
+  cap (the validated x2 widening; a cap on the head has no open rim) and
+  renders each view without the Gaussians the head hides from it
+  (`cull_mesh: scene.mesh_world?`, `render_splat`'s new input — otherwise
+  the far cheek shows through the temple and trains onto the side of the
+  head); `face_priority_weights` measures its coverage the same culled
+  way (`mesh_world`), so a frame is not faded over a ring the cap never
+  paints. And `meshify`'s face policy is `splat` now: the face's shape is
+  in the splat's depth, the fusion needs no `--protect`, and the refine
+  keeps the cap's footprint as fused (`--keep`). The bootstrap's
+  `face_splat` keeps the pointmap: it is composited onto the drawings and
+  denoised twice, never trained on.
 - `load_splat`/`save_splat`/`render_splat` — `render_splat`'s camera-path
   resolution (which cameras, what focal length, which bounding box frames
   the orbit, point-cloud preservation, metadata pass-through) is verified

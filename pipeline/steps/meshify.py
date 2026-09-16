@@ -18,16 +18,27 @@ render of it is consistent with the fused geometry by construction. The
 frames' bake bought ~10 % on a sharpness metric after the diffusion pass on
 one subject and nothing on the face (mesh-plan.md, decision 1).
 
-The face's geometry is the body model's, not the splat's (`face_geometry:
-prior`, the sgc3 recipe): within 3 cm of the cap no depth view is fused,
-the prior's signed distance shapes the face and a band blends the two.
-Measured on both subjects: the cap's own relief has the eyes proud and the
-nose flat, and the splat's depth at the profile is a recess behind the cap
-sheet, so either fused alone gives a concave profile; the body model's head
-gives a nose. The cap stays the authority for COLOUR: its Gaussians are one
-per photo pixel, rasterised at the photograph's camera they are the
-photograph's face, and every vertex that camera sees inside their coverage
-takes the colour under its own pixel, seam-levelled against the bake.
+The face's geometry is the body model's head — and it arrives THROUGH the
+splat (`face_geometry: splat`, the default; b2ctrain out/mesh/FACE_GUIDE.md).
+`face_splat_refined` builds the cap on the body model's surface
+(`depth_prior: mesh_surface`), the stage-2 training reproduces that
+surface as the splat's own depth over the face, and the fusion here reads
+it like any other depth: no protection, no cap probes. The refine then
+keeps the cap's footprint at its fused positions (`mesh-refine --keep`):
+the Sapiens normals of a 90 px face would smooth it away. Measured on
+both subjects, the cap's own Sapiens relief has the eyes proud and the
+nose flat, and the splat's depth at the profile of a cap NOT built on the
+model is a recess behind the cap sheet, so either fused alone gives a
+concave profile; the model's head gives a nose. `face_geometry: prior` is
+the earlier answer to the same problem (the sgc3 recipe: within 3 cm of
+the cap no depth view is fused and the prior's signed distance shapes the
+face) — it fixes the fused surface while the splat, its probes and the
+pass-2 input still carry the cap's relief, so it is kept as an option for
+a splat trained with a pointmap cap, not as the face policy. The cap is
+the authority for COLOUR either way: its Gaussians are one per photo
+pixel, rasterised at the photograph's camera they are the photograph's
+face, and every vertex that camera sees inside their coverage takes the
+colour under its own pixel, seam-levelled against the bake.
 
 What comes out, under `output_dir` (the `mesh/` deliverable):
   cams/           the camera lists the probes ran at
@@ -217,11 +228,14 @@ class MeshifyStep(Step):
         Param("prior_offset", float, -0.005, "The body prior's surface shifted inward by this (metres) where it fills"),
         Param("carve_min", int, 3, "Views a voxel must be outside of before it is carved", minimum=1),
         Param("min_component", float, 0.05, "Drop mesh components below this fraction of the largest one's area"),
-        Param("face_geometry", str, "prior",
-              "prior: the body model's head shapes the face (no depth view fused within face_radius of the cap; the sgc3 recipe). "
-              "splat: the fused depth as everywhere else", choices=("prior", "splat")),
-        Param("face_radius", float, 0.03, "Reach of the face protection about the cap's points (metres)"),
-        Param("face_band", float, 0.02, "Blend width from the protected face into the fused surface (metres)"),
+        Param("face_geometry", str, "splat",
+              "splat: the fused depth as everywhere else — the face's shape is the cap's, which face_splat_refined builds "
+              "on the body model's head (depth_prior mesh_surface), and the refine keeps the cap's footprint as fused. "
+              "prior: the body model's head is imposed in the fusion instead (no depth view fused within face_radius "
+              "of the cap; the sgc3 recipe) — for a splat trained with a pointmap-relief cap", choices=("splat", "prior")),
+        Param("face_radius", float, 0.03, "Reach of the cap's footprint (metres): the refine keeps the fused positions within it; "
+              "with face_geometry prior, also the fusion's protection"),
+        Param("face_band", float, 0.02, "face_geometry prior: blend width from the protected face into the fused surface (metres)"),
         Param("refine_iters", int, 400, "Normal-refine iterations (0 = skip the refine)", minimum=0),
         Param("refine_lam_pos", float, 10.0, "Refine: pull toward the fused positions"),
         Param("refine_lam_lap", float, 2.0, "Refine: Laplacian smoothness"),
@@ -338,7 +352,7 @@ class MeshifyStep(Step):
             refine = [trainer, "mesh-refine", "--input", str(geom), "--output", str(out / "mesh_geom.ply"),
                       "--views", str(train_json), str(normals_dir), "--iters", str(params["refine_iters"]),
                       "--lam-pos", str(params["refine_lam_pos"]), "--lam-lap", str(params["refine_lam_lap"]), "--device", device]
-            if protect_face:
+            if cap is not None:
                 refine += ["--keep", str(cap), str(params["face_radius"])]
             run(refine, "mesh-refine")
             geom = out / "mesh_geom.ply"

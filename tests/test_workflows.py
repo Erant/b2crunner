@@ -919,12 +919,19 @@ class TestWorkflowFiles(unittest.TestCase):
                     f"{path.name}: render_initial_views must read the face "
                     f"splat's .ply, and read it optionally",
                 )
-                self.assertLess(
+                # 60 = 60 since 2026-09-16: the refined cap sits on the body
+                # model's surface (no open rim to flare) and each support
+                # view is rendered with the head's occlusion (`cull_mesh`),
+                # which is what lets the disc reach the composite's angle.
+                self.assertLessEqual(
                     float(cap.params["cap_radius_deg"]),
                     float(drawing.params["splat_max_angle_deg"]),
-                    f"{path.name}: the supporting views must be sampled from a "
-                    f"tighter band than the drawings are composited over",
+                    f"{path.name}: the supporting views must not be sampled from a "
+                    f"wider band than the drawings are composited over",
                 )
+                self.assertEqual(cap.inputs.get("cull_mesh"), "scene.mesh_world?",
+                                 f"{path.name}: a 60-degree cap of a surface cap has to be "
+                                 f"rendered with the body's occlusion")
                 # The inner edge of the band is the denoising path, so the
                 # step has to be handed the cameras the training's own
                 # frames were rendered and denoised along — and a pivot to
@@ -1026,7 +1033,15 @@ class TestWorkflowFiles(unittest.TestCase):
                 self.assertEqual(refined.inputs.get("given_camera"),
                                  "scene.image_warp.camera")
                 self.assertEqual(refined.inputs.get("cameras"), "dataset.cameras")
+                # The refined cap's shape is the body model's head
+                # (FACE_GUIDE.md): the one the training reproduces and the
+                # mesh fuses. The bootstrap's cap keeps the pointmap.
+                self.assertEqual(refined.params.get("depth_prior"), "mesh_surface")
+                self.assertIsNone(by_id["face_splat"].params.get("depth_prior"))
                 self.assertEqual(priority.inputs["anchor_cameras"], "dataset.cameras")
+                # Its coverage is the cap as the head lets each frame see
+                # it, the same cull the support renders get.
+                self.assertEqual(priority.inputs.get("mesh_world"), "scene.mesh_world?")
                 selector = by_id["face_support_views"]
                 self.assertEqual(priority.inputs["splat_center"],
                                  selector.inputs["splat_center"])

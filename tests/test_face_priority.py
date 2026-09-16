@@ -49,9 +49,10 @@ def _disc(height=H, width=W):
 
 
 def _stub_coverage(calls):
-    def fake(splat_path, cameras, *, width, height, render_path):
+    def fake(splat_path, cameras, *, width, height, render_path, mesh_world=None, cull_margin=0.015):
         calls.append({"splat_path": splat_path, "cameras": list(cameras),
-                      "width": width, "height": height, "render_path": render_path})
+                      "width": width, "height": height, "render_path": render_path,
+                      "mesh_world": mesh_world})
         return [_disc(height, width) for _ in cameras]
     return fake
 

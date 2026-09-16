@@ -48,7 +48,13 @@ because `refine_cameras` moves it.
 **Coverage is the splat's own alpha**, rendered through the same binary
 `render_splat` uses, feathered by a few pixels so the weight ramps rather
 than steps at the splat's edge. Nothing here depends on the render's
-colour; it is thrown away.
+colour; it is thrown away. With `mesh_world` wired the coverage is
+rendered with the body's occlusion (pipeline/mesh_raster.py): the
+Gaussians the head hides from a view are left out, so a frame 40 degrees
+round is not faded where the far cheek would show through the temple —
+a ring the cap never paints, which the training then had no evidence for
+at all (a void under the chin, measured 2026-09-15). No dilation of the
+coverage, for the same reason.
 
 With no `splat_path` (the face branch is off) every weight is 1 and any
 masks pass through unchanged, so a workflow can wire this ungated in front
@@ -111,7 +117,10 @@ class FacePriorityWeightsStep(Step):
              "anchor_position": Optional[Sequence[float]] — fallback when
              the index is not wired,
              "splat_center": Optional[Sequence[float]] — the pivot the
-             angle is measured about; falls back to "orbit_target"}
+             angle is measured about; falls back to "orbit_target",
+             "mesh_world": Optional[(vertices, faces)] — the body in the
+             world frame; with it the coverage is the cap as the body lets
+             each camera see it}
     outputs: {"weights": List[np.ndarray] float32 HxW in [0, 1],
               "masks": List[np.ndarray] — only when masks were given}
 
@@ -142,6 +151,10 @@ class FacePriorityWeightsStep(Step):
         Param("render_path", str, None,
               "The rasteriser binary; empty uses render_splat's default",
               advanced=True),
+        Param("cull_margin", float, 0.015,
+              "With `mesh_world`: a Gaussian further than this (metres) behind the "
+              "body's surface along its pixel's ray is not part of that view's "
+              "coverage", minimum=0.0, advanced=True),
     )
 
     def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
@@ -170,6 +183,7 @@ class FacePriorityWeightsStep(Step):
         coverage = _render_coverage(
             splat_path, cameras, width=width, height=height,
             render_path=params["render_path"],
+            mesh_world=inputs.get("mesh_world"), cull_margin=float(params["cull_margin"]),
         )
 
         pivot = _pivot(inputs)
@@ -245,29 +259,39 @@ def _frame_size(cameras) -> tuple:
 
 
 def _render_coverage(splat_path: str, cameras, *, width: int, height: int,
-                     render_path: Optional[str]) -> List[np.ndarray]:
-    """The face splat's alpha from every camera, float32 HxW in [0, 1]."""
+                     render_path: Optional[str], mesh_world=None,
+                     cull_margin: float = 0.015) -> List[np.ndarray]:
+    """The face splat's alpha from every camera, float32 HxW in [0, 1] —
+    with `mesh_world`, of the Gaussians the body lets that camera see."""
     from body2colmap.splat_scene import SplatScene
 
-    from .splat import _RENDER_BINARY, _rasterize
+    from .splat import _RENDER_BINARY, _rasterize, _rasterize_culled
 
     scene = SplatScene.from_ply(str(splat_path))
     image_names = [f"coverage_{i + 1:05d}_.png" for i in range(len(cameras))]
     logger.info(
         "face_priority_weights: rendering the face splat's coverage (%d Gaussians) "
-        "from %d cameras at %dx%d", len(scene), len(cameras), width, height,
+        "from %d cameras at %dx%d%s", len(scene), len(cameras), width, height,
+        "" if mesh_world is None else ", with the body's occlusion",
     )
-    _images, masks = _rasterize(
-        scene=scene,
-        splat_path=str(splat_path),
-        cameras=cameras,
-        image_names=image_names,
-        width=width,
-        height=height,
-        bg_color=(0.0, 0.0, 0.0),
-        render_path=render_path or _RENDER_BINARY,
-        confidence=None,
-    )
+    if mesh_world is None:
+        _images, masks = _rasterize(
+            scene=scene,
+            splat_path=str(splat_path),
+            cameras=cameras,
+            image_names=image_names,
+            width=width,
+            height=height,
+            bg_color=(0.0, 0.0, 0.0),
+            render_path=render_path or _RENDER_BINARY,
+            confidence=None,
+        )
+    else:
+        _images, masks = _rasterize_culled(
+            scene=scene, cull_mesh=mesh_world, margin=cull_margin, cameras=cameras,
+            image_names=image_names, width=width, height=height, bg_color=(0.0, 0.0, 0.0),
+            render_path=render_path or _RENDER_BINARY, confidence=None,
+        )
     return [np.asarray(m, dtype=np.float32) for m in masks]
 
 

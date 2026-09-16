@@ -248,6 +248,15 @@ class RenderSplatStep(Step):
              camera, so the anchor frame lands where `refine_cameras` left
              the photograph's camera rather than where the source render
              put it. See _carry_anchor_refinement.
+             And optionally {"cull_mesh": (vertices, faces)} — the body
+             mesh in the world frame (scene.mesh_world): with it, each view
+             is rendered without the Gaussians the body hides from that
+             camera (`cull_margin` behind its surface along the pixel's
+             ray). For the face cap, whose Gaussians lie on the head's
+             front: a support view 60 degrees round sees the far cheek
+             through the temple, where the cap has nothing of its own to
+             occlude it, and would train that cheek onto the side of the
+             head. One render per view, since the scene differs per view.
     outputs: same shape as steps/render.py — {"images", "masks",
              "cameras", "image_names", "points_3d", "resolution",
              "focal_length_mm"} plus "anchor_position" /
@@ -376,7 +385,14 @@ class RenderSplatStep(Step):
               "Cap: angular radius of the disc of views, about the splat's centre. "
               "30 is where body2colmap measured a Face_Neck shell still reading "
               "cleanly — past it a 2.5-D shell is into its own open rim, and a rim "
-              "is not supervision", minimum=0.0, maximum=180.0),
+              "is not supervision. A cap built on the body model's surface "
+              "(face_pointmap_splat's mesh_surface prior) has no open rim and is "
+              "rendered with the body's occlusion (`cull_mesh`), and the validated "
+              "face recipe samples it at 60", minimum=0.0, maximum=180.0),
+        Param("cull_margin", float, 0.015,
+              "With a `cull_mesh` input: a Gaussian further than this (metres) "
+              "behind the body's surface along its pixel's ray is left out of that "
+              "view's render", minimum=0.0, advanced=True),
         Param("elevation_deg", float, 0.0, "Circular: camera elevation"),
         Param("start_azimuth_deg", float, 0.0, "Where the orbit starts"),
         Param("overlap", int, 1,
@@ -483,18 +499,27 @@ class RenderSplatStep(Step):
             f"(gate {confidence.gate_lo}-{confidence.gate_hi})",
         )
 
-        images, masks = _rasterize(
-            scene=scene,
-            splat_path=splat_path,
-            cameras=cameras,
-            image_names=image_names,
-            width=width,
-            height=height,
-            bg_color=bg_color,
-            render_path=render_path,
-            confidence=confidence,
-            sh_degree=sh_degree,
-        )
+        cull_mesh = inputs.get("cull_mesh")
+        if cull_mesh is None:
+            images, masks = _rasterize(
+                scene=scene,
+                splat_path=splat_path,
+                cameras=cameras,
+                image_names=image_names,
+                width=width,
+                height=height,
+                bg_color=bg_color,
+                render_path=render_path,
+                confidence=confidence,
+                sh_degree=sh_degree,
+            )
+        else:
+            images, masks = _rasterize_culled(
+                scene=scene, cull_mesh=cull_mesh, margin=float(params["cull_margin"]),
+                cameras=cameras, image_names=image_names, width=width, height=height,
+                bg_color=bg_color, render_path=render_path, confidence=confidence,
+                sh_degree=sh_degree,
+            )
 
         # The environment behind the splat (steps/backdrop.py). Composited
         # here rather than asked of the rasteriser, which draws one flat
@@ -682,6 +707,40 @@ def _rasterize(
     finally:
         logger_relay.flush()
         renderer.close()
+
+
+def _rasterize_culled(
+    *, scene, cull_mesh, margin, cameras, image_names, width, height, bg_color, render_path,
+    confidence=None, sh_degree=None,
+) -> Tuple[List[np.ndarray], List[np.ndarray]]:
+    """`_rasterize`, one view at a time, each from the scene without the
+    Gaussians the body hides from that view (pipeline/mesh_raster.py).
+    Per view because the scene differs per view; the .ply on disk is not
+    used, the culled scene is what gets serialised."""
+    from ..mesh_raster import cull_behind_mesh
+
+    if not isinstance(cull_mesh, (tuple, list)) or len(cull_mesh) != 2:
+        raise ValueError("render_splat: cull_mesh must be the (vertices, faces) pair scene.mesh_world holds")
+    mesh = (np.asarray(cull_mesh[0], np.float64), np.asarray(cull_mesh[1], np.int64))
+    images: List[np.ndarray] = []
+    masks: List[np.ndarray] = []
+    kept: List[float] = []
+    for camera, name in zip(cameras, image_names):
+        culled = cull_behind_mesh(scene, mesh, camera, margin)
+        kept.append(len(culled) / max(len(scene), 1))
+        image, mask = _rasterize(
+            scene=culled, splat_path=None, cameras=[camera], image_names=[name],
+            width=width, height=height, bg_color=bg_color, render_path=render_path,
+            confidence=confidence, sh_degree=sh_degree,
+        )
+        images.extend(image)
+        masks.extend(mask)
+    logger.info(
+        "render_splat: %d views rendered with the body's occlusion (margin %.0f mm): "
+        "Gaussians kept per view mean %.0f%%, min %.0f%%",
+        len(cameras), margin * 1000.0, 100.0 * float(np.mean(kept)), 100.0 * float(np.min(kept)),
+    )
+    return images, masks
 
 
 def render_splat_layers(

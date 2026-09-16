@@ -1368,13 +1368,18 @@ class PointmapSplatStep(Step):
               "Clamp |D| in the integration to this fraction of the focal "
               "length, and downweight those edges in proportion", advanced=True),
         Param("depth_prior", str, "pointmap",
-              "Where the depth solve's low frequencies come from. 'pointmap' "
-              "is masktest's behaviour and the default: Sapiens' own depth, "
-              "scaled onto the mesh. 'mesh' takes the coarse depth from the "
-              "SAM-3D-Body mesh instead and keeps only the pointmap's fine "
-              "structure — EXPERIMENTAL, and it deforms hands at the current "
-              "bin size; see mesh_depth_prior's docstring before using it",
-              choices=("pointmap", "mesh"), advanced=True),
+              "Where the depth comes from. 'pointmap' is masktest's behaviour "
+              "and the default: Sapiens' own depth, scaled onto the mesh. "
+              "'mesh' takes the coarse depth from the SAM-3D-Body mesh and keeps "
+              "only the pointmap's fine structure — EXPERIMENTAL, and it deforms "
+              "hands at the current bin size; see mesh_depth_prior's docstring. "
+              "'mesh_surface' takes no depth from the pointmap at all: every "
+              "Gaussian goes ON the body model's surface along its pixel's ray, "
+              "as a disc in that surface's tangent plane — the shape is the "
+              "model's head and the colour the photograph's (the validated face "
+              "cap of b2ctrain out/mesh/FACE_GUIDE.md, `tools/sam_cap.py`). The "
+              "pointmap head is not run; the normal map is not read",
+              choices=("pointmap", "mesh", "mesh_surface"), advanced=True),
         Param("align_depth", bool, True,
               "Fit a single scale putting the shell at the SAM-3D-Body mesh's "
               "distance. Off keeps the pointmap's own metric scale, which has "
@@ -1551,7 +1556,8 @@ class PointmapSplatStep(Step):
                      normal_map: np.ndarray, *, focal: float, cx: float, cy: float,
                      vertices_cam: np.ndarray,
                      pose: Optional[Tuple[np.ndarray, np.ndarray]],
-                     params: Dict[str, Any], label: str) -> "ShellResult":
+                     params: Dict[str, Any], label: str,
+                     faces: Optional[np.ndarray] = None) -> "ShellResult":
         """One frame -> one Gaussian shell, in the world `pose` names.
 
         Everything from the mask clean through `build_gaussians`, with
@@ -1574,14 +1580,15 @@ class PointmapSplatStep(Step):
         registered steps pass and is byte-identical to what this step did
         before the argument existed (see `build_gaussians`).
 
+        `faces` is the mesh's triangle list, needed by the `mesh_surface`
+        depth prior only (`_build_on_surface`), which is the one route
+        through here that never runs the pointmap head.
+
         Nothing about the numerics moved out of `run()` — this is a cut, not
         a rewrite. What stayed behind is input parsing, the
         `_source_intrinsics` call, the ply write and the `SplatScene`.
         """
         height, width = image.shape[:2]
-        if self._model is None or self._checkpoint != params["checkpoint"]:
-            self.load(params)
-
         mask = clean_mask(matte, params["mask_threshold"], params["fill_max_frac"],
                           params["min_component_frac"], params["close_iters"])
         if mask.sum() < 64:
@@ -1590,6 +1597,15 @@ class PointmapSplatStep(Step):
         logger.info("%s: mask %d px (%.1f%% of frame), %d soft-edge px",
                     label, int(mask.sum()), 100 * mask.mean(),
                     int(((alpha > 0.02) & (alpha < 0.98)).sum()))
+
+        if params["depth_prior"] == "mesh_surface":
+            return self._build_on_surface(
+                image, mask, alpha, focal=focal, cx=cx, cy=cy, vertices_cam=vertices_cam,
+                faces=faces, pose=pose, params=params, label=label,
+            )
+
+        if self._model is None or self._checkpoint != params["checkpoint"]:
+            self.load(params)
 
         xyz_pointmap = self._pointmap(image, params)
         z_raw = xyz_pointmap[..., 2].astype(np.float64)
@@ -1750,6 +1766,96 @@ class PointmapSplatStep(Step):
                            z_aligned=z_aligned, z_refined=z_refined, n_cam=n_cam,
                            front=front)
 
+    def _build_on_surface(self, image: np.ndarray, mask: np.ndarray, alpha: np.ndarray, *,
+                          focal: float, cx: float, cy: float, vertices_cam: np.ndarray,
+                          faces: Optional[np.ndarray],
+                          pose: Optional[Tuple[np.ndarray, np.ndarray]],
+                          params: Dict[str, Any], label: str) -> "ShellResult":
+        """The `mesh_surface` depth prior: the photograph's pixels on the
+        body model's surface.
+
+        Every masked pixel's ray (the photograph's camera, on this grid)
+        is cast onto the mesh — a z-buffer of it at this camera, which for
+        pixel rays is the same thing — and the Gaussian is put AT the hit,
+        as a disc in the hit triangle's tangent plane sized to the pixel's
+        footprint there and widened 1/cos along the ray's tangent direction
+        (`build_gaussians`, with the mesh's normal for the pointmap's). A
+        ray that hits a back face (the far side of the head, through a
+        gap) or nothing (the hair rim past the head's silhouette) takes
+        the depth and normal of the nearest pixel that does hit, so the
+        rim stays attached to the head rather than flying to the
+        background. No depth cliff cull: the surface is the model's and
+        has no sheets across self-occlusions.
+
+        Why this and not the pointmap's relief scaled onto the mesh (the
+        default): measured on two subjects against the body model's head
+        along the photograph's rays, the Sapiens relief has the brows and
+        eyes ~10 mm proud and the nose tip and lips 5-8 mm behind (p5/p50/p95
+        -17/-3/+6 mm). As colour it never mattered — the splat is layered
+        and view-dependent and the cap wins frontally. As geometry, for a
+        mesh fused from the intermediate splat, it is a concave profile
+        with a nose sliver; and protecting the face inside the fusion only
+        moves the fused surface while the splat, its probes and the pass-2
+        input still carry the wrong relief. Putting the model's shape INTO
+        the cap before the splat is trained makes the splat's face depth,
+        the fused mesh and the projected photograph agree on one surface
+        (b2ctrain out/mesh/FACE_GUIDE.md; `tools/sam_cap.py` is the
+        reference this ports, verified to agree with it on 00307).
+        """
+        from ..mesh_raster import hit_surface, rasterize
+
+        if faces is None:
+            raise ValueError(
+                f"{label}: depth_prior 'mesh_surface' needs the mesh's triangles — "
+                f"mesh_output carries no 'faces'"
+            )
+        height, width = mask.shape
+        raster = rasterize(np.asarray(vertices_cam, np.float64), np.asarray(faces, np.int64),
+                           fx=focal, fy=focal, cx=cx, cy=cy, width=width, height=height)
+        z, n_cam, on_mesh = hit_surface(raster, mask)
+        front = mesh_front_depth(vertices_cam, focal, cx, cy, (height, width), params["align_bin_px"])
+        xyz = backproject(z, focal, cx, cy)
+        gaussians = build_gaussians(
+            xyz, n_cam, cv2.cvtColor(image, cv2.COLOR_BGR2RGB), alpha, mask, focal,
+            k_tangent=params["splat_scale"], k_normal=params["splat_thickness"],
+            max_stretch=params["max_stretch"], cliff_k=0.0,
+            supersample=params["supersample"], pose=pose,
+        )
+        depths = z[mask]
+        stats: Dict[str, Any] = {
+            "image_size": [width, height],
+            "mask_pixels": int(mask.sum()),
+            "sam3d_intrinsics": {"f": focal, "cx": cx, "cy": cy},
+            "silhouette": silhouette_agreement(mask, vertices_cam, focal, cx, cy),
+            "depth_prior": "mesh_surface",
+            "surface": {
+                "on_mesh_pixels": int(on_mesh.sum()),
+                "off_mesh_pixels": int((mask & ~on_mesh).sum()),
+                "depth_m": {"median": float(np.median(depths)),
+                            "p2_p98": [float(v) for v in np.percentile(depths, [2, 98])]},
+            },
+            "placement": {
+                "depth_m": float(np.median(depths)),
+                "relief_mm": float(np.ptp(np.percentile(depths, [2, 98]))) * 1000.0,
+                "width_mm": float(np.ptp(np.nonzero(mask)[1])) * float(np.median(depths)) / focal * 1000.0,
+            },
+            "n_splats": int(len(gaussians["means"])),
+        }
+        logger.info(
+            "%s: on the body model's surface — %d of %d masked pixels hit its front "
+            "(%d took the nearest hit's depth), median depth %.3f m, relief %.1f mm "
+            "over %.1f mm of width",
+            label, stats["surface"]["on_mesh_pixels"], stats["mask_pixels"],
+            stats["surface"]["off_mesh_pixels"], stats["placement"]["depth_m"],
+            stats["placement"]["relief_mm"], stats["placement"]["width_mm"],
+        )
+        lo = gaussians["means"].min(0)
+        hi = gaussians["means"].max(0)
+        stats["world_bounds"] = [[float(v) for v in lo], [float(v) for v in hi]]
+        stats["world_center"] = [float(v) for v in (lo + hi) / 2.0]
+        return ShellResult(gaussians=gaussians, stats=stats, mask=mask, alpha=alpha,
+                           z_aligned=z, z_refined=z, n_cam=n_cam, front=front)
+
     def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
         from body2colmap.splat_scene import SplatScene
 
@@ -1810,9 +1916,14 @@ class PointmapSplatStep(Step):
             }
         logger.info("%s: unprojecting through %s", label, source)
 
+        try:
+            faces = np.asarray(mesh_output["faces"])
+        except (KeyError, TypeError):
+            faces = None
         shell = self._build_shell(
             image, matte, normal_map, focal=focal, cx=cx, cy=cy,
             vertices_cam=vertices_cam, pose=pose, params=params, label=label,
+            faces=faces,
         )
         gaussians, stats = shell.gaussians, shell.stats
         stats["source_camera"] = source_stats

@@ -127,10 +127,9 @@ sys.exit(0)
             fuse = calls[3]
             self.assertEqual(fuse.count("--views"), 2)
             self.assertEqual(fuse.count("--carve"), 2)
-            self.assertIn("--protect", fuse)
-            self.assertEqual(fuse[fuse.index("--protect-groups") + 1], "none")
+            self.assertNotIn("--protect", fuse)  # the face's shape is in the splat (face_geometry splat)
             refine = calls[4]
-            self.assertIn("--keep", refine)
+            self.assertIn("--keep", refine)  # but the refine keeps the cap's footprint as fused
             bake = calls[5]
             self.assertEqual(bake.count("--views"), 1)  # the orbit only, not the training views
             self.assertEqual(bake[bake.index("--project") + 2], "1")  # the anchor camera

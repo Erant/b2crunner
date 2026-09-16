@@ -110,6 +110,31 @@ the sweep's head-sharpness numbers did not see. Anyone reaching for this
 idea again should expect to answer that first, and to judge it on the
 trained splat rather than on the re-render.
 
+## The cap's shape, and the cull (2026-09-16)
+
+The refined cap the weights are measured against is now built on the
+body model's head (`face_splat_refined` with `depth_prior: mesh_surface`,
+b2ctrain out/mesh/FACE_GUIDE.md): one Gaussian per photo pixel on the
+model's surface along the photograph's ray. Two things follow here.
+
+The cap's coverage from a frame is rendered **with the head's occlusion**
+(`mesh_world` input, `pipeline/mesh_raster.py`): the Gaussians the body
+hides from that camera — further than `cull_margin` (15 mm) behind its
+surface along their pixel's ray — are left out before the render. A cap
+on the head's surface seen 40 degrees round shows its far cheek through
+the temple, where it has no Gaussians of its own to occlude it; fading the
+frame there would silence it over a ring the cap never paints, and the
+training would have no evidence for that ring at all (measured 2026-09-15
+as a void under the chin, from a coverage dilated 9 px on top of that —
+hence also no dilation). `render_face_support_views` renders the support
+views with the same cull (`cull_mesh`), and samples them over a
+60-degree cap: on the head the cap has no open rim to flare, and the
+validated runs widened the disc x2.
+
+`cap_radius_deg` here stays at 30 (+15 of fade): that is the recipe of
+the validated runs (`prod_weights.py`), and the angle beyond which a frame
+should keep its say over the face regardless of what the cap can show.
+
 ## Status
 
 Unit-tested end to end with the rasteriser stubbed (tests/test_face_priority.py,
