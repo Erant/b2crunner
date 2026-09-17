@@ -20,6 +20,7 @@ from . import face_views  # noqa: F401
 from . import face_landmarks  # noqa: F401
 from . import head_fit  # noqa: F401
 from . import mask_splat  # noqa: F401
+from . import mesh_views  # noqa: F401
 from . import meshify  # noqa: F401
 from . import photo_texture  # noqa: F401
 from . import pixel_ops  # noqa: F401

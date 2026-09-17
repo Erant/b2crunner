@@ -620,6 +620,22 @@ settings:
       texture and mesh/mesh_klein.obj with the refined one. Off: the baked
       texture only.
 
+  - name: pass2_mesh
+    label: Pass 2 conditions on the textured mesh
+    type: bool
+    default: true
+    help: >-
+      On (2026-09-17): the second denoise's frames are the meshify mesh with
+      its klein texture, rendered at exactly the helix cameras the splat
+      re-render produced (steps/mesh_views.py; the pod pass-2 A/B's fourth
+      arm, b2ctrain out/mesh/ab2/ds_mesh_b2c), composited over the same grey,
+      the render's alpha as the matte. The anchor re-injection and the
+      fringe masking run on them unchanged. This builds the mesh whether or
+      not `export_mesh` packages it: ~2 minutes for the mesh, ~6 for the
+      klein pass, ~1 for the renders. Off: pass 2 sees the intermediate
+      splat re-rendered, as before, and the mesh branch is skipped entirely
+      unless `export_mesh` asks for it.
+
   - name: texture_mode
     label: How klein sees the texture
     default: sheets
@@ -2790,11 +2806,16 @@ steps:
   # (`normal_maps`), the refit body and the face cap all describe the
   # intermediate dataset. The experiments it ports were run on exactly
   # this data (b2ctrain out/mesh), and its renders along the helix are the
-  # pass-2 A/B's fourth arm. Off by default (`export_mesh`).
+  # pass-2 A/B's fourth arm — now pass 2's frames themselves (`pass2_mesh`,
+  # rerender_mesh below). Built whenever pass 2 wants it or `export_mesh`
+  # packages it.
   - id: meshify
     step: meshify
     dispatch: in_process
-    when: ${globals.export_mesh}
+    when:
+      any:
+        - ${globals.export_mesh}
+        - ${globals.pass2_mesh}
     inputs:
       splat_path: dataset.splat_path
       cameras: dataset.cameras
@@ -2824,7 +2845,9 @@ steps:
     step: photo_texture
     dispatch: in_process
     when:
-      - ${globals.export_mesh}
+      - any:
+          - ${globals.export_mesh}
+          - ${globals.pass2_mesh}
       - ${globals.photo_texture}
       - ${globals.face_splat}
     inputs:
@@ -2852,7 +2875,9 @@ steps:
     dispatch: subprocess
     env: wan22
     when:
-      - ${globals.export_mesh}
+      - any:
+          - ${globals.export_mesh}
+          - ${globals.pass2_mesh}
       - ${globals.refine_texture}
     inputs:
       mesh_dir: scene.mesh_dir
@@ -3046,6 +3071,33 @@ steps:
       images: dataset.images
     outputs:
       masks: dataset.masks
+
+  # Pass 2's frames are the textured mesh, not the splat (steps/mesh_views.py,
+  # `pass2_mesh`, 2026-09-17): the meshify mesh with its klein texture rendered
+  # at EXACTLY the cameras rerender_splat just produced, composited over the
+  # same grey, the render's alpha as the matte. rerender_splat still runs — it
+  # is what sets the path, the anchor's position and the frame count, and its
+  # frames are a minute's work — and mask_splat_fringes + reinject_anchor
+  # below see a dataset of the same shape either way. Off: the splat frames
+  # and the rmbg matte above stand.
+  - id: rerender_mesh
+    step: render_mesh_views
+    dispatch: in_process
+    when: ${globals.pass2_mesh}
+    inputs:
+      mesh_dir: scene.mesh_dir
+      cameras: dataset.cameras
+      image_names: dataset.image_names
+      # klein's texture when refine_texture ran, the photograph's when only
+      # photo_texture did, the bake otherwise.
+      texture_path: scene.mesh_texture_path?
+      photo_texture_path: scene.mesh_photo_texture?
+    params:
+      output_dir: ${globals.output_root}/debug/mesh_views
+    outputs:
+      images: dataset.images
+      masks: dataset.masks
+      mesh_views_stats: scene.mesh_views_stats
 
   # This used to be the stage that dropped the splat's low-confidence
   # fringes: threshold the render's alpha at 239/255, dilate by 2,

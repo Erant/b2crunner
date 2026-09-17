@@ -534,8 +534,14 @@ class TestWorkflowFiles(unittest.TestCase):
         the render's alpha but one measured against the frames themselves.
         Replacing it is that step's whole job, so a step that has no other,
         and it cannot read what it replaces.
+
+        `render_mesh_views` (2026-09-17) is the other exception, for the
+        same reason one level up: it replaces the FRAMES wholesale — the
+        textured mesh rendered at the splat's cameras — and the alpha it
+        publishes is those frames' own silhouette. The splat's alpha belongs
+        to frames that are no longer there.
         """
-        deliberate = {"rmbg"}
+        deliberate = {"rmbg", "render_mesh_views"}
         for path in _workflows():
             spec = WorkflowSpec.from_yaml(str(path))
             if not any(s.step == "mask_splat" for s in spec.steps):
@@ -2081,3 +2087,58 @@ class TestDeclaredSettings(unittest.TestCase):
                 self.assertEqual(readers, expected)
                 self.assertGreaterEqual(len(readers), 3)
                 self.assertTrue(any("upscale" in r for r in readers))
+
+class TestPassTwoTakesTheMesh(unittest.TestCase):
+    """`pass2_mesh` (2026-09-17): the second denoise conditions on the textured
+    mesh rendered at the splat re-render's cameras, on by default; off, the
+    mesh branch is skipped unless `export_mesh` packages it, and pass 2 sees
+    the splat frames as before."""
+
+    def _spec(self):
+        return WorkflowSpec.from_yaml(str(next(p for p in _workflows() if p.name == "helical.yaml")))
+
+    def test_default_on_and_the_render_sits_between_the_matte_and_mask_splat(self):
+        spec = self._spec()
+        setting = next(s for s in spec.settings if s.name == "pass2_mesh")
+        self.assertTrue(setting.default)
+        ids = [s.id for s in spec.steps]
+        mesh_at = ids.index("rerender_mesh")
+        self.assertEqual(spec.steps[mesh_at].step, "render_mesh_views")
+        self.assertLess(ids.index("rerender_splat"), mesh_at, "the cameras it renders at are rerender_splat's")
+        self.assertLess(ids.index("resplat_foreground_masks"), mesh_at, "its alpha, not the rmbg matte, is the final mask")
+        self.assertLess(mesh_at, ids.index("mask_splat_fringes"))
+        self.assertLess(ids.index("mask_splat_fringes"), ids.index("reinject_anchor"), "the anchor is still re-injected after")
+        self.assertLess(ids.index("reinject_anchor"), ids.index("denoise_pass2"))
+        for field in ("images", "masks"):
+            self.assertEqual(spec.steps[mesh_at].outputs[field], f"dataset.{field}")
+        self.assertEqual(spec.steps[mesh_at].inputs["cameras"], "dataset.cameras")
+        self.assertLess(ids.index("refine_texture"), mesh_at, "the texture it renders is klein's")
+
+    def test_the_switches_gate_the_mesh_branch(self):
+        from pipeline.workflow import step_enabled
+
+        spec = self._spec()
+        by_id = {s.id: s in spec.steps and s for s in spec.steps}
+        base = {name: p.default for name, p in ((p.name, p) for p in spec.settings)}
+        base.update(face_splat=True, photo_texture=True, refine_texture=True)
+        for export_mesh, pass2_mesh, mesh_runs in ((False, False, False), (True, False, True), (False, True, True), (True, True, True)):
+            g = dict(base, export_mesh=export_mesh, pass2_mesh=pass2_mesh)
+            with self.subTest(export_mesh=export_mesh, pass2_mesh=pass2_mesh):
+                for step_id in ("meshify", "photo_texture", "refine_texture"):
+                    self.assertEqual(step_enabled(by_id[step_id], g), mesh_runs, step_id)
+                self.assertEqual(step_enabled(by_id["rerender_mesh"], g), pass2_mesh)
+                self.assertTrue(step_enabled(by_id["rerender_splat"], g), "the splat re-render always runs: it sets the path")
+
+    def test_when_any_form(self):
+        from pipeline.workflow import when_truthy
+
+        self.assertTrue(when_truthy({"any": [False, "true"]}))
+        self.assertFalse(when_truthy({"any": [False, "false"]}))
+        self.assertFalse(when_truthy([{"any": [True]}, False]))
+        self.assertTrue(when_truthy([{"any": [False, True]}, True]))
+        with self.assertRaises(ValueError):
+            when_truthy({"all": [True]})
+
+
+if __name__ == "__main__":
+    unittest.main()

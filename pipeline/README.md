@@ -994,7 +994,16 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   layout (b2ctrain out/mesh/view_atlas_m3: identical panel directions, 97 %
   of owned triangles on the same panel, sheet pixels within 0.1/255) and
   run as the step on the photo-textured atlas locally; the per-view loop
-  stays as `mode: views`. NOT yet run on a pod.
+  stays as `mode: views`. **And pass 2 conditions on it** (`pass2_mesh`, on
+  by default, the same day): `render_mesh_views` (steps/mesh_views.py)
+  renders the refined mesh at exactly the cameras `rerender_splat`
+  produced, composited over the same grey with the render's alpha as the
+  matte, and replaces the frames before `mask_splat_fringes` and
+  `reinject_anchor`, which run unchanged. The mesh branch runs whenever
+  pass 2 wants it or `export_mesh` packages it (the `when: {any: [...]}`
+  form); off, pass 2 sees the splat frames as before and the branch is
+  skipped. Verified with the real trainer at the 81 helix cameras of
+  00307 (5 s). NOT yet run on a pod.
 - `load_splat`/`save_splat`/`render_splat` — `render_splat`'s camera-path
   resolution (which cameras, what focal length, which bounding box frames
   the orbit, point-cloud preservation, metadata pass-through) is verified
