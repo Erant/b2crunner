@@ -83,8 +83,9 @@ DEFAULT_FP8_REPO = "black-forest-labs/FLUX.2-klein-4b-fp8"
 DEFAULT_FP8_FILE = "flux-2-klein-4b-fp8.safetensors"
 #: klein-4B's `text_encoder/` is Qwen3-4B byte for byte (checked tensor by
 #: tensor, 2026-09-17), so Qwen's own fp8 release stands in for it: 4.8 GB
-#: instead of 8, 5.2 GB of VRAM instead of 7.8, the klein output within
-#: 1.8/255 of bf16's (b2ctrain out/mesh/view_atlas_m3/te_fp8/README.md).
+#: to download instead of 8, dequantised to bf16 at load (see
+#: `Klein.load_text_encoder`), the klein output within 1.8/255 of bf16's
+#: (b2ctrain out/mesh/view_atlas_m3/te_fp8/README.md).
 DEFAULT_TEXT_ENCODER = "Qwen/Qwen3-4B-FP8"
 
 #: Everything the step loads from the bf16 repo: the tokenizer, the VAE and
@@ -272,13 +273,18 @@ class Klein:
         logger.info("refine_texture: klein loaded, %.1f GB free", torch.cuda.mem_get_info()[0] / 2 ** 30)
 
     def load_text_encoder(self, device: str):
-        """The fp8 Qwen3-4B: fp8 kernels on a CUDA device, dequantised to bf16 on the CPU.
+        """The fp8 Qwen3-4B, dequantised to bf16 at load, on either device.
 
-        transformers 5.16/5.17's fine-grained fp8 quantizer has two traps: its
+        The file is the win (4.8 GB instead of 8), not the fp8 matmul: the
+        encoder runs four prompts and is dropped, and transformers' fine-grained
+        fp8 kernel path wants the `kernels` package at one exact minor (0.16;
+        the image has 0.17, the pod died on it) plus a kernel fetched from the
+        Hub at run time. `dequantize=True` skips all of that and lands within
+        3 % of the original bf16 encoder (closer than the kernel path did).
+
+        transformers 5.16/5.17's quantizer has one more trap: its
         tensor-parallel hook dereferences a table that is None for Qwen3 (no
-        tensor parallel here, so the plan is returned untouched), and a model
-        placed on the CPU while a CUDA device exists keeps the Triton kernels
-        and dies at the first matmul — `dequantize=True` asks for bf16 up front.
+        tensor parallel here, so the plan is returned untouched).
         """
         import torch
         from transformers import Qwen3ForCausalLM
@@ -297,11 +303,9 @@ class Klein:
                 fp8q.FineGrainedFP8HfQuantizer.update_tp_plan = guarded
         except ImportError:
             pass
-        kwargs: Dict[str, Any] = dict(dtype=torch.bfloat16, device_map=device)
-        if device == "cpu":
-            from transformers import FineGrainedFP8Config
+        from transformers import FineGrainedFP8Config
 
-            kwargs["quantization_config"] = FineGrainedFP8Config(dequantize=True)
+        kwargs: Dict[str, Any] = dict(dtype=torch.bfloat16, device_map=device, quantization_config=FineGrainedFP8Config(dequantize=True))
         # Resolved through the cache the way the prefetch probes it (pipeline/models.py), so an offline
         # pod and a warm volume agree on what "present" means; transformers' own subfolder lookups do not.
         return Qwen3ForCausalLM.from_pretrained(snapshot_dir(self.text_encoder, TEXT_ENCODER_ALLOW_PATTERNS), **kwargs).eval()
