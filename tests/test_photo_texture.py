@@ -155,3 +155,23 @@ class TestRamp(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCoherentProtect(unittest.TestCase):
+    def test_specks_go_and_pinholes_fill_while_the_bake_side_stays_free(self):
+        from pipeline.steps.photo_texture import coherent_protect
+
+        w = h = 64
+        vv, uu = np.mgrid[0:h, 0:w]
+        u, v = uu.ravel().astype(float), vv.ravel().astype(float)
+        conf2 = np.where((uu < 32), 1.0, 0.2)  # the left half is the photograph's
+        conf2[10, 10] = 0.9  # a pinhole inside the region
+        conf2[40, 50] = 1.0  # a speck on the bake side
+        conf = conf2.ravel()
+        owned = coherent_protect(u, v, conf, w, h, 5).reshape(h, w).reshape(h, w)
+        self.assertTrue(owned[10, 10], "the pinhole is filled")
+        self.assertFalse(owned[40, 50], "the speck is gone")
+        self.assertTrue(owned[:, :30].all(), "the region's interior is protected")
+        self.assertFalse(owned[:, 36:].any(), "the bake side is free")
+        raw = coherent_protect(u, v, conf, w, h, 0).reshape(h, w)
+        self.assertTrue(raw[40, 50], "0 = the raw threshold")

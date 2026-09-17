@@ -977,6 +977,24 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   keeps the cap's footprint as fused (`--keep`). The bootstrap's
   `face_splat` keeps the pointmap: it is composited onto the drawings and
   denoised twice, never trained on.
+- `meshify` / `photo_texture` / `refine_texture` — the textured-mesh
+  deliverable (`export_mesh`): b2ctrain's mesh-* chain on the stage-2
+  splat, the photograph sampled straight into the atlas, then klein over
+  the texture. **Update (2026-09-17):** `refine_texture` runs in
+  `mode: sheets` by default (`texture_mode`): the atlas is re-laid as three
+  character sheets by `pipeline/view_atlas.py` (front and back, six oblique
+  full-body views, four close-up head views — every panel a render of the
+  whole mesh, chosen by the effective texel density a triangle gains, so
+  klein always sees a person) and each sheet is ONE klein call at 2048 px,
+  the edit transferred back as a delta with the face and every
+  `protect_path` texel bit-exact. Rasterisation is a torch z-buffer; no
+  open3d, no ray tracer. The text encoder is Qwen's fp8 `Qwen/Qwen3-4B-FP8`
+  (klein's own is the same weights in bf16; 4.8 GB instead of 8, the klein
+  output within 1.8/255). Verified on 00307 against the open3d research
+  layout (b2ctrain out/mesh/view_atlas_m3: identical panel directions, 97 %
+  of owned triangles on the same panel, sheet pixels within 0.1/255) and
+  run as the step on the photo-textured atlas locally; the per-view loop
+  stays as `mode: views`. NOT yet run on a pod.
 - `load_splat`/`save_splat`/`render_splat` — `render_splat`'s camera-path
   resolution (which cameras, what focal length, which bounding box frames
   the orbit, point-cloud preservation, metadata pass-through) is verified

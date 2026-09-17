@@ -294,7 +294,7 @@ class TestRequiredForSteps(unittest.TestCase):
                                     "dinov3_hub", "mediapipe", "wan22",
                                     "wan22_fp8", "wan22_lora", "seedvr2",
                                     "colmap_onnx", "flux2_klein",
-                                    "flux2_klein_fp8"},
+                                    "flux2_klein_fp8", "qwen3_4b_fp8"},
         }
         for workflow, expected in cases.items():
             with self.subTest(workflow=workflow):

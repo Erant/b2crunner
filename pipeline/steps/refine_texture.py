@@ -1,4 +1,19 @@
-"""refine_texture — sharpen a meshify atlas with FLUX.2 klein, view by view.
+"""refine_texture — sharpen a meshify atlas with FLUX.2 klein: character sheets, or view by view.
+
+**`mode: sheets` (the default, 2026-09-17).** The atlas is re-laid as three
+character sheets (pipeline/view_atlas.py): front and back, six oblique
+full-body views, four close-up head views — every panel a render of the whole
+mesh, so klein always sees a person and its priors apply — and each sheet is
+one klein img2img at half its size (2048 px for a 4096 sheet). The edit comes
+back to the atlas texel by texel as a delta (b2ctrain out/mesh/view_atlas_m3:
+mottled cloth to fabric weave, the petticoat under the hem, the ear and jaw
+band that no body view could resolve). Three klein calls, ~90 s each on a
+4070 Ti at 8.6 GB, against eleven views before; the face and every texel
+`protect_path` names are never repainted and the transfer puts them back
+bit-exact. The reserve — surface no panel owns, 40 % of it the TSDF's inner
+wall nobody sees — keeps the start texture.
+
+**`mode: views`** is the loop below, kept for the A/B.
 
 The TEXTure / Text2Tex loop of b2ctrain/docs/mesh-plan.md: views of the
 textured mesh are rendered (`b2ctrain mesh-render`), the pixels this view
@@ -66,11 +81,30 @@ logger = logging.getLogger(__name__)
 DEFAULT_REPO = "black-forest-labs/FLUX.2-klein-4B"
 DEFAULT_FP8_REPO = "black-forest-labs/FLUX.2-klein-4b-fp8"
 DEFAULT_FP8_FILE = "flux-2-klein-4b-fp8.safetensors"
+#: klein-4B's `text_encoder/` is Qwen3-4B byte for byte (checked tensor by
+#: tensor, 2026-09-17), so Qwen's own fp8 release stands in for it: 4.8 GB
+#: instead of 8, 5.2 GB of VRAM instead of 7.8, the klein output within
+#: 1.8/255 of bf16's (b2ctrain out/mesh/view_atlas_m3/te_fp8/README.md).
+DEFAULT_TEXT_ENCODER = "Qwen/Qwen3-4B-FP8"
 
-#: Everything the step loads from the bf16 repo: the text encoder, the
-#: tokenizer, the VAE and the transformer's config (the weights come from
-#: the fp8 file). `transformer/*.safetensors` is 8 GB nothing opens.
-KLEIN_ALLOW_PATTERNS = ["model_index.json", "text_encoder/*", "tokenizer/*", "vae/*", "transformer/config.json", "scheduler/*"]
+#: Everything the step loads from the bf16 repo: the tokenizer, the VAE and
+#: the transformer's config (the transformer's weights come from the fp8
+#: file, the text encoder's from DEFAULT_TEXT_ENCODER). `transformer/*.safetensors`
+#: is 8 GB nothing opens, `text_encoder/*` 8 GB of bf16 the fp8 file replaces.
+KLEIN_ALLOW_PATTERNS = ["model_index.json", "tokenizer/*", "vae/*", "transformer/config.json", "scheduler/*"]
+#: The fp8 text encoder: weights, configs and its tokenizer files (a few MB).
+TEXT_ENCODER_ALLOW_PATTERNS = ["*.safetensors", "*.json", "merges.txt", "vocab.json"]
+
+DEFAULT_PROMPT_SHEET = (
+    "Restore clean, sharp natural surface detail, removing mottled noise and blur. Preserve the exact pixel alignment, pose, "
+    "silhouettes, face, clothing design and colors. Do not move, resize, rotate or add anything. {caption}. "
+    "Flat even lighting, plain grey background. This is a character reference sheet of one person. ")
+SHEET_LAYOUT_PROMPTS = {
+    "main": "Preserve its exact layout: large front and back views across the top, small side views at bottom left, "
+            "top and bottom views at bottom center, empty grey bottom right.",
+    "extra": "Preserve its exact layout: full-body views of the same person from oblique camera angles in a grid.",
+    "head": "Preserve its exact layout: close-up views of the same person's head and shoulders from different angles in a grid.",
+}
 
 DEFAULT_PROMPT_BODY = (
     "A photograph of {caption}. Keep the pose, the framing and the silhouette exactly as they are; "
@@ -148,22 +182,85 @@ def read_f32(path: Path, shape: Tuple[int, ...]) -> np.ndarray:
 
 # -- klein ----------------------------------------------------------------------
 
+def snapshot_dir(repo: str, allow_patterns: Sequence[str]) -> Path:
+    """The local snapshot of an HF repo's files (downloaded if the network is on and they are missing)."""
+    from huggingface_hub import snapshot_download
+
+    return Path(snapshot_download(repo, allow_patterns=list(allow_patterns)))
+
+
+def lift_init_pixel_cap(pipe: Any, max_pixels: int) -> None:
+    """The klein pipelines silently cap the init image at 1 MP; the sheets need 4. The cap is a literal
+    `1024 * 1024` in `__call__` (twice for the init image, twice for the references); the first two are
+    rewritten in the pipeline's own source and the class swapped for one carrying the patched method.
+    Asserting the count means a diffusers whose pipeline changed shape fails here, loudly, not silently at 1 MP."""
+    import importlib
+    import inspect
+    import textwrap
+
+    cls = type(pipe)
+    if getattr(cls, "_b2c_pixel_cap", None) == max_pixels:
+        return
+    base = cls.__mro__[1] if getattr(cls, "_b2c_pixel_cap", None) else cls
+    source = textwrap.dedent(inspect.getsource(base.__call__))
+    needle = "1024 * 1024"
+    if source.count(needle) != 4:
+        raise RuntimeError(f"refine_texture: {base.__name__}.__call__ has {source.count(needle)} pixel caps, expected 4; diffusers changed")
+    source = source.replace(needle, f"{max_pixels}", 2)
+    namespace = vars(importlib.import_module(base.__module__)).copy()
+    exec(compile(source, f"<{base.__name__}.__call__ cap {max_pixels}>", "exec"), namespace)
+    pipe.__class__ = type(base.__name__ + "HighRes", (base,), {"__call__": namespace["__call__"], "_b2c_pixel_cap": max_pixels})
+
+
+def chunk_linears(module: Any, rows: int = 2048) -> None:
+    """Every Linear of the transformer runs in row chunks: torchao's dynamic fp8 activation quantisation
+    otherwise materialises a float32 copy of the whole token stream per layer (34k tokens at a 2048 sheet)."""
+    import types
+
+    import torch
+
+    for m in module.modules():
+        if isinstance(m, torch.nn.Linear) and not getattr(m, "_b2c_chunked", False):
+            original = m.forward
+
+            def chunked(self_, x, _f=original, _rows=rows):
+                if x.numel() // x.shape[-1] <= _rows:
+                    return _f(x)
+                flat = x.reshape(-1, x.shape[-1])
+                out = torch.empty((flat.shape[0], self_.out_features), device=x.device, dtype=x.dtype)
+                for start in range(0, len(flat), _rows):
+                    out[start:start + _rows] = _f(flat[start:start + _rows])
+                return out.reshape(*x.shape[:-1], self_.out_features)
+
+            m.forward = types.MethodType(chunked, m)
+            m._b2c_chunked = True  # type: ignore[attr-defined]
+
+
 class Klein:
     """FLUX.2 klein 4B (fp8 transformer) as an inpainting img2img, resident."""
 
-    def __init__(self, repo: str, fp8_repo: str, fp8_file: str, text_encoder_device: str) -> None:
+    def __init__(self, repo: str, fp8_repo: str, fp8_file: str, text_encoder_device: str, text_encoder: str = DEFAULT_TEXT_ENCODER,
+                 max_pixels: int = 1024 * 1024) -> None:
         import torch
         from diffusers import AutoencoderKLFlux2, Flux2KleinInpaintPipeline
 
         from ..flux2_fp8 import load_flux2_fp8_transformer
 
         self.repo = repo
+        self.text_encoder = text_encoder
         self.text_encoder_device = text_encoder_device
         self._embeds: Dict[str, Any] = {}
         transformer = load_flux2_fp8_transformer(repo_id=fp8_repo, filename=fp8_file, config_repo=repo).eval().to("cuda")
         vae = AutoencoderKLFlux2.from_pretrained(repo, subfolder="vae", dtype=torch.bfloat16).to("cuda").eval()
         self.pipe = Flux2KleinInpaintPipeline.from_pretrained(repo, text_encoder=None, tokenizer=None, transformer=transformer,
                                                               vae=vae, dtype=torch.bfloat16)
+        if max_pixels > 1024 * 1024:
+            lift_init_pixel_cap(self.pipe, max_pixels)
+            # A 4 MP sheet on a 12 GB card: tiled VAE, and the linears chunked so the fp8 activation
+            # quantisation never holds a whole 34k-token activation in float32 at once.
+            self.pipe.vae.enable_tiling()
+            self.pipe.vae.enable_slicing()
+            chunk_linears(self.pipe.transformer)
         self._orig_prepare = self.pipe.prepare_image_latents
         self.extra_refs: List[Any] = []
         pipe = self.pipe
@@ -174,23 +271,59 @@ class Klein:
         pipe.prepare_image_latents = prepare_with_extras
         logger.info("refine_texture: klein loaded, %.1f GB free", torch.cuda.mem_get_info()[0] / 2 ** 30)
 
+    def load_text_encoder(self, device: str):
+        """The fp8 Qwen3-4B: fp8 kernels on a CUDA device, dequantised to bf16 on the CPU.
+
+        transformers 5.16/5.17's fine-grained fp8 quantizer has two traps: its
+        tensor-parallel hook dereferences a table that is None for Qwen3 (no
+        tensor parallel here, so the plan is returned untouched), and a model
+        placed on the CPU while a CUDA device exists keeps the Triton kernels
+        and dies at the first matmul — `dequantize=True` asks for bf16 up front.
+        """
+        import torch
+        from transformers import Qwen3ForCausalLM
+
+        try:
+            from transformers.quantizers import quantizer_finegrained_fp8 as fp8q
+
+            hook = fp8q.FineGrainedFP8HfQuantizer.update_tp_plan
+            if not getattr(hook, "_b2c_guarded", False):
+                def guarded(self_, config, _orig=hook):
+                    try:
+                        return _orig(self_, config)
+                    except AttributeError:
+                        return config
+                guarded._b2c_guarded = True  # type: ignore[attr-defined]
+                fp8q.FineGrainedFP8HfQuantizer.update_tp_plan = guarded
+        except ImportError:
+            pass
+        kwargs: Dict[str, Any] = dict(dtype=torch.bfloat16, device_map=device)
+        if device == "cpu":
+            from transformers import FineGrainedFP8Config
+
+            kwargs["quantization_config"] = FineGrainedFP8Config(dequantize=True)
+        # Resolved through the cache the way the prefetch probes it (pipeline/models.py), so an offline
+        # pod and a warm volume agree on what "present" means; transformers' own subfolder lookups do not.
+        return Qwen3ForCausalLM.from_pretrained(snapshot_dir(self.text_encoder, TEXT_ENCODER_ALLOW_PATTERNS), **kwargs).eval()
+
     def encode(self, prompt: str):
         """Prompt embeddings, cached per prompt; the text encoder is loaded for the call and dropped."""
         if prompt in self._embeds:
             return self._embeds[prompt]
         import torch
         from diffusers import Flux2KleinPipeline
-        from transformers import AutoTokenizer, Qwen3ForCausalLM
+        from transformers import AutoTokenizer
 
         device = self.text_encoder_device
         if device == "auto":
             device = "cuda" if torch.cuda.mem_get_info()[0] / 2 ** 30 > 9.0 else "cpu"
-        tokenizer = AutoTokenizer.from_pretrained(self.repo, subfolder="tokenizer")
-        encoder = Qwen3ForCausalLM.from_pretrained(self.repo, subfolder="text_encoder", dtype=torch.bfloat16).to(device).eval()
+        tokenizer = AutoTokenizer.from_pretrained(snapshot_dir(self.repo, KLEIN_ALLOW_PATTERNS) / "tokenizer")
+        encoder = self.load_text_encoder(device)
         with torch.no_grad():
             emb = Flux2KleinPipeline._get_qwen3_prompt_embeds(text_encoder=encoder, tokenizer=tokenizer, prompt=prompt, dtype=torch.bfloat16,
                                                               device=torch.device(device), max_sequence_length=512, hidden_states_layers=[9, 18, 27])
         del encoder
+        torch.cuda.synchronize()
         torch.cuda.empty_cache()
         self._embeds[prompt] = emb.to("cuda")
         return self._embeds[prompt]
@@ -239,9 +372,22 @@ class RefineTextureStep(Step):
     """
 
     PARAMS = (
-        Param("trainer_path", str, "b2ctrain", "The b2ctrain binary (mesh-render / mesh-backproject)", advanced=True),
+        Param("trainer_path", str, "b2ctrain", "The b2ctrain binary (mesh-render / mesh-backproject, views mode)", advanced=True),
         Param("output_dir", str, help="Where the refined texture and the per-view renders go (the run's mesh/)"),
         Param("device", int, 0, "CUDA device index for the raster halves", advanced=True),
+        Param("mode", str, "sheets", "sheets: three character sheets, one klein call each (pipeline/view_atlas.py); "
+              "views: the per-view TEXTure loop", choices=("sheets", "views")),
+        Param("sheet_res", int, 4096, "Side of each sheet in texels", minimum=1024, advanced=True),
+        Param("sheet_input", int, 2048, "Side klein sees a sheet at (the init image; 2048 = 4 MP, 8.6 GB on a 4070 Ti)", minimum=512),
+        Param("extra_panels", int, 6, "Oblique full-body views on the second sheet (0 = none)", minimum=0, maximum=12),
+        Param("head_panels", int, 4, "Close-up head views on the third sheet (0 = none)", minimum=0, maximum=8),
+        Param("extra_scope", str, "grazing", "What may move to the oblique views: reserve | small (+ the side/crown/sole panels) | "
+              "grazing (+ front/back surface facing its panel below steal_cos)", choices=("reserve", "small", "grazing"), advanced=True),
+        Param("steal_cos", float, 0.5, "grazing scope: front/back triangles facing their panel below this cosine may move", minimum=0.0, maximum=1.0, advanced=True),
+        Param("head_height", float, 0.32, "The head band the head views frame and may take: metres below the crown", minimum=0.05, advanced=True),
+        Param("protect_close", int, 9, "Sheets: pinholes in the protection narrower than this (px at 4096) are closed for klein's mask", minimum=0, advanced=True),
+        Param("prompt_sheet", str, DEFAULT_PROMPT_SHEET, "Sheet prompt; {caption} is the subject description, the layout clause is appended per sheet"),
+        Param("text_encoder", str, DEFAULT_TEXT_ENCODER, "The Qwen3-4B text encoder repo (Qwen's fp8 release; klein's own is the same weights in bf16)", advanced=True),
         Param("face_policy", str, "protect_cap", "What klein never repaints: protect_cap (the projected photograph's footprint), "
               "protect_head (the face band), none (klein repaints the face too)", choices=("protect_cap", "protect_head", "none")),
         Param("strength", float, 0.8, "img2img strength: 0.8 is the working point, below 0.65 nothing sharpens, 1.0 ignores the render",
@@ -274,7 +420,7 @@ class RefineTextureStep(Step):
         import cv2
 
         trainer = params["trainer_path"]
-        if shutil.which(trainer) is None and not Path(trainer).is_file():
+        if params["mode"] == "views" and shutil.which(trainer) is None and not Path(trainer).is_file():
             raise RuntimeError(f"refine_texture: trainer binary {trainer!r} not found on PATH")
         atlas = Path(str(inputs["mesh_dir"]))
         if not (atlas / "mesh_uv.obj").is_file() or not (atlas / "texture.png").is_file():
@@ -317,6 +463,7 @@ class RefineTextureStep(Step):
                 best[prot > 127] = np.inf
                 protected = int((prot > 127).sum())
         extra_protect = inputs.get("protect_path")
+        params = dict(params, _protect_path=str(extra_protect) if extra_protect else "")
         if extra_protect:
             prot = cv2.imread(str(extra_protect), cv2.IMREAD_GRAYSCALE)
             if prot is None or prot.shape != (res, res):
@@ -330,6 +477,9 @@ class RefineTextureStep(Step):
         if not start.is_file():
             raise FileNotFoundError(f"refine_texture: texture_path {start} does not exist")
         shutil.copy(start, texture)
+
+        if params["mode"] == "sheets":
+            return self._run_sheets(atlas, out, start, best, protected, policy, front, back, caption, params, debug, t0)
 
         # -- cameras -------------------------------------------------------------
         bw, bh = int(params["body_size"][0]), int(params["body_size"][1])
@@ -424,4 +574,110 @@ class RefineTextureStep(Step):
                  "seconds": round(time.time() - t0, 1), "caption": caption, "references": len(refs)}
         (out / "refine_texture.json").write_text(json.dumps(stats, indent=1))
         logger.info("refine_texture: %s in %.0fs (%d views, %d repainted)", final, stats["seconds"], len(views), sum(1 for v in log if not v.get("skipped")))
+        return {"texture_path": str(final), "mesh_path": str(mesh_obj), "refine_texture_stats": stats}
+
+    def _run_sheets(self, atlas: Path, out: Path, start: Path, best: np.ndarray, protected: int, policy: str, front: Any, back: Any,
+                    caption: str, params: Dict[str, Any], debug: Optional[Path], t0: float) -> Dict[str, Any]:
+        """The character-sheet mode: layout, one klein call per sheet, the chained transfer back."""
+        import cv2
+
+        from ..view_atlas import GREY, apply_sheet, build_layout, read_obj
+
+        device = f"cuda:{int(params['device'])}"
+        protect_extra = [Path(str(p)) for p in ([params.get("_protect_path")] if params.get("_protect_path") else [])]
+        sheets_dir = out / "sheets"
+        t1 = time.time()
+        manifest = build_layout(atlas, sheets_dir, texture=start, res=int(params["sheet_res"]), extra=int(params["extra_panels"]),
+                                head=int(params["head_panels"]), scope=params["extra_scope"], steal_cos=float(params["steal_cos"]),
+                                head_height=float(params["head_height"]), protect=protect_extra, device=device)
+        layout_seconds = time.time() - t1
+        logger.info("refine_texture: %d sheets laid out in %.0fs", len(manifest["sheets"]), layout_seconds)
+        # The protection, in each sheet's coordinates: the face policy's mask and everything protect_path named.
+        protect_names = [n for n in (({"protect_cap": "protect_cap.png", "protect_head": "protect_head.png"}.get(policy),) +
+                                     tuple(p.name for p in protect_extra)) if n]
+        side = int(params["sheet_input"])
+        klein = Klein(params["repo"], params["fp8_repo"], params["fp8_file"], params["text_encoder_device"], params["text_encoder"], side * side)
+        refs = [fit_reference(cv2.cvtColor(np.asarray(front), cv2.COLOR_BGR2RGB), params["ref_max_pixels"])]
+        if back is not None:
+            refs.append(fit_reference(cv2.cvtColor(np.asarray(back), cv2.COLOR_BGR2RGB), params["ref_max_pixels"]))
+        klein.set_references(refs)
+        base_prompt = params["prompt_sheet"].replace("{caption}", caption)
+        log: List[Dict[str, Any]] = []
+        edited_sheets: List[Tuple[Path, np.ndarray, np.ndarray]] = []
+        for sheet in manifest["sheets"]:
+            sdir = Path(sheet["dir"])
+            kind = sheet["kind"]
+            W, H = sheet["width"], sheet["height"]
+            diffusion = cv2.imread(str(sdir / "diffusion_texture.png"))
+            context = cv2.imread(str(sdir / "context.png"))
+            claim = cv2.imread(str(sdir / "edit_mask.png"), cv2.IMREAD_GRAYSCALE)
+            protect = np.zeros((H, W), np.uint8)
+            for name in protect_names:
+                m = cv2.imread(str(sdir / name), cv2.IMREAD_GRAYSCALE)
+                if m is not None:
+                    protect = np.maximum(protect, m)
+            # Pinholes in the protection (the photograph's visibility test flickers per texel at grazing angles)
+            # are closed for klein's mask only: they stay unpainted, their protected neighbours come back exact,
+            # so klein never paints a speckle of contrast into them.
+            hole = max(3, int(params["protect_close"] * W / 4096) // 2 * 2 + 1)
+            protect = cv2.morphologyEx(protect, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (hole, hole)))
+            # klein's mask is the whole figure (a broad, coherent repaint), less the protection; the sparse
+            # ownership only decides what comes back.
+            subject = (np.max(np.abs(context.astype(np.int16) - GREY), axis=2) > 5).astype(np.uint8) * 255
+            if kind == "main":
+                subject[int(.75 * H):, int(.75 * W):] = 0
+            paint = cv2.dilate(subject, np.ones((17, 17), np.uint8))
+            paint[protect > 127] = 0
+            scale = min(1.0, side / float(max(W, H)))
+            size = (max(16, int(W * scale) // 16 * 16), max(16, int(H * scale) // 16 * 16))
+            inp = cv2.resize(diffusion, size, interpolation=cv2.INTER_AREA)
+            m = cv2.resize(paint, size, interpolation=cv2.INTER_NEAREST)
+            prompt = base_prompt + SHEET_LAYOUT_PROMPTS.get(kind, "")
+            t2 = time.time()
+            raw = klein.repaint(cv2.cvtColor(inp, cv2.COLOR_BGR2RGB), m, prompt, params["strength"], params["steps"], params["guidance"], params["seed"])
+            klein_seconds = time.time() - t2
+            full = cv2.resize(cv2.cvtColor(raw, cv2.COLOR_RGB2BGR), (W, H), interpolation=cv2.INTER_CUBIC)
+            weight = np.clip(cv2.distanceTransform((claim > 0).astype(np.uint8), cv2.DIST_L2, 5) / 8.0, 0, 1)
+            weight[protect > 127] = 0
+            edited = np.clip(diffusion * (1 - weight[..., None]) + full * weight[..., None], 0, 255).astype(np.uint8)
+            cv2.imwrite(str(sdir / "edited.png"), edited)
+            change = float(np.abs(edited.astype(np.float32) - diffusion.astype(np.float32))[claim > 0].mean()) if (claim > 0).any() else 0.0
+            log.append({"sheet": kind, "size": list(size), "klein_seconds": round(klein_seconds, 1), "mean_change": round(change, 2),
+                        "panels": [dict(name=p["name"], triangles=p["triangles"]) for p in json.loads((sdir / "atlas.json").read_text())["panels"]]})
+            logger.info("refine_texture [%s]: klein %.0fs at %dx%d, mean change %.1f/255", kind, klein_seconds, size[0], size[1], change)
+            if debug is not None:
+                d = debug / f"sheet_{kind}"
+                d.mkdir(parents=True, exist_ok=True)
+                cv2.imwrite(str(d / "input.png"), inp)
+                cv2.imwrite(str(d / "mask.png"), m)
+                cv2.imwrite(str(d / "raw.png"), cv2.cvtColor(raw, cv2.COLOR_RGB2BGR))
+                shutil.copy(sdir / "edited.png", d / "edited.png")
+                shutil.copy(sdir / "diffusion_texture.png", d / "sheet.png")
+            edited_sheets.append((sdir, edited, diffusion))
+        # -- back to the atlas, sheet after sheet ----------------------------------
+        _, _, olduv = read_obj(atlas / "mesh_uv.obj")
+        source_mask = cv2.imread(str(atlas / "mask.png"), cv2.IMREAD_GRAYSCALE)
+        start_tex = cv2.imread(str(start))
+        cur = start_tex.copy()
+        transfer = []
+        for sdir, edited, reference in edited_sheets:
+            cur, changed, metrics = apply_sheet(sdir, edited, cur, reference, source_mask, olduv, device)
+            transfer.append(dict(sheet=sdir.name if sdir != sheets_dir else "main", **metrics))
+        keep = np.isinf(best)
+        cur[keep] = start_tex[keep]
+        final = out / "texture_final.png"
+        cv2.imwrite(str(final), cur)
+        mesh_obj = out / "mesh_klein.obj"
+        mesh_obj.write_text((atlas / "mesh_uv.obj").read_text().replace("mtllib mesh_uv.mtl", "mtllib mesh_klein.mtl", 1))
+        (out / "mesh_klein.mtl").write_text("newmtl tex\nKd 1 1 1\nmap_Kd texture_final.png\n")
+        # The working sheets are large (three 4096 PNGs and their masks); the edited sheets stay for the eye
+        # under debug_dir, the layout manifest for provenance.
+        for sdir, _, _ in edited_sheets:
+            for name in ("context.png", "texture.png", "source_uv.npy", "edited.png"):
+                (sdir / name).unlink(missing_ok=True)
+        stats = {"mode": "sheets", "face_policy": policy, "protected_texels": protected, "start_texture": str(start), "sheets": log, "transfer": transfer,
+                 "layout": {k: v for k, v in manifest.items() if k != "stats"}, "layout_seconds": round(layout_seconds, 1), "strength": params["strength"],
+                 "steps": params["steps"], "seconds": round(time.time() - t0, 1), "caption": caption, "references": len(refs), "text_encoder": params["text_encoder"]}
+        (out / "refine_texture.json").write_text(json.dumps(stats, indent=1))
+        logger.info("refine_texture: %s in %.0fs (%d sheets, %d texels changed)", final, stats["seconds"], len(log), sum(t["edited_texels"] for t in transfer))
         return {"texture_path": str(final), "mesh_path": str(mesh_obj), "refine_texture_stats": stats}

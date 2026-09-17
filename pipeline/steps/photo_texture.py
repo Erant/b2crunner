@@ -272,6 +272,32 @@ def read_f32(path: Path, shape: Tuple[int, ...]) -> np.ndarray:
 
 # -- the step ------------------------------------------------------------------
 
+def coherent_protect(u: np.ndarray, v: np.ndarray, conf: np.ndarray, width: int, height: int, clean: int) -> np.ndarray:
+    """Which texels klein never repaints: the photograph's own at full confidence, as one coherent region.
+
+    The confidence follows the mesh normal, which the TSDF leaves noisy, so a plain
+    `conf >= 0.999` has a fractal boundary and thousands of one-texel holes where the
+    facing hovers at the threshold. On a character sheet klein then paints around
+    speckles and the transfer puts every speck back. So the mask is drawn in the
+    photograph's plane, where the region is one silhouette: opened (specks go) and
+    closed (pinholes fill) with a `clean` px kernel; a texel is protected when its
+    pixel lies in the cleaned region and the photograph colours it at all (the
+    blend at a low confidence is still the photograph's smooth fade, not klein's).
+    """
+    import cv2
+
+    full = conf >= 0.999
+    if clean <= 0 or not full.any():
+        return full
+    ui = np.clip(u.astype(int), 0, width - 1)
+    vi = np.clip(v.astype(int), 0, height - 1)
+    plane = np.zeros((height, width), np.uint8)
+    plane[vi[full], ui[full]] = 255
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (clean, clean))
+    plane = cv2.morphologyEx(cv2.morphologyEx(plane, cv2.MORPH_CLOSE, k), cv2.MORPH_OPEN, k)
+    return (plane[vi, ui] > 0) & (conf > 0.05)
+
+
 @register_step("photo_texture")
 class PhotoTextureStep(Step):
     """The photograph into the atlas (see the module docstring).
@@ -315,6 +341,8 @@ class PhotoTextureStep(Step):
         Param("protect", str, "photo", "What klein never repaints: photo (every texel the photograph owns at full confidence; "
               "measured best on every metric) or face (the face core only, klein may retouch the rest of the photograph)",
               choices=("photo", "face")),
+        Param("protect_clean", int, 9, "The protection made coherent in the photograph's plane: specks and pinholes smaller than "
+              "this many photo pixels go (0 = the raw per-texel threshold)", minimum=0, advanced=True),
     )
 
     def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
@@ -427,7 +455,7 @@ class PhotoTextureStep(Step):
         cv2.imwrite(str(texture_path), texture)
 
         protect = np.zeros(res * res, np.uint8)
-        owned = (core if params["protect"] == "face" else conf) >= 0.999
+        owned = coherent_protect(u, v, (core if params["protect"] == "face" else conf), width, height, params["protect_clean"])
         protect[ids[owned]] = 255
         protect_path = atlas / "protect_photo.png"
         cv2.imwrite(str(protect_path), protect.reshape(res, res))

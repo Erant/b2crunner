@@ -472,7 +472,7 @@ def _registry() -> List[ModelSource]:
     from .steps.sapiens2 import DEFAULT_CHECKPOINT as SAPIENS
     from .steps.sapiens2 import DEFAULT_SEG_CHECKPOINT as SAPIENS_SEG
     from .steps.wan22_vace_denoise import DEFAULT_CHECKPOINT as WAN22
-    from .steps.refine_texture import DEFAULT_REPO as KLEIN, KLEIN_ALLOW_PATTERNS
+    from .steps.refine_texture import DEFAULT_REPO as KLEIN, DEFAULT_TEXT_ENCODER as QWEN_FP8, KLEIN_ALLOW_PATTERNS, TEXT_ENCODER_ALLOW_PATTERNS
 
     # allow_patterns, or these pull the whole repo including formats the
     # pipeline never loads. Measured against the live repos:
@@ -493,6 +493,7 @@ def _registry() -> List[ModelSource]:
     sam3d_fetch, sam3d_probe = _hf_snapshot(SAM3D)
     wan22_fetch, wan22_probe = _hf_snapshot(WAN22, WAN22_ALLOW_PATTERNS)
     klein_fetch, klein_probe = _hf_snapshot(KLEIN, KLEIN_ALLOW_PATTERNS)
+    qwen_fetch, qwen_probe = _hf_snapshot(QWEN_FP8, TEXT_ENCODER_ALLOW_PATTERNS)
 
     return [
         ModelSource(
@@ -587,17 +588,23 @@ def _registry() -> List[ModelSource]:
             _fetch_seedvr2, _probe_seedvr2, approx_gb=6.0,
         ),
         ModelSource(
-            # The texture refinement's klein: the Qwen3 text encoder (~8 GB),
-            # the VAE and the configs from the bf16 repo — its transformer
-            # weights are NOT pulled (8 GB nothing opens; the fp8 file
-            # below is what loads). Only `refine_texture` wants it, and
-            # that step is off by default until the pod A/B.
-            "flux2_klein", f"{KLEIN} (texture refinement: text encoder, vae)",
-            ("refine_texture",), klein_fetch, klein_probe, approx_gb=8.5,
+            # The texture refinement's klein: the tokenizer, the VAE and the
+            # configs from the bf16 repo — neither the transformer weights
+            # (8 GB nothing opens; the fp8 file below is what loads) nor the
+            # text encoder (8 GB of bf16; Qwen's fp8 release below is the
+            # same weights) are pulled. Only `refine_texture` wants it.
+            "flux2_klein", f"{KLEIN} (texture refinement: tokenizer, vae, configs)",
+            ("refine_texture",), klein_fetch, klein_probe, approx_gb=0.4,
         ),
         ModelSource(
             "flux2_klein_fp8", "black-forest-labs/FLUX.2-klein-4b-fp8 transformer (fp8)",
             ("refine_texture",), _fetch_klein_fp8, _probe_klein_fp8, approx_gb=3.8,
+        ),
+        ModelSource(
+            # klein-4B's text encoder is Qwen3-4B byte for byte; this is Qwen's
+            # own fp8 quantisation of it (steps/refine_texture.py).
+            "qwen3_4b_fp8", f"{QWEN_FP8} (klein's text encoder, fp8)",
+            ("refine_texture",), qwen_fetch, qwen_probe, approx_gb=4.9,
         ),
         ModelSource(
             # ~65 MB for the pair. Small enough that the prefetch barely

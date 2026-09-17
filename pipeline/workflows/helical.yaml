@@ -610,15 +610,29 @@ settings:
     type: bool
     default: true
     help: >-
-      With the textured mesh on: sharpen its texture with FLUX.2 klein 4B,
-      view by view (steps/refine_texture.py) — each view of the mesh is
-      repainted as img2img at strength 0.8 inside the pixels it sees best,
-      the front and back photo panels as references, and baked back. The
-      face is left alone (`face_policy`). ~4 minutes for 11 views on a
-      4070 Ti-class card, 7 GB of VRAM, and two more models on the volume
-      (the klein text encoder and its fp8 transformer, ~12 GB). The mesh
-      lands twice: mesh/atlas/mesh_uv.obj with the baked texture and
-      mesh/mesh_klein.obj with the refined one. Off: the baked texture only.
+      With the textured mesh on: sharpen its texture with FLUX.2 klein 4B
+      (steps/refine_texture.py), the front and back photo panels as
+      references, at strength 0.8. `texture_mode` picks how klein sees the
+      texture. The face is left alone (`face_policy`). ~6 minutes on a
+      4070 Ti-class card at 8.6 GB of VRAM, and three more models on the
+      volume (the fp8 transformer, Qwen's fp8 text encoder and klein's VAE,
+      ~9 GB). The mesh lands twice: mesh/atlas/mesh_uv.obj with the baked
+      texture and mesh/mesh_klein.obj with the refined one. Off: the baked
+      texture only.
+
+  - name: texture_mode
+    label: How klein sees the texture
+    default: sheets
+    choices: [sheets, views]
+    help: >-
+      sheets (2026-09-17): the atlas re-laid as three character sheets —
+      front and back, six oblique full-body views, four close-up head views,
+      every panel a render of the whole mesh so klein always sees a person —
+      and one klein call per sheet at 2048 px, the edit transferred back
+      texel by texel (pipeline/view_atlas.py; b2ctrain out/mesh/view_atlas_m3:
+      fabric weave instead of mottling, the petticoat under the hem and the
+      ear and jaw band that no body view could resolve). views: the per-view
+      TEXTure loop, eleven renders repainted and baked back, kept for the A/B.
 
   - name: photo_texture
     label: Project the photograph into the mesh texture
@@ -792,7 +806,7 @@ outputs:
       normal / mask maps and the protection masks, then the klein pass over
       that texture (`refine_texture`, mesh/mesh_klein.obj + texture_final.png).
       Off by default (it costs ~2 minutes for the mesh, the unwrap is most
-      of it, and ~4 more for the klein pass).
+      of it, and ~6 more for the klein pass).
 
 globals:
   # What has no control of its own, and therefore no `settings:` entry.
@@ -2854,8 +2868,9 @@ steps:
       protect_path: scene.mesh_photo_protect?
     params:
       output_dir: ${globals.output_root}/mesh
+      mode: ${globals.texture_mode}
       face_policy: ${globals.face_policy}
-      # Every view's render, repaint mask and repaint, for the eye.
+      # Every sheet's (or view's) input, repaint mask and repaint, for the eye.
       debug_dir: ${globals.output_root}/debug/refine_texture
     outputs:
       texture_path: scene.mesh_texture_path
