@@ -232,7 +232,9 @@ class RefineTextureStep(Step):
               "mesh_stats"?: dict — meshify's stats (the head centre for the head cameras),
               "front_image": HxWx3 uint8 BGR — the photograph's front panel (reference 1),
               "back_image"?: HxWx3 uint8 BGR or None — the back panel (reference 2),
-              "caption"?: str — the subject description the prompts are built from}
+              "caption"?: str — the subject description the prompts are built from,
+              "texture_path"?: str — start from this texture instead of the atlas's (photo_texture's),
+              "protect_path"?: str — an R x R mask of texels klein never repaints, on top of face_policy's}
     outputs: {"texture_path": str, "mesh_path": str (mesh_klein.obj), "refine_texture_stats": dict}
     """
 
@@ -314,10 +316,20 @@ class RefineTextureStep(Step):
             else:
                 best[prot > 127] = np.inf
                 protected = int((prot > 127).sum())
+        extra_protect = inputs.get("protect_path")
+        if extra_protect:
+            prot = cv2.imread(str(extra_protect), cv2.IMREAD_GRAYSCALE)
+            if prot is None or prot.shape != (res, res):
+                raise FileNotFoundError(f"refine_texture: protect_path {extra_protect} is not an {res} x {res} mask")
+            best[prot > 127] = np.inf
+            protected = int(np.isinf(best).sum())
         best_path = out / "best.f32"
         best.tofile(best_path)
         texture = out / "texture_cur.png"
-        shutil.copy(atlas / "texture.png", texture)
+        start = Path(str(inputs["texture_path"])) if inputs.get("texture_path") else atlas / "texture.png"
+        if not start.is_file():
+            raise FileNotFoundError(f"refine_texture: texture_path {start} does not exist")
+        shutil.copy(start, texture)
 
         # -- cameras -------------------------------------------------------------
         bw, bh = int(params["body_size"][0]), int(params["body_size"][1])
@@ -408,7 +420,7 @@ class RefineTextureStep(Step):
         obj_text = (atlas / "mesh_uv.obj").read_text().replace("mtllib mesh_uv.mtl", "mtllib mesh_klein.mtl", 1)
         mesh_obj.write_text(obj_text)
         (out / "mesh_klein.mtl").write_text("newmtl tex\nKd 1 1 1\nmap_Kd texture_final.png\n")
-        stats = {"face_policy": policy, "protected_texels": protected, "views": log, "strength": params["strength"], "steps": params["steps"],
+        stats = {"face_policy": policy, "protected_texels": protected, "start_texture": str(start), "views": log, "strength": params["strength"], "steps": params["steps"],
                  "seconds": round(time.time() - t0, 1), "caption": caption, "references": len(refs)}
         (out / "refine_texture.json").write_text(json.dumps(stats, indent=1))
         logger.info("refine_texture: %s in %.0fs (%d views, %d repainted)", final, stats["seconds"], len(views), sum(1 for v in log if not v.get("skipped")))

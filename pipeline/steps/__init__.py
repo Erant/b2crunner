@@ -21,6 +21,7 @@ from . import face_landmarks  # noqa: F401
 from . import head_fit  # noqa: F401
 from . import mask_splat  # noqa: F401
 from . import meshify  # noqa: F401
+from . import photo_texture  # noqa: F401
 from . import pixel_ops  # noqa: F401
 from . import pointmap_splat  # noqa: F401
 from . import reference_sheet  # noqa: F401

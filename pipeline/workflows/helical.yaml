@@ -142,6 +142,19 @@
 # face_splat_refined's `given_camera` — that input is required now, and the
 # step refuses `cameras` without it. This is the one workflow file.
 #
+# WHAT CHANGED (2026-09-16, night): **the photograph is projected straight
+# into the mesh texture** — `photo_texture` (steps/photo_texture.py) between
+# meshify and refine_texture, a setting on by default behind `export_mesh`.
+# The face used to reach the atlas through a detour (the cap rasterised at
+# the 720 x 1280 training camera = a 92 x 116 px face, projected onto the
+# mesh's vertices, interpolated into the atlas, its tone swapped for the
+# bake's), with a grey rim from a premultiplied-alpha bug in the bake (fixed
+# in b2ctrain 478a069). Now every texel the photograph's camera sees is the
+# photograph's pixel; the bake around it is levelled TO the photograph; the
+# face core is handed to refine_texture as texels klein never repaints
+# (`protect_path`), the rest of what the photo owns at partial confidence
+# is klein's to blend. locate_face publishes its class map for it.
+#
 # WHAT CHANGED (2026-09-16, later): **the klein texture pass is on, with the
 # face kept as the photograph's pixels.** `refine_texture` defaults to true
 # (behind `export_mesh`) and `face_policy` to `protect_cap` — mesh-plan.md
@@ -607,6 +620,25 @@ settings:
       lands twice: mesh/atlas/mesh_uv.obj with the baked texture and
       mesh/mesh_klein.obj with the refined one. Off: the baked texture only.
 
+  - name: photo_texture
+    label: Project the photograph into the mesh texture
+    type: bool
+    default: true
+    help: >-
+      With the textured mesh on: sample every texel the photograph's camera
+      sees straight from the photograph at its native resolution
+      (steps/photo_texture.py) before klein runs, instead of the face
+      arriving through the cap's 92 x 116 px raster and the mesh's vertex
+      colours. The face core (Sapiens2's face classes) is the photograph's
+      pixels exactly and klein never repaints it; hair, skin and clothing
+      fade in with the surface's facing angle; the bake around them is
+      levelled to the photograph's tone so the cheek runs into the neck at
+      one colour; klein then paints only what the photograph does not own.
+      Measured on 00307 (b2ctrain out/mesh/photo, after klein): the
+      cap-border colour jump 19.4 -> 13.7, face sharpness 3.5 -> 5.6,
+      whole-subject sharpness 39.5 -> 51.5, the whole front of the body
+      the photograph's. ~30 s on the CPU.
+
   - name: face_policy
     label: Face policy of the texture refinement
     default: protect_cap
@@ -1005,6 +1037,9 @@ steps:
       parts: face
     outputs:
       box: scene.face_box
+      # The whole class map of the photograph: photo_texture's foreground,
+      # face and hair (steps/photo_texture.py) — free, the pass runs anyway.
+      labels: scene.front_labels
 
   # Cut it out at native resolution and record where it came from. `padding`
   # 3.5 (the step's default) makes this a head-against-a-torso crop rather
@@ -2766,6 +2801,33 @@ steps:
       mesh_dir: scene.mesh_dir
       mesh_stats: scene.mesh_stats
 
+  # The photograph projected straight into the atlas (steps/photo_texture.py):
+  # every texel its camera sees is sampled from it at native resolution,
+  # the bake around it levelled to its tone, the face core marked for klein
+  # to leave alone. Needs the face branch: the class map is locate_face's,
+  # the camera is the one face_splat_refined hangs the cap on.
+  - id: photo_texture
+    step: photo_texture
+    dispatch: in_process
+    when:
+      - ${globals.export_mesh}
+      - ${globals.photo_texture}
+      - ${globals.face_splat}
+    inputs:
+      mesh_dir: scene.mesh_dir
+      mesh_stats: scene.mesh_stats?
+      image: scene.front_image
+      labels: scene.front_labels?
+      # sam3d_body's outputs: the photograph's focal length.
+      mesh_output: scene
+      cameras: dataset.cameras
+      anchor_frame_index: dataset.extras.anchor_frame_index?
+      given_camera: scene.image_warp.camera?
+    outputs:
+      texture_path: scene.mesh_photo_texture
+      protect_path: scene.mesh_photo_protect
+      photo_texture_stats: scene.photo_texture_stats
+
   # klein over the atlas (steps/refine_texture.py), the face left as the
   # photograph's pixels (`face_policy: protect_cap`). In the wan22 env: the
   # same diffusers / torchao the denoise runs on, and the same fp8 loading
@@ -2786,6 +2848,10 @@ steps:
       front_image: scene.front_image
       back_image: dataset.reference_image?
       caption: dataset.prompt?
+      # photo_texture's texture and the texels it hands klein (the face
+      # core, or everything the photograph owns); the baked atlas without it.
+      texture_path: scene.mesh_photo_texture?
+      protect_path: scene.mesh_photo_protect?
     params:
       output_dir: ${globals.output_root}/mesh
       face_policy: ${globals.face_policy}
