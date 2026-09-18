@@ -25,6 +25,20 @@ class TestHelpers(unittest.TestCase):
         self.assertEqual(out[0, 1].tolist(), [128, 128, 128])
         self.assertTrue(np.all(np.abs(out[1, 0].astype(int) - np.array([69, 74, 79])) <= 1))
 
+    def test_blur_within_stays_inside_the_alpha(self):
+        """The colour is smoothed inside the silhouette, the surround never bleeds in, and the alpha is untouched."""
+        from pipeline.steps.mesh_views import blur_within
+
+        rgba = np.zeros((60, 60, 4), np.uint8)
+        rgba[10:50, 10:50, 3] = 255
+        rgba[10:50, 10:50, :3] = 200
+        rgba[25:35, 25:35, :3] = 0  # a dark square inside the subject; outside the alpha the colour is black too
+        out = blur_within(rgba, 3.0)
+        self.assertTrue(np.array_equal(out[..., 3], rgba[..., 3]), "the alpha is the rasteriser's")
+        self.assertEqual(int(out[11, 11, 0]), 200, "a subject pixel by the silhouette does not darken toward the transparent surround")
+        self.assertTrue(0 < int(out[30, 30, 0]) < 200 and 0 < int(out[25, 25, 0]) < 200, "the dark square is smoothed")
+        self.assertTrue(np.array_equal(blur_within(rgba, 0.0), rgba), "0 = untouched")
+
     def test_pick_texture_prefers_klein_then_photo_then_bake(self):
         from pipeline.steps.mesh_views import pick_texture
 
@@ -105,6 +119,17 @@ for i, c in enumerate(cams["cameras"]):
         names = {p.name for p in mv.RenderSubjectStep.PARAMS}
         self.assertTrue({"from_mesh", "pattern", "override_cam_from_mesh", "sh_degree", "confidence"} <= names)
         self.assertFalse(mv.RenderSubjectStep.resolve_params({})["from_mesh"], "a bare render_subject is a splat render")
+        self.assertEqual(mv.RenderSubjectStep.resolve_params({})["mesh_blur_px"], 0.0, "the step itself does not blur; the workflow asks for it")
+
+    def test_the_workflow_blurs_the_mesh_frames_instead_of_klein(self):
+        import yaml
+
+        wf = yaml.safe_load((Path(__file__).resolve().parents[1] / "pipeline" / "workflows" / "helical.yaml").read_text())
+        settings = {g["name"]: g for g in wf["settings"]}
+        self.assertFalse(settings["refine_texture"]["default"], "the klein pass is off by default")
+        self.assertEqual(settings["mesh_blur"]["default"], 2.0)
+        render = next(s for s in wf["steps"] if s.get("id") == "render_subject")
+        self.assertEqual(render["params"]["mesh_blur_px"], "${globals.mesh_blur}")
 
 
 if __name__ == "__main__":

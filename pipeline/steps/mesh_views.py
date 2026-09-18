@@ -16,6 +16,14 @@ The A/B this ports is b2ctrain out/mesh/ab2/ds_mesh_b2c (`tools/ab_arm_b2c.py`,
 the pod pass-2 A/B's fourth arm). The texture is klein's when
 `refine_texture` ran, the photograph's when only `photo_texture` did, the
 bake otherwise.
+
+`blur_px` (2026-09-17) softens the mesh frames before they are composited:
+a Gaussian of that sigma over the render's colour, weighted by its alpha so
+the flat backdrop never bleeds into the subject and the silhouette — the
+matte downstream — stays exactly the rasteriser's. The bake's texture is
+the splat's own projected colour, and a mild blur over it is the cheap
+alternative to the klein pass: the denoise resharpens what it is given, and
+what it is given is then free of the atlas's texel-level speckle.
 """
 
 from __future__ import annotations
@@ -46,6 +54,26 @@ def composite_over(rgba: np.ndarray, flat_bgr: Sequence[float]) -> np.ndarray:
     return np.clip(rgba[..., :3].astype(np.float32) * alpha + flat * (1.0 - alpha) + 0.5, 0, 255).astype(np.uint8)
 
 
+def blur_within(rgba: np.ndarray, sigma: float) -> np.ndarray:
+    """A BGRA render with its colour Gaussian-blurred (sigma in px) inside its own alpha; the alpha is untouched.
+
+    The blur runs on premultiplied colour and is divided by the blurred alpha, so a pixel near the
+    silhouette averages its neighbours in the subject only, never the transparent surround.
+    """
+    import cv2
+
+    if sigma <= 0.0:
+        return rgba
+    alpha = rgba[..., 3:4].astype(np.float32) / 255.0
+    premul = rgba[..., :3].astype(np.float32) * alpha
+    blurred = cv2.GaussianBlur(premul, (0, 0), float(sigma))
+    weight = cv2.GaussianBlur(alpha, (0, 0), float(sigma))[..., None]
+    colour = np.where(weight > 1e-4, blurred / np.maximum(weight, 1e-4), rgba[..., :3].astype(np.float32))
+    out = rgba.copy()
+    out[..., :3] = np.clip(colour + 0.5, 0, 255).astype(np.uint8)
+    return out
+
+
 def pick_texture(atlas: Path, refined: Optional[str], photo: Optional[str]) -> Path:
     """The best texture on hand: klein's, else the photograph's, else the bake."""
     for candidate in (refined, photo):
@@ -55,8 +83,11 @@ def pick_texture(atlas: Path, refined: Optional[str], photo: Optional[str]) -> P
 
 
 def render_mesh_frames(trainer: str, atlas: Path, texture: Path, cameras: Sequence[Any], image_names: Sequence[str], flat_bgr: Sequence[float],
-                       supersample: int, device: int, out: Path, keep: bool) -> Tuple[List[np.ndarray], List[np.ndarray], Dict[str, Any]]:
-    """`b2ctrain mesh-render` at the cameras: (BGR frames over `flat_bgr`, float32 alpha masks, stats)."""
+                       supersample: int, device: int, out: Path, keep: bool, blur_px: float = 0.0) -> Tuple[List[np.ndarray], List[np.ndarray], Dict[str, Any]]:
+    """`b2ctrain mesh-render` at the cameras: (BGR frames over `flat_bgr`, float32 alpha masks, stats).
+
+    `blur_px` > 0 softens each render's colour inside its alpha (`blur_within`) before the composite.
+    """
     import cv2
 
     if shutil.which(trainer) is None and not Path(trainer).is_file():
@@ -93,17 +124,18 @@ def render_mesh_frames(trainer: str, atlas: Path, texture: Path, cameras: Sequen
             raise RuntimeError(f"render_subject: {path} is not the RGBA render mesh-render writes")
         if rgba.shape[:2] != (cams["height"], cams["width"]):
             raise RuntimeError(f"render_subject: {path} is {rgba.shape[1]}x{rgba.shape[0]}, the cameras {cams['width']}x{cams['height']}")
-        images.append(composite_over(rgba, flat_bgr))
+        images.append(composite_over(blur_within(rgba, blur_px), flat_bgr))
         alpha = rgba[..., 3].astype(np.float32) / 255.0
         masks.append(alpha)
         coverage.append(float((alpha > 0.5).mean()))
     if not keep:
         shutil.rmtree(render_dir, ignore_errors=True)
-    stats = {"frames": len(images), "texture": str(texture), "width": cams["width"], "height": cams["height"],
+    stats = {"frames": len(images), "texture": str(texture), "width": cams["width"], "height": cams["height"], "blur_px": float(blur_px),
              "subject_coverage_mean": round(float(np.mean(coverage)), 4) if coverage else 0.0, "seconds": round(time.time() - t0, 1)}
     (out / "render_subject.json").write_text(json.dumps(stats, indent=1))
-    logger.info("render_subject: %d frames of the mesh (%s) at %dx%d in %.0fs (subject %.0f%% of the frame)", len(images), texture.name,
-                cams["width"], cams["height"], stats["seconds"], 100 * stats["subject_coverage_mean"])
+    logger.info("render_subject: %d frames of the mesh (%s) at %dx%d in %.0fs (subject %.0f%% of the frame%s)", len(images), texture.name,
+                cams["width"], cams["height"], stats["seconds"], 100 * stats["subject_coverage_mean"],
+                f", blurred at sigma {blur_px:.1f} px" if blur_px > 0.0 else "")
     return images, masks, stats
 
 
@@ -121,6 +153,7 @@ class RenderSubjectStep(RenderSplatStep):
         Param("from_mesh", bool, False, "Render the textured mesh (mesh_dir + the best texture on hand) at the resolved cameras instead of the splat"),
         Param("trainer_path", str, "b2ctrain", "The b2ctrain binary (mesh-render)", advanced=True),
         Param("mesh_supersample", int, 2, "mesh-render supersampling", minimum=1, maximum=4, advanced=True),
+        Param("mesh_blur_px", float, 0.0, "Gaussian blur (sigma, px) over the mesh frames' colour inside the silhouette; 0 = none", minimum=0.0, maximum=32.0),
         Param("mesh_render_dir", str, "", "Where the mesh renders and their camera file go (a temporary directory when empty)", advanced=True),
         Param("keep_mesh_renders", bool, False, "Keep the RGBA mesh renders under mesh_render_dir"),
         Param("device", int, 0, "CUDA device index for mesh-render", advanced=True),
@@ -141,7 +174,7 @@ class RenderSubjectStep(RenderSplatStep):
         flat = tuple(float(c) for c in (bg_color if confidence is None else confidence.cull_color))
         out = Path(params["mesh_render_dir"]) if params["mesh_render_dir"] else Path(tempfile.mkdtemp(prefix="b2c_render_subject_"))
         images, masks, stats = render_mesh_frames(params["trainer_path"], atlas, texture, cameras, image_names, flat, int(params["mesh_supersample"]),
-                                                  int(params["device"]), out, bool(params["keep_mesh_renders"]))
+                                                  int(params["device"]), out, bool(params["keep_mesh_renders"]), blur_px=float(params["mesh_blur_px"]))
         if not params["mesh_render_dir"]:
             shutil.rmtree(out, ignore_errors=True)
         self._mesh_stats = stats

@@ -142,6 +142,18 @@
 # face_splat_refined's `given_camera` — that input is required now, and the
 # step refuses `cameras` without it. This is the one workflow file.
 #
+# WHAT CHANGED (2026-09-17): **the klein texture pass is off; pass 2 sees
+# the projected texture, blurred.** `refine_texture` defaults to false and
+# `render_subject` takes `mesh_blur_px: ${globals.mesh_blur}` (2 px, a
+# Gaussian sigma at the render resolution): the frames drawn from the mesh
+# are the photograph where it reaches and the splat's bake elsewhere,
+# softened inside their silhouette (steps/mesh_views.py's `blur_within`,
+# alpha-weighted so the grey surround stays out and the matte stays the
+# rasteriser's). The klein pass and its settings (`texture_mode`,
+# `face_policy`) are untouched for the A/B; on, the blur runs over klein's
+# texture too. Nothing changes for the exported mesh: the blur lives in the
+# frames, not in the atlas.
+#
 # WHAT CHANGED (2026-09-16, night): **the photograph is projected straight
 # into the mesh texture** — `photo_texture` (steps/photo_texture.py) between
 # meshify and refine_texture, a setting on by default behind `export_mesh`.
@@ -608,7 +620,7 @@ settings:
   - name: refine_texture
     label: Refine the mesh texture with klein
     type: bool
-    default: true
+    default: false
     help: >-
       With the textured mesh on: sharpen its texture with FLUX.2 klein 4B
       (steps/refine_texture.py), the front and back photo panels as
@@ -617,8 +629,28 @@ settings:
       4070 Ti-class card at 8.6 GB of VRAM, and three more models on the
       volume (the fp8 transformer, Qwen's fp8 text encoder and klein's VAE,
       ~9 GB). The mesh lands twice: mesh/atlas/mesh_uv.obj with the baked
-      texture and mesh/mesh_klein.obj with the refined one. Off: the baked
-      texture only.
+      texture and mesh/mesh_klein.obj with the refined one. OFF by default
+      as of 2026-09-17: pass 2 conditions on the projected texture (the
+      photograph's where it reaches, the splat's bake elsewhere) softened
+      by `mesh_blur` instead, the klein pass kept for the A/B. Off: the
+      baked / photo texture only.
+
+  - name: mesh_blur
+    label: Blur on the mesh renders (px)
+    type: float
+    default: 2.0
+    minimum: 0.0
+    maximum: 32.0
+    help: >-
+      Gaussian blur (sigma, in pixels at the render resolution) over the
+      frames `render_subject` draws from the textured mesh for pass 2, on
+      the subject's colour only: the blur is weighted by the render's alpha
+      so the grey surround never bleeds in, and the silhouette the matte is
+      cut from stays the rasteriser's. The bake is the splat's colour
+      projected into the atlas, sharp to the texel with the seams and
+      speckle that implies; the second denoise redraws detail from what it
+      is shown, and it is shown less of that. 0 = the renders as they are.
+      Nothing when `pass2_mesh` is off (the splat frames are not blurred).
 
   - name: pass2_mesh
     label: Pass 2 conditions on the textured mesh
@@ -626,13 +658,15 @@ settings:
     default: true
     help: >-
       On (2026-09-17): the second denoise's frames are the meshify mesh with
-      its klein texture, rendered by `render_subject` (steps/mesh_views.py)
-      at the very helix cameras it resolves — the pod pass-2 A/B's fourth
-      arm, b2ctrain out/mesh/ab2/ds_mesh_b2c — composited over the same grey,
-      the render's alpha as the matte (the rmbg matte is skipped). The
-      anchor re-injection and the fringe masking run on them unchanged. This
-      builds the mesh whether or not `export_mesh` packages it: ~2 minutes
-      for the mesh, ~6 for the klein pass, seconds for the renders. Off:
+      its texture (klein's with `refine_texture`, else the photograph's and
+      the bake's), rendered by `render_subject` (steps/mesh_views.py) at
+      the very helix cameras it resolves — the pod pass-2 A/B's fourth
+      arm, b2ctrain out/mesh/ab2/ds_mesh_b2c — softened by `mesh_blur`,
+      composited over the same grey, the render's alpha as the matte (the
+      rmbg matte is skipped). The anchor re-injection and the fringe
+      masking run on them unchanged. This builds the mesh whether or not
+      `export_mesh` packages it: ~2 minutes for the mesh, ~6 more for the
+      klein pass when it is on, seconds for the renders. Off:
       render_subject rasterises the intermediate splat, as before, and the
       mesh branch is skipped entirely unless `export_mesh` asks for it.
 
@@ -820,9 +854,9 @@ outputs:
       Sapiens normal maps, the face cap's photograph projected onto the face.
       Lands as mesh/atlas/mesh_uv.obj + texture.png with the position /
       normal / mask maps and the protection masks, then the klein pass over
-      that texture (`refine_texture`, mesh/mesh_klein.obj + texture_final.png).
-      Off by default (it costs ~2 minutes for the mesh, the unwrap is most
-      of it, and ~6 more for the klein pass).
+      that texture when `refine_texture` is on (mesh/mesh_klein.obj +
+      texture_final.png). Off by default (it costs ~2 minutes for the
+      mesh, the unwrap is most of it, and ~6 more for the klein pass).
 
 globals:
   # What has no control of its own, and therefore no `settings:` entry.
@@ -2908,8 +2942,8 @@ steps:
     inputs:
       splat_scene: scene.splat
       # The textured mesh (steps/mesh_views.py): with `pass2_mesh` the frames
-      # are the meshify mesh with klein's texture (the photograph's when only
-      # photo_texture ran, the bake otherwise) rendered at the very cameras
+      # are the meshify mesh with the best texture on hand (klein's when
+      # refine_texture ran, else the photograph's, else the bake) rendered at the very cameras
       # this step resolves — the path, the anchor and its extras are the same
       # either way, and nothing downstream can tell the sources apart by shape.
       mesh_dir: scene.mesh_dir?
@@ -3041,6 +3075,9 @@ steps:
       # an ellipsoid fitted to MESH VERTICES, and a .ply has none.
       background: ""
       from_mesh: ${globals.pass2_mesh}
+      # The mesh frames softened inside their silhouette (steps/mesh_views.py's
+      # blur_within) — the stand-in for the klein pass since 2026-09-17.
+      mesh_blur_px: ${globals.mesh_blur}
       mesh_render_dir: ${globals.output_root}/debug/mesh_views
     outputs:
       images: dataset.images

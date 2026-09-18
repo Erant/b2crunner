@@ -443,6 +443,7 @@ def build_sheet(out: Path, W: int, H: int, pad: int, specs: Sequence[Tuple], own
     V, F, t, area = geo.V, geo.F, geo.t, geo.area
     uv = np.zeros_like(olduv)
     context = np.full((H, W, 3), GREY, np.uint8)
+    depth_img = np.zeros((H, W), np.uint8)  # a depth map in the sheet's own layout (near = bright, per panel), for a structure-following model
     seen = np.zeros((H, W), bool)
     panels = []
     for p, (name, d, r, u, fit, box) in enumerate(specs):
@@ -461,6 +462,11 @@ def build_sheet(out: Path, W: int, H: int, pad: int, specs: Sequence[Tuple], own
         colors = sample(source, suv)
         context[y0:y1, x0:x1][hit] = colors[hit]
         seen[y0:y1, x0:x1] = hit
+        z = buf["z"].cpu().numpy()
+        if hit.any():
+            lo, hi = float(z[hit].min()), float(z[hit].max())
+            rel = 1.0 - (z - lo) / max(hi - lo, 1e-6)  # near = 1
+            depth_img[y0:y1, x0:x1][hit] = np.clip(rel[hit] * 215 + 40, 0, 255).astype(np.uint8)
         panels.append(dict(name=name, box_pixels=[int(x0), int(y0), int(x1), int(y1)], direction=[float(z) for z in d], px_per_m=float(view.scale),
                            head=fit is not None, context_only=name.startswith("ctx_"), triangles=int(ids.sum()), area_fraction=float(area[ids].sum() / area.sum())))
     if fallback is not None:
@@ -504,6 +510,7 @@ def build_sheet(out: Path, W: int, H: int, pad: int, specs: Sequence[Tuple], own
     texture[gutter] = texture.reshape(-1, 3)[nearest[gutter]]
     cv2.imwrite(str(out / "texture.png"), texture)
     cv2.imwrite(str(out / "context.png"), context)
+    cv2.imwrite(str(out / "depth.png"), depth_img)
     cv2.imwrite(str(out / "mask.png"), mask)
     np.save(out / "source_uv.npy", remap)
     np.save(out / "face_panel.npy", owner.astype(np.int8))

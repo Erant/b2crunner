@@ -1018,6 +1018,14 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   bake and the photo projection, amplified by wan; an occluder-edge margin
   in either made it worse (the texels fall back to the other's leak), so
   `photo_texture.edge_margin` ships off and the bake is unchanged.
+  **Update (2026-09-17, later): the klein pass is off by default.**
+  `refine_texture` defaults to false; pass 2's mesh frames are the
+  projected texture (the photograph's where it reaches, the splat's bake
+  elsewhere) softened by `render_subject`'s new `mesh_blur_px`
+  (`mesh_blur`, 2 px — a Gaussian sigma at the render resolution, weighted
+  by the render's alpha in `mesh_views.blur_within` so the grey surround
+  stays out and the matte stays the rasteriser's). The klein step, its
+  settings and `mode: sheets` are untouched for the A/B.
 - `load_splat`/`save_splat`/`render_splat` — `render_splat`'s camera-path
   resolution (which cameras, what focal length, which bounding box frames
   the orbit, point-cloud preservation, metadata pass-through) is verified
