@@ -25,7 +25,7 @@ keep/repaint mask is what keeps the views from blurring each other: every
 texel is painted once, by the view that sees it best.
 
 Measured on both local subjects (b2crunner memory uv_texture_klein_refine):
-strength 0.8 at 12 steps is the working point (fabric weave, satin sheen,
+strength 0.8 is the working point (12 steps then; 4 since the 2026-09-18 sweep, see `steps`) (fabric weave, satin sheen,
 smears gone, the waistband and buttons stay put to a few px); 0.4-0.65 is a
 VAE round trip and 1.0 ignores the structure. The front and back photo
 panels go in as SEPARATE reference streams (the pipeline API takes one
@@ -396,7 +396,9 @@ class RefineTextureStep(Step):
               "protect_head (the face band), none (klein repaints the face too)", choices=("protect_cap", "protect_head", "none")),
         Param("strength", float, 0.8, "img2img strength: 0.8 is the working point, below 0.65 nothing sharpens, 1.0 ignores the render",
               minimum=0.0, maximum=1.0),
-        Param("steps", int, 12, "Denoising steps", minimum=1),
+        Param("steps", int, 4, "Denoising steps: klein is distilled for 4 (its model card); at strength 0.8 the schedule keeps 3 of them. "
+              "More steps keep more of the input: the 2026-09-18 sweep on the head sheet (4/6/8/12/20) had 4 rebuild the ear, jaw and "
+              "hair cleanly and 12 and 20 hand the input's smears back (mean change 19 -> 8/255), at 52 s a sheet against 88", minimum=1),
         Param("guidance", float, 1.0, "Guidance scale (klein is distilled; 1.0)", advanced=True),
         Param("seed", int, 0, "Noise seed, fixed per view for a reproducible run"),
         Param("power", float, 4.0, "Facing exponent of a view's claim weight (cos^power x texel density)"),
