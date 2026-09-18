@@ -462,7 +462,7 @@ def build_sheet(out: Path, W: int, H: int, pad: int, specs: Sequence[Tuple], own
         context[y0:y1, x0:x1][hit] = colors[hit]
         seen[y0:y1, x0:x1] = hit
         panels.append(dict(name=name, box_pixels=[int(x0), int(y0), int(x1), int(y1)], direction=[float(z) for z in d], px_per_m=float(view.scale),
-                           head=fit is not None, triangles=int(ids.sum()), area_fraction=float(area[ids].sum() / area.sum())))
+                           head=fit is not None, context_only=name.startswith("ctx_"), triangles=int(ids.sum()), area_fraction=float(area[ids].sum() / area.sum())))
     if fallback is not None:
         x0, y0, x1, y1 = fallback
         uv[owner < 0] = olduv[owner < 0] * [(x1 - x0 - 2 * pad) / W, (y1 - y0 - 2 * pad) / H] + [(x0 + pad) / W, (H - y1 + pad) / H]
@@ -558,7 +558,13 @@ def build_layout(atlas: Path, output: Path, *, texture: Optional[Path] = None, r
     main_boxes = [tuple(round(z * R) for z in b) for b in [(0, 0, .5, .72), (.5, 0, 1, .72), (0, .72, .25, 1), (.25, .72, .5, 1), (.5, .72, .75, .86), (.5, .86, .75, 1)]]
     fallback = tuple(int(z) for z in np.rint(np.array([.75, .75, 1., 1.]) * R))
     extra_boxes = grid_boxes(extra, 2 if extra > 3 else 1, (0, 0, R, R))
-    head_boxes = grid_boxes(head, 2 if head > 2 else 1, (0, 0, R, R))
+    # The head sheet: close-ups in the left two thirds, the whole person (the front view) on the right as
+    # context only. A sheet of nothing but head-and-shoulder crops on grey is where klein invents a
+    # figure or a cap (the pod run of 2026-09-18, out/mesh/view_atlas_m3/README.md): with the body
+    # beside them it knows whose head it is drawing.
+    head_split = round(R * 2 / 3)
+    head_boxes = grid_boxes(head, 2 if head > 2 else 1, (0, 0, head_split, R))
+    head_context_box = (head_split, 0, R, R)
     axes = [("front", front, right, up), ("back", -front, -right, up), ("left", right, -front, up), ("right", -right, front, up),
             ("top", up, right, -front), ("bottom", -up, right, front)]
     scores = np.stack([facing_score(geo.visible(d), geo.normal, d) for name, d, r, u in axes], 1)
@@ -593,6 +599,8 @@ def build_layout(atlas: Path, output: Path, *, texture: Optional[Path] = None, r
         specs_h, owner_h = pick_panels(geo, cands, band_t, own_eff, band_v, head_boxes[0], head, "h", pad)
         specs_h = [(n, d, r, u, fit, box) for (n, d, r, u, fit), box in zip(specs_h, head_boxes)]
         drop_overlaps(owner_h, specs_h, V, F, geo.t)
+        if specs_h:
+            specs_h.append(("ctx_front", front, right, up, None, head_context_box))  # context only: no triangle is ever assigned to it
         taken = owner_h >= 0
         owner[taken] = -1
         for g in groups:

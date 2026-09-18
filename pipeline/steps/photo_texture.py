@@ -272,6 +272,23 @@ def read_f32(path: Path, shape: Tuple[int, ...]) -> np.ndarray:
 
 # -- the step ------------------------------------------------------------------
 
+def occluder_edges(depth: np.ndarray, gap: float, margin: float) -> np.ndarray:
+    """A soft band (float32 in [0,1]) within `margin` px of every depth discontinuity of a render, the
+    silhouette included: 1 on the edge, fading to 0 at `margin`. `depth` is 0 where nothing was hit."""
+    import cv2
+
+    if margin <= 0:
+        return np.zeros(depth.shape, np.float32)
+    valid = depth > 0
+    far = np.where(valid, depth, np.inf).astype(np.float32)
+    near = cv2.erode(far, np.ones((3, 3), np.uint8))
+    far_d = cv2.dilate(np.where(valid, depth, 0).astype(np.float32), np.ones((3, 3), np.uint8))
+    jump = (far_d - near > gap) & np.isfinite(near)
+    jump |= valid & ~cv2.erode(valid.astype(np.uint8), np.ones((3, 3), np.uint8)).astype(bool)  # the silhouette
+    dist = cv2.distanceTransform((~jump).astype(np.uint8), cv2.DIST_L2, 5)
+    return np.clip(1.0 - dist / margin, 0.0, 1.0).astype(np.float32)
+
+
 def coherent_protect(u: np.ndarray, v: np.ndarray, conf: np.ndarray, width: int, height: int, clean: int) -> np.ndarray:
     """Which texels klein never repaints: the photograph's own at full confidence, as one coherent region.
 
@@ -328,6 +345,11 @@ class PhotoTextureStep(Step):
         Param("face_lo", float, 0.10, "The face core is the photograph's pixels from this cosine ..."),
         Param("face_hi", float, 0.30, "... fully at this one"),
         Param("depth_tol", float, 0.004, "Visibility: a texel deeper than the render by more than this is hidden (metres)", minimum=0.0),
+        Param("edge_gap", float, 0.01, "An occluder's edge: a depth jump of more than this between neighbouring photo pixels (metres)", minimum=0.0, advanced=True),
+        Param("edge_margin", float, 0.0, "Texels within this many photo pixels of an occluder's edge (or the silhouette) are not the "
+              "photograph's: the mesh and the photograph disagree there by a few pixels and the occluder's colour leaks. OFF (0) "
+              "by default: measured on the pod run of 2026-09-18, the texels it releases fall back to the bake, which leaks the "
+              "same white under the hem (pale thigh 2.6 -> 3.4 %); worth turning on once the bake is fixed", minimum=0.0, advanced=True),
         Param("fg_erode", float, 3.0, "Foreground ramps in over this many photo pixels inside Sapiens2's silhouette", minimum=0.0),
         Param("face_erode", float, 4.0, "The face core ramps in over this many pixels inside the face classes", minimum=0.0),
         Param("normal_cell", float, 0.008, "World grid cell (metres) the normals are smoothed on", minimum=0.001, advanced=True),
@@ -394,6 +416,12 @@ class PhotoTextureStep(Step):
         # more than the tolerance and a texel tested against its own pixel's depth flickers in stripes; a texel
         # hidden behind the head is centimetres behind every neighbour and still fails.
         farthest = cv2.dilate(depth, np.ones((3, 3), np.uint8))
+        # An occluder's edge in the photograph (the hem over the thigh, hair over the face, the arm over the
+        # torso) is where the mesh and the photograph disagree by a few pixels; a texel just behind it that
+        # the depth test passes then samples the occluder's colour — the petticoat's white on the thigh that
+        # the second denoise grew into patches (2026-09-18). Nothing within `edge_margin` px of a depth jump
+        # of `edge_gap` metres is the photograph's.
+        edge = occluder_edges(depth, params["edge_gap"], params["edge_margin"])
 
         # -- the texels ---------------------------------------------------------
         texture = cv2.imread(str(atlas / "texture.png"), cv2.IMREAD_COLOR)
@@ -419,7 +447,7 @@ class PhotoTextureStep(Step):
         ui, vi = np.clip(u.astype(int), 0, width - 1), np.clip(v.astype(int), 0, height - 1)
         behind = z - farthest[vi, ui]
         tol = params["depth_tol"]
-        visible = (1.0 - ramp(behind, 0.5 * tol, tol)) * seen[vi, ui]
+        visible = (1.0 - ramp(behind, 0.5 * tol, tol)) * seen[vi, ui] * (1.0 - edge[vi, ui])
 
         # -- the photograph's masks ---------------------------------------------
         if labels is not None:

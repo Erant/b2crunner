@@ -1006,7 +1006,18 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   wants it or `export_mesh` packages it (`when: {any: [...]}`); off, the
   step rasterises the splat as before and the branch is skipped. The mesh
   path was verified with the real trainer at the 81 helix cameras of 00307
-  (5 s); the first pod run of the mesh path reached refine_texture.
+  (5 s); the first pod run of the mesh path reached refine_texture, and
+  the second ran through. What it taught (2026-09-18, b2ctrain
+  out/mesh/pod_sweep): the head sheet gets the front body view beside the
+  close-ups as context only (a sheet of head crops on grey is where klein
+  invents faces or a cap); klein runs 4 steps on the body sheets (the
+  distilled model repairs MORE with fewer: 4 leaves the thighs clean skin
+  where 12 keeps the mottling) and 12 on the head sheet (at 4 it painted
+  new faces into it). The pale "vitiligo" patches pass 2 grew on the thighs
+  are the petticoat's white leaking onto the thigh under the hem in the
+  bake and the photo projection, amplified by wan; an occluder-edge margin
+  in either made it worse (the texels fall back to the other's leak), so
+  `photo_texture.edge_margin` ships off and the bake is unchanged.
 - `load_splat`/`save_splat`/`render_splat` — `render_splat`'s camera-path
   resolution (which cameras, what focal length, which bounding box frames
   the orbit, point-cloud preservation, metadata pass-through) is verified

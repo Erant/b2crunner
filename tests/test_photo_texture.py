@@ -175,3 +175,22 @@ class TestCoherentProtect(unittest.TestCase):
         self.assertFalse(owned[:, 36:].any(), "the bake side is free")
         raw = coherent_protect(u, v, conf, w, h, 0).reshape(h, w)
         self.assertTrue(raw[40, 50], "0 = the raw threshold")
+
+class TestOccluderEdges(unittest.TestCase):
+    def test_band_hugs_depth_jumps_and_the_silhouette(self):
+        from pipeline.steps.photo_texture import occluder_edges
+
+        depth = np.zeros((40, 40), np.float32)
+        depth[5:35, 5:35] = 2.0          # a body
+        depth[5:20, 5:35] = 1.95         # a hem 5 cm in front of the lower half
+        band = occluder_edges(depth, 0.01, 4.0)
+        self.assertEqual(band.dtype, np.float32)
+        self.assertGreater(band[20, 20], 0.9, "on the hem's edge")
+        self.assertGreater(band[5, 20], 0.9, "on the silhouette")
+        self.assertEqual(band[28, 20], 0.0, "well inside the lower half: not the photograph's edge")
+        self.assertEqual(band[12, 20], 0.0, "well inside the hem")
+        self.assertTrue((occluder_edges(depth, 0.01, 0.0) == 0).all(), "margin 0 = off")
+
+
+if __name__ == "__main__":
+    unittest.main()

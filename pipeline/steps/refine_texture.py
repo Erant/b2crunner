@@ -104,7 +104,8 @@ SHEET_LAYOUT_PROMPTS = {
     "main": "Preserve its exact layout: large front and back views across the top, small side views at bottom left, "
             "top and bottom views at bottom center, empty grey bottom right.",
     "extra": "Preserve its exact layout: full-body views of the same person from oblique camera angles in a grid.",
-    "head": "Preserve its exact layout: close-up views of the same person's head and shoulders from different angles in a grid.",
+    "head": "Preserve its exact layout: close-up views of the same person's head and shoulders from different angles on the left, "
+            "and a full-body front view of the same person on the right for reference.",
 }
 
 DEFAULT_PROMPT_BODY = (
@@ -396,9 +397,11 @@ class RefineTextureStep(Step):
               "protect_head (the face band), none (klein repaints the face too)", choices=("protect_cap", "protect_head", "none")),
         Param("strength", float, 0.8, "img2img strength: 0.8 is the working point, below 0.65 nothing sharpens, 1.0 ignores the render",
               minimum=0.0, maximum=1.0),
-        Param("steps", int, 4, "Denoising steps: klein is distilled for 4 (its model card); at strength 0.8 the schedule keeps 3 of them. "
-              "More steps keep more of the input: the 2026-09-18 sweep on the head sheet (4/6/8/12/20) had 4 rebuild the ear, jaw and "
-              "hair cleanly and 12 and 20 hand the input's smears back (mean change 19 -> 8/255), at 52 s a sheet against 88", minimum=1),
+        Param("steps", int, 4, "Denoising steps for the body sheets (and the views loop): klein is distilled for 4 (its model card); at "
+              "strength 0.8 the schedule keeps 3. More steps keep more of the input: on the pod's oblique sheet (2026-09-18 sweep, "
+              "b2ctrain out/mesh/pod_sweep) 4 leaves the thighs clean skin where 12 keeps the mottling, at 43 s a sheet against 88", minimum=1),
+        Param("head_steps", int, 12, "Denoising steps for the head sheet. Close-ups of a smeared head are where klein invents: at 4 steps it "
+              "painted new faces into the pod's head sheet even with the body beside it, 8 and 12 kept the ponytail and the profiles", minimum=1),
         Param("guidance", float, 1.0, "Guidance scale (klein is distilled; 1.0)", advanced=True),
         Param("seed", int, 0, "Noise seed, fixed per view for a reproducible run"),
         Param("power", float, 4.0, "Facing exponent of a view's claim weight (cos^power x texel density)"),
@@ -634,13 +637,18 @@ class RefineTextureStep(Step):
                 subject[int(.75 * H):, int(.75 * W):] = 0
             paint = cv2.dilate(subject, np.ones((17, 17), np.uint8))
             paint[protect > 127] = 0
+            for panel in json.loads((sdir / "atlas.json").read_text())["panels"]:
+                if panel.get("context_only"):  # the whole person beside the head close-ups: klein looks, never paints
+                    x0, y0, x1, y1 = panel["box_pixels"]
+                    paint[y0:y1, x0:x1] = 0
             scale = min(1.0, side / float(max(W, H)))
             size = (max(16, int(W * scale) // 16 * 16), max(16, int(H * scale) // 16 * 16))
             inp = cv2.resize(diffusion, size, interpolation=cv2.INTER_AREA)
             m = cv2.resize(paint, size, interpolation=cv2.INTER_NEAREST)
             prompt = base_prompt + SHEET_LAYOUT_PROMPTS.get(kind, "")
             t2 = time.time()
-            raw = klein.repaint(cv2.cvtColor(inp, cv2.COLOR_BGR2RGB), m, prompt, params["strength"], params["steps"], params["guidance"], params["seed"])
+            steps = int(params["head_steps"] if kind == "head" else params["steps"])
+            raw = klein.repaint(cv2.cvtColor(inp, cv2.COLOR_BGR2RGB), m, prompt, params["strength"], steps, params["guidance"], params["seed"])
             klein_seconds = time.time() - t2
             full = cv2.resize(cv2.cvtColor(raw, cv2.COLOR_RGB2BGR), (W, H), interpolation=cv2.INTER_CUBIC)
             weight = np.clip(cv2.distanceTransform((claim > 0).astype(np.uint8), cv2.DIST_L2, 5) / 8.0, 0, 1)
@@ -648,7 +656,7 @@ class RefineTextureStep(Step):
             edited = np.clip(diffusion * (1 - weight[..., None]) + full * weight[..., None], 0, 255).astype(np.uint8)
             cv2.imwrite(str(sdir / "edited.png"), edited)
             change = float(np.abs(edited.astype(np.float32) - diffusion.astype(np.float32))[claim > 0].mean()) if (claim > 0).any() else 0.0
-            log.append({"sheet": kind, "size": list(size), "klein_seconds": round(klein_seconds, 1), "mean_change": round(change, 2),
+            log.append({"sheet": kind, "size": list(size), "steps": steps, "klein_seconds": round(klein_seconds, 1), "mean_change": round(change, 2),
                         "panels": [dict(name=p["name"], triangles=p["triangles"]) for p in json.loads((sdir / "atlas.json").read_text())["panels"]]})
             logger.info("refine_texture [%s]: klein %.0fs at %dx%d, mean change %.1f/255", kind, klein_seconds, size[0], size[1], change)
             if debug is not None:
