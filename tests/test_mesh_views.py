@@ -1,4 +1,4 @@
-"""steps/mesh_views.py — the textured mesh rendered at the helix as pass 2's frames."""
+"""steps/mesh_views.py — render_subject: the textured mesh as pass 2's frames, at the splat path's cameras."""
 
 import json
 import os
@@ -13,14 +13,14 @@ import numpy as np
 
 
 class TestHelpers(unittest.TestCase):
-    def test_composite_over_grey(self):
-        from pipeline.steps.mesh_views import composite_over_grey
+    def test_composite_over(self):
+        from pipeline.steps.mesh_views import composite_over
 
         rgba = np.zeros((2, 2, 4), np.uint8)
         rgba[0, 0] = (10, 20, 30, 255)
         rgba[0, 1] = (10, 20, 30, 0)
         rgba[1, 0] = (10, 20, 30, 128)
-        out = composite_over_grey(rgba, 0.5)
+        out = composite_over(rgba, (0.5, 0.5, 0.5))
         self.assertEqual(out[0, 0].tolist(), [10, 20, 30])
         self.assertEqual(out[0, 1].tolist(), [128, 128, 128])
         self.assertTrue(np.all(np.abs(out[1, 0].astype(int) - np.array([69, 74, 79])) <= 1))
@@ -40,7 +40,9 @@ class TestHelpers(unittest.TestCase):
             self.assertEqual(pick_texture(atlas, str(klein), str(photo)), klein)
 
 
-class TestStep(unittest.TestCase):
+class TestSubjectFromMesh(unittest.TestCase):
+    """render_subject's mesh path against a fake mesh-render: the frames, the masks, the names, the texture, the colour."""
+
     FAKE = r'''#!/usr/bin/env python3
 import sys, json, os
 import numpy as np, cv2
@@ -58,9 +60,7 @@ for i, c in enumerate(cams["cameras"]):
     cv2.imwrite(os.path.join(out, c["name"]), rgba)
 '''
 
-    def test_frames_and_masks_from_the_render(self):
-        from unittest import mock
-
+    def test_render_frames_from_the_mesh(self):
         from pipeline.steps import mesh_views as mv
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -78,22 +78,33 @@ for i, c in enumerate(cams["cameras"]):
             cams = [SimpleNamespace(fx=100.0, fy=100.0, cx=16.0, cy=24.0, width=32, height=48, position=[0, 0, float(i)],
                                     rotation=np.eye(3).tolist()) for i in range(3)]
             names = [f"frame_{i + 1:05d}_.png" for i in range(3)]
-            params = mv.RenderMeshViewsStep.resolve_params({"trainer_path": str(fake), "output_dir": str(tmp / "views")})
-            out = mv.RenderMeshViewsStep().run({"mesh_dir": str(atlas), "cameras": cams, "image_names": names, "texture_path": str(klein)}, params)
-            self.assertEqual(len(out["images"]), 3)
-            self.assertEqual(out["images"][0].shape, (48, 32, 3))
-            self.assertEqual(out["images"][2][24, 16].tolist(), [20, 100, 200], "inside the silhouette: the render's colour")
-            self.assertEqual(out["images"][2][0, 0].tolist(), [128, 128, 128], "outside: the grey")
-            self.assertEqual(out["masks"][0].dtype, np.float32)
-            self.assertEqual(float(out["masks"][0][24, 16]), 1.0)
-            self.assertEqual(float(out["masks"][0][0, 0]), 0.0)
+            params = mv.RenderSubjectStep.resolve_params({"from_mesh": True, "trainer_path": str(fake), "mesh_render_dir": str(tmp / "views"), "confidence": True})
+            step = mv.RenderSubjectStep()
+            confidence = SimpleNamespace(cull_color=(0.5, 0.5, 0.5))
+            images, masks = step._render_frames({"mesh_dir": str(atlas), "mesh_texture_path": str(klein)}, params, scene=None, splat_path=None, cameras=cams,
+                                                image_names=names, width=32, height=48, bg_color=(0.0, 0.0, 0.0), render_path="unused", confidence=confidence, sh_degree=2)
+            self.assertEqual(len(images), 3)
+            self.assertEqual(images[0].shape, (48, 32, 3))
+            self.assertEqual(images[2][24, 16].tolist(), [20, 100, 200], "inside the silhouette: the render's colour")
+            self.assertEqual(images[2][0, 0].tolist(), [128, 128, 128], "outside: the confidence mode's cull grey")
+            self.assertEqual(masks[0].dtype, np.float32)
+            self.assertEqual(float(masks[0][24, 16]), 1.0)
+            self.assertEqual(float(masks[0][0, 0]), 0.0)
             log = json.loads((tmp / "log.json").read_text())
             self.assertEqual(log["texture"], str(klein), "klein's texture is the one rendered")
-            self.assertEqual(log["bg"], "0.5")
-            cams_json = json.loads((tmp / "views" / "cams_helix.json").read_text())
+            self.assertEqual(log["bg"], "0.5000")
+            cams_json = json.loads((tmp / "views" / "cams.json").read_text())
             self.assertEqual([c["name"] for c in cams_json["cameras"]], names, "the renders carry the frames' names")
-            self.assertEqual(out["mesh_views_stats"]["frames"], 3)
             self.assertFalse((tmp / "views" / "renders").exists(), "renders are not kept by default")
+
+    def test_off_it_is_render_splat(self):
+        from pipeline.steps import mesh_views as mv
+        from pipeline.steps.splat import RenderSplatStep
+
+        self.assertTrue(issubclass(mv.RenderSubjectStep, RenderSplatStep))
+        names = {p.name for p in mv.RenderSubjectStep.PARAMS}
+        self.assertTrue({"from_mesh", "pattern", "override_cam_from_mesh", "sh_degree", "confidence"} <= names)
+        self.assertFalse(mv.RenderSubjectStep.resolve_params({})["from_mesh"], "a bare render_subject is a splat render")
 
 
 if __name__ == "__main__":

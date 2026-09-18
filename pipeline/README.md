@@ -995,15 +995,18 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   of owned triangles on the same panel, sheet pixels within 0.1/255) and
   run as the step on the photo-textured atlas locally; the per-view loop
   stays as `mode: views`. **And pass 2 conditions on it** (`pass2_mesh`, on
-  by default, the same day): `render_mesh_views` (steps/mesh_views.py)
-  renders the refined mesh at exactly the cameras `rerender_splat`
-  produced, composited over the same grey with the render's alpha as the
-  matte, and replaces the frames before `mask_splat_fringes` and
-  `reinject_anchor`, which run unchanged. The mesh branch runs whenever
-  pass 2 wants it or `export_mesh` packages it (the `when: {any: [...]}`
-  form); off, pass 2 sees the splat frames as before and the branch is
-  skipped. Verified with the real trainer at the 81 helix cameras of
-  00307 (5 s). NOT yet run on a pod.
+  by default, the same day): `render_subject` (steps/mesh_views.py) is
+  `render_splat` with the source of the frames decided where they are
+  drawn — it resolves the helical path, the anchor and its extras exactly
+  as `rerender_splat` did, then rasterises the splat or renders the
+  refined mesh with `b2ctrain mesh-render` at those cameras, composited
+  over the same grey with the render's alpha as the matte; the rmbg matte
+  is skipped in mesh mode (`when: {not: ...}`), `mask_splat_fringes` and
+  `reinject_anchor` run unchanged. The mesh branch runs whenever pass 2
+  wants it or `export_mesh` packages it (`when: {any: [...]}`); off, the
+  step rasterises the splat as before and the branch is skipped. The mesh
+  path was verified with the real trainer at the 81 helix cameras of 00307
+  (5 s); the first pod run of the mesh path reached refine_texture.
 - `load_splat`/`save_splat`/`render_splat` — `render_splat`'s camera-path
   resolution (which cameras, what focal length, which bounding box frames
   the orbit, point-cloud preservation, metadata pass-through) is verified

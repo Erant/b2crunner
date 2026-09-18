@@ -46,7 +46,7 @@
 # not look.
 #
 # WHAT CHANGED (2026-09-08, later): **the helical re-render follows the
-# camera refinement.** `rerender_splat` takes `given_anchor_camera:
+# camera refinement.** `render_subject` takes `given_anchor_camera:
 # scene.image_warp.camera` and moves its whole helix by the delta between
 # that and the refined anchor camera it was handed, so the stage-3
 # `reinject_anchor` puts the photograph where the trained splat thinks it
@@ -105,7 +105,7 @@
 # measured against the 81 novel helical cameras the second denoise sees):
 #
 #   * the evidence gate stops culling the subject — brush a9405881 fixed two
-#     bugs in the in-mask denominator, and `rerender_splat` now passes
+#     bugs in the in-mask denominator, and `render_subject` now passes
 #     `--conf-tau 0.3 --conf-angle-margin 45`. 30% of the subject culled
 #     (69% of the face, 67% of the silver top) -> 6.4%, IoU 0.70 -> 0.92.
 #     This is the big one; everything else here is worth less than it.
@@ -118,7 +118,7 @@
 #     (face 143 -> 161) — and `match_alpha_weight: 0.5`. (The polish went
 #     back off on 2026-09-07: re-measured on b2ctrain it buys nothing.)
 #   * the re-render was made on BLACK again (`cull_color`; back to 0.5 grey
-#     on 2026-09-07, see rerender_splat), the room is off
+#     on 2026-09-07, see render_subject), the room is off
 #     there too (`background: ""`), and the frames the second denoise sees
 #     are cut with an RMBG matte (`resplat_foreground_masks`) and laid over
 #     0.5 grey by `mask_splat_fringes` in its new `composite` mode. The gate
@@ -136,7 +136,7 @@
 # fast_helical_shell.yaml is gone, and with it everything only it used:
 # `refine_pose_to_splat` (steps/pose_refine.py), `inject_shell_views`, the
 # whole-body `pointmap_splat` registration, the `anchor_helix` global
-# (rerender_splat is simply `override_cam_from_mesh: true` and publishes
+# (render_subject is simply `override_cam_from_mesh: true` and publishes
 # plain `anchor_position` / `anchor_frame_index` outputs), the runner's
 # optional-OUTPUT `name?:` form, the mirror test, and the `?` on
 # face_splat_refined's `given_camera` — that input is required now, and the
@@ -218,7 +218,7 @@
 # with it face_refined.ply and the refined cameras, was gone.
 #
 # WHAT CHANGED (2026-09-04): **the helical anchor re-injection actually
-# runs.** The shared tail's `rerender_splat` now anchors its helix
+# runs.** The shared tail's `render_subject` now anchors its helix
 # (`override_cam_from_mesh: true`) and publishes
 # `anchor_position` / `anchor_frame_index` for the path it built, so the
 # stage-3 `reinject_anchor` has a frame to match. It had none: an
@@ -442,13 +442,13 @@ settings:
     help: >-
       How much of the body fills the frame. Threaded through both renderers
       that see it — the mesh render (render_initial_views) and the splat
-      re-render (rerender_splat) — because they have to agree: `render` frames
+      re-render (render_subject) — because they have to agree: `render` frames
       the mesh at this preset, the splat is trained on cameras aimed for it,
-      and rerender_splat rebuilds its helical orbit around the same preset.
+      and render_subject rebuilds its helical orbit around the same preset.
       `full` is the whole body and what every prior run used; torso / bust /
       head crop progressively tighter. Only the mesh reconstruction's skeleton
       makes the tighter presets available — `render` falls back to `full` for
-      any it cannot compute, and rerender_splat follows.
+      any it cannot compute, and render_subject follows.
 
   - name: input_layout
     label: Input
@@ -626,15 +626,15 @@ settings:
     default: true
     help: >-
       On (2026-09-17): the second denoise's frames are the meshify mesh with
-      its klein texture, rendered at exactly the helix cameras the splat
-      re-render produced (steps/mesh_views.py; the pod pass-2 A/B's fourth
-      arm, b2ctrain out/mesh/ab2/ds_mesh_b2c), composited over the same grey,
-      the render's alpha as the matte. The anchor re-injection and the
-      fringe masking run on them unchanged. This builds the mesh whether or
-      not `export_mesh` packages it: ~2 minutes for the mesh, ~6 for the
-      klein pass, ~1 for the renders. Off: pass 2 sees the intermediate
-      splat re-rendered, as before, and the mesh branch is skipped entirely
-      unless `export_mesh` asks for it.
+      its klein texture, rendered by `render_subject` (steps/mesh_views.py)
+      at the very helix cameras it resolves — the pod pass-2 A/B's fourth
+      arm, b2ctrain out/mesh/ab2/ds_mesh_b2c — composited over the same grey,
+      the render's alpha as the matte (the rmbg matte is skipped). The
+      anchor re-injection and the fringe masking run on them unchanged. This
+      builds the mesh whether or not `export_mesh` packages it: ~2 minutes
+      for the mesh, ~6 for the klein pass, seconds for the renders. Off:
+      render_subject rasterises the intermediate splat, as before, and the
+      mesh branch is skipped entirely unless `export_mesh` asks for it.
 
   - name: texture_mode
     label: How klein sees the texture
@@ -1188,7 +1188,7 @@ steps:
   # override_cam_from_mesh: true is what makes this the *initial* render —
   # it anchors one frame exactly at the original SAM-3D-Body camera and
   # publishes the orbit_target/anchor_position/original_focal_length/
-  # image_warp extras that reinject_anchor_initial and rerender_splat
+  # image_warp extras that reinject_anchor_initial and render_subject
   # both key off (see splat.py's override_cam_from_mesh path). Without it
   # this would be a normal auto-oriented render with no anchor to warp the
   # reference photo onto.
@@ -1218,7 +1218,7 @@ steps:
       pattern: circular
       n_frames: 81
       resolution: ${globals.resolution}
-      # See the `framing` global: rerender_splat below reads the same value,
+      # See the `framing` global: render_subject below reads the same value,
       # and the two renderers must frame the subject identically.
       framing: ${globals.framing}
       override_cam_from_mesh: true
@@ -1294,7 +1294,7 @@ steps:
       # the ruling in frame frontal / 66-72% three-quarter, against 22% / 44%
       # at 2). This file at `542eb79` has both arguments in full.
       #
-      # NOTE that `rerender_splat` below followed on 2026-09-05: neither
+      # NOTE that `render_subject` below followed on 2026-09-05: neither
       # render draws a room now, so the two denoise passes agree again. What
       # they do NOT agree with is their own prompt, whose 场景 slot still
       # describes the gridded room in both passes — see the note on that
@@ -1588,7 +1588,7 @@ steps:
       pattern: circular
       n_frames: 81
       resolution: ${globals.resolution}
-      # See the `framing` global: rerender_splat below reads the same value,
+      # See the `framing` global: render_subject below reads the same value,
       # and the two renderers must frame the subject identically.
       framing: ${globals.framing}
       override_cam_from_mesh: true
@@ -1664,7 +1664,7 @@ steps:
       # the ruling in frame frontal / 66-72% three-quarter, against 22% / 44%
       # at 2). This file at `542eb79` has both arguments in full.
       #
-      # NOTE that `rerender_splat` below followed on 2026-09-05: neither
+      # NOTE that `render_subject` below followed on 2026-09-05: neither
       # render draws a room now, so the two denoise passes agree again. What
       # they do NOT agree with is their own prompt, whose 场景 slot still
       # describes the gridded room in both passes — see the note on that
@@ -2132,7 +2132,7 @@ steps:
       # cap axis (which prefers the live camera anyway) and inject_anchor's
       # position match — now see the same anchor the cameras do.
       #
-      # It does not stay this file's last word on the anchor: rerender_splat
+      # It does not stay this file's last word on the anchor: render_subject
       # republishes both keys for the helix it builds, because a position
       # match has to be against the path the frames were rendered along, and
       # this refinement's ~62 mm move would miss it by ~10x the tolerance.
@@ -2402,7 +2402,7 @@ steps:
   # its alpha mode. The denoised frames keep carving the silhouette (their
   # alpha is untouched) and keep every pixel outside the face; over the
   # face they whisper and the cap speaks. brush's evidence pass honours the
-  # same map, so rerender_splat's confidence gate does not then read the
+  # same map, so render_subject's confidence gate does not then read the
   # silenced disagreement as evidence against the face.
   #
   # Only within the cap: the attenuation is full inside cap_radius_deg (30,
@@ -2629,7 +2629,7 @@ steps:
       # Also steps/brush.py's default, and spelled out for the same reason:
       # the next-but-one step depends on it. It writes each Gaussian's
       # multi-view evidence into the exported .ply (ev_* properties), which
-      # is what rerender_splat's `confidence` reads to gate the render
+      # is what render_subject's `confidence` reads to gate the render
       # without a second pass over the dataset. Turn it off and that render
       # warns and falls back to plain alpha — i.e. silently back to the
       # behaviour mask_splat used to patch up.
@@ -2667,7 +2667,7 @@ steps:
       # below, 3m44s for the step — that one timed on the fp16-SH build the
       # trainer briefly defaulted to, so read it as a floor. Every flag
       # emitted here is accepted, and the export carries the same ev_*
-      # block rerender_splat gates on.
+      # block render_subject gates on.
     outputs:
       splat_path: dataset.splat_path
 
@@ -2807,7 +2807,7 @@ steps:
   # intermediate dataset. The experiments it ports were run on exactly
   # this data (b2ctrain out/mesh), and its renders along the helix are the
   # pass-2 A/B's fourth arm — now pass 2's frames themselves (`pass2_mesh`,
-  # rerender_mesh below). Built whenever pass 2 wants it or `export_mesh`
+  # render_subject below). Built whenever pass 2 wants it or `export_mesh`
   # packages it.
   - id: meshify
     step: meshify
@@ -2902,11 +2902,19 @@ steps:
       mesh_path: scene.mesh_klein_path
       refine_texture_stats: scene.refine_texture_stats
 
-  - id: rerender_splat
-    step: render_splat
+  - id: render_subject
+    step: render_subject
     dispatch: in_process
     inputs:
       splat_scene: scene.splat
+      # The textured mesh (steps/mesh_views.py): with `pass2_mesh` the frames
+      # are the meshify mesh with klein's texture (the photograph's when only
+      # photo_texture ran, the bake otherwise) rendered at the very cameras
+      # this step resolves — the path, the anchor and its extras are the same
+      # either way, and nothing downstream can tell the sources apart by shape.
+      mesh_dir: scene.mesh_dir?
+      mesh_texture_path: scene.mesh_texture_path?
+      mesh_photo_texture_path: scene.mesh_photo_texture?
       # The trained .ply itself, so the render reads it where it lies. Without
       # this the step stages `splat_scene` through SplatScene.to_ply, which
       # writes the standard 3DGS columns only: the ev_* block train_splat
@@ -3032,6 +3040,8 @@ steps:
       # the fade params at all, and never did. The shell it fades against is
       # an ellipsoid fitted to MESH VERTICES, and a .ply has none.
       background: ""
+      from_mesh: ${globals.pass2_mesh}
+      mesh_render_dir: ${globals.output_root}/debug/mesh_views
     outputs:
       images: dataset.images
       masks: dataset.masks
@@ -3064,66 +3074,19 @@ steps:
   # The gate is not wasted: it has already been applied, to the RGB, by the
   # render above. Culled pixels come through BLACK, and black on a grey
   # composite is a hole in the subject rather than a hole in the frame.
+  # The matte mask_splat composites with: measured against the splat frames
+  # by rmbg (2026-09-05). A mesh render's alpha IS its silhouette, so with
+  # `pass2_mesh` the step is skipped and render_subject's masks stand.
   - id: resplat_foreground_masks
     step: rmbg
     dispatch: in_process
+    when:
+      not: ${globals.pass2_mesh}
     inputs:
       images: dataset.images
     outputs:
       masks: dataset.masks
 
-  # Pass 2's frames are the textured mesh, not the splat (steps/mesh_views.py,
-  # `pass2_mesh`, 2026-09-17): the meshify mesh with its klein texture rendered
-  # at EXACTLY the cameras rerender_splat just produced, composited over the
-  # same grey, the render's alpha as the matte. rerender_splat still runs — it
-  # is what sets the path, the anchor's position and the frame count, and its
-  # frames are a minute's work — and mask_splat_fringes + reinject_anchor
-  # below see a dataset of the same shape either way. Off: the splat frames
-  # and the rmbg matte above stand.
-  - id: rerender_mesh
-    step: render_mesh_views
-    dispatch: in_process
-    when: ${globals.pass2_mesh}
-    inputs:
-      mesh_dir: scene.mesh_dir
-      cameras: dataset.cameras
-      image_names: dataset.image_names
-      # klein's texture when refine_texture ran, the photograph's when only
-      # photo_texture did, the bake otherwise.
-      texture_path: scene.mesh_texture_path?
-      photo_texture_path: scene.mesh_photo_texture?
-    params:
-      output_dir: ${globals.output_root}/debug/mesh_views
-    outputs:
-      images: dataset.images
-      masks: dataset.masks
-      mesh_views_stats: scene.mesh_views_stats
-
-  # This used to be the stage that dropped the splat's low-confidence
-  # fringes: threshold the render's alpha at 239/255, dilate by 2,
-  # composite over black, bilateral-filter (`mask_splat.json`'s subgraph,
-  # at `fast helical.yaml`'s 6/2). rerender_splat's `confidence` above
-  # decides that better — once, in 3-D, from what the training views
-  # actually constrained rather than from accumulated alpha per pixel per
-  # frame — so the cut is gone and what is left of the old subgraph is the
-  # COMPOSITE: the subject laid over 0.5 grey with the matte the step above
-  # produced, softness and all, no threshold and no bilateral filter to
-  # smear an edge that is already right.
-  #
-  # 0.5 grey, the same colour the render above culls to (rerender_splat's
-  # `cull_color`, grey again since 2026-09-07 — it was black for two days,
-  # and the black culls inside the subject were the face-rim speckles): a
-  # culled pixel and the background resolve to the one value the batch is
-  # handed to the denoise on — the same 0.5 the warped anchor photo's
-  # border is filled with, so the one real frame in the batch does not
-  # arrive as the odd one out.
-  #
-  # The step's other half is unchanged and still needed: replacing the
-  # per-pixel matte in dataset.masks with the per-frame all-1.0 VACE batch
-  # that denoise_pass2 reads and reinject_anchor writes its 0.0 into.
-  # Ordering is unchanged and still load-bearing (see below). To A/B against
-  # the recorded ComfyUI run, set `mode: threshold` and turn rerender_splat's
-  # `confidence` off — 6/2 is that step's own default.
   - id: mask_splat_fringes
     step: mask_splat
     dispatch: in_process
@@ -3137,7 +3100,7 @@ steps:
 
   # Put the warped reference photo back onto whichever new frames landed on
   # the original camera. Matches by position, so it survives the reorbit —
-  # but only because rerender_splat above ANCHORED its helix and published
+  # but only because render_subject above ANCHORED its helix and published
   # where it put the anchor. A position match cannot re-apply an anchor to a
   # path that never passes through it; with the re-render unanchored (as
   # this file had it until 2026-09-04) the nearest camera is ~24x the
@@ -3146,7 +3109,7 @@ steps:
   #
   # AFTER mask_splat, not before it — the ordering is load-bearing and was
   # wrong. Before mask_splat this step sits where dataset.masks is carrying
-  # rerender_splat's per-pixel splat alpha, and it would overwrite exactly
+  # render_subject's per-pixel splat alpha, and it would overwrite exactly
   # the input mask_splat exists to threshold. Here it only ever sees VACE
   # masks: mask_splat has already consumed the alpha and emitted all-1.0.
   #
@@ -3390,7 +3353,7 @@ steps:
 
   # There used to be a second sapiens2_lite here, estimating normals for
   # these frames — the stage-2 maps do not describe them, since
-  # rerender_splat replaced the dataset wholesale with a longer orbit and
+  # render_subject replaced the dataset wholesale with a longer orbit and
   # the upscale changed the resolution — so that the deliverable training
   # could supervise on them. It is gone with the supervision itself
   # (2026-09-06): the normal loss measured as a straight loss on this splat,
@@ -3406,7 +3369,7 @@ steps:
 
   # ------------------------------------------- refining the cameras (stage 6)
   # The same refinement again, and it is needed again for the same reason:
-  # rerender_splat replaced the dataset wholesale with a NEW generated path
+  # render_subject replaced the dataset wholesale with a NEW generated path
   # — a longer helical orbit, 81 fresh poses solved from a pattern rather
   # than measured — so the corrections made back in stage 2 do not describe
   # these cameras at all. The frames have also been through a second
@@ -3441,7 +3404,7 @@ steps:
       image_names: dataset.image_names
       images: dataset.images
       masks: dataset.masks
-      # The helix's anchor (37), as rerender_splat published it — so the
+      # The helix's anchor (37), as render_subject published it — so the
       # "anchor frame is left N deg" line and stats.json's anchor_residual
       # are about the photograph, not frame 0. Until 2026-09-08 this was
       # unwired and both described a synthetic frame.

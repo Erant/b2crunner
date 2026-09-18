@@ -142,6 +142,11 @@ def _workflows():
     return sorted(WORKFLOW_DIR.glob("*.yaml"))
 
 
+#: The steps that rasterise the splat along a path: render_splat, and render_subject
+#: (render_splat with the mesh as an alternative source, 2026-09-17).
+_SPLAT_RENDERS = ("render_splat", "render_subject")
+
+
 def _splat_alpha_producer(case, path, spec, mask_at: int) -> int:
     """Index of the `render_splat` whose per-pixel alpha `mask_splat` is
     about to threshold — i.e. the last one before it that publishes
@@ -154,7 +159,7 @@ def _splat_alpha_producer(case, path, spec, mask_at: int) -> int:
     bootstrap inside a gap that does not exist.
     """
     producers = [i for i, step in enumerate(spec.steps[:mask_at])
-                 if step.step == "render_splat"
+                 if step.step in _SPLAT_RENDERS
                  and "dataset.masks" in step.outputs.values()]
     case.assertTrue(
         producers,
@@ -535,13 +540,11 @@ class TestWorkflowFiles(unittest.TestCase):
         Replacing it is that step's whole job, so a step that has no other,
         and it cannot read what it replaces.
 
-        `render_mesh_views` (2026-09-17) is the other exception, for the
-        same reason one level up: it replaces the FRAMES wholesale — the
-        textured mesh rendered at the splat's cameras — and the alpha it
-        publishes is those frames' own silhouette. The splat's alpha belongs
-        to frames that are no longer there.
+        (`render_subject`, 2026-09-17, is not in the gap: it IS the producer,
+        drawing either the splat or the textured mesh, so its alpha is always
+        the frames' own.)
         """
-        deliberate = {"rmbg", "render_mesh_views"}
+        deliberate = {"rmbg"}
         for path in _workflows():
             spec = WorkflowSpec.from_yaml(str(path))
             if not any(s.step == "mask_splat" for s in spec.steps):
@@ -589,7 +592,7 @@ class TestWorkflowFiles(unittest.TestCase):
                 continue
             mask_at = min(i for i, s in enumerate(steps) if s.step == "mask_splat")
             inject_at = [i for i, s in enumerate(steps) if s.step == "inject_anchor"]
-            resplat_at = [i for i, s in enumerate(steps) if s.step == "render_splat"]
+            resplat_at = [i for i, s in enumerate(steps) if s.step in _SPLAT_RENDERS]
 
             with self.subTest(workflow=path.name, check="reinjected after mask_splat"):
                 self.assertTrue(
@@ -653,7 +656,7 @@ class TestWorkflowFiles(unittest.TestCase):
                 # against and there is nothing to re-anchor.
                 repaths = [
                     j for j, s in by_index.items()
-                    if j < i and s.step == "render_splat" and s.params.get("pattern")
+                    if j < i and s.step in _SPLAT_RENDERS and s.params.get("pattern")
                     and "dataset.cameras" in s.outputs.values()
                 ]
                 if not repaths:
@@ -755,7 +758,7 @@ class TestWorkflowFiles(unittest.TestCase):
             spec = WorkflowSpec.from_yaml(str(path))
             trainings = [s for s in spec.steps if s.step == "brush"]
             for step in spec.steps:
-                if step.step != "render_splat" or not step.params.get("confidence"):
+                if step.step not in _SPLAT_RENDERS or not step.params.get("confidence"):
                     continue
                 with self.subTest(workflow=path.name, step=step.id):
                     if step.params.get("evidence_dataset"):
@@ -793,7 +796,7 @@ class TestWorkflowFiles(unittest.TestCase):
             by_id = {s.id: s for s in spec.steps}
             producers = {}
             for step in spec.steps:
-                if step.step == "render_splat":
+                if step.step in _SPLAT_RENDERS:
                     for ctx in step.outputs.values():
                         producers[ctx] = step.id
             needs_black = {"select_support_views": ("images", "masks")}
@@ -864,7 +867,7 @@ class TestWorkflowFiles(unittest.TestCase):
                     stale = [
                         s.id for s in spec.steps
                         if cap_at < order[s.id] < order[step.id] and (
-                            (s.step == "render_splat" and s.params.get("pattern")
+                            (s.step in _SPLAT_RENDERS and s.params.get("pattern")
                              and "dataset.cameras" in s.outputs.values())
                             or (s.step in ("seedvr2", "resize_batch")
                                 and "dataset.images" in s.outputs.values()))
@@ -1094,7 +1097,7 @@ class TestWorkflowFiles(unittest.TestCase):
 
         Both `brush` trainings come next: each one is roughly an hour of
         GPU fitted to whatever poses reach it, and the second trains on a
-        dataset `rerender_splat` replaced wholesale, so one refinement
+        dataset `render_subject` replaced wholesale, so one refinement
         cannot cover both.
 
         And the refinement never reads a supporting view. Those are renders
@@ -1677,22 +1680,22 @@ class TestTheFirstDenoiseInputIsKept(unittest.TestCase):
 
 
 class TestOnlyTheHelicalRerenderCapsTheShBands(unittest.TestCase):
-    """`rerender_splat` is the one render_splat that sets `sh_degree`, and
+    """`render_subject` is the one render_splat that sets `sh_degree`, and
     it sets 2. Every other instance leaves the step's default (3, every
     band the splat carries) alone — pinned as a workflow decision rather
     than as a step default, because a `sh_degree:` line quietly added to
     the face cap's render would change what the final training is
     supervised by."""
 
-    def test_rerender_splat_says_two_and_nothing_else_says_anything(self):
+    def test_render_subject_says_two_and_nothing_else_says_anything(self):
         from pipeline.cli import resolve_workflow
         from pipeline.workflow import WorkflowSpec
 
         spec = WorkflowSpec.from_yaml(resolve_workflow("helical"))
-        renders = [s for s in spec.steps if s.step == "render_splat"]
+        renders = [s for s in spec.steps if s.step in _SPLAT_RENDERS]
         self.assertGreater(len(renders), 1)
         setting = {s.id: s.params.get("sh_degree") for s in renders}
-        self.assertEqual(setting.pop("rerender_splat"), 2)
+        self.assertEqual(setting.pop("render_subject"), 2)
         self.assertEqual(set(setting.values()), {None}, setting)
 
 
@@ -1762,7 +1765,7 @@ class TestTheSingleViewInput(unittest.TestCase):
 
 class TestThePixelOpsShipOff(unittest.TestCase):
     """`adjust_denoised` (pixel_ops) runs in the workflow, but every knob on
-    it is off unless a setting turns it on. The SH cap on `rerender_splat`
+    it is off unless a setting turns it on. The SH cap on `render_subject`
     is aimed at part of what the highlight suppression was for — the
     specular sparkle a re-render carries into pass 2 — so the two are kept
     separable: the pixel op stays a choice, not a default."""
@@ -2089,56 +2092,576 @@ class TestDeclaredSettings(unittest.TestCase):
                 self.assertTrue(any("upscale" in r for r in readers))
 
 class TestPassTwoTakesTheMesh(unittest.TestCase):
-    """`pass2_mesh` (2026-09-17): the second denoise conditions on the textured
-    mesh rendered at the splat re-render's cameras, on by default; off, the
-    mesh branch is skipped unless `export_mesh` packages it, and pass 2 sees
-    the splat frames as before."""
+    """`pass2_mesh` (2026-09-17): `render_subject` — render_splat with the source
+    decided by `from_mesh` — draws the second denoise's frames from the textured
+    mesh at the cameras it resolves, on by default; off, it rasterises the splat
+    as before and the mesh branch is skipped unless `export_mesh` packages it."""
 
     def _spec(self):
         return WorkflowSpec.from_yaml(str(next(p for p in _workflows() if p.name == "helical.yaml")))
 
-    def test_default_on_and_the_render_sits_between_the_matte_and_mask_splat(self):
+    def test_default_on_and_the_subject_render_sits_where_the_splat_render_was(self):
         spec = self._spec()
         setting = next(s for s in spec.settings if s.name == "pass2_mesh")
         self.assertTrue(setting.default)
         ids = [s.id for s in spec.steps]
-        mesh_at = ids.index("rerender_mesh")
-        self.assertEqual(spec.steps[mesh_at].step, "render_mesh_views")
-        self.assertLess(ids.index("rerender_splat"), mesh_at, "the cameras it renders at are rerender_splat's")
-        self.assertLess(ids.index("resplat_foreground_masks"), mesh_at, "its alpha, not the rmbg matte, is the final mask")
-        self.assertLess(mesh_at, ids.index("mask_splat_fringes"))
+        at = ids.index("render_subject")
+        step = spec.steps[at]
+        self.assertEqual(step.step, "render_subject")
+        self.assertEqual(step.params["from_mesh"], "${globals.pass2_mesh}")
+        self.assertEqual(step.params["pattern"], "helical", "the path is the same helical one")
+        self.assertTrue(step.params["override_cam_from_mesh"])
+        self.assertEqual(step.inputs["mesh_dir"], "scene.mesh_dir?")
+        self.assertEqual(step.inputs["mesh_texture_path"], "scene.mesh_texture_path?")
+        for field in ("images", "masks", "cameras", "anchor_position", "anchor_frame_index"):
+            self.assertIn(field, step.outputs)
+        self.assertNotIn("render_mesh_views", [s.step for s in spec.steps], "one step draws the frames, whichever the source")
+        self.assertLess(ids.index("refine_texture"), at, "the texture it renders is klein's")
+        self.assertLess(at, ids.index("resplat_foreground_masks"))
+        self.assertLess(ids.index("resplat_foreground_masks"), ids.index("mask_splat_fringes"))
         self.assertLess(ids.index("mask_splat_fringes"), ids.index("reinject_anchor"), "the anchor is still re-injected after")
         self.assertLess(ids.index("reinject_anchor"), ids.index("denoise_pass2"))
-        for field in ("images", "masks"):
-            self.assertEqual(spec.steps[mesh_at].outputs[field], f"dataset.{field}")
-        self.assertEqual(spec.steps[mesh_at].inputs["cameras"], "dataset.cameras")
-        self.assertLess(ids.index("refine_texture"), mesh_at, "the texture it renders is klein's")
 
-    def test_the_switches_gate_the_mesh_branch(self):
+    def test_the_switches_gate_the_mesh_branch_and_the_matte(self):
         from pipeline.workflow import step_enabled
 
         spec = self._spec()
-        by_id = {s.id: s in spec.steps and s for s in spec.steps}
-        base = {name: p.default for name, p in ((p.name, p) for p in spec.settings)}
+        by_id = {s.id: s for s in spec.steps}
+        base = {p.name: p.default for p in spec.settings}
         base.update(face_splat=True, photo_texture=True, refine_texture=True)
         for export_mesh, pass2_mesh, mesh_runs in ((False, False, False), (True, False, True), (False, True, True), (True, True, True)):
             g = dict(base, export_mesh=export_mesh, pass2_mesh=pass2_mesh)
             with self.subTest(export_mesh=export_mesh, pass2_mesh=pass2_mesh):
                 for step_id in ("meshify", "photo_texture", "refine_texture"):
                     self.assertEqual(step_enabled(by_id[step_id], g), mesh_runs, step_id)
-                self.assertEqual(step_enabled(by_id["rerender_mesh"], g), pass2_mesh)
-                self.assertTrue(step_enabled(by_id["rerender_splat"], g), "the splat re-render always runs: it sets the path")
+                self.assertTrue(step_enabled(by_id["render_subject"], g), "render_subject always runs: it sets the path")
+                self.assertEqual(step_enabled(by_id["resplat_foreground_masks"], g), not pass2_mesh, "the rmbg matte only for splat frames")
 
-    def test_when_any_form(self):
+    def test_when_forms(self):
         from pipeline.workflow import when_truthy
 
         self.assertTrue(when_truthy({"any": [False, "true"]}))
         self.assertFalse(when_truthy({"any": [False, "false"]}))
         self.assertFalse(when_truthy([{"any": [True]}, False]))
         self.assertTrue(when_truthy([{"any": [False, True]}, True]))
+        self.assertTrue(when_truthy({"not": "false"}))
+        self.assertFalse(when_truthy({"not": True}))
         with self.assertRaises(ValueError):
             when_truthy({"all": [True]})
 
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+class TestTheIntermediateSplatIsKept(unittest.TestCase):
+    """The first brush training exports somewhere the result .zip carries.
+
+    That splat is what the helical re-render is built from, so it is the
+    first thing to look at when the re-render is wrong — and it is only
+    reachable afterwards if it lands under the run's `debug/`, which is
+    what `runs.DEBUG_SUBDIRS` packages. An `output_dir` here instead would
+    put it in `brush/training_<ms>/`: on the volume, and gone with the pod.
+    """
+
+    def test_the_first_training_exports_into_debug(self):
+        from pipeline.cli import resolve_workflow
+        from pipeline.templating import resolve
+        from pipeline.workflow import WorkflowSpec
+
+        spec = WorkflowSpec.from_yaml(resolve_workflow("helical"))
+        scope = {"globals": dict(spec.globals, output_root="/out")}
+        trainings = {
+            step.id: resolve(step.params, scope)
+            for step in spec.steps if step.step == "brush"
+        }
+        self.assertIn("train_splat", trainings)
+        intermediate = trainings["train_splat"]
+        self.assertEqual(intermediate.get("export_dir"), "/out/debug")
+        self.assertTrue(str(intermediate.get("export_name", "")).endswith(".ply"))
+        # `output_dir` would win nothing here (export_dir takes precedence),
+        # but leaving both set would be a contradiction to read later.
+        self.assertIsNone(intermediate.get("output_dir"))
+
+    def test_the_two_trainings_cannot_collide(self):
+        from pipeline.cli import resolve_workflow
+        from pipeline.templating import resolve
+        from pipeline.workflow import WorkflowSpec
+
+        spec = WorkflowSpec.from_yaml(resolve_workflow("helical"))
+        scope = {"globals": dict(spec.globals, output_root="/out")}
+        exports = [
+            (resolve(step.params, scope).get("export_dir"),
+             resolve(step.params, scope).get("export_name"))
+            for step in spec.steps if step.step == "brush"
+        ]
+        self.assertEqual(len(exports), len(set(exports)), f"two trainings share a path: {exports}")
+
+
+class TestTheFirstDenoiseInputIsKept(unittest.TestCase):
+    """The control video pass 1 is handed lands in the debug bundle.
+
+    Everything else a run exports describes frames from AFTER a denoise —
+    `colmap_intermediate/` is pass 1's output, `colmap/` is pass 2's. The
+    drawings that caused them lived in memory only, so "was the skeleton
+    too much ink", "did the face splat land on the face" and "does the
+    anchor frame carry the photograph" could be asked of a finished run
+    only by re-running the first fourteen steps from the same upload — and
+    not at all once the upload was gone.
+    """
+
+    def _spec(self):
+        from pipeline.cli import resolve_workflow
+        from pipeline.workflow import WorkflowSpec
+
+        return WorkflowSpec.from_yaml(resolve_workflow("helical"))
+
+    def test_the_dataset_is_saved_under_debug(self):
+        from pipeline.templating import resolve
+
+        spec = self._spec()
+        scope = {"globals": dict(spec.globals, output_root="/out")}
+        saves = {
+            step.id: resolve(step.params, scope)["directory"]
+            for step in spec.steps if step.step == "save_dataset"
+        }
+        self.assertIn("dump_denoise_input", saves)
+        self.assertEqual(saves["dump_denoise_input"], "/out/debug/denoise_pass1_input")
+        for step_id, directory in saves.items():
+            self.assertTrue(
+                directory.startswith("/out/debug/"),
+                f"{step_id} writes to {directory!r}, which the result .zip never sees")
+        self.assertEqual(len(set(saves.values())), len(saves))
+
+    def test_it_saves_what_the_denoise_reads(self):
+        """After the anchor injection, before pass 1 — so the frames on disk
+        carry the warped photograph and the 0.0 VACE mask at the anchor,
+        which is the half of the input a mesh render cannot be re-derived
+        into."""
+        spec = self._spec()
+        order = [step.id for step in spec.steps]
+        self.assertLess(order.index("reinject_anchor_initial"), order.index("dump_denoise_input"))
+        self.assertLess(order.index("dump_denoise_input"), order.index("denoise_pass1"))
+        dump = next(s for s in spec.steps if s.id == "dump_denoise_input")
+        denoise = next(s for s in spec.steps if s.id == "denoise_pass1")
+        self.assertEqual(dump.inputs["dataset"], "dataset")
+        # The frames and their masks are what the dump is for; both reach
+        # the denoise from the same dataset the dump wrote.
+        self.assertEqual(denoise.inputs["control_video"], "dataset.images")
+        self.assertEqual(denoise.inputs["control_masks"], "dataset.masks")
+
+
+class TestOnlyTheHelicalRerenderCapsTheShBands(unittest.TestCase):
+    """`render_subject` is the one render_splat that sets `sh_degree`, and
+    it sets 2. Every other instance leaves the step's default (3, every
+    band the splat carries) alone — pinned as a workflow decision rather
+    than as a step default, because a `sh_degree:` line quietly added to
+    the face cap's render would change what the final training is
+    supervised by."""
+
+    def test_render_subject_says_two_and_nothing_else_says_anything(self):
+        from pipeline.cli import resolve_workflow
+        from pipeline.workflow import WorkflowSpec
+
+        spec = WorkflowSpec.from_yaml(resolve_workflow("helical"))
+        renders = [s for s in spec.steps if s.step in _SPLAT_RENDERS]
+        self.assertGreater(len(renders), 1)
+        setting = {s.id: s.params.get("sh_degree") for s in renders}
+        self.assertEqual(setting.pop("render_subject"), 2)
+        self.assertEqual(set(setting.values()), {None}, setting)
+
+
+class TestTheSingleViewInput(unittest.TestCase):
+    """A single frontal photo rides the same workflow as a sheet: the split
+    step decides which it is (`input_layout`, auto by default) and
+    publishes the verdict, and `pick_rear_view` reads that verdict after
+    pass 1 to fill the reference slot the photo could not. Neither is
+    gated — a `when:` resolves against globals before the run, so a
+    runtime verdict cannot switch a step off — and the wiring below is what
+    makes the two modes share one file (steps/reference_view.py)."""
+
+    def _spec(self):
+        from pipeline.cli import resolve_workflow
+        from pipeline.workflow import WorkflowSpec
+
+        return WorkflowSpec.from_yaml(resolve_workflow("helical"))
+
+    def _step(self, spec, step_id):
+        return next(s for s in spec.steps if s.id == step_id)
+
+    def test_the_split_reads_the_setting_and_publishes_its_verdict(self):
+        spec = self._spec()
+        setting = next(p for p in spec.settings if p.name == "input_layout")
+        self.assertEqual(setting.default, "auto")
+        self.assertEqual(list(setting.choices), ["auto", "sheet", "single"])
+        split = self._step(spec, "split_sheet")
+        self.assertEqual(split.params.get("layout"), "${globals.input_layout}")
+        self.assertEqual(split.outputs.get("layout"), "scene.input_layout")
+
+    def test_pick_rear_view_sits_after_pass_1_and_before_the_training(self):
+        spec = self._spec()
+        order = [s.id for s in spec.steps]
+        pick = order.index("pick_rear_view")
+        self.assertGreater(pick, order.index("foreground_masks"), "it needs the mattes")
+        self.assertGreater(pick, order.index("adjust_denoised"), "the treated frames")
+        self.assertLess(pick, order.index("train_splat"))
+        self.assertLess(pick, order.index("denoise_pass2"))
+        step = self._step(spec, "pick_rear_view")
+        self.assertTrue(step.when is True, "runs in both modes; see the class docstring")
+        self.assertEqual(step.inputs.get("layout"), "scene.input_layout")
+        self.assertEqual(step.inputs.get("reference_image"), "dataset.reference_image")
+        self.assertEqual(step.outputs.get("reference_image"), "dataset.reference_image")
+        self.assertEqual(step.inputs.get("masks"), "dataset.masks")
+
+    def test_the_reference_has_exactly_two_writers(self):
+        """The split (the back panel, or None) and the pick (the rear view,
+        or the back panel again). A third would be a second opinion on
+        what pass 2 conditions on."""
+        spec = self._spec()
+        writers = [
+            s.id for s in spec.steps
+            if "dataset.reference_image" in s.outputs.values()
+        ]
+        self.assertEqual(writers, ["split_sheet", "pick_rear_view"])
+
+    def test_pass_2_reads_what_the_pick_wrote(self):
+        spec = self._spec()
+        order = [s.id for s in spec.steps]
+        for step_id in ("denoise_pass2",):
+            step = self._step(spec, step_id)
+            self.assertGreater(order.index(step_id), order.index("pick_rear_view"))
+            self.assertEqual(step.inputs.get("reference_image"), "dataset.reference_image")
+        # and pass 1 reads the slot BEFORE the pick, when a photo leaves it empty
+        self.assertLess(order.index("denoise_pass1"), order.index("pick_rear_view"))
+
+
+class TestThePixelOpsShipOff(unittest.TestCase):
+    """`adjust_denoised` (pixel_ops) runs in the workflow, but every knob on
+    it is off unless a setting turns it on. The SH cap on `render_subject`
+    is aimed at part of what the highlight suppression was for — the
+    specular sparkle a re-render carries into pass 2 — so the two are kept
+    separable: the pixel op stays a choice, not a default."""
+
+    def test_specular_suppress_is_zero_and_is_what_the_step_reads(self):
+        from pipeline.cli import resolve_workflow
+        from pipeline.workflow import WorkflowSpec
+
+        spec = WorkflowSpec.from_yaml(resolve_workflow("helical"))
+        setting = next(s for s in spec.settings if s.name == "specular_suppress")
+        self.assertEqual(setting.default, 0.0)
+        step = next(s for s in spec.steps if s.id == "adjust_denoised")
+        self.assertEqual(step.step, "pixel_ops")
+        self.assertEqual(step.params["specular_suppress"],
+                         "${globals.specular_suppress}")
+
+
+class TestTheDenoiseSettingsAreTheMeasuredOnes(unittest.TestCase):
+    """The two passes ship the settings the 2026-09-08 sweeps settled on
+    (docs/vace-denoise-findings-2026-09-07.md, sections 5 and 6), applied
+    2026-09-09. Pinned because they are decisions with numbers behind them,
+    and a step default drifting under them — the step's own `sampler_shift`
+    is 8, which cost pass 2 three points of head sharpness — would be
+    silent.
+    """
+
+    def _step(self, step_id):
+        from pipeline.cli import resolve_workflow
+        from pipeline.workflow import WorkflowSpec
+
+        spec = WorkflowSpec.from_yaml(resolve_workflow("helical"))
+        return next(s for s in spec.steps if s.id == step_id)
+
+    def test_pass_1_is_run_e4(self):
+        """The skeleton-leak sweep's E4: shift 5 erases the ink, uni_pc is
+        the reference graph's sampler and at shift 5 it no longer matters,
+        the structure steps stay at full scale and the four detail steps
+        sit at a flat half rather than a taper spent on steps 5-6."""
+        params = self._step("denoise_pass1").params
+        self.assertEqual(params["sampler_high"], "uni_pc")
+        self.assertEqual(params["sampler_shift"], 5)
+        self.assertEqual(params["strength"], [1, 1, 0.5, 0.5, 0.5, 0.5])
+        self.assertEqual((params["steps_high"], params["steps_low"]), (2, 4))
+
+    def test_pass_2_is_the_quality_sweep_s_corner_at_0_8(self):
+        """Euler on the opening steps at shift 2.5 (shift 8 and uni_pc each
+        cost ~3 points of head sharpness on a splat render), a flat 0.8 on
+        every step (strength is a fidelity-vs-texture dial; 0.8 is the
+        texture compromise, and a taper to 0 is invention), 2/4 kept."""
+        params = self._step("denoise_pass2").params
+        self.assertEqual(params["sampler_high"], "euler")
+        self.assertEqual(params["sampler_shift"], 2.5)
+        self.assertEqual(params["strength"], [0.8] * 6)
+        self.assertEqual((params["steps_high"], params["steps_low"]), (2, 4))
+
+
+class TestTheReoutlineBranch(unittest.TestCase):
+    """The experimental branch that redraws the silhouette from a matte
+    (docs/re-outline.md): six gated steps between the anchor injection and
+    the first denoise. What is pinned is what makes it a faithful copy of
+    pass 1 and of the first render — a different denoise would matte a
+    different subject, a different render would put matte i on the wrong
+    camera — and that with the setting off nothing of it runs.
+    """
+
+    BRANCH = [
+        "reoutline_downscale", "reoutline_denoise", "reoutline_matte",
+        "reoutline_upscale_mattes", "render_reoutlined_views",
+        "reinject_anchor_reoutlined",
+    ]
+
+    def _spec(self):
+        from pipeline.cli import resolve_workflow
+
+        return WorkflowSpec.from_yaml(resolve_workflow("helical"))
+
+    def _step(self, spec, step_id):
+        return next(s for s in spec.steps if s.id == step_id)
+
+    def test_it_sits_between_the_anchor_injection_and_the_dump(self):
+        spec = self._spec()
+        order = [s.id for s in spec.steps]
+        first = order.index("reinject_anchor_initial") + 1
+        self.assertEqual(order[first:first + len(self.BRANCH)], self.BRANCH)
+        self.assertEqual(order[first + len(self.BRANCH)], "dump_denoise_input")
+
+    def test_every_step_is_gated_on_the_setting_and_it_defaults_off(self):
+        spec = self._spec()
+        setting = next(s for s in spec.settings if s.name == "re_outline")
+        self.assertIs(setting.default, False)
+        for step_id in self.BRANCH:
+            with self.subTest(step=step_id):
+                self.assertEqual(self._step(spec, step_id).when, "${globals.re_outline}")
+
+    def test_the_extra_denoise_is_pass_1_at_480p(self):
+        spec = self._spec()
+        extra = self._step(spec, "reoutline_denoise")
+        pass1 = self._step(spec, "denoise_pass1")
+        expected = dict(pass1.params, width=480, height=832)
+        self.assertEqual(extra.params, expected)
+        self.assertEqual((extra.dispatch, extra.env, extra.keep_loaded),
+                         (pass1.dispatch, pass1.env, pass1.keep_loaded))
+        self.assertEqual(extra.inputs["reference_image"], pass1.inputs["reference_image"])
+        self.assertEqual(extra.inputs["subject_desc"], pass1.inputs["subject_desc"])
+        # It reads the downscaled batch, not the dataset, and writes beside it.
+        self.assertEqual(extra.inputs["control_video"], "scene.reoutline.images")
+        self.assertEqual(extra.inputs["control_masks"], "scene.reoutline.masks")
+        self.assertEqual(extra.outputs, {"images": "scene.reoutline.denoised"})
+
+    def test_the_batch_is_resized_here_not_by_diffusers(self):
+        """diffusers fits a control video under the target AREA (464x832 for
+        a 720x1280 batch asked for 480x832) — see steps/resize.py."""
+        spec = self._spec()
+        down = self._step(spec, "reoutline_downscale")
+        self.assertEqual(down.params, {"width": 480, "height": 832})
+        self.assertEqual(down.inputs, {"images": "dataset.images", "masks": "dataset.masks"})
+        up = self._step(spec, "reoutline_upscale_mattes")
+        self.assertEqual(up.params, {"width": "${globals.resolution.0}",
+                                     "height": "${globals.resolution.1}"})
+        self.assertEqual(up.inputs, {"masks": "scene.reoutline.mattes"})
+        self.assertEqual(up.outputs, {"masks": "scene.outline_masks"})
+
+    def test_the_re_render_is_the_first_render_plus_the_mattes(self):
+        """Same params, so the same cameras; and it republishes nothing about
+        them, so nothing can drift."""
+        spec = self._spec()
+        first = self._step(spec, "render_initial_views")
+        again = self._step(spec, "render_reoutlined_views")
+        self.assertEqual(again.params, first.params)
+        self.assertEqual(again.inputs, dict(first.inputs, outline_masks="scene.outline_masks"))
+        self.assertEqual(set(again.outputs), {"images", "masks", "inactive_masks"})
+        self.assertEqual(again.outputs["images"], "dataset.images")
+
+    def test_the_anchor_goes_back_in_after_the_re_render(self):
+        spec = self._spec()
+        first = self._step(spec, "reinject_anchor_initial")
+        again = self._step(spec, "reinject_anchor_reoutlined")
+        self.assertEqual(again.inputs, first.inputs)
+        self.assertEqual(again.outputs, first.outputs)
+
+    def test_the_480p_pass_lands_in_the_debug_bundle(self):
+        from pipeline.templating import resolve
+
+        spec = self._spec()
+        matte = self._step(spec, "reoutline_matte")
+        scope = {"globals": dict(spec.globals, output_root="/out")}
+        self.assertEqual(resolve(matte.params, scope)["debug_dir"], "/out/debug/reoutline")
+
+
+class TestDeclaredSettings(unittest.TestCase):
+    """The `settings:` and `outputs:` blocks, which are the whole UI.
+
+    The web UI holds no table of a workflow's knobs any more: it draws what
+    these declare. So a mistake here is a mistake on the form, and the point
+    of every check below is that it fires at load rather than at submit or
+    forty minutes into a pod run.
+    """
+
+    def _write(self, body: str) -> str:
+        import os
+        import tempfile
+
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as handle:
+            handle.write(body)
+            path = handle.name
+        self.addCleanup(os.unlink, path)
+        return path
+
+    def test_every_shipped_workflow_declares_its_form(self):
+        for path in _workflows():
+            spec = WorkflowSpec.from_yaml(str(path))
+            with self.subTest(workflow=path.name):
+                self.assertTrue(spec.settings, "no settings: block")
+                self.assertTrue(spec.outputs, "no outputs: block")
+                for param in spec.settings:
+                    self.assertTrue(param.help, f"{param.name} has no help")
+                for output in spec.outputs:
+                    self.assertTrue(output.label and output.help and output.directory)
+
+    def test_resolution_and_framing_are_pipeline_settings(self):
+        """The two knobs the pipeline exists to let somebody turn. Both were
+        bare globals the UI had to carry a hardcoded choice list for."""
+        for path in _workflows():
+            spec = WorkflowSpec.from_yaml(str(path))
+            by_name = {p.name: p for p in spec.settings}
+            with self.subTest(workflow=path.name):
+                self.assertEqual(by_name["resolution"].type, list)
+                self.assertIn([720, 1280], by_name["resolution"].choices)
+                self.assertEqual(
+                    tuple(by_name["framing"].choices),
+                    ("full", "torso", "bust", "head"),
+                )
+
+    def test_a_settings_choice_set_matches_the_step_param_it_feeds(self):
+        """`framing` reaches `render` as `${globals.framing}`, so the two
+        choice lists have to be the same list. They used to be two — one in
+        the step class, one in a GLOBAL_CHOICES dict in webui.py with a
+        comment asking the next person to keep them in step."""
+        from pipeline.registry import get_step_class
+
+        render_choices = get_step_class("render").declared_params()["framing"].choices
+        for path in _workflows():
+            spec = WorkflowSpec.from_yaml(str(path))
+            framing = next(p for p in spec.settings if p.name == "framing")
+            with self.subTest(workflow=path.name):
+                self.assertEqual(tuple(framing.choices), tuple(render_choices))
+
+    def test_the_outputs_dirs_are_the_ones_the_export_steps_write(self):
+        """`dir:` is what packages a finished run, so it has to be the
+        directory the step gated by that output actually writes under
+        output_root."""
+        for path in _workflows():
+            spec = WorkflowSpec.from_yaml(str(path))
+            written = resolve(
+                [step.params for step in spec.steps], {"globals": spec.globals}
+            )
+            blob = repr(written)
+            root = spec.globals["output_root"]
+            for output in spec.outputs:
+                with self.subTest(workflow=path.name, output=output.name):
+                    self.assertIn(f"{root}/{output.directory}", blob)
+
+    def test_a_setting_nothing_reads_is_refused(self):
+        path = self._write(
+            "name: orphan\n"
+            "settings:\n"
+            "  - name: unused\n    default: 3\n    help: nothing reads me\n"
+            "steps:\n"
+            "  - id: a\n    step: rmbg\n    dispatch: in_process\n"
+        )
+        with self.assertRaises(ValueError) as caught:
+            WorkflowSpec.from_yaml(path).validate()
+        self.assertIn("unused", str(caught.exception))
+
+    def test_a_name_declared_twice_is_refused(self):
+        path = self._write(
+            "name: clash\n"
+            "settings:\n"
+            "  - name: run_it\n    default: true\n    help: x\n"
+            "globals:\n  run_it: false\n"
+            "steps:\n"
+            "  - id: a\n    step: rmbg\n    dispatch: in_process\n"
+            "    when: ${globals.run_it}\n"
+        )
+        with self.assertRaises(ValueError) as caught:
+            WorkflowSpec.from_yaml(path)
+        self.assertIn("one home", str(caught.exception))
+
+    def test_a_default_outside_its_own_choices_is_refused(self):
+        path = self._write(
+            "name: badchoice\n"
+            "settings:\n"
+            "  - name: mode\n    default: sideways\n    help: x\n"
+            "    choices: [up, down]\n"
+            "steps:\n"
+            "  - id: a\n    step: rmbg\n    dispatch: in_process\n"
+            "    params:\n      device: ${globals.mode}\n"
+        )
+        with self.assertRaises(ValueError) as caught:
+            WorkflowSpec.from_yaml(path).validate()
+        self.assertIn("choices", str(caught.exception))
+
+    def test_a_default_that_does_not_fit_its_type_is_refused(self):
+        path = self._write(
+            "name: badtype\n"
+            "settings:\n"
+            "  - name: count\n    type: int\n    default: many\n    help: x\n"
+            "steps:\n"
+            "  - id: a\n    step: rmbg\n    dispatch: in_process\n"
+            "    params:\n      batch_size: ${globals.count}\n"
+        )
+        with self.assertRaises(ValueError) as caught:
+            WorkflowSpec.from_yaml(path).validate()
+        self.assertIn("count", str(caught.exception))
+
+    def test_an_output_requiring_something_undeclared_is_refused(self):
+        path = self._write(
+            "name: badreq\n"
+            "outputs:\n"
+            "  - name: export_thing\n    dir: thing\n    label: Thing\n"
+            "    requires: no_such_setting\n"
+            "steps:\n"
+            "  - id: a\n    step: rmbg\n    dispatch: in_process\n"
+            "    when: ${globals.export_thing}\n"
+        )
+        with self.assertRaises(ValueError) as caught:
+            WorkflowSpec.from_yaml(path).validate()
+        self.assertIn("no_such_setting", str(caught.exception))
+
+    def test_an_output_with_no_dir_is_refused(self):
+        path = self._write(
+            "name: nodir\n"
+            "outputs:\n  - name: export_thing\n    label: Thing\n"
+            "steps:\n  - id: a\n    step: rmbg\n    dispatch: in_process\n"
+        )
+        with self.assertRaises(ValueError) as caught:
+            WorkflowSpec.from_yaml(path)
+        self.assertIn("dir", str(caught.exception))
+
+    def test_a_settings_value_is_coerced_the_way_a_step_param_is(self):
+        """`--param run_upscale=no` and a text box both hand over strings,
+        and `bool("no")` is True."""
+        spec = WorkflowSpec.from_yaml(str(WORKFLOW_DIR / "helical.yaml"))
+        self.assertIs(spec.coerce_global("run_upscale", "no"), False)
+        self.assertEqual(spec.coerce_global("seed", "7"), 7)
+        # An undeclared global has no type to be brought to.
+        self.assertEqual(spec.coerce_global("output_root", 3), 3)
+
+    def test_one_seed_reaches_every_stochastic_step(self):
+        """It was three step params holding 0, 0 and 42 — one run drawing
+        three unrelated samples. Four readers since 2026-09-08: the gated
+        re-outline denoise draws the same seed as pass 1, so the silhouette
+        it cuts is of the sample pass 1 would have drawn at 480p."""
+        stochastic = {"wan22_vace_denoise", "seedvr2"}
+        for path in _workflows():
+            spec = WorkflowSpec.from_yaml(str(path))
+            readers = [step.id for step in spec.steps
+                       if step.params.get("seed") == "${globals.seed}"]
+            expected = [step.id for step in spec.steps if step.step in stochastic]
+            with self.subTest(workflow=path.name):
+                # Every denoise and the upscale, and nothing else: four.
+                self.assertEqual(readers, expected)
+                self.assertGreaterEqual(len(readers), 3)
+                self.assertTrue(any("upscale" in r for r in readers))
 
 if __name__ == "__main__":
     unittest.main()

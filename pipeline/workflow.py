@@ -595,15 +595,17 @@ def step_enabled(step: StepSpec, workflow_globals: Dict[str, Any]) -> bool:
 
 
 def when_truthy(value: Any) -> bool:
-    """A resolved `when:`: a list is a conjunction, `{any: [...]}` a disjunction, anything else plain truthiness.
+    """A resolved `when:`: a list is a conjunction, `{any: [...]}` a disjunction, `{not: x}` a negation, anything else plain truthiness.
 
     The `any:` form exists for a branch two switches can want — the mesh
     steps run for the `export_mesh` output OR because pass 2 conditions on
     the mesh — without inventing an expression language in YAML.
     """
     if isinstance(value, dict):
+        if set(value) == {"not"}:
+            return not when_truthy(value["not"])
         if set(value) != {"any"} or not isinstance(value["any"], list):
-            raise ValueError(f"a `when:` mapping must be exactly {{any: [...]}}, got {value!r}")
+            raise ValueError(f"a `when:` mapping must be exactly {{any: [...]}} or {{not: ...}}, got {value!r}")
         return any(when_truthy(item) for item in value["any"])
     if isinstance(value, list):
         return all(when_truthy(item) for item in value)

@@ -499,27 +499,10 @@ class RenderSplatStep(Step):
             f"(gate {confidence.gate_lo}-{confidence.gate_hi})",
         )
 
-        cull_mesh = inputs.get("cull_mesh")
-        if cull_mesh is None:
-            images, masks = _rasterize(
-                scene=scene,
-                splat_path=splat_path,
-                cameras=cameras,
-                image_names=image_names,
-                width=width,
-                height=height,
-                bg_color=bg_color,
-                render_path=render_path,
-                confidence=confidence,
-                sh_degree=sh_degree,
-            )
-        else:
-            images, masks = _rasterize_culled(
-                scene=scene, cull_mesh=cull_mesh, margin=float(params["cull_margin"]),
-                cameras=cameras, image_names=image_names, width=width, height=height,
-                bg_color=bg_color, render_path=render_path, confidence=confidence,
-                sh_degree=sh_degree,
-            )
+        images, masks = self._render_frames(
+            inputs, params, scene=scene, splat_path=splat_path, cameras=cameras, image_names=image_names,
+            width=width, height=height, bg_color=bg_color, render_path=render_path, confidence=confidence, sh_degree=sh_degree,
+        )
 
         # The environment behind the splat (steps/backdrop.py). Composited
         # here rather than asked of the rasteriser, which draws one flat
@@ -569,6 +552,24 @@ class RenderSplatStep(Step):
             )
 
         return result
+
+
+    def _render_frames(self, inputs: Dict[str, Any], params: Dict[str, Any], *, scene, splat_path, cameras, image_names,
+                       width: int, height: int, bg_color, render_path, confidence, sh_degree: int):
+        """The frames at the resolved cameras: (BGR images, float masks). The splat rasterised, culled
+        behind the body mesh when `cull_mesh` is wired. `render_subject` (steps/mesh_views.py) swaps this
+        for the textured mesh; everything around it — the path, the anchor, the backdrop — is shared."""
+        cull_mesh = inputs.get("cull_mesh")
+        if cull_mesh is None:
+            return _rasterize(
+                scene=scene, splat_path=splat_path, cameras=cameras, image_names=image_names, width=width, height=height,
+                bg_color=bg_color, render_path=render_path, confidence=confidence, sh_degree=sh_degree,
+            )
+        return _rasterize_culled(
+            scene=scene, cull_mesh=cull_mesh, margin=float(params["cull_margin"]),
+            cameras=cameras, image_names=image_names, width=width, height=height,
+            bg_color=bg_color, render_path=render_path, confidence=confidence, sh_degree=sh_degree,
+        )
 
 
 def _confidence_options(params: Dict[str, Any]):
