@@ -24,10 +24,13 @@ step will not download anything.
 
 **Blocking is scoped to the workflow, prefetching is not.** Waiting for the
 ~47 GB of Wan2.2 weights before a run whose denoise passes are switched
-off would be actively wrong. The prefetch is greedy by default;
-`required_for_steps()` decides what a given run must actually wait on —
-fed from `WorkflowSpec.enabled_steps()`, so a `when:`-skipped step's
-checkpoint is not waited on either.
+off would be actively wrong. The prefetch is greedy by default — every
+source except the `optional` ones, which belong to a parked branch and are
+fetched by the run that turns it on (`wait_until_ready`, below); the
+klein trio is the case since 2026-09-19. `required_for_steps()` decides
+what a given run must actually wait on — fed from
+`WorkflowSpec.enabled_steps()`, so a `when:`-skipped step's checkpoint is
+not waited on either.
 
 Readiness is a marker file per model under `$B2C_MODELS_DIR/.ready/`,
 written only after a fetch returns successfully. It is what makes a warm
@@ -73,6 +76,13 @@ class ModelSource:
     probe: Callable[[], bool]
     approx_gb: float = 0.0
     gated: bool = False
+    #: Not part of the default prefetch: only a run whose enabled steps
+    #: need it fetches it (`wait_until_ready` does, synchronously, before
+    #: the run starts). For a model of a parked branch — klein's three
+    #: sources, 9 GB the shipped workflow never opens since the mesh path
+    #: was parked (2026-09-19). `prefetch(include_optional=True)` / the CLI's
+    #: `--all` pull these too.
+    optional: bool = False
 
 
 def _hf_snapshot(repo: str, allow_patterns: Optional[Sequence[str]] = None):
@@ -594,17 +604,17 @@ def _registry() -> List[ModelSource]:
             # text encoder (8 GB of bf16; Qwen's fp8 release below is the
             # same weights) are pulled. Only `refine_texture` wants it.
             "flux2_klein", f"{KLEIN} (texture refinement: tokenizer, vae, configs)",
-            ("refine_texture",), klein_fetch, klein_probe, approx_gb=0.4,
+            ("refine_texture",), klein_fetch, klein_probe, approx_gb=0.4, optional=True,
         ),
         ModelSource(
             "flux2_klein_fp8", "black-forest-labs/FLUX.2-klein-4b-fp8 transformer (fp8)",
-            ("refine_texture",), _fetch_klein_fp8, _probe_klein_fp8, approx_gb=3.8,
+            ("refine_texture",), _fetch_klein_fp8, _probe_klein_fp8, approx_gb=3.8, optional=True,
         ),
         ModelSource(
             # klein-4B's text encoder is Qwen3-4B byte for byte; this is Qwen's
             # own fp8 quantisation of it (steps/refine_texture.py).
             "qwen3_4b_fp8", f"{QWEN_FP8} (klein's text encoder, fp8)",
-            ("refine_texture",), qwen_fetch, qwen_probe, approx_gb=4.9,
+            ("refine_texture",), qwen_fetch, qwen_probe, approx_gb=4.9, optional=True,
         ),
         ModelSource(
             # ~65 MB for the pair. Small enough that the prefetch barely
@@ -855,8 +865,13 @@ def prefetch(
     keys: Optional[Sequence[str]] = None,
     force: bool = False,
     stop_on_failure: bool = False,
+    include_optional: bool = False,
 ) -> Dict[str, Dict[str, object]]:
-    """Download the named models (default: all), recording progress as it goes.
+    """Download the named models (default: every non-`optional` one), recording progress as it goes.
+
+    The optional sources (the parked mesh path's klein, 9 GB) are left to
+    the run that enables their step: `wait_until_ready` fetches what a run
+    needs and nobody is fetching. `include_optional` pulls them here too.
 
     Never raises for a single model's failure by default: a pod that cannot
     reach the gated SAM-3D-Body repo should still finish pulling the four it
@@ -864,7 +879,7 @@ def prefetch(
     that model reports it at submit time rather than an hour in.
     """
     known = registry()
-    selected = list(keys) if keys else list(known)
+    selected = list(keys) if keys else [key for key, source in known.items() if include_optional or not source.optional]
     unknown = [key for key in selected if key not in known]
     if unknown:
         raise KeyError(f"Unknown model keys: {unknown}. Known: {sorted(known)}")

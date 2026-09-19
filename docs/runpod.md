@@ -551,7 +551,8 @@ Manual control, if you want it:
 
 ```bash
 python -m pipeline.cli prefetch --status          # what's present, what isn't
-python -m pipeline.cli prefetch                   # pull everything now
+python -m pipeline.cli prefetch                   # pull the shipped workflow's models now
+python -m pipeline.cli prefetch --all             # ... and the optional ones (the parked mesh path's klein, 9 GB)
 python -m pipeline.cli prefetch --only wan22,seedvr2
 python -m pipeline.cli prefetch --force           # re-verify against the network
 ```

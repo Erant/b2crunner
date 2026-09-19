@@ -280,7 +280,7 @@ def run_prefetch(args: argparse.Namespace) -> int:
             print(f"{entry['status']:<9} {key:<12} {known[key].approx_gb:>5.1f} GB  {entry.get('detail', '')}")
         return 0
 
-    status = prefetch(keys, force=args.force)
+    status = prefetch(keys, force=args.force, include_optional=args.all)
     failures = [k for k, v in status.items() if v["status"] == FAILED]
     if failures:
         logger.error("could not download: %s", ", ".join(failures))
@@ -456,12 +456,17 @@ def build_parser() -> argparse.ArgumentParser:
     doctor_p.set_defaults(func=run_doctor)
 
     prefetch_p = sub.add_parser(
-        "prefetch", help="Download every model checkpoint up front"
+        "prefetch", help="Download the shipped workflow's model checkpoints up front"
     )
     prefetch_p.add_argument(
         "--only", default=None, metavar="KEYS",
-        help="Comma-separated model keys instead of all of them "
-             "(rmbg, sapiens2, sam3dbody, wan22, wan22_lora, seedvr2, mediapipe)",
+        help="Comma-separated model keys instead of the default set "
+             "(rmbg, sapiens2, sam3dbody, wan22, wan22_lora, seedvr2, mediapipe, ...)",
+    )
+    prefetch_p.add_argument(
+        "--all", action="store_true",
+        help="Also pull the optional sources — the parked mesh path's klein (9 GB), which a "
+             "default run never opens; a run that enables refine_texture fetches them itself",
     )
     prefetch_p.add_argument(
         "--force", action="store_true",

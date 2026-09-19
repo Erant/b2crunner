@@ -432,6 +432,33 @@ class TestPrefetch(unittest.TestCase):
             self.assertEqual(status["good"]["status"], models.READY)
             self.assertIn("good", calls)
 
+    def test_the_default_prefetch_leaves_the_optional_sources_alone(self):
+        """The parked mesh path's klein (9 GB) is `optional`: a pod start does not
+        pull it, `--all` does, and a run that enables refine_texture fetches it
+        itself through wait_until_ready — so `optional` never means unreachable."""
+        known = models.registry()
+        optional = {k for k, v in known.items() if v.optional}
+        self.assertEqual(optional, {"flux2_klein", "flux2_klein_fp8", "qwen3_4b_fp8"})
+        self.assertTrue(all(known[k].steps == ("refine_texture",) for k in optional))
+        fetched = []
+        fake = {k: v.__class__(**{**v.__dict__, "fetch": (lambda k=k: fetched.append(k) or "/x"), "probe": lambda: False})
+                for k, v in known.items()}
+        # Each check on its own cold volume: a fetch writes a ready marker, and a
+        # marked model is skipped by the next prefetch on the same volume.
+        with mock.patch.object(models, "registry", return_value=fake):
+            with _OnAVolume():
+                models.prefetch()
+                self.assertFalse(optional & set(fetched), "a default prefetch pulled an optional source")
+                self.assertEqual(set(fetched), set(known) - optional)
+            fetched.clear()
+            with _OnAVolume():
+                models.prefetch(include_optional=True)
+                self.assertEqual(set(fetched), set(known))
+            fetched.clear()
+            with _OnAVolume():
+                models.wait_until_ready(["flux2_klein_fp8"], timeout=5.0, poll=0.01)
+                self.assertEqual(fetched, ["flux2_klein_fp8"], "a run that needs it fetches it")
+
     def test_unknown_key_is_refused_up_front(self):
         with _OnAVolume():
             with self.assertRaises(KeyError):
