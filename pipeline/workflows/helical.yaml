@@ -142,6 +142,29 @@
 # face_splat_refined's `given_camera` — that input is required now, and the
 # step refuses `cameras` without it. This is the one workflow file.
 #
+# WHAT CHANGED (2026-09-19): **the photograph wins over the whole surface
+# it sees, in the intermediate training.** A new `photo_priority` step
+# (steps/photo_priority.py) after `face_priority` fades every denoised
+# frame wherever the anchor photograph's camera sees the body head-on
+# (the body mesh rasterised from each frame, its surface points tested for
+# visibility and facing from the anchor), the way `face_priority` fades
+# them over the cap; the two yields multiply and `train_splat` +
+# `export_colmap_intermediate` read the stacked `scene.priority.weights`.
+# The photograph's frame keeps weight 1 — ONLY that one: the helix's last
+# frame sits on the same pose and is the denoiser's repaint of it (14.5 dB
+# from the photograph on the 2026-09-18 run), and at full weight it had
+# outvoted the photograph one to one in every run to date. The step also
+# hands the training six masked copies of the photograph as supporting
+# views (merge_support_views' b_* triple): one frame is one vote against
+# forty, and one supporting view is below the evidence gate — the copies
+# alone take the photograph's view from 17.8 to 23.1 dB (sharpness x2.8),
+# the fade adds a few tenths at the cost of fidelity to the frames beside
+# it. Setting `photo_priority` (the strength, 0.5; the copies are the
+# step's `copies`, 6). docs/photo-priority.md has the sweep. Ported from
+# the mesh path's `photo_texture`, whose projection of the photograph was
+# its one clear win; the splat's own meshification is otherwise being
+# wound down (skin artefacts in the texture the user could not resolve).
+#
 # WHAT CHANGED (2026-09-17): **the klein texture pass is off; pass 2 sees
 # the projected texture, blurred.** `refine_texture` defaults to false and
 # `render_subject` takes `mesh_blur_px: ${globals.mesh_blur}` (2 px, a
@@ -616,6 +639,28 @@ settings:
       four-subject measurement that motivated the deltas looked at frontal
       novel views only. On, the old behaviour; `face_motion_cm` and `hold`
       on `build_face_rig` are its knobs.
+
+  - name: photo_priority
+    label: The photograph wins over the surface it sees
+    type: float
+    default: 0.5
+    minimum: 0.0
+    maximum: 1.0
+    help: >-
+      In the intermediate training, how far the denoised frames yield to the
+      photograph wherever its camera sees the body head-on enough
+      (steps/photo_priority.py): the frame's loss weight there is 1 minus
+      this. The face cap's own yield (face_priority_weights) stacks on top.
+      The frames either side of the anchor are the denoiser's re-lit,
+      slightly displaced re-drawings of the front the photograph already
+      shows, and the fit averaged them with it; the step also hands the
+      training six masked copies of the photograph as supporting views,
+      which is what makes it win (measured 2026-09-19: 17.8 -> 23.1 dB at
+      its own view from the copies alone, 23.3 at 0.5, 23.5 at 0.8; the
+      strength trades fidelity to the photograph against fidelity to the
+      frames beside it, -1.5 dB at view 3 from 0.5 to 0.8). 0 keeps the
+      copies and no fade; the copies switch off with the step's `copies`. The mesh path's photo_texture is the same rule for
+      the atlas, measured there at +30 % subject sharpness.
 
   - name: refine_texture
     label: Refine the mesh texture with klein
@@ -2455,6 +2500,8 @@ steps:
     step: face_priority_weights
     dispatch: in_process
     when: ${globals.face_splat}
+    # NOTE: the weights this publishes are read by `photo_priority` below,
+    # which multiplies its own yield in and is the step the trainings read.
     inputs:
       cameras: dataset.cameras
       # The REFINED splat, rebuilt through the refined anchor camera by
@@ -2474,10 +2521,58 @@ steps:
     outputs:
       weights: scene.face_priority.weights
 
-  # brush takes ONE support_* triple, and this publishes it. There is one
-  # producer left since the stage-1 shells went (2026-09-06), so the `b_*`
-  # half is unwired; the step stays for what it does UNGATED, which is the
-  # point: it is always the writer of scene.support_views.*, so that path
+  # The photograph wins over the whole surface it sees, not only the face
+  # (steps/photo_priority.py, 2026-09-19). The frames within the window of
+  # the anchor are the denoiser's re-lit, 5-10 px displaced re-drawings of
+  # the front the photograph already shows, and averaging them with it is
+  # what softened the front of every intermediate splat. The body mesh is
+  # rasterised from each frame's camera; every surface pixel the
+  # photograph's camera sees head-on enough (photo_texture's cos 0.2-0.5
+  # ramp) fades that frame to `1 - photo_priority`, the hair and skirt rim
+  # within 24 px of the body take the nearest value, and the injected
+  # anchor frames (both ends of the helix) keep weight 1: they ARE the
+  # photograph. The face cap's weights come in and multiply through, so the
+  # two yields stack, and this is ungated: with `photo_priority` 0 the cap's
+  # weights pass through unchanged (weights of 1 with the face branch off).
+  # The mesh path's `photo_texture` is the same rule for the atlas, and its
+  # measured win (sharpness 39.5 -> 51.5 on 00307) is what this ports.
+  - id: photo_priority
+    step: photo_priority_weights
+    dispatch: in_process
+    inputs:
+      cameras: dataset.cameras
+      weights: scene.face_priority.weights?
+      # The frames' own mattes clip the yield off the body (the extension
+      # into hair and skirt stops at the silhouette).
+      alphas: dataset.masks
+      anchor_cameras: dataset.cameras
+      anchor_frame_index: dataset.extras.anchor_frame_index?
+      anchor_position: dataset.extras.anchor_position?
+      splat_center: scene.face_splat_stats.world_center?
+      # The INITIAL body in the world frame: the one the intermediate
+      # training's hollow loss and rig use, and where its splat will be.
+      mesh_world: scene.mesh_world?
+      # The frames, for the photograph's own: `copies` of it go to the
+      # training as masked supporting views at the anchor camera (the
+      # `b_*` triple of merge_support_views below). Fading the neighbours
+      # alone left the photograph one vote against forty and a front the
+      # evidence gate culled; the copies are what made it win (measured
+      # 2026-09-19, docs/photo-priority.md: 17.8 -> 23.5 dB at its view).
+      images: dataset.images
+    params:
+      strength: ${globals.photo_priority}
+      debug_dir: ${globals.output_root}/debug/photo_priority
+    outputs:
+      weights: scene.priority.weights
+      support_images: scene.photo_support.images
+      support_masks: scene.photo_support.masks
+      support_cameras: scene.photo_support.cameras
+      photo_priority_stats: scene.photo_priority_stats
+
+  # brush takes ONE support_* triple, and this publishes it. The `a_*` half
+  # is the face cap's, the `b_*` half the photograph's masked copies
+  # (photo_priority, 2026-09-19; unwired between the stage-1 shells' removal
+  # on 2026-09-06 and then). The step runs UNGATED, which is the point: it is always the writer of scene.support_views.*, so that path
   # has exactly one writer rather than a gated branch that sometimes
   # doesn't. With the face branch off it publishes three empty lists and
   # brush trains exactly as it did before the cap existed.
@@ -2488,6 +2583,11 @@ steps:
       a_images: scene.face_support_views.images?
       a_masks: scene.face_support_views.masks?
       a_cameras: scene.face_support_views.cameras?
+      # The photograph's masked copies (photo_priority, 2026-09-19): the
+      # `b_*` half has a writer again.
+      b_images: scene.photo_support.images?
+      b_masks: scene.photo_support.masks?
+      b_cameras: scene.photo_support.cameras?
     params: {}
     outputs:
       images: scene.support_views.images
@@ -2548,7 +2648,7 @@ steps:
       # The training views' loss weights (face_priority), as the weights/
       # sidecar brush reads — so this export trains at the same weighting
       # train_splat did. Optional for the same reason as the support_* reads.
-      weights: scene.face_priority.weights?
+      weights: scene.priority.weights?
     params:
       output_dir: ${globals.output_root}/colmap_intermediate
       layout: brush
@@ -2596,7 +2696,7 @@ steps:
       # the denoised frames yield to the face cap over the face. Optional
       # (`?`) so the face branch being off leaves brush training on
       # byte-identical data to before. See steps/brush.py's `weights`.
-      weights: scene.face_priority.weights?
+      weights: scene.priority.weights?
       # The body mesh, for the hollow loss (see hollow_weight below).
       mesh: scene.mesh_world?
       # The per-view deformation rig (build_body_rig_initial above), on the

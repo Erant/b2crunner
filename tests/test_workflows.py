@@ -1058,7 +1058,32 @@ class TestWorkflowFiles(unittest.TestCase):
                 # the denoising path are no longer redundant with them.
                 self.assertEqual(selector.params.get("min_path_angle_deg"), 0.0)
 
-                weights = priority.outputs["weights"] + "?"
+                # The cap's weights do not reach the trainings directly:
+                # `photo_priority` (2026-09-19) multiplies its own yield in
+                # — the frames fade wherever the photograph sees the body —
+                # and publishes the stacked map. It is ungated (strength 0
+                # passes the cap's weights through), reads the cap's output
+                # and the dataset's own cameras, mattes and anchor, and its
+                # strength is the `photo_priority` setting.
+                photo = by_id["photo_priority"]
+                self.assertEqual(photo.step, "photo_priority_weights")
+                self.assertIs(photo.when, True)  # ungated: strength 0 is the off switch
+                self.assertEqual(photo.inputs["weights"], priority.outputs["weights"] + "?")
+                self.assertEqual(photo.inputs["cameras"], "dataset.cameras")
+                self.assertEqual(photo.inputs["anchor_cameras"], "dataset.cameras")
+                self.assertEqual(photo.inputs["alphas"], "dataset.masks")
+                self.assertEqual(photo.inputs.get("mesh_world"), "scene.mesh_world?")
+                self.assertEqual(photo.params.get("strength"), "${globals.photo_priority}")
+                self.assertGreater(spec.steps.index(photo), spec.steps.index(priority))
+                # Its masked copies of the photograph reach the training through
+                # merge_support_views' second triple, and it runs before that merge.
+                self.assertEqual(photo.inputs["images"], "dataset.images")
+                merge = by_id["merge_support_views"]
+                for name in ("images", "masks", "cameras"):
+                    self.assertEqual(merge.inputs[f"b_{name}"], photo.outputs[f"support_{name}"] + "?")
+                self.assertGreater(spec.steps.index(merge), spec.steps.index(photo))
+
+                weights = photo.outputs["weights"] + "?"
                 for step in spec.steps:
                     if step.step != "brush":
                         continue
