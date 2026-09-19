@@ -2145,16 +2145,21 @@ class TestDeclaredSettings(unittest.TestCase):
 class TestPassTwoTakesTheMesh(unittest.TestCase):
     """`pass2_mesh` (2026-09-17): `render_subject` — render_splat with the source
     decided by `from_mesh` — draws the second denoise's frames from the textured
-    mesh at the cameras it resolves, on by default; off, it rasterises the splat
-    as before and the mesh branch is skipped unless `export_mesh` packages it."""
+    mesh at the cameras it resolves; off (the default since the mesh path was
+    parked on 2026-09-19), it rasterises the splat as before and the mesh branch
+    is skipped unless `export_mesh` asks for it. Both are globals now."""
 
     def _spec(self):
         return WorkflowSpec.from_yaml(str(next(p for p in _workflows() if p.name == "helical.yaml")))
 
-    def test_default_on_and_the_subject_render_sits_where_the_splat_render_was(self):
+    def test_default_off_and_the_subject_render_sits_where_the_splat_render_was(self):
+        """Parked 2026-09-19: the switch is a plain global, off — no setting, so
+        no UI control — and pass 2 draws its frames from the splat again."""
         spec = self._spec()
-        setting = next(s for s in spec.settings if s.name == "pass2_mesh")
-        self.assertTrue(setting.default)
+        self.assertNotIn("pass2_mesh", {s.name for s in spec.settings})
+        self.assertNotIn("export_mesh", {s.name for s in spec.settings})
+        self.assertFalse(spec.globals["pass2_mesh"])
+        self.assertFalse(spec.globals["export_mesh"])
         ids = [s.id for s in spec.steps]
         at = ids.index("render_subject")
         step = spec.steps[at]
@@ -2179,6 +2184,7 @@ class TestPassTwoTakesTheMesh(unittest.TestCase):
         spec = self._spec()
         by_id = {s.id: s for s in spec.steps}
         base = {p.name: p.default for p in spec.settings}
+        base.update({k: v for k, v in spec.globals.items() if not isinstance(v, str) or not v.startswith("output")})
         base.update(face_splat=True, photo_texture=True, refine_texture=True)
         for export_mesh, pass2_mesh, mesh_runs in ((False, False, False), (True, False, True), (False, True, True), (True, True, True)):
             g = dict(base, export_mesh=export_mesh, pass2_mesh=pass2_mesh)

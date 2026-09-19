@@ -337,11 +337,12 @@ class TestRequiredForSteps(unittest.TestCase):
              # Still here with both exports off: the stage-2 refinement runs
              # ahead of the training that drives the helical re-render, which
              # is not one of the deliverables these switches gate.
-             "colmap_onnx",
-             # And since 2026-09-17 pass 2 conditions on the textured mesh by
-             # default (`pass2_mesh`), so klein and its text encoder are
-             # required whether or not `export_mesh` packages the mesh.
-             "flux2_klein", "flux2_klein_fp8", "qwen3_4b_fp8"},
+             "colmap_onnx"},
+            # 2026-09-17 to 2026-09-19 klein and its text encoder were in here
+            # too (pass 2 conditioned on the textured mesh by default); the
+            # mesh path is parked behind off globals now, so a default run
+            # never enables refine_texture and the prefetch must not wait on
+            # its 9 GB.
         )
 
 

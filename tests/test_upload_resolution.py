@@ -399,7 +399,7 @@ class OutputSwitchTests(unittest.TestCase):
     def test_the_declared_defaults_are_both_deliverables(self):
         self.assertEqual(
             runs.resolve_outputs(self.spec()),
-            {"export_colmap": True, "export_ply": True, "export_debug": True, "export_mesh": False},
+            {"export_colmap": True, "export_ply": True, "export_debug": True},
         )
 
     def test_the_debug_bundle_is_not_a_deliverable_on_its_own(self):

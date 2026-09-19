@@ -125,9 +125,10 @@ for i, c in enumerate(cams["cameras"]):
         import yaml
 
         wf = yaml.safe_load((Path(__file__).resolve().parents[1] / "pipeline" / "workflows" / "helical.yaml").read_text())
-        settings = {g["name"]: g for g in wf["settings"]}
-        self.assertFalse(settings["refine_texture"]["default"], "the klein pass is off by default")
-        self.assertEqual(settings["mesh_blur"]["default"], 2.0)
+        # Parked 2026-09-19: the mesh path's switches are plain globals now (no UI control), off.
+        self.assertFalse(wf["globals"]["refine_texture"], "the klein pass is off")
+        self.assertFalse(wf["globals"]["pass2_mesh"], "pass 2 draws its frames from the splat again")
+        self.assertEqual(wf["globals"]["mesh_blur"], 2.0)
         render = next(s for s in wf["steps"] if s.get("id") == "render_subject")
         self.assertEqual(render["params"]["mesh_blur_px"], "${globals.mesh_blur}")
 
