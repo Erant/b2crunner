@@ -584,6 +584,17 @@ class RenderStep(Step):
         Param("n_loops", int, 2, "Helical: turns around the subject"),
         Param("lead_in_deg", float, 45.0, "Helical: azimuth spent easing in"),
         Param("lead_out_deg", float, 45.0, "Helical: azimuth spent easing out"),
+        Param("helix_anchor", str, "ramp",
+              "Helical under override_cam_from_mesh: where on the helix the "
+              "photograph's camera lands. `ramp` bends the helix so the frame "
+              "whose elevation matches the anchor's sits on it — mid-ramp, so the "
+              "path starts and ends on the far side of the subject. `start` "
+              "begins the helix ON the anchor: frame 0 is the photograph's camera "
+              "and the elevation climbs from there by 2 x amplitude_deg over the "
+              "loops (a negative amplitude descends), so the first frame is the "
+              "photograph and the last is the same azimuth, lifted. See "
+              "workflows/helical_shell.yaml",
+              choices=("ramp", "start"), advanced=True),
 
         Param("radius", float, None,
               "Orbit radius; empty derives one from the framing", advanced=True),
@@ -759,15 +770,42 @@ class RenderStep(Step):
                     lead_in_deg=params["lead_in_deg"],
                     lead_out_deg=params["lead_out_deg"],
                 )
-                anchor_info = compute_helical_anchor_params(target=orbit_center, **helix_params)
-                derived_radius = float(anchor_info["radius"])
-                anchor_frame_index = int(anchor_info["anchor_frame_index"])
-                anchor_azimuth = float(anchor_info["anchor_azimuth_deg"])
+                if params["helix_anchor"] == "start":
+                    # The helix begins on the photograph's camera, the way
+                    # the circular orbit does, and climbs from there. The
+                    # anchor's spherical coordinates about the target are
+                    # the circular path's own (radius, azimuth, elevation);
+                    # body2colmap's ramp puts frame 0 at -amplitude whatever
+                    # the lead-in, so lifting every frame by the anchor's
+                    # elevation plus the amplitude lands frame 0 exactly on
+                    # the anchor and the ramp's end 2 x amplitude above it.
+                    # A signed amplitude is legal here — the ramp is linear
+                    # in it, so a negative one descends — where the mid-ramp
+                    # solve below requires it positive.
+                    amplitude = float(helix_params["amplitude_deg"])
+                    if amplitude == 0.0:
+                        raise ValueError(
+                            "helix_anchor 'start' needs a non-zero amplitude_deg: "
+                            "with none the helix is the circular orbit"
+                        )
+                    orbit_params = compute_original_camera_orbit_params(orbit_center)
+                    derived_radius = float(orbit_params["radius"])
+                    anchor_azimuth = float(orbit_params["start_azimuth_deg"])
+                    anchor_frame_index = 0
+                    helix_start_azimuth = anchor_azimuth
+                    helix_elevation_offset = float(orbit_params["elevation_deg"]) + amplitude
+                else:
+                    anchor_info = compute_helical_anchor_params(target=orbit_center, **helix_params)
+                    derived_radius = float(anchor_info["radius"])
+                    anchor_frame_index = int(anchor_info["anchor_frame_index"])
+                    anchor_azimuth = float(anchor_info["anchor_azimuth_deg"])
+                    helix_start_azimuth = float(anchor_info["start_azimuth_deg"])
+                    helix_elevation_offset = float(anchor_info["elevation_offset_deg"])
 
                 path_gen = OrbitPath(target=orbit_center, radius=derived_radius)
                 cameras = path_gen.helical(
-                    start_azimuth_deg=anchor_info["start_azimuth_deg"],
-                    elevation_offset_deg=anchor_info["elevation_offset_deg"],
+                    start_azimuth_deg=helix_start_azimuth,
+                    elevation_offset_deg=helix_elevation_offset,
                     camera_template=camera_template,
                     **helix_params,
                 )

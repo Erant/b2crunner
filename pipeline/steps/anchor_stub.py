@@ -35,6 +35,20 @@ in the original ComfyUI-Body2COLMAP repo:
   composited into the drawings by `render` before the diffusion passes get
   their hands on it. See steps/brush.py's `support_*` inputs.
 
+- InjectShellViews (2026-09-19, workflows/helical_shell.yaml) is the
+  anchor injection's counterpart for the frames the photograph is NOT on:
+  pass 1's helix there starts on the photograph and climbs, so its last
+  frames look at the subject from the photograph's azimuth a few degrees
+  up, and the frame a warp could supply does not exist. A render of the
+  whole-body pointmap shell (steps/pointmap_splat.py's `pointmap_splat`)
+  from those cameras stands in: the step swaps the shell's render into the
+  batch's last `tail_frames` (and the `head_frames` after the anchor) and
+  marks them for VACE the way `render`'s `splat_inactive_mask` marks the
+  face — 0.0 where the shell covers, 1.0 around it. Chosen by INDEX, not by
+  angle: the ends of the sequence are where a video model conditions
+  hardest, and the experiment is about them. It composes with
+  `inject_anchor` (wire `masks: dataset.masks` into whichever runs second).
+
 - MergeSupportViews is the fourth, and exists because there are now two
   producers of that kind of evidence and `brush` takes one set: the face
   cap above, and the stage-1 body shells
@@ -336,6 +350,222 @@ def _scene_scale(positions: np.ndarray) -> float:
     bbox_max = positions.max(axis=0)
     diag = np.linalg.norm(bbox_max - bbox_min)
     return float(diag) if diag > 0 else 1.0
+
+
+@register_step("inject_shell_views")
+class InjectShellViewsStep(Step):
+    """Put renders of the photo-derived shell into the frames at the ends of
+    the batch, and tell the denoise which of their pixels are real.
+
+    inputs: {"images": List[np.ndarray] — the drawings, one per frame,
+             "shell_images": List[np.ndarray] — `render_splat` of the shell
+             over the SAME cameras, in the same order (`pattern: ""`), on
+             the drawings' own grey,
+             "shell_masks": List[np.ndarray] float32 [0,1] — that render's
+             alpha, the shell's coverage per pixel,
+             "cameras": List[Camera] — the batch's cameras,
+             "shell_cameras": Optional[List[Camera]] — wire them and the two
+             batches are checked to be the same views rather than assumed,
+             "masks": Optional[List[np.ndarray]] — the VACE mask batch to
+             write into, passed through untouched except at the substituted
+             frames; all-1.0 is manufactured without one,
+             "anchor_frame_index": Optional[int] — the photograph's frame,
+             which `head_frames` counts from (0 without one)}
+    outputs: {"images": List[np.ndarray],
+              "masks": List[np.ndarray] — the VACE batch (float32, 0.0 = "a
+              real photograph, keep it", 1.0 = "synthetic, denoise it"),
+              "view_roles": List[dict] — per frame: index, source, role.
+              Diagnostics; nothing downstream reads it}
+
+    Why the ends, and why by index
+    ------------------------------
+    helical_shell.yaml's pass 1 is a helix that STARTS on the photograph's
+    camera (render's `helix_anchor: start`) and climbs `2 x amplitude_deg`
+    over one turn, so frame 0 is the warped photograph as ever and the last
+    frame looks at the subject from the same azimuth, lifted by the climb.
+    Nothing can warp the photograph onto that view; a 2.5-D shell of the
+    photograph rendered from it can. The video model conditions hardest on
+    the first and last frames of a clip, and the question this file asks —
+    does it read a helix as the camera moving rather than the subject
+    changing — is answered by what those two frames say about the camera.
+    So the frames are named by their place in the sequence, not by an
+    angle: the last `tail_frames` and the `head_frames` right after the
+    anchor (a shell render at frame 1, 4.5 degrees round, is a second real
+    view beside the photograph, which is parallax the model can read the
+    motion's direction from). The anchor frame itself is never touched —
+    `inject_anchor` owns it, and a shell rendered at the photograph's own
+    camera IS the photograph with holes.
+
+    What the mask says
+    ------------------
+    `reference: silhouette` (the default) marks each substituted frame the
+    way `render`'s `splat_inactive_mask` marks the composited face: 0.0
+    where the shell's alpha is at or above `inactive_threshold`, 1.0
+    everywhere else, through body2colmap's own `InactiveMaskOptions` so the
+    two marks are one convention. The holes a shell has where the photograph
+    saw nothing (under the chin from above, the far side of an arm) and the
+    grey around it stay the denoiser's to paint, consistently with the
+    frames beside them. `frame` marks the whole frame 0.0, as
+    `inject_anchor` does for the photograph — every hole kept verbatim.
+    `none` substitutes without marking: the shell as a better drawing, the
+    frame still denoised.
+
+    Nothing trains on these frames as shell renders: they go through pass 1
+    like every other frame, and what the intermediate training sees is
+    whatever the denoise returns for them. No supporting view is cut from
+    the shell anywhere.
+    """
+
+    PARAMS = (
+        Param("tail_frames", int, 1,
+              "How many frames at the END of the batch take the shell's render: "
+              "the last frame, or the last two. 0 for none", minimum=0),
+        Param("head_frames", int, 0,
+              "How many frames right AFTER the anchor frame take it. 0 for "
+              "none; 1 gives the photograph a real neighbour", minimum=0),
+        Param("reference", str, "silhouette",
+              "What the VACE mask says about a substituted frame: `silhouette` "
+              "keeps the shell's covered pixels and denoises the rest, `frame` "
+              "keeps the whole frame, `none` denoises all of it",
+              choices=("silhouette", "frame", "none")),
+        Param("inactive_threshold", float, 0.9,
+              "silhouette: shell alpha at or above which a pixel is kept, as a "
+              "fraction. body2colmap's InactiveMaskOptions default",
+              minimum=0.0, maximum=1.0, advanced=True),
+        Param("inactive_grow", int, 0,
+              "silhouette: grow the kept region by this many pixels, or shrink it "
+              "when negative — shrinking pulls the boundary clear of the "
+              "shell's soft rim", advanced=True),
+    )
+
+    def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+        images: List[np.ndarray] = list(inputs["images"])
+        shell_images: List[np.ndarray] = list(inputs["shell_images"])
+        shell_masks: List[np.ndarray] = list(inputs["shell_masks"])
+        cameras = inputs["cameras"]
+        n = len(images)
+        tail = int(params["tail_frames"])
+        head = int(params["head_frames"])
+        reference = params["reference"]
+
+        if len(shell_images) != n or len(shell_masks) != n:
+            raise ValueError(
+                f"inject_shell_views: {len(shell_images)} shell renders / "
+                f"{len(shell_masks)} shell masks against {n} frames. The batches "
+                f"are matched by index, which holds because render_splat with "
+                f"`pattern: \"\"` reuses the source dataset's cameras verbatim "
+                f"and in order — a pattern on that step breaks this."
+            )
+        shell_cameras = inputs.get("shell_cameras")
+        if shell_cameras is not None:
+            if len(shell_cameras) != n:
+                raise ValueError(
+                    f"inject_shell_views: the shell render has {len(shell_cameras)} "
+                    f"cameras against the batch's {n}"
+                )
+            drift = max(
+                (float(np.linalg.norm(np.asarray(a.position, dtype=np.float64)
+                                      - np.asarray(b.position, dtype=np.float64)))
+                 for a, b in zip(cameras, shell_cameras)),
+                default=0.0,
+            )
+            if drift > 1e-4:
+                raise ValueError(
+                    f"inject_shell_views: the shell render's cameras are not the "
+                    f"frame batch's (worst position drift {drift:.6f}). Render the "
+                    f"shell with `pattern: \"\"` and the dataset wired, so it "
+                    f"reuses these cameras verbatim."
+                )
+
+        in_masks = inputs.get("masks")
+        if in_masks is None:
+            masks = [np.ones(img.shape[:2], dtype=np.float32) for img in images]
+        else:
+            if len(in_masks) != n:
+                raise ValueError(
+                    f"inject_shell_views: {len(in_masks)} masks against {n} frames"
+                )
+            masks = [np.asarray(m, dtype=np.float32) for m in in_masks]
+
+        anchor = inputs.get("anchor_frame_index")
+        anchor = 0 if anchor is None else int(anchor)
+        if not 0 <= anchor < n:
+            raise ValueError(
+                f"inject_shell_views: anchor_frame_index {anchor} is outside the "
+                f"batch of {n} frames"
+            )
+
+        # The anchor frame is inject_anchor's, whichever band would reach
+        # it; the two bands may not overlap each other either, or a frame
+        # would be counted twice in the log and the roles.
+        head_indices = [i for i in range(anchor + 1, anchor + 1 + head) if i < n]
+        tail_indices = [i for i in range(max(n - tail, 0), n) if i != anchor]
+        chosen: Dict[int, str] = {}
+        for i in tail_indices:
+            chosen[i] = "tail"
+        for i in head_indices:
+            chosen.setdefault(i, "head")
+
+        view_roles = []
+        for index in range(n):
+            band = chosen.get(index)
+            if band is None:
+                view_roles.append({"index": index, "source": "drawing",
+                                   "role": "anchor" if index == anchor else "synthetic"})
+                continue
+            shell = shell_images[index]
+            if tuple(shell.shape) != tuple(images[index].shape):
+                raise ValueError(
+                    f"inject_shell_views: shell render {index} has shape "
+                    f"{tuple(shell.shape)} against the frame's "
+                    f"{tuple(images[index].shape)}. Render the shell at the same "
+                    f"resolution as the orbit."
+                )
+            images[index] = shell
+            if reference == "frame":
+                masks[index] = np.zeros(shell.shape[:2], dtype=np.float32)
+                role = "reference_frame"
+            elif reference == "silhouette":
+                masks[index] = _shell_inactive_mask(
+                    shell, shell_masks[index],
+                    threshold=params["inactive_threshold"], grow=params["inactive_grow"],
+                )
+                role = "reference_silhouette"
+            else:
+                role = "synthetic"
+            view_roles.append({"index": index, "source": f"shell_{band}", "role": role})
+
+        substituted = sorted(chosen)
+        kept = sum(1 for v in view_roles if v["role"].startswith("reference"))
+        logger.info(
+            "inject_shell_views: %d/%d frames take the shell's render %s "
+            "(anchor frame %d left to inject_anchor); %d of them marked for VACE "
+            "as '%s'",
+            len(substituted), n, substituted, anchor, kept, reference,
+        )
+        if not substituted:
+            logger.warning(
+                "inject_shell_views: tail_frames=%d and head_frames=%d select no "
+                "frame, so the shell was rendered and then discarded", tail, head,
+            )
+        return {"images": images, "masks": masks, "view_roles": view_roles}
+
+
+def _shell_inactive_mask(shell_bgr: np.ndarray, alpha: np.ndarray, *,
+                         threshold: float, grow: int) -> np.ndarray:
+    """A substituted frame's VACE mask: 0.0 where the shell covers, 1.0
+    elsewhere — `render`'s `_inactive_masks` for a layer this step assembles
+    from the render and its alpha, so the face composite's mark and the
+    shell frame's mark are the same body2colmap convention.
+    """
+    from body2colmap.splat_renderer import InactiveMaskOptions
+
+    height, width = shell_bgr.shape[:2]
+    layer = np.empty((height, width, 4), dtype=np.uint8)
+    layer[..., :3] = shell_bgr[..., :3]
+    layer[..., 3] = np.clip(np.asarray(alpha, dtype=np.float32) * 255.0 + 0.5, 0, 255).astype(np.uint8)
+    options = InactiveMaskOptions(threshold=float(threshold), grow=int(grow))
+    return options.build(layer, (width, height)).astype(np.float32) / 255.0
 
 
 @register_step("select_support_views")

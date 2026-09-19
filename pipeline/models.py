@@ -527,7 +527,7 @@ def _registry() -> List[ModelSource]:
             # is the ONLY step wanting this head, and a run that did not
             # prefetch it would block mid-pipeline on 6.5 GB of download.
             "sapiens2_pointmap", f"{SAPIENS_POINTMAP} (pointmap / depth)",
-            ("face_pointmap_splat", "pointmap_elevation_views"),
+            ("face_pointmap_splat", "pointmap_splat", "pointmap_elevation_views"),
             pointmap_fetch, pointmap_probe, approx_gb=6.5,
         ),
         ModelSource(

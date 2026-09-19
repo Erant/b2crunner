@@ -135,7 +135,36 @@ BOOTSTRAPS = {
         "render_initial_views",
         "warp_reference_to_anchor", "reinject_anchor_initial",
     ],
+    # The EXPERIMENT (2026-09-19): the same bootstrap with a whole-body
+    # pointmap shell built before the render (front_matte / front_normals /
+    # shell_splat) and the render drawing a helix that starts on the
+    # photograph. The shell's two remaining steps (render_shell_views,
+    # inject_shell_views) sit after the gated re-outline block, outside
+    # this prologue — see SHELL_ONLY_STEPS and the mirror test.
+    "helical_shell": [
+        "split_sheet", "reconstruct_body",
+        "detect_face", "map_face_to_mesh", "fit_head_to_face",
+        "locate_face", "crop_face", "face_seg", "face_mask",
+        "face_normals", "face_splat",
+        "front_matte", "front_normals", "shell_splat",
+        "render_initial_views",
+        "warp_reference_to_anchor", "reinject_anchor_initial",
+    ],
 }
+
+#: The steps helical_shell.yaml has and helical.yaml does not. Take them
+#: out and the two files must agree step for step (test_helical_shell_
+#: mirrors_helical), with exactly the differences that test lists.
+SHELL_ONLY_STEPS = (
+    "front_matte", "front_normals", "shell_splat",
+    "render_shell_views", "inject_shell_views",
+)
+
+#: helical_shell.yaml's first denoise (and its re-outline pass, which must
+#: read as pass 1 does) carries the `elevation_hint` setting appended to the
+#: pinned prompt — one sentence per language about the camera climbing,
+#: blank for the arm without. Pass 2's prompt is the pinned one.
+HINTED_DENOISE_PROMPT = DENOISE_PROMPT + " ${globals.elevation_hint}"
 
 
 def _workflows():
@@ -1424,7 +1453,11 @@ class TestWorkflowFiles(unittest.TestCase):
         """
         # How many wan22_vace_denoise steps each file carries: the two
         # full-resolution passes plus the gated 480p re-outline pass.
-        expected = {"helical.yaml": 3}
+        expected = {"helical.yaml": 3, "helical_shell.yaml": 3}
+        # The experiment's pass 1 and re-outline pass carry the hint
+        # appended (HINTED_DENOISE_PROMPT); its pass 2 does not.
+        hinted = {("helical_shell.yaml", "denoise_pass1"),
+                  ("helical_shell.yaml", "reoutline_denoise")}
         workflows = _workflows()
         seen = 0
         for path in workflows:
@@ -1436,7 +1469,9 @@ class TestWorkflowFiles(unittest.TestCase):
                 seen += 1
                 passes += 1
                 with self.subTest(workflow=path.name, step=step.id):
-                    self.assertEqual(step.params.get("prompt"), DENOISE_PROMPT)
+                    want = (HINTED_DENOISE_PROMPT if (path.name, step.id) in hinted
+                            else DENOISE_PROMPT)
+                    self.assertEqual(step.params.get("prompt"), want)
                     self.assertEqual(
                         step.params.get("negative_prompt"), DENOISE_NEGATIVE_PROMPT
                     )
@@ -1444,6 +1479,95 @@ class TestWorkflowFiles(unittest.TestCase):
                 passes, expected[path.name],
                 f"{path.name}: expected {expected[path.name]} denoise passes")
         self.assertEqual(seen, sum(expected[p.name] for p in workflows))
+
+    def test_bootstrap_prologues_have_the_pinned_shape(self):
+        """BOOTSTRAPS pins how each file manufactures the dataset the tail
+        expects; a prologue that changed shape is the edit somebody should
+        look at. Every shipped file is pinned, and every pinned file
+        ships."""
+        names = {p.stem for p in _workflows()}
+        self.assertEqual(names, set(BOOTSTRAPS))
+        for name, prologue in BOOTSTRAPS.items():
+            spec = WorkflowSpec.from_yaml(str(WORKFLOW_DIR / f"{name}.yaml"))
+            with self.subTest(workflow=name):
+                self.assertEqual([s.id for s in spec.steps[: len(prologue)]], prologue)
+
+    def test_helical_shell_mirrors_helical(self):
+        """helical_shell.yaml is helical.yaml with five shell steps added
+        and a short list of deliberate differences. There is no include
+        mechanism, so the thing worth checking is that nothing ELSE has
+        drifted between the two: an A/B against helical.yaml is only an A/B
+        if the tail is the same tail.
+
+        Compared, step by step after SHELL_ONLY_STEPS are removed: id,
+        class, dispatch, env, inputs, outputs, when, keep_loaded and the raw
+        params block — except where this test says the file differs:
+
+          * both mesh renders draw the helix: `pattern`, `n_loops`,
+            `amplitude_deg`, `lead_in_deg`, `lead_out_deg`, `helix_anchor`
+            replace helical's `pattern: circular`; every other param on
+            those steps is the same;
+          * pass 1 and the re-outline pass carry the prompt hint
+            (HINTED_DENOISE_PROMPT, pinned above); nothing else on them
+            differs.
+
+        Globals: helical's, all of them, at the same values, plus the
+        experiment's own settings and a per-file output_root.
+        """
+        base = WorkflowSpec.from_yaml(str(WORKFLOW_DIR / "helical.yaml"))
+        shell = WorkflowSpec.from_yaml(str(WORKFLOW_DIR / "helical_shell.yaml"))
+        for name in SHELL_ONLY_STEPS:
+            self.assertIn(name, [s.id for s in shell.steps])
+            self.assertNotIn(name, [s.id for s in base.steps])
+        mirrored = [s for s in shell.steps if s.id not in SHELL_ONLY_STEPS]
+        self.assertEqual([s.id for s in mirrored], [s.id for s in base.steps],
+                         "helical_shell's steps have drifted from helical's")
+
+        helix_keys = {"pattern", "n_loops", "amplitude_deg", "lead_in_deg",
+                      "lead_out_deg", "helix_anchor"}
+        renders = {"render_initial_views", "render_reoutlined_views"}
+        hinted = {"denoise_pass1", "reoutline_denoise"}
+        for step, twin in zip(mirrored, base.steps):
+            with self.subTest(step=step.id):
+                self.assertEqual(step.step, twin.step)
+                self.assertEqual(step.dispatch, twin.dispatch)
+                self.assertEqual(step.env, twin.env)
+                self.assertEqual(step.inputs, twin.inputs)
+                self.assertEqual(step.outputs, twin.outputs)
+                self.assertEqual(step.when, twin.when)
+                self.assertEqual(step.keep_loaded, twin.keep_loaded)
+                params, base_params = dict(step.params), dict(twin.params)
+                if step.id in renders:
+                    self.assertEqual(base_params.pop("pattern"), "circular")
+                    self.assertEqual(
+                        {k: params.pop(k) for k in helix_keys},
+                        {"pattern": "helical", "n_loops": 1,
+                         "amplitude_deg": "${globals.helix_amplitude_deg}",
+                         "lead_in_deg": 0.0, "lead_out_deg": 4.5,
+                         "helix_anchor": "start"},
+                    )
+                if step.id in hinted:
+                    self.assertEqual(params.pop("prompt"), HINTED_DENOISE_PROMPT)
+                    self.assertEqual(base_params.pop("prompt"), DENOISE_PROMPT)
+                self.assertEqual(params, base_params)
+
+        own = {"helix_amplitude_deg", "shell_tail_frames", "shell_head_frames",
+               "shell_reference", "elevation_hint"}
+        self.assertEqual(set(shell.globals) - set(base.globals), own)
+        for key, value in base.globals.items():
+            with self.subTest(glob=key):
+                if key == "output_root":
+                    self.assertNotEqual(shell.globals[key], value)
+                    continue
+                self.assertEqual(shell.globals.get(key), value,
+                                 f"global '{key}' differs between the two files")
+        # The hint is what makes the two prompts differ; blank, they are
+        # the same string — which is the arm without.
+        self.assertTrue(shell.globals["elevation_hint"].strip())
+        self.assertEqual(
+            resolve(HINTED_DENOISE_PROMPT, {"globals": {"elevation_hint": ""}}),
+            DENOISE_PROMPT + " ",
+        )
 
     def test_every_render_with_a_backdrop_draws_the_same_room(self):
         """The backdrop was a pipeline SETTING until 2026-09-01, which made

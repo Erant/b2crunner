@@ -876,6 +876,9 @@ def result_dirs(run_dir: Optional[Path], workflow: str = "") -> Dict[str, Path]:
 DEBUG_SUBDIRS: Dict[str, str] = {
     "debug": "debug",
     "face": "debug/face",
+    # The whole-body pointmap shell helical_shell.yaml builds (shell.ply +
+    # the pointmap step's stats), packaged like the face .ply files.
+    "shell": "debug/shell",
     "colmap_intermediate": "debug/colmap_intermediate",
     "colmap_preupscale": "debug/colmap_preupscale",
 }

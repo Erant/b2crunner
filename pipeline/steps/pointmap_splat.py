@@ -63,12 +63,19 @@ How it is wired
 As `face_pointmap_splat`, twice in `workflows/helical.yaml`:
 `face_splat` in the bootstrap (through SAM-3D-Body's camera at the origin)
 and `face_splat_refined` after `refine_cameras` (through the photograph's
-camera moved by the anchor's refinement delta). See that class. The
-whole-body registration this base class used to carry (`pointmap_splat`,
-the photo-to-splat shell bootstrap's `shell_splat`, rendered along the mesh
-cameras and swapped into the frames near the source view by
-`inject_shell_views`, with `refine_pose_to_splat` re-posing the body onto
-it) was retired with that bootstrap on 2026-09-04 and lives in git history.
+camera moved by the anchor's refinement delta). See that class.
+
+As `pointmap_splat`, the whole subject, in `workflows/helical_shell.yaml`
+(2026-09-19): `shell_splat` builds the shell from the sheet's front half,
+`render_shell_views` renders it along pass 1's helix, and
+`inject_shell_views` (steps/anchor_stub.py) puts those renders into the
+frames at the END of that helix — the same azimuth as the photograph, a
+few degrees above it — as frames the denoise is told to keep. The shell
+is a control-video ingredient there and nothing else: no training reads
+it, no supporting view is cut from it. (The registration first existed for
+the photo-to-splat shell bootstrap of 2026-08-29, whose band of
+substituted frames, `refine_pose_to_splat` and stage-1 shells were retired
+on 2026-09-04; that history is in git.)
 
 Coordinate frames
 -----------------
@@ -1224,12 +1231,12 @@ def rotation_angle_deg(rotation: np.ndarray) -> float:
 class PointmapSplatStep(Step):
     """Single photo -> a Gaussian-splat shell in SAM-3D-Body's world.
 
-    **The base class, not a registered step.** The one specialization at
-    the bottom of this module, `face_pointmap_splat` (a head, from a crop of
-    the photograph), is what a workflow names. See `_source_intrinsics` for
-    the one thing it changes; everything else is a measured default. The
-    whole-body registration (`pointmap_splat`) went with the shell
-    bootstrap on 2026-09-04.
+    **The base class, not a registered step.** The two specializations at
+    the bottom of this module are what a workflow names: `pointmap_splat`
+    (the whole subject, this class verbatim under its registered name) and
+    `face_pointmap_splat` (a head, from a crop of the photograph). See
+    `_source_intrinsics` for the one thing the face changes; everything
+    else is a measured default.
 
     Instantiable and complete on its own, deliberately: the full-frame
     behaviour lives here as the default rather than in a subclass, because
@@ -1949,11 +1956,30 @@ class PointmapSplatStep(Step):
 
 
 # ---------------------------------------------------------------------------
-# The registered step. Everything above is shared and is the base class,
-# which tests/test_pointmap_splat.py exercises directly; this is the name a
-# workflow writes. (A whole-body `pointmap_splat` registration existed for
-# the photo-to-splat shell bootstrap, retired 2026-09-04.)
+# The registered steps. Everything above is shared and is the base class,
+# which tests/test_pointmap_splat.py exercises directly; these are the
+# names a workflow writes.
 # ---------------------------------------------------------------------------
+@register_step("pointmap_splat")
+class BodyPointmapSplatStep(PointmapSplatStep):
+    """The whole subject, from the whole photograph. `PointmapSplatStep` verbatim.
+
+    Thin on purpose. The base is already the full-frame case (see its
+    docstring), so this class exists to carry the registered name and to
+    state the input contract that goes with it: the matte is RMBG-2.0's,
+    over the same photo `sam3d_body` was fitted to, at that photo's own
+    resolution. What comes out is a 2.5-D shell of the side the photograph
+    saw, exact at the photograph's own camera and usable for a few degrees
+    around it (the retired shell bootstrap measured ~19 before the missing
+    back and the grazing fringes show) — enough for `inject_shell_views` to
+    take a frame or two at the top of a shallow helix from it.
+
+    Registered again on 2026-09-19 for workflows/helical_shell.yaml, after
+    leaving with the shell bootstrap on 2026-09-04. Nothing in the base
+    changed for it.
+    """
+
+
 @register_step("face_pointmap_splat")
 class FacePointmapSplatStep(PointmapSplatStep):
     """A head, from a crop of that same photograph.

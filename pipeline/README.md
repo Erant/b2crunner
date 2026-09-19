@@ -714,8 +714,10 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   per-view vertex displacements (rig v3, face core only), which is what
   lets the canonical face converge to the anchor's eye opening. Measured on
   four subjects: eye error 51-82 → 28-56, face and hair sharpness unchanged.
-- `PointmapSplatStep` (`pointmap_splat.py`; the base class — its whole-body
-  `pointmap_splat` registration went with the shell bootstrap on 2026-09-04)
+- `PointmapSplatStep` (`pointmap_splat.py`; the base class, registered
+  whole-body as `pointmap_splat` — retired with the shell bootstrap on
+  2026-09-04, back on 2026-09-19 for `helical_shell.yaml`'s shell, which
+  is a control-video ingredient for pass 1 and reaches no training)
   — one photo into a feed-forward
   Gaussian shell, in SAM-3D-Body's own world: Sapiens2 pointmap, depth
   re-solved from `sapiens2_lite`'s normals, one oriented Gaussian per

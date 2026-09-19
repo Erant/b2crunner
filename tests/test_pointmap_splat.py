@@ -719,3 +719,22 @@ class TestStepRun(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRegistrations(unittest.TestCase):
+    """The two names a workflow writes, both over the one base class."""
+
+    def test_the_whole_body_step_is_registered_again(self):
+        """`pointmap_splat` left with the shell bootstrap on 2026-09-04 and
+        came back on 2026-09-19 for helical_shell.yaml. It is the base
+        verbatim: full-frame intrinsics, the base's defaults."""
+        from pipeline.registry import get_step_class
+
+        cls = get_step_class("pointmap_splat")
+        self.assertTrue(issubclass(cls, ps.PointmapSplatStep))
+        self.assertIsNot(cls, get_step_class("face_pointmap_splat"))
+        base = {p.name: p.default for p in ps.PointmapSplatStep.PARAMS}
+        body = {p.name: p.default for p in cls.PARAMS}
+        self.assertEqual(body, base)
+        face = {p.name: p.default for p in get_step_class("face_pointmap_splat").PARAMS}
+        self.assertNotEqual(face["splat_scale"], body["splat_scale"])
