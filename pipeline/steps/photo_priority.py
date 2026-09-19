@@ -41,12 +41,14 @@ reached only 20.6 dB at its own view, and the confidence render greyed out
 45 % of the front — one frame is one vote, and one supporting view is
 below the evidence gate's `conf-min-views`. So the step also hands the
 training `copies` (6) of the photograph's frame as MASKED supporting views
-at the anchor camera, each masked by the photograph's own confidence field
-(its facing cosine from its own camera, extended off the body, clipped to
-its matte): 23.1 dB at the photograph's view from the copies alone (23.3
-at strength 0.5, 23.5 at 0.8), sharpness there x2.8, and the cull no worse
-than the untouched run's, because every copy is a view the evidence pass
-counts. The fade is the smaller half and a fidelity dial: 0.8 costs 1.5 dB
+at the anchor camera, each masked by the photograph's own matte
+(`copies_mask`; the confidence field — its facing cosine from its own
+camera — was the first version and measured worse: 23.1 dB at the
+photograph's view with six of those against 23.8 with six matte-masked
+ones, because the hair, the loose clothing and every grazing surface are
+exactly where the photograph still beats the repaints). Sharpness there
+x2.8-3.3, and the cull no worse than the untouched run's, because every
+copy is a view the evidence pass counts. The fade is the smaller half and a fidelity dial: 0.8 costs 1.5 dB
 against the frames beside the photograph for +0.4 dB at it. `images` (the
 training frames) has to be wired for the copies; without it none are made.
 
@@ -238,10 +240,15 @@ class PhotoPriorityWeightsStep(Step):
               "repaint (measured 2026-09-19: 14.5 dB from the photograph, a different face), which "
               "at full weight outvotes the photograph one to one at its own pose. Only "
               "`anchor_frame_index` is the photograph", minimum=0.0, advanced=True),
-        Param("copies", int, 6,
+        Param("copies", int, 12,
               "How many masked copies of the photograph's frame go to the training as supporting views at the "
-              "anchor camera (votes AND supporting views for the evidence gate; 6 measured, 12 barely better). "
-              "0 makes none. Needs `images`", minimum=0),
+              "anchor camera (votes AND supporting views for the evidence gate; 12 measured a little better than 6 "
+              "on both trainings). 0 makes none. Needs `images`", minimum=0),
+        Param("copies_mask", str, "matte",
+              "What masks the copies: `matte` (the photograph's own silhouette — measured best: the hair, the loose "
+              "clothing and every grazing surface are where the photograph still beats the repaints) or `confidence` "
+              "(the facing-cosine field the frames' fade uses, which leaves those out). Without an alpha to read the "
+              "matte from, the confidence field is used", choices=("matte", "confidence")),
         Param("debug_dir", str, "", "Write each view's confidence and weight here, and stats.json"),
     )
 
@@ -357,6 +364,12 @@ class PhotoPriorityWeightsStep(Step):
             conf = cv2.GaussianBlur(conf, (0, 0), float(params["feather_px"]))
         if alpha is not None:
             conf = conf * (normalize_mask(alpha) > 0.5)
+        if params["copies_mask"] == "matte":
+            if alpha is None:
+                logger.warning("photo_priority_weights: copies_mask is `matte` but the photograph's frame has no alpha and no "
+                               "`alphas` were wired; the copies take the confidence field")
+            else:
+                conf = (normalize_mask(alpha) > 0.5).astype(np.float32)
         bgr = photo[..., :3] if photo.ndim == 3 else np.repeat(photo[..., None], 3, 2)
         logger.info("photo_priority_weights: %d masked copies of the photograph's frame as supporting views (mask mean over the "
                     "subject %.2f)", copies, float(conf[normalize_mask(alpha) > 0.5].mean()) if alpha is not None and (normalize_mask(alpha) > 0.5).any() else float(conf.mean()))

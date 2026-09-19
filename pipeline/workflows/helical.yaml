@@ -154,7 +154,7 @@
 # frame sits on the same pose and is the denoiser's repaint of it (14.5 dB
 # from the photograph on the 2026-09-18 run), and at full weight it had
 # outvoted the photograph one to one in every run to date. The step also
-# hands the training six masked copies of the photograph as supporting
+# hands the training twelve masked copies of the photograph as supporting
 # views (merge_support_views' b_* triple): one frame is one vote against
 # forty, and one supporting view is below the evidence gate — the copies
 # alone take the photograph's view from 17.8 to 23.1 dB (sharpness x2.8),
@@ -654,7 +654,7 @@ settings:
       The frames either side of the anchor are the denoiser's re-lit,
       slightly displaced re-drawings of the front the photograph already
       shows, and the fit averaged them with it; the step also hands the
-      training six masked copies of the photograph as supporting views,
+      training twelve masked copies of the photograph as supporting views,
       which is what makes it win (measured 2026-09-19: 17.8 -> 23.1 dB at
       its own view from the copies alone, 23.3 at 0.5, 23.5 at 0.8; the
       strength trades fidelity to the photograph against fidelity to the

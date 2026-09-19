@@ -41,11 +41,13 @@ it was that path's one unambiguous win (whole-subject sharpness 39.5 ->
    multiplied into the face cap's weights, and `train_splat` and
    `export_colmap_intermediate` read the product (`scene.priority.weights`).
 
-5. the step also hands the training `copies` (6) of the photograph's
+5. the step also hands the training `copies` (12) of the photograph's
    frame as masked supporting views at the anchor camera, masked by the
-   photograph's own confidence field (steps 2-3 from its own camera),
-   through `merge_support_views`' second triple: votes and supporting
-   views at once (see the measurements).
+   photograph's own matte (`copies_mask`; the confidence field of steps
+   2-3 is the other option, measured worse — it leaves out the hair, the
+   loose clothing and every grazing surface, exactly where the photograph
+   still beats the repaints), through `merge_support_views`' second
+   triple: votes and supporting views at once (see the measurements).
 
 The photograph's own frame keeps weight 1. **Only that frame**: see the
 trap below. `strength` is the `photo_priority` setting (0..1; 0 leaves the
@@ -134,6 +136,13 @@ both arms):
 
 Every other view is unchanged: pass 2's frames agree with each other, so
 the fade has nothing to cost there, and the copies only decide the front.
+
+The copies' mask, measured on both sets (copies only, no fade): on the
+pass-2 set six confidence-masked copies 27.3 dB / sharpness 141 at the
+photograph, six matte-masked 27.8 / 175, twelve matte-masked 28.0 / 223;
+on the intermediate set six confidence-masked 23.1 / 813, six
+matte-masked 23.8 / 963. Off-axis unchanged in every case. Hence the
+defaults: twelve copies, the matte.
 
 ## Not done
 

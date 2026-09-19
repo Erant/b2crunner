@@ -202,6 +202,15 @@ class TestStep(unittest.TestCase):
         self.assertEqual(float(mask[0, 0]), 0.0)                            # off the body
         self.assertIs(out["support_cameras"][0], out["support_cameras"][3])
         self.assertEqual(out["photo_priority_stats"]["copies"], 4)
+        # With an alpha to read, the default `matte` mask is the silhouette itself, cosine or not.
+        alphas = [np.zeros((H, W), np.float32) for _ in range(3)]
+        alphas[0][2:H - 2, 2:W - 2] = 1.0
+        out = run_step("photo_priority_weights", _inputs([0.0, 15.0, 180.0], images=images, alphas=alphas),
+                       {"feather_px": 0.0, "extend_px": 0.0, "copies": 2})
+        np.testing.assert_allclose(out["support_masks"][0], alphas[0])
+        out = run_step("photo_priority_weights", _inputs([0.0, 15.0, 180.0], images=images, alphas=alphas),
+                       {"feather_px": 0.0, "extend_px": 0.0, "copies": 2, "copies_mask": "confidence"})
+        self.assertEqual(float(out["support_masks"][0][2, 2]), 0.0)   # the cube's edge: no body there
         # No images wired: no copies, and a passthrough returns the empty triple too.
         out = run_step("photo_priority_weights", _inputs([0.0, 15.0]), {"copies": 4})
         self.assertEqual(out["support_images"], [])
