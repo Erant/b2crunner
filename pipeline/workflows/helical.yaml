@@ -3716,6 +3716,37 @@ steps:
   # found are set below: normal supervision off, and the alignment loop on.
   # Both are steps/brush.py defaults now, so what is spelled out here is the
   # part that would be a silent regression if it moved.
+  # The photograph wins in the FINAL training too (2026-09-19, measured on
+  # two subjects' pass-2 exports: +1.8 / +2.8 dB at the photograph's view,
+  # its face +1.8 / +5.4 dB, sharpness x2, every other view unchanged).
+  # Pass 2's anchor frame (37, the lead-in) comes back as the photograph
+  # (17.8 dB against it; every other frame < 12.6), once against eighty
+  # repaints, exactly the intermediate training's situation. Same step, on
+  # the final cameras and frames after the eyes and the labels, with the
+  # REFIT body for the visibility test; no face cap here, so no base
+  # weights. The copies are the deliverable's only look at the photograph.
+  - id: photo_priority_final
+    step: photo_priority_weights
+    dispatch: in_process
+    when: ${globals.export_ply}
+    inputs:
+      cameras: dataset.cameras
+      images: dataset.images
+      alphas: dataset.masks
+      anchor_cameras: dataset.cameras
+      anchor_frame_index: dataset.extras.anchor_frame_index?
+      anchor_position: dataset.extras.anchor_position?
+      mesh_world: scene.mesh_world?
+    params:
+      strength: ${globals.photo_priority}
+      debug_dir: ${globals.output_root}/debug/photo_priority_final
+    outputs:
+      weights: scene.priority_final.weights
+      support_images: scene.photo_support_final.images
+      support_masks: scene.photo_support_final.masks
+      support_cameras: scene.photo_support_final.cameras
+      photo_priority_stats: scene.photo_priority_final_stats
+
   - id: train_final_splat
     step: brush
     dispatch: in_process
@@ -3747,14 +3778,24 @@ steps:
       # the absence is already the whole of "supervision off" — the explicit
       # 0.0 below is there in case anyone wires it back.
       #
-      # NO support_* here, deliberately. The face splat's renders were
-      # taken along the CIRCULAR bootstrap orbit and belong to the training
-      # that ran on it; by this point the dataset is the helical re-render,
-      # denoised a second time and upscaled, and those renders are stale in
-      # both senses — wrong path, and a resolution and a diffusion pass
-      # behind the frames beside them. Wiring `scene.support_views.*` in
-      # here would not fail, which is exactly why it is called out: the
-      # path is still populated from stage 1.
+      # NOT `scene.support_views.*` here, deliberately. The face splat's
+      # renders were taken along the CIRCULAR bootstrap orbit and belong to
+      # the training that ran on it; by this point the dataset is the
+      # helical re-render, denoised a second time and upscaled, and those
+      # renders are stale in both senses — wrong path, and a resolution and
+      # a diffusion pass behind the frames beside them. Wiring them in here
+      # would not fail, which is exactly why it is called out: the path is
+      # still populated from stage 1.
+      #
+      # What IS wired (2026-09-19): the photograph's masked copies and the
+      # frames' yield to it, made by photo_priority_final just above from
+      # THIS dataset (its cameras, its frames, after the eyes and the
+      # labels): the deliverable's front is the photograph's, not the
+      # average of eighty repaints of it.
+      weights: scene.priority_final.weights?
+      support_images: scene.photo_support_final.images?
+      support_masks: scene.photo_support_final.masks?
+      support_cameras: scene.photo_support_final.cameras?
     params:
       # See train_splat's note. Same count; a run tuning the deliverable
       # splat alone changes it here.

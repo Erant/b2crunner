@@ -849,9 +849,24 @@ class TestWorkflowFiles(unittest.TestCase):
                 continue
             with self.subTest(workflow=path.name):
                 readers = []
+                photo_steps = {s.id: s for s in spec.steps if s.step == "photo_priority_weights"}
+                photo_outputs = {v + "?" for ps in photo_steps.values()
+                                 for k, v in ps.outputs.items() if k.startswith("support_")}
                 for step in trainings:
                     wired = [step.inputs.get(name, "") for name in support]
                     if not any(wired):
+                        continue
+                    # The photograph's masked copies (photo_priority_weights, 2026-09-19)
+                    # are made by a step of this training's own dataset, after every
+                    # replacer; a training that reads ONLY those is not a cap reader.
+                    if all(v in photo_outputs for v in wired if v):
+                        producers = [ps for ps in photo_steps.values()
+                                     if any(v + "?" in wired for v in ps.outputs.values())]
+                        for ps in producers:
+                            self.assertLess(order[ps.id], order[step.id])
+                            replaced = [s.id for s in spec.steps if order[ps.id] < order[s.id] < order[step.id]
+                                        and ("dataset.cameras" in s.outputs.values() or "dataset.images" in s.outputs.values())]
+                            self.assertFalse(replaced, f"{path.name}: {replaced} replaced the dataset after '{ps.id}' made the photograph's copies")
                         continue
                     readers.append(step)
                     for name, value in zip(support, wired):
@@ -1084,14 +1099,25 @@ class TestWorkflowFiles(unittest.TestCase):
                 self.assertGreater(spec.steps.index(merge), spec.steps.index(photo))
 
                 weights = photo.outputs["weights"] + "?"
+                photo_steps = [s for s in spec.steps if s.step == "photo_priority_weights"]
                 for step in spec.steps:
                     if step.step != "brush":
                         continue
                     if step.inputs.get("support_images"):
+                        # The nearest photo_priority step before this training is the
+                        # one whose stacked weights (and copies) it must read.
+                        before = [ps for ps in photo_steps if spec.steps.index(ps) < spec.steps.index(step)]
+                        self.assertTrue(before, f"'{step.id}' reads supporting views with no photo_priority before it")
+                        expected = before[-1].outputs["weights"] + "?"
+                        if step.id == "train_splat":
+                            self.assertEqual(expected, weights)
+                        else:
+                            for name in ("images", "masks", "cameras"):
+                                self.assertEqual(step.inputs.get(f"support_{name}"), before[-1].outputs[f"support_{name}"] + "?")
                         self.assertEqual(
-                            step.inputs.get("weights"), weights,
-                            f"'{step.id}' reads the face cap and must read "
-                            f"the weights that make the frames yield to it",
+                            step.inputs.get("weights"), expected,
+                            f"'{step.id}' reads supporting views and must read "
+                            f"the weights that make the frames yield to them",
                         )
                     else:
                         self.assertNotIn(

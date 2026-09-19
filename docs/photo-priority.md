@@ -113,11 +113,33 @@ The `cull` column is at the binary's defaults; `render_subject` ships
 with `--conf-tau 0.3 --conf-angle-margin 45`, at which A and B5 both cull
 4 % — the copies' evidence advantage matters at the defaults, less there.
 
+## The final training too
+
+Pass 2's anchor is frame 37 (the helix's lead-in), and `colmap_preupscale`
+shows it comes back as the photograph again (17.8 dB against anchor.png;
+every other frame under 12.6), so the deliverable's training also sees
+the photograph once against eighty repaints. The same step runs as
+`photo_priority_final` right before `train_final_splat` (the final
+cameras and frames, the refit body, no face cap so no base weights) and
+the training reads its weights and copies. Measured on two subjects'
+pass-2 exports (720x1280, the final argv minus rig / labels / alignment,
+both arms):
+
+| subject | arm | PSNR @ photo | face PSNR @ photo | sharpness @ photo | PSNR @ +3 | PSNR @ +20 |
+|---|---|---|---|---|---|---|
+| 2026-09-18 run | as is | 26.2 | 26.2 | 100 | 28.4 | 30.3 |
+| 2026-09-18 run | copies 6 + 0.5 | 28.0 | 28.0 | 202 | 28.4 | 30.7 |
+| 00183 | as is | 22.0 | 24.1 | 346 | 27.0 | 27.1 |
+| 00183 | copies 6 + 0.5 | 24.8 | 29.5 | 666 | 26.5 | 26.9 |
+
+Every other view is unchanged: pass 2's frames agree with each other, so
+the fade has nothing to cost there, and the copies only decide the front.
+
 ## Not done
 
 * The frames 45-90 degrees round still see the front at a grazing angle
   and are only partly faded; a tighter window trades that against the
   sides' evidence.
 * Off the body mesh beyond 24 px (a wide skirt, long hair) nothing yields.
-* The final training never sees the photograph at all (no reinjection
-  after pass 2); this step is intermediate-only by construction.
+* Neither training has run on a pod with this; the numbers are local
+  retrains of pod exports without the body rig.
