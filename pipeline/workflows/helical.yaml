@@ -1565,6 +1565,7 @@ steps:
       image_names: dataset.image_names
       points_3d: dataset.points_3d
       sync_masks: scene.sync_silhouettes?
+      sync_mesh: scene.mesh_world?
     params:
       width: 480
       height: 832
@@ -1878,6 +1879,7 @@ steps:
       image_names: dataset.image_names
       points_3d: dataset.points_3d
       sync_masks: scene.sync_silhouettes?
+      sync_mesh: scene.mesh_world?
     params:
       width: ${globals.resolution.0}
       height: ${globals.resolution.1}
@@ -3328,6 +3330,7 @@ steps:
       points_3d: dataset.points_3d
       sync_masks: scene.sync_silhouettes_pass2?
       sync_init_ply: dataset.splat_path
+      sync_mesh: scene.mesh_world?
     params:
       width: ${globals.resolution.0}
       height: ${globals.resolution.1}

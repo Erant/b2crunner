@@ -158,6 +158,8 @@ class LatentSync:
         width: int, height: int, n_ref: int, steps: Sequence[int], mix: Sequence[float],
         band: float, iters: int, warm_iters: int, max_splats: int, mask_dilate_px: int,
         trainer: str, debug_dir: Optional[str], init_ply: Optional[str] = None,
+        mesh=None, hollow_weight: float = 0.0, confidence: bool = False,
+        gate: Sequence[float] = (0.45, 0.65), conf_args: Sequence[str] = (),
     ) -> None:
         if len(cameras) != len(image_names):
             raise ValueError(f"wan22_vace_denoise sync: {len(cameras)} cameras but {len(image_names)} image names")
@@ -183,6 +185,16 @@ class LatentSync:
         self.previous_ply: Optional[Path] = Path(init_ply) if init_ply else None
         if self.previous_ply is not None and not self.previous_ply.exists():
             raise FileNotFoundError(f"wan22_vace_denoise sync: init splat {self.previous_ply} does not exist")
+        # What keeps the splat from memorising its 81 views — the first pod
+        # run's splat did (render-vs-x0 23-29 dB per frame at 400k Gaussians,
+        # walking pose and all), and a memorising splat constrains nothing:
+        # the body mesh for the hollow loss, and the evidence gate at render
+        # time, which culls Gaussians few views support.
+        self.mesh = mesh
+        self.hollow_weight = float(hollow_weight)
+        self.confidence = bool(confidence)
+        self.gate = (float(gate[0]), float(gate[1]))
+        self.conf_args = [str(a) for a in conf_args]
         self.stats: List[Dict[str, Any]] = []
         self._lowpass = None
 
@@ -320,6 +332,18 @@ class LatentSync:
             "--max-splats", str(self.max_splats),
             "--eval-every", "1000000",
         ]
+        if self.mesh is not None and self.hollow_weight > 0:
+            # train_splat's hollow loss: Gaussians are held near the body's
+            # surface, so a pose the views disagree on cannot be built out
+            # of floaters that each view sees differently.
+            from .brush import _write_mesh_ply
+
+            mesh_path = colmap / "mesh.ply"
+            _write_mesh_ply(mesh_path, self.mesh[0], self.mesh[1])
+            cmd += ["--mesh", str(mesh_path), "--hollow-weight", str(self.hollow_weight),
+                    "--hollow-margin", "0.05", "--hollow-dilate", "2", "--hollow-proxy", "auto"]
+        if self.confidence:
+            cmd.append("--export-evidence")
         t0 = time.time()
         self._run(cmd, "train")
         ply = out / "sync.ply"
@@ -336,11 +360,23 @@ class LatentSync:
         # alpha on top of that counts the background twice — a grey band
         # learned as grey-over-black gets grey-over-grey — and decoded as a
         # bright halo round the subject (measured locally, twice).
-        self._run([self.trainer, "render", "--splat", str(ply), "--cameras", str(cams),
-                   "--output-dir", str(renders), "--background", "0,0,0"], "render")
+        render_cmd = [self.trainer, "render", "--splat", str(ply), "--cameras", str(cams),
+                      "--output-dir", str(renders), "--background", "0,0,0"]
+        if self.confidence:
+            # render_splat's gate: every pixel weighted by the multi-view
+            # confidence of the Gaussians behind it (smoothstep between the
+            # two gates), the alpha channel becoming that weight and culled
+            # pixels resolving to the same black the kept ones sit on. What
+            # survives is what the views AGREE on; where nothing does, the
+            # composite below keeps x0.
+            render_cmd += ["--confidence", "--cull-color", "0,0,0",
+                           "--gate-lo", str(self.gate[0]), "--gate-hi", str(self.gate[1])] + self.conf_args
+        self._run(render_cmd, "render")
         t2 = time.time()
         composited = []
         coverage = []
+        agreement = []
+        fidelity = []
         for index, (frame, name) in enumerate(zip(frames, self.image_names)):
             rgba = cv2.imread(str(renders / name), cv2.IMREAD_UNCHANGED)
             if rgba is None:
@@ -355,16 +391,33 @@ class LatentSync:
                 weight = cv2.GaussianBlur(m.astype(np.float32) / 255.0, (0, 0), 4)[..., None]
             else:
                 weight = np.ones(rgb.shape[:2] + (1,), np.float32)
+            subject = weight[..., 0] > 0.5
+            if self.confidence and rgba.ndim == 3 and rgba.shape[2] == 4:
+                gate = rgba[..., 3:4].astype(np.float32) / 255.0
+                agreement.append(float(gate[subject].mean()) if subject.any() else 0.0)
+                weight = weight * gate
             coverage.append(float(weight.mean()))
+            # How closely the render reproduces this very view: a splat
+            # that memorises its views scores high here and constrains
+            # nothing. Measured where the render is actually used.
+            used = weight[..., 0] > 0.5
+            if used.any():
+                mse = float(((rgb - frame.astype(np.float32)) ** 2).mean(-1)[used].mean())
+                fidelity.append(10 * math.log10(255.0 ** 2 / max(mse, 1e-6)))
             composited.append(np.clip(rgb * weight + frame.astype(np.float32) * (1 - weight), 0, 255).astype(np.uint8))
         self.previous_ply = ply
         self.stats[-1].update({
             "train_s": t1 - t0, "render_s": t2 - t1, "warm": warm, "iters": iters,
             "render_coverage": float(np.mean(coverage)),
+            "render_vs_x0_psnr": float(np.mean(fidelity)) if fidelity else None,
+            "gate_agreement": float(np.mean(agreement)) if agreement else None,
         })
-        logger.info("  sync step %d: %s %d iters in %.1fs%s, render %.1fs, render covers %.1f%% of the frame",
+        logger.info("  sync step %d: %s %d iters in %.1fs%s, render %.1fs, render covers %.1f%% of the frame%s; "
+                    "render vs x0 %.1f dB (memorisation if high)",
                     step_index, self.trainer, iters, t1 - t0, " (warm)" if warm else "", t2 - t1,
-                    100 * float(np.mean(coverage)))
+                    100 * float(np.mean(coverage)),
+                    f", gate keeps {100 * float(np.mean(agreement)):.0f}% of the subject" if agreement else "",
+                    float(np.mean(fidelity)) if fidelity else float("nan"))
         return composited
 
     def _run(self, cmd: List[str], what: str) -> None:

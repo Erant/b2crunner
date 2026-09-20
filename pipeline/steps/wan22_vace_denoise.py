@@ -1038,7 +1038,8 @@ class Wan22VaceDenoiseStep(Step):
         # it runs at; `sync_masks` (spatial, per frame — the mesh silhouettes,
         # not VACE's flags) confines the splat to the subject; `sync_init_ply`
         # (a .ply path) warm-starts the first sync's splat instead of the
-        # cold fit from points_3d.
+        # cold fit from points_3d; `sync_mesh` (vertices, faces — scene.
+        # mesh_world) is the hollow loss's surface.
         Param("sync_steps", list, [],
               "Denoise steps (0-based, of steps_high + steps_low) after whose "
               "model call the clean estimate is made 3D-consistent before the "
@@ -1058,13 +1059,32 @@ class Wan22VaceDenoiseStep(Step):
               "a Wan latent's energy and the only one that survives a "
               "sub-latent-pixel shift; everything above it stays the model's",
               minimum=0.0, maximum=1.0),
-        Param("sync_iters", int, 6000,
-              "Trainer iterations for the first sync's splat (cold, from points_3d)",
+        Param("sync_iters", int, 3000,
+              "Trainer iterations for the first sync's splat (cold, from points_3d). "
+              "6000 until 2026-09-20; fewer, like fewer Gaussians, is the point: "
+              "a splat that cannot fit every view renders their consensus",
               minimum=1),
-        Param("sync_warm_iters", int, 1500,
+        Param("sync_warm_iters", int, 800,
               "Trainer iterations for every later sync, warm-started from the "
               "previous sync's splat", minimum=1),
-        Param("sync_max_splats", int, 400_000, "Cap on the sync splat's Gaussians", minimum=1),
+        Param("sync_max_splats", int, 50_000,
+              "Cap on the sync splat's Gaussians. The first pod run's 400k "
+              "memorised its 81 views (render vs x0 23-29 dB, walking pose and "
+              "all) and so constrained nothing", minimum=1),
+        Param("sync_hollow_weight", float, 0.5,
+              "train_splat's hollow loss against the body mesh (`sync_mesh` "
+              "input), holding the sync splat's Gaussians near the body's "
+              "surface; 0 is off", minimum=0.0),
+        Param("sync_confidence", bool, True,
+              "Render the sync splat through render_splat's evidence gate: "
+              "Gaussians few views support are culled and the composite keeps "
+              "x0 there, so what is fed back is what the views agree on"),
+        Param("sync_gate", list, [0.45, 0.65],
+              "The gate's [lo, hi]: confidence at or below lo is culled, at or "
+              "above hi kept, a smoothstep between (render_splat's defaults)"),
+        Param("sync_conf_args", list, ["--conf-tau", "0.3", "--conf-angle-margin", "45"],
+              "Extra --conf-* flags for the gated render, verbatim; the default "
+              "is what rerender_splat passes", advanced=True),
         Param("sync_mask_dilate_px", int, 24,
               "How far the spatial masks are grown before they confine the "
               "splat's loss and the render's compositing — room for a body "
@@ -1527,7 +1547,13 @@ class Wan22VaceDenoiseStep(Step):
             max_splats=int(params["sync_max_splats"]), mask_dilate_px=int(params["sync_mask_dilate_px"]),
             trainer=params["sync_trainer"], debug_dir=params["sync_debug_dir"],
             init_ply=inputs.get("sync_init_ply"),
+            mesh=inputs.get("sync_mesh"), hollow_weight=float(params["sync_hollow_weight"]),
+            confidence=bool(params["sync_confidence"]), gate=params["sync_gate"] or [0.45, 0.65],
+            conf_args=params["sync_conf_args"] or [],
         )
+        if params["sync_hollow_weight"] > 0 and inputs.get("sync_mesh") is None:
+            logger.info("  sync: hollow_weight %s but no `sync_mesh` input is wired; the splat trains without it",
+                        params["sync_hollow_weight"])
         logger.info("  sync: steps %s, mix %s, band %.3f, %s%s%s", steps, mix, float(params["sync_band"]),
                     params["sync_trainer"], " with masks" if inputs.get("sync_masks") is not None else " (no masks)",
                     f", warm from {inputs['sync_init_ply']}" if inputs.get("sync_init_ply") else ", cold from points_3d")

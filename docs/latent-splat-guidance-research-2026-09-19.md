@@ -469,6 +469,22 @@ splat (`dataset.splat_path`) as the first sync's warm start
 `sync_steps: []` / `sync_steps_pass2: []` is the control arm, and
 `sync_mix: [0]` measures without applying.
 
+**First pod run, 2026-09-20 (`90db726`, pass 1 only):** the mechanics
+held (36/32/31 s per sync, clean renders, no halos), x0 at σ .93 was
+already sharp (Lightning), and the splat **memorised its views** —
+render vs x0 23–29 dB per frame at 400k Gaussians / 6000 iterations,
+each view rendered with its own walking pose (frame 0 feet together,
+frames 20 and 60 mid-stride with different legs). What was applied
+(0.33 → 0.20 → 0.15 of the low band) was the fit's softening, not a 3D
+constraint: E2's train-view result, live. Answer (`32b8f1a`+): make the
+splat unable to memorise — 50k Gaussians, 3000/800 iterations, the
+hollow loss against the body mesh (`sync_mesh`), and the evidence gate
+at render time (`sync_confidence`, render_splat's gate and conf args)
+so what is fed back is what the views agree on and x0 is kept where
+nothing does. Each sync now logs render-vs-x0 PSNR (memorisation if
+high) and the gate's kept fraction of the subject. Locally, on the
+consistent colmap frames: 25 dB, gate 97 %.
+
 To run the experiment (E3), same seed, two arms:
 
     python -m pipeline.cli run helical --reference-image <photo>      # sync on (the defaults)

@@ -53,8 +53,9 @@ masks = [((np.abs(fr[:, t].permute(1, 2, 0).numpy() - 123).max(-1) > 8) * 255).a
 
 sync = wan22_sync.LatentSync(
     pipe=types.SimpleNamespace(vae=vae), cameras=cameras, image_names=names, points_3d=points_3d, masks=masks,
-    width=480, height=832, n_ref=0, steps=[2, 3, 4], mix=[1.0, 1.0, 0.5], band=1 / 6, iters=6000, warm_iters=1500,
-    max_splats=400000, mask_dilate_px=24, trainer=os.path.expanduser("~/Projects/b2ctrain/build/b2ctrain"), debug_dir=OUT)
+    width=480, height=832, n_ref=0, steps=[2, 3, 4], mix=[1.0, 1.0, 0.5], band=1 / 6, iters=3000, warm_iters=800,
+    max_splats=50000, mask_dilate_px=24, trainer=os.path.expanduser("~/Projects/b2ctrain/build/b2ctrain"), debug_dir=OUT,
+    confidence=True, conf_args=["--conf-tau", "0.3", "--conf-angle-margin", "45"])
 print("cameras scaled:", sync.cameras[0].width, sync.cameras[0].height, round(float(sync.cameras[0].fx), 2))
 
 torch.manual_seed(0)
