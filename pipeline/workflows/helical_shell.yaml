@@ -254,6 +254,46 @@ settings:
       42) before this became a setting. Change it to draw a different sample
       of the same pipeline.
 
+  - name: sync_steps
+    label: Pass-1 3D sync steps
+    type: list
+    default: []
+    advanced: true
+    help: >-
+      In-loop 3D synchronisation of pass 1 (experimental, 2026-09-19;
+      docs/latent-splat-guidance-research-2026-09-19.md, M1). Denoise steps
+      (0-based, of the six) after whose model call the clean estimate is
+      decoded, fitted as a splat at the orbit's cameras, re-rendered,
+      re-encoded, and its LOW frequency band put back before the step is
+      taken — so the 81 views are pulled toward one body while the model
+      keeps its own detail. Empty is off, and the run is the one that came
+      before. [2, 3, 4] is the experiment: steps 0-1 predict a blur, step 5
+      is the output. Needs `pass1_sampler_low: euler`; the step refuses
+      otherwise. Each sync costs a splat fit and a VAE round trip (~1 min).
+
+  - name: sync_mix
+    label: Pass-1 3D sync mix
+    type: list
+    default: [1.0]
+    advanced: true
+    help: >-
+      How much of the low-band difference each sync applies, one entry per
+      sync step or one for all: 1.0 replaces the band with the render's,
+      0.5 goes halfway. [1, 1, 0.5] fades out toward the last steps.
+
+  - name: pass1_sampler_low
+    label: Pass-1 low-noise sampler
+    type: str
+    default: uni_pc
+    choices: [uni_pc, euler]
+    advanced: true
+    help: >-
+      The sampler pass 1's low-noise expert takes its four steps with.
+      `uni_pc` is run E4's, the settled default. `euler` is required by the
+      3D sync above (it rewrites the euler step's velocity and has no seam
+      in UniPC's multistep history) and is otherwise the plain first-order
+      step — the pass-2 sweep found the two within noise of each other.
+
   - name: run_upscale
     label: Upscale dataset
     type: bool
@@ -1170,6 +1210,22 @@ steps:
   # bg_color) are render_initial_views' own image_warp output, unpacked —
   # see anchor_stub.py's GenerateFirstLastStep for why those specific
   # fields.
+  # The mesh silhouettes as render_initial_views drew them, kept for the
+  # pass-1 3D sync before the anchor injection below overwrites
+  # dataset.masks with VACE's per-frame flags. A resize to the size they
+  # already are is the pipeline's copy. Gated on the sync being on.
+  - id: sync_silhouettes
+    step: resize_batch
+    dispatch: in_process
+    when: ${globals.sync_steps}
+    inputs:
+      masks: dataset.masks
+    params:
+      width: ${globals.resolution.0}
+      height: ${globals.resolution.1}
+    outputs:
+      masks: scene.sync_silhouettes
+
   - id: warp_reference_to_anchor
     step: generate_firstlast
     dispatch: in_process
@@ -1287,6 +1343,12 @@ steps:
       control_masks: scene.reoutline.masks
       reference_image: dataset.reference_image
       subject_desc: dataset.prompt
+      # The 3D sync's inputs, as on denoise_pass1 (this pass is pass 1 at
+      # 480p, sync included; the cameras are rescaled by the step).
+      cameras: dataset.cameras
+      image_names: dataset.image_names
+      points_3d: dataset.points_3d
+      sync_masks: scene.sync_silhouettes?
     params:
       width: 480
       height: 832
@@ -1294,6 +1356,10 @@ steps:
       steps_low: 4
       cfg: 1.0
       seed: ${globals.seed}
+      sync_steps: ${globals.sync_steps}
+      sync_mix: ${globals.sync_mix}
+      sync_debug_dir: ${globals.output_root}/debug/sync_reoutline
+      sampler_low: ${globals.pass1_sampler_low}
       sampler_high: uni_pc
       sampler_shift: 5
       strength: [1, 1, 0.5, 0.5, 0.5, 0.5]
@@ -1663,6 +1729,14 @@ steps:
       control_masks: dataset.masks
       reference_image: dataset.reference_image
       subject_desc: dataset.prompt
+      # For the in-loop 3D sync (`sync_steps`): the orbit's cameras and the
+      # body points the sync's splat starts from, and the mesh silhouettes
+      # that confine it to the subject. Read whether or not the sync is on;
+      # the step ignores them when it is off.
+      cameras: dataset.cameras
+      image_names: dataset.image_names
+      points_3d: dataset.points_3d
+      sync_masks: scene.sync_silhouettes?
     params:
       width: ${globals.resolution.0}
       height: ${globals.resolution.1}
@@ -1680,6 +1754,13 @@ steps:
       steps_low: 4
       cfg: 1.0
       seed: ${globals.seed}
+      # The in-loop 3D sync, off unless the `sync_steps` setting names a
+      # step; steps/wan22_sync.py. The debug dir gets each sync's decoded
+      # and rendered frames and sync_stats.json.
+      sync_steps: ${globals.sync_steps}
+      sync_mix: ${globals.sync_mix}
+      sync_debug_dir: ${globals.output_root}/debug/sync_pass1
+      sampler_low: ${globals.pass1_sampler_low}
       # The sampler and the scale schedule are run E4's, the settled result
       # of the 2026-09-08 skeleton-leak sweep (docs/vace-denoise-findings-
       # 2026-09-07.md, section 5; sidecar docs/vace-leak-sweep/E4-shift5-

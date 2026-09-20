@@ -132,7 +132,7 @@ BOOTSTRAPS = {
         "detect_face", "map_face_to_mesh", "fit_head_to_face",
         "locate_face", "crop_face", "face_seg", "face_mask",
         "face_normals", "face_splat",
-        "render_initial_views",
+        "render_initial_views", "sync_silhouettes",
         "warp_reference_to_anchor", "reinject_anchor_initial",
     ],
     # The EXPERIMENT (2026-09-19): the same bootstrap with a whole-body
@@ -147,7 +147,7 @@ BOOTSTRAPS = {
         "locate_face", "crop_face", "face_seg", "face_mask",
         "face_normals", "face_splat",
         "front_matte", "front_normals", "shell_splat",
-        "render_initial_views",
+        "render_initial_views", "sync_silhouettes",
         "warp_reference_to_anchor", "reinject_anchor_initial",
     ],
 }
@@ -2039,7 +2039,9 @@ class TestTheReoutlineBranch(unittest.TestCase):
         spec = self._spec()
         extra = self._step(spec, "reoutline_denoise")
         pass1 = self._step(spec, "denoise_pass1")
-        expected = dict(pass1.params, width=480, height=832)
+        # ... and its own sync debug dir, the one per-step path in the block.
+        expected = dict(pass1.params, width=480, height=832,
+                        sync_debug_dir="${globals.output_root}/debug/sync_reoutline")
         self.assertEqual(extra.params, expected)
         self.assertEqual((extra.dispatch, extra.env, extra.keep_loaded),
                          (pass1.dispatch, pass1.env, pass1.keep_loaded))
@@ -2617,7 +2619,9 @@ class TestTheReoutlineBranch(unittest.TestCase):
         spec = self._spec()
         extra = self._step(spec, "reoutline_denoise")
         pass1 = self._step(spec, "denoise_pass1")
-        expected = dict(pass1.params, width=480, height=832)
+        # ... and its own sync debug dir, the one per-step path in the block.
+        expected = dict(pass1.params, width=480, height=832,
+                        sync_debug_dir="${globals.output_root}/debug/sync_reoutline")
         self.assertEqual(extra.params, expected)
         self.assertEqual((extra.dispatch, extra.env, extra.keep_loaded),
                          (pass1.dispatch, pass1.env, pass1.keep_loaded))

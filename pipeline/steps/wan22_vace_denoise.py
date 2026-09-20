@@ -730,6 +730,17 @@ def _install_sampler(step: "Wan22VaceDenoiseStep", scheduler) -> None:
         if step._sampler_at(scheduler, timestep) != "euler":
             return original(model_output, timestep, sample, *args, **kwargs)
         return_dict = kwargs.get("return_dict", args[0] if args else True)
+        sync = step._sync
+        if sync is not None:
+            index = _nearest_step(scheduler, timestep)
+            if sync.wants(index):
+                # The sigma the euler step is about to read: x0 = x_t -
+                # sigma * v is only that estimate at this sigma, so the
+                # index is initialised here exactly as _euler_step does it.
+                if getattr(scheduler, "_step_index", None) is None:
+                    scheduler._init_step_index(timestep)
+                sigma = float(scheduler.sigmas[scheduler._step_index])
+                model_output = sync.velocity(model_output, sample, sigma, index)
         return _euler_step(scheduler, model_output, timestep, sample, return_dict)
 
     scheduler.step = sampler_step
@@ -1020,6 +1031,48 @@ class Wan22VaceDenoiseStep(Step):
         Param("length", int, None,
               "Frames to generate; empty means as many as the control video has"),
 
+        # In-loop 3D synchronisation (steps/wan22_sync.py; M1 of
+        # docs/latent-splat-guidance-research-2026-09-19.md). Off unless
+        # `sync_steps` names a step. Needs the `cameras`, `image_names` and
+        # `points_3d` inputs (dataset.*) and the euler sampler on the steps
+        # it runs at; `sync_masks` (spatial, per frame — the mesh silhouettes,
+        # not VACE's flags) confines the splat to the subject.
+        Param("sync_steps", list, [],
+              "Denoise steps (0-based, of steps_high + steps_low) after whose "
+              "model call the clean estimate is made 3D-consistent before the "
+              "step is taken: decoded, fitted as a splat at the dataset's "
+              "cameras, re-rendered, re-encoded, and its LOW radial band put "
+              "back into x0. Empty is off. With the 2 + 4 default and shift 5 "
+              "the useful ones are [2, 3, 4]: 0-1 predict a blur, 5 is the "
+              "output. Those steps must run `euler`"),
+        Param("sync_mix", list, [1.0],
+              "How much of the low-band difference is applied at each sync "
+              "step, one entry per `sync_steps` entry (or one for all): 1.0 "
+              "replaces the band, 0.5 moves halfway. [1, 1, 0.5] fades out "
+              "the way VidSplat's schedule does"),
+        Param("sync_band", float, 1.0 / 6.0,
+              "Radial fraction of the latent spectrum taken from the render "
+              "(1.0 = the corner Nyquist). 1/6 is the band that holds 95% of "
+              "a Wan latent's energy and the only one that survives a "
+              "sub-latent-pixel shift; everything above it stays the model's",
+              minimum=0.0, maximum=1.0),
+        Param("sync_iters", int, 6000,
+              "Trainer iterations for the first sync's splat (cold, from points_3d)",
+              minimum=1),
+        Param("sync_warm_iters", int, 1500,
+              "Trainer iterations for every later sync, warm-started from the "
+              "previous sync's splat", minimum=1),
+        Param("sync_max_splats", int, 400_000, "Cap on the sync splat's Gaussians", minimum=1),
+        Param("sync_mask_dilate_px", int, 24,
+              "How far the spatial masks are grown before they confine the "
+              "splat's loss and the render's compositing — room for a body "
+              "painted off the drawing", minimum=0),
+        Param("sync_trainer", str, "b2ctrain",
+              "The trainer binary; `<trainer> render` is the rasteriser", advanced=True),
+        Param("sync_debug_dir", str, None,
+              "Where to write each sync's decoded and rendered frames (every "
+              "~10th) and sync_stats.json; empty writes nothing"),
+
         Param("checkpoint", str, DEFAULT_CHECKPOINT,
               "The diffusers repo the pipeline's non-transformer components come from",
               advanced=True),
@@ -1116,6 +1169,11 @@ class Wan22VaceDenoiseStep(Step):
         self._sampler_high = "uni_pc"
         self._sampler_low = "uni_pc"
         self._sampled = None
+        # The pass's in-loop synchroniser (steps/wan22_sync.py), or None:
+        # built by run() when `sync_steps` names a step, consulted by the
+        # euler step _install_sampler routes through it, dropped after
+        # pipe() returns.
+        self._sync = None
 
     def load(self, params: Dict[str, Any]) -> None:
         """Build the pipeline around the pre-quantized fp8 transformers.
@@ -1424,6 +1482,52 @@ class Wan22VaceDenoiseStep(Step):
 
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+
+    def _build_sync(self, pipe, inputs: Dict[str, Any], params: Dict[str, Any], n_steps: int, *, n_ref: int):
+        """The pass's LatentSync (steps/wan22_sync.py), or None when
+        `sync_steps` is empty. Everything it needs is checked here, before
+        the model runs: the steps exist and run euler, the dataset inputs
+        are wired, the mix has an entry per step."""
+        steps = [int(v) for v in (params["sync_steps"] or [])]
+        if not steps:
+            return None
+        from .wan22_sync import LatentSync
+
+        for index in steps:
+            if not 0 <= index < n_steps:
+                raise ValueError(f"wan22_vace_denoise: sync_steps names step {index} of a {n_steps}-step run")
+            sampler = params["sampler_high"] if index < params["steps_high"] else params["sampler_low"]
+            if sampler != "euler":
+                raise ValueError(
+                    f"wan22_vace_denoise: sync step {index} runs {sampler}; the synchroniser rewrites "
+                    "the euler step's velocity and has no seam in UniPC's multistep history. Set "
+                    f"{'sampler_high' if index < params['steps_high'] else 'sampler_low'}: euler")
+        mix = [float(v) for v in (params["sync_mix"] or [1.0])]
+        if len(mix) == 1:
+            mix = mix * len(steps)
+        if len(mix) != len(steps):
+            raise ValueError(f"wan22_vace_denoise: sync_mix has {len(mix)} entries for {len(steps)} sync steps")
+        cameras = inputs.get("cameras")
+        image_names = inputs.get("image_names")
+        if cameras is None or image_names is None:
+            raise ValueError(
+                "wan22_vace_denoise: sync_steps is set but the `cameras` and `image_names` inputs "
+                "(dataset.cameras, dataset.image_names) are not wired; the splat needs them")
+        if len(cameras) != len(inputs["control_video"]):
+            raise ValueError(
+                f"wan22_vace_denoise: {len(cameras)} cameras for {len(inputs['control_video'])} control frames")
+        sync = LatentSync(
+            pipe=pipe, cameras=cameras, image_names=image_names,
+            points_3d=inputs.get("points_3d"), masks=inputs.get("sync_masks"),
+            width=int(params["width"]), height=int(params["height"]), n_ref=n_ref,
+            steps=steps, mix=mix, band=float(params["sync_band"]),
+            iters=int(params["sync_iters"]), warm_iters=int(params["sync_warm_iters"]),
+            max_splats=int(params["sync_max_splats"]), mask_dilate_px=int(params["sync_mask_dilate_px"]),
+            trainer=params["sync_trainer"], debug_dir=params["sync_debug_dir"],
+        )
+        logger.info("  sync: steps %s, mix %s, band %.3f, %s%s", steps, mix, float(params["sync_band"]),
+                    params["sync_trainer"], " with masks" if inputs.get("sync_masks") is not None else " (no masks)")
+        return sync
 
     def release_vram(self) -> None:
         """Give the card back, keep the ~47 GB of weights in host RAM.
@@ -1737,6 +1841,7 @@ class Wan22VaceDenoiseStep(Step):
         # scheduler will actually take, which the schedule and shift decide.
         self._configure_sampler(pipe, params)
         self._set_expert_split(pipe, params["steps_high"], n_steps)
+        self._sync = self._build_sync(pipe, inputs, params, n_steps, n_ref=1 if reference_images else 0)
 
         # Timings, not just a call. Everything up to the progress bar's
         # "0%" is silent otherwise, which on a resident worker's second
@@ -1762,6 +1867,13 @@ class Wan22VaceDenoiseStep(Step):
         # is the VAE *decode* of the finished latents, which is inline in
         # __call__ rather than a method and so cannot be wrapped.
         logger.info("  pipe() total: %.1fs", time.time() - started)
+        if self._sync is not None:
+            stats = self._sync.finish()
+            self._sync = None
+            logger.info("  sync: %d syncs, %.0fs in all, x0 moved by %s (low band %s)",
+                        len(stats), sum(float(s.get("seconds", 0)) for s in stats),
+                        [round(float(s.get("rel_change_full", 0)), 3) for s in stats],
+                        [round(float(s.get("rel_change_low_band", 0)), 3) for s in stats])
 
         frames = result.frames[0] if hasattr(result, "frames") else result[0]
         images = [_rgb_float_to_bgr_uint8(frame) for frame in frames]
