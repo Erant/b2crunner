@@ -496,6 +496,64 @@ settings:
       `outline_strength`'s 6.25 for the model's. Greyed out with
       `re_outline` off, when no step reads it.
 
+  - name: outline_relief
+    label: Outline relief
+    default: none
+    choices: [none, depth]
+    help: >-
+      What fills the silhouette in both drawings (the body model's and,
+      with `re_outline`, the splat's). `none` is the flat grey of the
+      strength settings above. `depth` fills it with the body model's
+      depth at that same mean grey: smoothed to body scale, cut to 16
+      levels over 80 cm centred on the orbit target, the near surface
+      lighter and the far surface darker by `outline_relief_amplitude`.
+      Why: a flat silhouette under a 2-D skeleton is the same drawing
+      from the front and from behind, mirrored, and the denoise can turn
+      the head without the torso (helical-20260920-202010 painted the
+      breastplate at azimuth 171, and its 480p pass never showed the back
+      at all). The relief puts back the one bit the drawing lacks — which
+      surface faces the camera — at outline strength rather than as the
+      depth map that had the denoise trace the naked model. Where the
+      re-outline's silhouette is wider than the model (hair, clothing) it
+      takes the nearest model depth. Applied to the drawing the 480p pass
+      sees and to the one pass 1 sees alike: the 480p pass has the same
+      ambiguity, and its silhouette is only as trustworthy as its turn.
+
+  - name: outline_relief_amplitude
+    label: Relief amplitude
+    type: float
+    default: 6.25
+    minimum: 0.0
+    maximum: 50.0
+    advanced: true
+    help: >-
+      With `outline_relief: depth`: how far the relief's near and far ends
+      sit either side of the fill's strength, on the same percentage ramp.
+      6.25 is 8 bytes each way — 16 distinct greys — and at
+      `outline_strength` 6.25 puts the nearest level on the ground, where
+      only a point 40 cm nearer than the orbit target reaches it. Raise
+      the strength or lower this if that matters.
+
+  - name: skeleton_occlusion_m
+    label: Skeleton occlusion (m)
+    type: float
+    default: 0.0
+    minimum: 0.0
+    maximum: 1.0
+    help: >-
+      In both drawings, hide every skeleton joint the body model hides
+      from the camera, and every bone ending on one — the far arm behind
+      the torso in profile is then not drawn through it. That is DWPose's
+      own rule for a keypoint its detector did not find, so the drawing
+      stays one it could have made, and it stops supporting the mirrored
+      reading of a profile. The value is how deep, in metres, a limb joint
+      may sit behind the model's surface and still count as seen (its own
+      flesh); torso joints get 2-2.5x and face landmarks half, by
+      body2colmap's table. 0.12 was measured to keep every joint of a
+      fitted body from every side and drop the ones behind another part.
+      0 draws every bone through everything, as every run before
+      2026-09-20 did.
+
 outputs:
   # What stage 6 can produce, and the switch each one is. `name:` is the
   # workflow global the `when:` on its export steps reads, so the switch is
@@ -1073,6 +1131,9 @@ steps:
       # with `reoutlined_strength` here — the ONE line the two differ in.
       render_mode: outline+skeleton+splat
       outline_strength: ${globals.outline_strength}
+      outline_relief: ${globals.outline_relief}
+      outline_relief_amplitude: ${globals.outline_relief_amplitude}
+      skeleton_occlusion_m: ${globals.skeleton_occlusion_m}
       # Tell the denoise which pixels are already real: 0.0 where the face
       # splat covers the frame, 1.0 everywhere else, in
       # wan22_vace_denoise's `control_masks` convention. ON here although
@@ -1546,6 +1607,9 @@ steps:
       # render_initial_views' in; tests/test_workflows.py pins that.
       render_mode: outline+skeleton+splat
       outline_strength: ${globals.reoutlined_strength}
+      outline_relief: ${globals.outline_relief}
+      outline_relief_amplitude: ${globals.outline_relief_amplitude}
+      skeleton_occlusion_m: ${globals.skeleton_occlusion_m}
       # The other line this block has that render_initial_views' does not.
       # The coverage of a splat trained on a single-elevation orbit carries
       # opaque needle Gaussians along the cameras' horizontal rays at the

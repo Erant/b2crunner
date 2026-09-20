@@ -839,7 +839,7 @@ COPY --from=python-builder /opt/vendor /opt/vendor
 # would install cleanly and then raise on the first render_splat of a real
 # run, an hour into a pod booking. The last five asserts below are what stop it.
 RUN /opt/venv_base/bin/pip install --force-reinstall --no-deps \
-        'body2colmap @ git+https://github.com/Erant/body2colmap.git@339a5983d9c36e31e5dd0265a8de905eb8d4c9c4' \
+        'body2colmap @ git+https://github.com/Erant/body2colmap.git@4c98a532e45bc27cfc5ec4faaab621c2e34320e8' \
     && /opt/venv_base/bin/python -c "\
 import inspect; \
 import body2colmap.face as f; \
@@ -867,6 +867,10 @@ assert (sr.INACTIVE, sr.REACTIVE) == (0, 255) \
 assert 'mask' in inspect.signature(Renderer.render_outline).parameters, \
     'bump the body2colmap pin: steps/render.py needs render_outline(mask=...) ' \
     'for the outline_masks input, or the re-outline branch silently draws the mesh'; \
+assert 'relief' in inspect.signature(Renderer.render_outline).parameters \
+    and 'occlusion_tolerance' in inspect.signature(Renderer.render_skeleton).parameters, \
+    'bump the body2colmap pin: steps/render.py needs render_outline(relief=...) and ' \
+    'render_skeleton(occlusion_tolerance=...) for outline_relief / skeleton_occlusion_m'; \
 print('body2colmap eye_style default:', f.DEFAULT_EYE_STYLE)"
 
 # NOT /workspace/b2c_runner, which is where this used to live. RunPod's

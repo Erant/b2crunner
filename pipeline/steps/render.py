@@ -543,6 +543,63 @@ class RenderStep(Step):
               "it was fitted to; 9 removes all of it and 0.04% of a matte's "
               "own thin structure, fingers kept)",
               minimum=0, advanced=True),
+        Param("outline_relief", str, "none",
+              "`outline*` modes only: what the silhouette is filled with. "
+              "`none` is the flat grey of `outline_strength`. `depth` fills "
+              "it with the body model's depth, smoothed to body scale and "
+              "cut to `outline_relief_levels` greys between "
+              "`outline_strength` ± `outline_relief_amplitude` — the near "
+              "surface lighter, the far surface darker, the mean grey the "
+              "flat fill's. A flat silhouette plus a 2-D skeleton is the "
+              "same drawing from the front and from behind, mirrored, and "
+              "a video model conditioned on it can turn the head and not "
+              "the torso (helical-20260920-202010: breastplate painted at "
+              "azimuth 171). The relief puts back the one bit the drawing "
+              "lacks — which surface faces the camera — without the full "
+              "depth map that had the denoise trace the naked model. The "
+              "window is `outline_relief_depth_m` metres centred on the "
+              "orbit's target, so a surface keeps its grey around the orbit; "
+              "an outline_masks silhouette wider than the model (hair, a "
+              "coat) takes the nearest model depth",
+              choices=("none", "depth")),
+        Param("outline_relief_amplitude", float, 6.25,
+              "With `outline_relief: depth`: how far the relief's near and "
+              "far ends sit either side of `outline_strength`, on the same "
+              "percentage ramp (100 = the whole #7F7F7F-to-black range). "
+              "6.25 is 8 bytes each way, which with 16 levels makes every "
+              "level a distinct byte; the ends clip at 0 (the ground) and "
+              "100", minimum=0.0, maximum=50.0, advanced=True),
+        Param("outline_relief_levels", int, 16,
+              "With `outline_relief: depth`: how many greys the relief is "
+              "cut to. More than the byte gap between the ends collapses "
+              "levels together", minimum=2, maximum=256, advanced=True),
+        Param("outline_relief_depth_m", float, 0.8,
+              "With `outline_relief: depth`: the metric depth the levels "
+              "span, centred on the orbit target — 0.8 with 16 levels is "
+              "5 cm a level, so the face reads against the back of the "
+              "head and a heel against a toe, but not a fold of the model",
+              minimum=0.01, advanced=True),
+        Param("outline_relief_smooth", float, 12.0,
+              "With `outline_relief: depth`: Gaussian sigma, in pixels at "
+              "the render size, applied to the depth before it is cut into "
+              "levels. What keeps the relief at body scale — no finger, no "
+              "naked contour under the clothes — rather than the model's "
+              "own detail. 0 leaves the model's relief",
+              minimum=0.0, advanced=True),
+        Param("skeleton_occlusion_m", float, 0.0,
+              "The `*+skeleton` modes: hide every joint that the body model "
+              "hides from the camera, and every bone ending on one — "
+              "DWPose's own rule for a keypoint its detector did not find, "
+              "so the far arm behind the torso in profile is not drawn "
+              "through it, and the drawing stops supporting the mirrored "
+              "reading of the pose. The value is the depth, in metres, a "
+              "limb joint may sit behind the model's surface and still be "
+              "drawn (its own flesh); the torso joints get more and the "
+              "face landmarks less, by body2colmap's per-joint table "
+              "(hips 2x, neck 2.5x, face 0.5x). 0.12 was measured to keep "
+              "every joint of a fitted body from every side and drop those "
+              "behind another part (37-57 cm back). 0 draws every bone "
+              "through everything, as before", minimum=0.0),
         Param("splat_max_angle_deg", float, 60.0,
               "The `+splat` modes only: composite the splat on every frame whose "
               "view of it is within this angle of the photograph's. Past it the "
@@ -922,6 +979,22 @@ class RenderStep(Step):
         outline_fg_color = (_outline_grey(params["outline_strength"]),) * 3
         outline_bg_color = (_outline_grey(0.0),) * 3
         outline_blur = params["outline_blur"]
+        # The relief's two ends straddle the flat fill on the same ramp, so
+        # the mean grey of a relief fill is the flat fill's and an A/B
+        # between the two changes only the shading.
+        outline_relief = None
+        if params["outline_relief"] == "depth":
+            amplitude = params["outline_relief_amplitude"]
+            outline_relief = {
+                "levels": params["outline_relief_levels"],
+                "depth_range": params["outline_relief_depth_m"],
+                "smooth": params["outline_relief_smooth"],
+                "near_color": (_outline_grey(params["outline_strength"] - amplitude),) * 3,
+                "far_color": (_outline_grey(params["outline_strength"] + amplitude),) * 3,
+                "center": np.asarray(orbit_center, dtype=np.float64),
+            }
+        skeleton_occlusion = params["skeleton_occlusion_m"]
+        occlusion_tolerance = skeleton_occlusion if skeleton_occlusion > 0 else None
 
         # Eye appearance for the face overlay. body2colmap ignores these
         # unless a face_landmarks input makes the face visible, so they are
@@ -1026,6 +1099,7 @@ class RenderStep(Step):
                     face_mode=face_mode,
                     face_landmarks=openpose_face_70,
                     face_max_angle=face_max_angle,
+                    occlusion_tolerance=occlusion_tolerance,
                     **eye_opts,
                 )
             elif base_render_mode in ("outline", "mesh+skeleton", "depth+skeleton",
@@ -1042,6 +1116,7 @@ class RenderStep(Step):
                         "style": skeleton_style,
                         "joint_radius": joint_radius,
                         "bone_radius": bone_radius,
+                        "occlusion_tolerance": occlusion_tolerance,
                     }
                 if base_render_mode == "mesh+skeleton":
                     composite_modes["mesh"] = {"color": mesh_color, "bg_color": bg_color}
@@ -1055,6 +1130,8 @@ class RenderStep(Step):
                     }
                     if outline_masks is not None:
                         composite_modes["outline"]["mask"] = outline_masks[index]
+                    if outline_relief is not None:
+                        composite_modes["outline"]["relief"] = outline_relief
                 if face_mode is not None and "skeleton" in composite_modes:
                     composite_modes["face"] = {
                         "face_mode": face_mode,
