@@ -557,3 +557,30 @@ class TestTheDebugExportRecordsThem(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestErode(unittest.TestCase):
+    """`erode_px`: the cap's outermost band is left to the frames (run
+    c0514e's grey jaw stripe, measured away at 30 px on its close-up cap
+    views), the colour still bleeding past the shrunk mask."""
+
+    def test_the_mask_is_shrunk_and_the_colour_still_bleeds_past_it(self):
+        images, masks = [], []
+        image, alpha = _render(1.0)
+        images.append(image); masks.append(alpha)
+        out = _run({"images": images, "masks": masks, "cameras": _cameras(1)}, erode_px=2, bleed_px=3)
+        mask = out["masks"][0]
+        self.assertEqual(float(mask[8, 8]), 0.0)     # the block's rim is out
+        self.assertEqual(float(mask[9, 9]), 0.0)
+        self.assertEqual(float(mask[10, 10]), 1.0)   # its interior stays
+        self.assertEqual(float(mask[12, 12]), 1.0)
+        # the colour is bled from the shrunk mask, so the old rim still has it
+        self.assertEqual(int(out["images"][0][8, 8, 0]), 200)
+
+    def test_zero_is_the_whole_cap(self):
+        images, masks = [], []
+        image, alpha = _render(1.0)
+        images.append(image); masks.append(alpha)
+        out = _run({"images": images, "masks": masks, "cameras": _cameras(1)}, erode_px=0)
+        self.assertEqual(float(out["masks"][0][8, 8]), 1.0)
+

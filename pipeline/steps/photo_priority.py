@@ -244,6 +244,13 @@ class PhotoPriorityWeightsStep(Step):
               "How many masked copies of the photograph's frame go to the training as supporting views at the "
               "anchor camera (votes AND supporting views for the evidence gate; 12 measured a little better than 6 "
               "on both trainings). 0 makes none. Needs `images`", minimum=0),
+        Param("copies_erode_px", int, 4,
+              "How far the copies' mask is shrunk from the photograph's silhouette. A photograph's outermost pixels are "
+              "its anti-aliased, backdrop-mixed edge, lighter than the garment behind them; twelve copies weight that edge "
+              "hard at the anchor camera, where they also sit a few px off the frames' silhouette, and the splat learns a "
+              "thin light rim seen only head-on (run c0514e; measured 2026-09-19 on its colmap_intermediate: front-halo "
+              "fraction 0.20 as-is, 0.13 without the copies, 0.30 with the mask grown 4 px, 0.14 with it shrunk 4 px). "
+              "0 leaves the matte as it is", minimum=0),
         Param("copies_mask", str, "matte",
               "What masks the copies: `matte` (the photograph's own silhouette — measured best: the hair, the loose "
               "clothing and every grazing surface are where the photograph still beats the repaints) or `confidence` "
@@ -370,6 +377,11 @@ class PhotoPriorityWeightsStep(Step):
                                "`alphas` were wired; the copies take the confidence field")
             else:
                 conf = (normalize_mask(alpha) > 0.5).astype(np.float32)
+        erode_px = int(params["copies_erode_px"])
+        if erode_px > 0:
+            # The photograph's own edge band is left to the frames: see copies_erode_px.
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * erode_px + 1, 2 * erode_px + 1))
+            conf = conf * (cv2.erode((conf > 0).astype(np.uint8), kernel) > 0)
         bgr = photo[..., :3] if photo.ndim == 3 else np.repeat(photo[..., None], 3, 2)
         logger.info("photo_priority_weights: %d masked copies of the photograph's frame as supporting views (mask mean over the "
                     "subject %.2f)", copies, float(conf[normalize_mask(alpha) > 0.5].mean()) if alpha is not None and (normalize_mask(alpha) > 0.5).any() else float(conf.mean()))

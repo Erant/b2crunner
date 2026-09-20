@@ -2480,6 +2480,11 @@ steps:
       # trustworthy renders (least parallax from the one source), which is
       # a second reason not to be the step that throws them away.
       min_path_angle_deg: 0.0
+      # The cap's outermost 30 px (at these close-up cameras) are left to
+      # the frames: the projected skin along the jaw contour drew a grey
+      # stripe from ear to chin on the splat, seen head-on (run c0514e,
+      # 2026-09-19; the step's param has the numbers).
+      erode_px: 30
     outputs:
       # `face_support_views`, not `support_views`: `merge_support_views` in
       # the shared tail is the single writer of scene.support_views.*, and

@@ -733,6 +733,16 @@ class SelectSupportViewsStep(Step):
               "inside the matte (dips to 0.90). A grey closing, so it fills the dips "
               "without moving the boundary. 0 leaves the alpha as it came",
               minimum=0, advanced=True),
+        Param("erode_px", int, 0,
+              "Shrink the mask this far from the render's own edge before it is "
+              "cut, leaving the cap's outermost band to the frames. The face cap's "
+              "rim is projected photo skin at grazing angles along the jaw contour, "
+              "and where it disagrees with the frames' jaw the splat learned a grey "
+              "stripe from ear to chin, visible head-on (run c0514e; measured "
+              "2026-09-19 on its colmap_intermediate: 12 px narrows it, 30 removes "
+              "it and the cheek seam, the cap's sharpness staying). The colour "
+              "still bleeds `bleed_px` past the shrunk mask. 0 keeps the whole cap",
+              minimum=0, advanced=True),
         Param("bleed_px", int, 12,
               "Extend the recovered colour this far past the mask, filling each "
               "outside pixel with its nearest inside one. The mask is untouched — "
@@ -754,6 +764,7 @@ class SelectSupportViewsStep(Step):
         min_alpha = params["min_alpha"]
         alpha_closing = params["alpha_closing"]
         bleed_px = params["bleed_px"]
+        erode_px = int(params["erode_px"])
 
         if not (len(images) == len(masks) == len(cameras)):
             raise ValueError(
@@ -799,6 +810,10 @@ class SelectSupportViewsStep(Step):
             # 10% dark if it were divided by the number it should have had.
             coverage = _close_alpha(alpha, alpha_closing)
             keep_px = coverage >= min_alpha
+            if erode_px > 0:
+                # The rim is left to the frames: see erode_px.
+                kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * erode_px + 1, 2 * erode_px + 1))
+                keep_px = cv2.erode(keep_px.astype(np.uint8), kernel).astype(bool)
             layer = images[index]
             # The same requirement steps/render.py's `+splat` compositing
             # has, for a different reason: dividing by alpha only recovers

@@ -485,6 +485,20 @@ nothing does. Each sync now logs render-vs-x0 PSNR (memorisation if
 high) and the gate's kept fraction of the subject. Locally, on the
 consistent colmap frames: 25 dB, gate 97 %.
 
+**Two artefacts of run c0514e's final splat, unrelated to the sync,
+diagnosed by retraining its colmap_intermediate locally** (11 arms,
+~2 min each on the 4070 Ti; scratch `halo/ab*.py`): the thin light rim
+round the figure seen only head-on is the twelve photograph copies'
+own outermost pixels (front-halo fraction 0.20 as-is, 0.13 without the
+copies, 0.30 with their mask grown 4 px, 0.14 shrunk 4 px; compositing
+the photo over the frame outside its mask changes nothing, so it is
+not the backdrop) → `photo_priority_weights.copies_erode_px` 4. The
+grey stripe from ear to chin is the face cap's rim along the jaw
+contour (gone without the face supports, at the cost of the cap's
+sharpness; gone with the supports' mask shrunk 30 px at their close-up
+cameras, sharpness kept) → `select_support_views.erode_px`, 30 on the
+face supports.
+
 To run the experiment (E3), same seed, two arms:
 
     python -m pipeline.cli run helical --reference-image <photo>      # sync on (the defaults)

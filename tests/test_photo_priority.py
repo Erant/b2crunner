@@ -206,8 +206,24 @@ class TestStep(unittest.TestCase):
         alphas = [np.zeros((H, W), np.float32) for _ in range(3)]
         alphas[0][2:H - 2, 2:W - 2] = 1.0
         out = run_step("photo_priority_weights", _inputs([0.0, 15.0, 180.0], images=images, alphas=alphas),
-                       {"feather_px": 0.0, "extend_px": 0.0, "copies": 2})
+                       {"feather_px": 0.0, "extend_px": 0.0, "copies": 2, "copies_erode_px": 0})
         np.testing.assert_allclose(out["support_masks"][0], alphas[0])
+
+    def test_the_copies_mask_is_shrunk_from_the_photographs_edge(self):
+        """The photograph's outermost pixels are its backdrop-mixed edge, and
+        twelve copies of them at one camera taught the splat a light rim
+        seen only head-on (run c0514e). The default leaves that band to the
+        frames."""
+        images = [np.full((H, W, 3), 200, np.uint8) for _ in range(3)]
+        alphas = [np.zeros((H, W), np.float32) for _ in range(3)]
+        alphas[0][2:H - 2, 2:W - 2] = 1.0
+        out = run_step("photo_priority_weights", _inputs([0.0, 15.0, 180.0], images=images, alphas=alphas),
+                       {"feather_px": 0.0, "extend_px": 0.0, "copies": 1, "copies_erode_px": 2})
+        mask = out["support_masks"][0]
+        self.assertEqual(float(mask[2, 2]), 0.0)                   # the edge band is out
+        self.assertEqual(float(mask[3, 3]), 0.0)
+        self.assertEqual(float(mask[H // 2, W // 2]), 1.0)         # the interior stays
+        self.assertEqual(float(mask[4, 4]), 1.0)
         out = run_step("photo_priority_weights", _inputs([0.0, 15.0, 180.0], images=images, alphas=alphas),
                        {"feather_px": 0.0, "extend_px": 0.0, "copies": 2, "copies_mask": "confidence"})
         self.assertEqual(float(out["support_masks"][0][2, 2]), 0.0)   # the cube's edge: no body there
