@@ -257,7 +257,7 @@ settings:
   - name: sync_steps
     label: Pass-1 3D sync steps
     type: list
-    default: []
+    default: [2, 3, 4]
     advanced: true
     help: >-
       In-loop 3D synchronisation of pass 1 (experimental, 2026-09-19;
@@ -267,9 +267,10 @@ settings:
       re-encoded, and its LOW frequency band put back before the step is
       taken — so the 81 views are pulled toward one body while the model
       keeps its own detail. Empty is off, and the run is the one that came
-      before. [2, 3, 4] is the experiment: steps 0-1 predict a blur, step 5
-      is the output. Needs `pass1_sampler_low: euler`; the step refuses
-      otherwise. Each sync costs a splat fit and a VAE round trip (~1 min).
+      before 2026-09-19. [2, 3, 4], the default since, is the experiment:
+      steps 0-1 predict a blur, step 5 is the output. Needs
+      `pass1_sampler_low: euler`; the step refuses otherwise. Each sync
+      costs a splat fit and a VAE round trip (~35 s on an L40S).
 
   - name: sync_mix
     label: Pass-1 3D sync mix
@@ -284,15 +285,40 @@ settings:
   - name: pass1_sampler_low
     label: Pass-1 low-noise sampler
     type: str
-    default: uni_pc
+    default: euler
     choices: [uni_pc, euler]
     advanced: true
     help: >-
       The sampler pass 1's low-noise expert takes its four steps with.
-      `uni_pc` is run E4's, the settled default. `euler` is required by the
-      3D sync above (it rewrites the euler step's velocity and has no seam
-      in UniPC's multistep history) and is otherwise the plain first-order
-      step — the pass-2 sweep found the two within noise of each other.
+      `uni_pc` is run E4's, the default until 2026-09-19. `euler` is
+      required by the 3D sync above (it rewrites the euler step's velocity
+      and has no seam in UniPC's multistep history) and is otherwise the
+      plain first-order step — the pass-2 sweep found the two within noise
+      of each other.
+
+  - name: sync_steps_pass2
+    label: Pass-2 3D sync steps
+    type: list
+    default: [2, 3, 4]
+    advanced: true
+    help: >-
+      The same in-loop 3D synchronisation for pass 2, whose splat is
+      warm-started from the intermediate splat (trained at these cameras)
+      and confined by the rmbg matte of its re-render. Pass 2 is already
+      conditioned on a consistent render, so the residual it corrects is
+      smaller; what it adds is self-consistency of the detail pass 2
+      repaints. Empty is off. Needs `pass2_sampler_low: euler`.
+
+  - name: pass2_sampler_low
+    label: Pass-2 low-noise sampler
+    type: str
+    default: euler
+    choices: [uni_pc, euler]
+    advanced: true
+    help: >-
+      The sampler pass 2's low-noise expert takes its four steps with;
+      `euler` is required by the pass-2 sync. The high-noise expert has run
+      euler since the 2026-09-08 sweep either way.
 
   - name: run_upscale
     label: Upscale dataset
@@ -3103,6 +3129,21 @@ steps:
     outputs:
       masks: dataset.masks
 
+  # The subject matte of the re-render (rmbg's, or the mesh render's own
+  # under pass2_mesh), kept for the pass-2 3D sync before mask_splat below
+  # replaces dataset.masks with VACE's flags.
+  - id: sync_silhouettes_pass2
+    step: resize_batch
+    dispatch: in_process
+    when: ${globals.sync_steps_pass2}
+    inputs:
+      masks: dataset.masks
+    params:
+      width: ${globals.resolution.0}
+      height: ${globals.resolution.1}
+    outputs:
+      masks: scene.sync_silhouettes_pass2
+
   - id: mask_splat_fringes
     step: mask_splat
     dispatch: in_process
@@ -3164,6 +3205,14 @@ steps:
       control_masks: dataset.masks
       reference_image: dataset.reference_image
       subject_desc: dataset.prompt
+      # For the in-loop 3D sync (`sync_steps_pass2`): the refined cameras,
+      # the matte of the re-render, and the intermediate splat as the
+      # warm start. Ignored when the sync is off.
+      cameras: dataset.cameras
+      image_names: dataset.image_names
+      points_3d: dataset.points_3d
+      sync_masks: scene.sync_silhouettes_pass2?
+      sync_init_ply: dataset.splat_path
     params:
       width: ${globals.resolution.0}
       height: ${globals.resolution.1}
@@ -3185,6 +3234,10 @@ steps:
       steps_low: 4
       cfg: 1.0
       seed: ${globals.seed}
+      sync_steps: ${globals.sync_steps_pass2}
+      sync_mix: ${globals.sync_mix}
+      sync_debug_dir: ${globals.output_root}/debug/sync_pass2
+      sampler_low: ${globals.pass2_sampler_low}
       # The pass-2 quality sweep's settings (docs/vace-denoise-findings-
       # 2026-09-07.md, section 6; six runs F1-F6 on E4's pass 1, 2026-09-08),
       # applied 2026-09-09. This pass's control is a splat render, not a

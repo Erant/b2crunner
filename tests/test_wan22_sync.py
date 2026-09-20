@@ -153,6 +153,23 @@ class TestBuildSync(unittest.TestCase):
         self.assertEqual(int(grown[8, 11]), 0)
 
 
+class TestWarmStart(unittest.TestCase):
+    def test_an_init_splat_is_the_first_syncs_warm_start(self):
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(suffix=".ply") as ply:
+            _, calls = _run({**_DATASET, "sync_init_ply": ply.name}, sync_steps=[3], sampler_low="euler")
+            self.assertEqual(str(calls["sync"].previous_ply), ply.name)
+
+    def test_a_missing_init_splat_is_refused_before_the_model_runs(self):
+        with self.assertRaises(FileNotFoundError):
+            _run({**_DATASET, "sync_init_ply": "/nonexistent/intermediate.ply"}, sync_steps=[3], sampler_low="euler")
+
+    def test_no_init_splat_means_a_cold_first_sync(self):
+        _, calls = _run(_DATASET, sync_steps=[3], sampler_low="euler")
+        self.assertIsNone(calls["sync"].previous_ply)
+
+
 class _FakeSync:
     def __init__(self, at, velocity=3.0):
         self.at = set(at)

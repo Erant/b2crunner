@@ -1036,7 +1036,9 @@ class Wan22VaceDenoiseStep(Step):
         # `sync_steps` names a step. Needs the `cameras`, `image_names` and
         # `points_3d` inputs (dataset.*) and the euler sampler on the steps
         # it runs at; `sync_masks` (spatial, per frame — the mesh silhouettes,
-        # not VACE's flags) confines the splat to the subject.
+        # not VACE's flags) confines the splat to the subject; `sync_init_ply`
+        # (a .ply path) warm-starts the first sync's splat instead of the
+        # cold fit from points_3d.
         Param("sync_steps", list, [],
               "Denoise steps (0-based, of steps_high + steps_low) after whose "
               "model call the clean estimate is made 3D-consistent before the "
@@ -1524,9 +1526,11 @@ class Wan22VaceDenoiseStep(Step):
             iters=int(params["sync_iters"]), warm_iters=int(params["sync_warm_iters"]),
             max_splats=int(params["sync_max_splats"]), mask_dilate_px=int(params["sync_mask_dilate_px"]),
             trainer=params["sync_trainer"], debug_dir=params["sync_debug_dir"],
+            init_ply=inputs.get("sync_init_ply"),
         )
-        logger.info("  sync: steps %s, mix %s, band %.3f, %s%s", steps, mix, float(params["sync_band"]),
-                    params["sync_trainer"], " with masks" if inputs.get("sync_masks") is not None else " (no masks)")
+        logger.info("  sync: steps %s, mix %s, band %.3f, %s%s%s", steps, mix, float(params["sync_band"]),
+                    params["sync_trainer"], " with masks" if inputs.get("sync_masks") is not None else " (no masks)",
+                    f", warm from {inputs['sync_init_ply']}" if inputs.get("sync_init_ply") else ", cold from points_3d")
         return sync
 
     def release_vram(self) -> None:

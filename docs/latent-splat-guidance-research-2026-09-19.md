@@ -459,15 +459,24 @@ M1 is in the tree as `pipeline/steps/wan22_sync.py` plus a seam in
 - **Unit tests**: `tests/test_wan22_sync.py` (the refusals, the seam's
   arithmetic, the band split where torch exists).
 
+**Pass 2 too, and on by default** (later the same day, after the first
+pod syncs fired as designed — 36 s each on an L40S, x0 moved 0.33 at
+σ .93 then 0.20 at σ .83): `sync_steps_pass2` / `pass2_sampler_low`
+wire the same seam into `denoise_pass2`, with the rmbg matte of the
+re-render as the mask (`sync_silhouettes_pass2`) and the intermediate
+splat (`dataset.splat_path`) as the first sync's warm start
+(`sync_init_ply`). Both passes now default to `[2, 3, 4]` on `euler`;
+`sync_steps: []` / `sync_steps_pass2: []` is the control arm, and
+`sync_mix: [0]` measures without applying.
+
 To run the experiment (E3), same seed, two arms:
 
+    python -m pipeline.cli run helical --reference-image <photo>      # sync on (the defaults)
     python -m pipeline.cli run helical --reference-image <photo> \
-        --param sync_steps=[2,3,4] --param pass1_sampler_low=euler
-    python -m pipeline.cli run helical --reference-image <photo> \
-        --param pass1_sampler_low=euler          # the control arm
+        --param sync_steps=[] --param sync_steps_pass2=[]          # the control arm
 
-The control arm runs euler on the low expert too, so the only
-difference is the sync. `debug/sync_pass1/` holds every sync's decoded
+The control arm keeps euler on the low expert, so the only difference
+is the sync. `debug/sync_pass1/` holds every sync's decoded
 and rendered frames (every ~10th) and `sync_stats.json` (per step: how
 far the render moved x0, in full and in the low band; the timings).
 Second arm of interest: `sync_mix=[1,1,0.5]`.

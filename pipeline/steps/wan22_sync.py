@@ -157,7 +157,7 @@ class LatentSync:
         points_3d: Optional[np.ndarray], masks: Optional[Sequence[np.ndarray]],
         width: int, height: int, n_ref: int, steps: Sequence[int], mix: Sequence[float],
         band: float, iters: int, warm_iters: int, max_splats: int, mask_dilate_px: int,
-        trainer: str, debug_dir: Optional[str],
+        trainer: str, debug_dir: Optional[str], init_ply: Optional[str] = None,
     ) -> None:
         if len(cameras) != len(image_names):
             raise ValueError(f"wan22_vace_denoise sync: {len(cameras)} cameras but {len(image_names)} image names")
@@ -177,7 +177,12 @@ class LatentSync:
         self.trainer = trainer
         self.debug_dir = Path(debug_dir) if debug_dir else None
         self.workdir = Path(tempfile.mkdtemp(prefix="b2c_sync_"))
-        self.previous_ply: Optional[Path] = None
+        # A splat to warm-start the FIRST sync from (pass 2 hands over the
+        # intermediate splat, trained at these very cameras); after that
+        # every sync starts from the one before it.
+        self.previous_ply: Optional[Path] = Path(init_ply) if init_ply else None
+        if self.previous_ply is not None and not self.previous_ply.exists():
+            raise FileNotFoundError(f"wan22_vace_denoise sync: init splat {self.previous_ply} does not exist")
         self.stats: List[Dict[str, Any]] = []
         self._lowpass = None
 
