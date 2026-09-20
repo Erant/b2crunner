@@ -1185,11 +1185,22 @@ class TestWorkflowFiles(unittest.TestCase):
         vote for the answer already in hand.
         """
         refine_inputs = ("cameras", "image_names", "images", "masks")
+        # The re-outline branch's training is the one brush that takes no
+        # solve of its own, on purpose: it is fitted on the orbit's ideal
+        # cameras and its coverage rendered straight back onto them
+        # (docs/re-outline.md). A refinement for it could not publish to
+        # dataset.cameras — those stay the ideal orbit the re-render, the
+        # sync and the main solve read — and what it would correct is
+        # per-frame jitter with the common mode removed, a sharpness lever
+        # for a splat kept only for its coverage. Unmeasured either way, so
+        # left out rather than added on principle.
+        unrefined = {"reoutline_train_splat"}
         for path in _workflows():
             spec = WorkflowSpec.from_yaml(str(path))
             ids = [s.id for s in spec.steps]
             refiners = [s for s in spec.steps if s.step == "refine_cameras"]
-            trainings = [s for s in spec.steps if s.step == "brush"]
+            trainings = [s for s in spec.steps
+                         if s.step == "brush" and s.id not in unrefined]
             if not trainings:
                 continue
             with self.subTest(workflow=path.name):
@@ -1228,7 +1239,8 @@ class TestWorkflowFiles(unittest.TestCase):
                 # Every step that reads dataset.cameras for geometry has a
                 # refinement in front of it.
                 for consumer in [s for s in spec.steps
-                                 if s.step in ("brush", "pointmap_elevation_views")]:
+                                 if s.step in ("brush", "pointmap_elevation_views")
+                                 and s.id not in unrefined]:
                     earlier = [s for s in refiners
                                if ids.index(s.id) < ids.index(consumer.id)]
                     self.assertTrue(
@@ -1998,18 +2010,19 @@ class TestTheDenoiseSettingsAreTheMeasuredOnes(unittest.TestCase):
 
 
 class TestTheReoutlineBranch(unittest.TestCase):
-    """The experimental branch that redraws the silhouette from a matte
-    (docs/re-outline.md): six gated steps between the anchor injection and
-    the first denoise. What is pinned is what makes it a faithful copy of
-    pass 1 and of the first render — a different denoise would matte a
-    different subject, a different render would put matte i on the wrong
-    camera — and that with the setting off nothing of it runs.
+    """The experimental branch that redraws the silhouette from a splat of
+    the subject (docs/re-outline.md): eight gated steps between the anchor
+    injection and the first denoise. What is pinned is what makes it a
+    faithful copy of pass 1 and of the first render — a different denoise
+    would matte a different subject, a splat trained or rendered on other
+    cameras would put silhouette i on the wrong frame — and that with the
+    setting off nothing of it runs.
     """
 
     BRANCH = [
         "reoutline_downscale", "reoutline_denoise", "reoutline_matte",
-        "reoutline_upscale_mattes", "render_reoutlined_views",
-        "reinject_anchor_reoutlined",
+        "reoutline_upscale", "reoutline_train_splat", "render_reoutline_splat",
+        "render_reoutlined_views", "reinject_anchor_reoutlined",
     ]
 
     def _spec(self):
@@ -2059,22 +2072,98 @@ class TestTheReoutlineBranch(unittest.TestCase):
         down = self._step(spec, "reoutline_downscale")
         self.assertEqual(down.params, {"width": 480, "height": 832})
         self.assertEqual(down.inputs, {"images": "dataset.images", "masks": "dataset.masks"})
-        up = self._step(spec, "reoutline_upscale_mattes")
+        up = self._step(spec, "reoutline_upscale")
         self.assertEqual(up.params, {"width": "${globals.resolution.0}",
                                      "height": "${globals.resolution.1}"})
-        self.assertEqual(up.inputs, {"masks": "scene.reoutline.mattes"})
-        self.assertEqual(up.outputs, {"masks": "scene.outline_masks"})
+        self.assertEqual(up.inputs, {"images": "scene.reoutline.denoised",
+                                     "masks": "scene.reoutline.mattes"})
+        self.assertEqual(up.outputs, {"images": "scene.reoutline.frames",
+                                      "masks": "scene.reoutline.frame_mattes"})
+
+    def test_the_splat_is_trained_on_the_orbit_cameras_from_the_upscaled_pass(self):
+        """The outline is the splat's coverage, so the splat has to be fitted
+        on the very cameras the orbit is re-rendered from, to frames at
+        those cameras' size; and only to the 480p pass — none of the
+        supporting views, weights, rig or mesh the intermediate takes,
+        which would pull it toward something other than that pass."""
+        spec = self._spec()
+        train = self._step(spec, "reoutline_train_splat")
+        self.assertEqual(train.step, "brush")
+        self.assertEqual(train.inputs, {
+            "cameras": "dataset.cameras",
+            "image_names": "dataset.image_names",
+            "points_3d": "dataset.points_3d",
+            "images": "scene.reoutline.frames",
+            "masks": "scene.reoutline.frame_mattes",
+        })
+        self.assertEqual(train.outputs, {"splat_path": "scene.reoutline.splat_path"})
+        # The intermediate's silhouette knobs, no alignment, no polish, and
+        # the .ply in the debug bundle beside intermediate_splat.ply.
+        intermediate = self._step(spec, "train_splat")
+        for key in ("total_steps", "polish_steps", "align_iters", "match_alpha_weight"):
+            with self.subTest(param=key):
+                self.assertEqual(train.params[key], intermediate.params[key])
+        self.assertEqual(train.params["export_dir"], intermediate.params["export_dir"])
+        self.assertEqual(train.params["export_name"], "reoutline_splat.ply")
+        self.assertNotEqual(train.params["export_name"], intermediate.params["export_name"])
+        self.assertNotIn("hollow_weight", train.params)
+
+    def test_the_outline_is_the_splat_rendered_on_the_dataset_cameras(self):
+        """No pattern: render_splat reuses the dataset's cameras verbatim,
+        which is what puts silhouette i on frame i. Only the alpha is
+        published, at the render's size, so `render` accepts it."""
+        spec = self._spec()
+        render = self._step(spec, "render_reoutline_splat")
+        self.assertEqual(render.step, "render_splat")
+        self.assertEqual(render.inputs, {"splat_path": "scene.reoutline.splat_path",
+                                         "dataset": "dataset"})
+        self.assertNotIn("pattern", render.params)
+        self.assertNotIn("override_cam_from_mesh", render.params)
+        self.assertFalse(render.params.get("confidence", False))
+        self.assertEqual((render.params["width"], render.params["height"]),
+                         ("${globals.resolution.0}", "${globals.resolution.1}"))
+        self.assertEqual(render.outputs, {"masks": "scene.outline_masks"})
 
     def test_the_re_render_is_the_first_render_plus_the_mattes(self):
         """Same params, so the same cameras; and it republishes nothing about
-        them, so nothing can drift."""
+        them, so nothing can drift. The one param that differs is the fill's
+        darkness, and it is the setting for a re-outlined drawing."""
         spec = self._spec()
         first = self._step(spec, "render_initial_views")
         again = self._step(spec, "render_reoutlined_views")
-        self.assertEqual(again.params, first.params)
+        self.assertEqual(again.params, dict(first.params, outline_strength="${globals.reoutlined_strength}"))
+        self.assertEqual(first.params["outline_strength"], "${globals.outline_strength}")
         self.assertEqual(again.inputs, dict(first.inputs, outline_masks="scene.outline_masks"))
         self.assertEqual(set(again.outputs), {"images", "masks", "inactive_masks"})
         self.assertEqual(again.outputs["images"], "dataset.images")
+
+    def test_the_two_fill_strengths_are_settings_with_one_home_each(self):
+        """`outline_strength` is the faint fill of the body model's
+        silhouette — what pass 1 sees with the branch off, and what the 480p
+        pass sees with it on; `reoutlined_strength` is the darker fill of the
+        splat's, what pass 1 sees with the branch on, and is greyed out
+        behind the switch. Each is read by exactly one render, as
+        `${globals.<name>}`, which is what drops the render step's own
+        `outline_strength` from the per-step panel."""
+        from pipeline.templating import global_ref
+
+        spec = self._spec()
+        by_name = {p.name: p for p in spec.settings}
+        plain, reoutlined = by_name["outline_strength"], by_name["reoutlined_strength"]
+        self.assertEqual((plain.type, plain.default, plain.requires), (float, 6.25, ""))
+        self.assertEqual((reoutlined.type, reoutlined.default, reoutlined.requires),
+                         (float, 20.0, "re_outline"))
+        readers = {}
+        for step in spec.steps:
+            ref = global_ref(step.params.get("outline_strength"))
+            if ref is not None:
+                readers.setdefault(ref, []).append(step.id)
+        self.assertEqual(readers, {"outline_strength": ["render_initial_views"],
+                                   "reoutlined_strength": ["render_reoutlined_views"]})
+        # No render sets a literal darkness of its own.
+        for step in spec.steps:
+            if step.step == "render" and "outline_strength" in step.params:
+                self.assertIsNotNone(global_ref(step.params["outline_strength"]), step.id)
 
     def test_the_anchor_goes_back_in_after_the_re_render(self):
         spec = self._spec()
@@ -2217,6 +2306,48 @@ class TestDeclaredSettings(unittest.TestCase):
         with self.assertRaises(ValueError) as caught:
             WorkflowSpec.from_yaml(path).validate()
         self.assertIn("count", str(caught.exception))
+
+    def test_a_setting_requiring_something_undeclared_or_itself_is_refused(self):
+        """`requires:` on a setting greys its control out behind another
+        setting, so the name has to be one — not an output, not itself."""
+        def body(requires):
+            return (
+                "name: badreq\n"
+                "settings:\n"
+                "  - name: switch\n    type: bool\n    default: false\n    help: x\n"
+                "  - name: knob\n    type: int\n    default: 1\n    help: x\n"
+                f"    requires: {requires}\n"
+                "outputs:\n"
+                "  - name: export_thing\n    dir: thing\n    label: Thing\n    help: x\n"
+                "steps:\n"
+                "  - id: a\n    step: rmbg\n    dispatch: in_process\n"
+                "    when: ${globals.switch}\n"
+                "    params:\n      batch_size: ${globals.knob}\n"
+                "  - id: b\n    step: rmbg\n    dispatch: in_process\n"
+                "    when: ${globals.export_thing}\n"
+            )
+        for requires in ("no_such_setting", "knob", "export_thing"):
+            with self.subTest(requires=requires):
+                with self.assertRaises(ValueError) as caught:
+                    WorkflowSpec.from_yaml(self._write(body(requires))).validate()
+                self.assertIn(requires, str(caught.exception))
+        spec = WorkflowSpec.from_yaml(self._write(body("switch")))
+        spec.validate()
+        self.assertEqual(next(p for p in spec.settings if p.name == "knob").requires, "switch")
+
+    def test_a_setting_read_only_through_another_settings_requires_is_not_an_orphan(self):
+        """The switch a `requires:` names is read, the way an output's is."""
+        path = self._write(
+            "name: reqread\n"
+            "settings:\n"
+            "  - name: switch\n    type: bool\n    default: false\n    help: x\n"
+            "  - name: knob\n    type: int\n    default: 1\n    help: x\n"
+            "    requires: switch\n"
+            "steps:\n"
+            "  - id: a\n    step: rmbg\n    dispatch: in_process\n"
+            "    params:\n      batch_size: ${globals.knob}\n"
+        )
+        WorkflowSpec.from_yaml(path).validate()
 
     def test_an_output_requiring_something_undeclared_is_refused(self):
         path = self._write(
@@ -2578,18 +2709,19 @@ class TestTheDenoiseSettingsAreTheMeasuredOnes(unittest.TestCase):
 
 
 class TestTheReoutlineBranch(unittest.TestCase):
-    """The experimental branch that redraws the silhouette from a matte
-    (docs/re-outline.md): six gated steps between the anchor injection and
-    the first denoise. What is pinned is what makes it a faithful copy of
-    pass 1 and of the first render — a different denoise would matte a
-    different subject, a different render would put matte i on the wrong
-    camera — and that with the setting off nothing of it runs.
+    """The experimental branch that redraws the silhouette from a splat of
+    the subject (docs/re-outline.md): eight gated steps between the anchor
+    injection and the first denoise. What is pinned is what makes it a
+    faithful copy of pass 1 and of the first render — a different denoise
+    would matte a different subject, a splat trained or rendered on other
+    cameras would put silhouette i on the wrong frame — and that with the
+    setting off nothing of it runs.
     """
 
     BRANCH = [
         "reoutline_downscale", "reoutline_denoise", "reoutline_matte",
-        "reoutline_upscale_mattes", "render_reoutlined_views",
-        "reinject_anchor_reoutlined",
+        "reoutline_upscale", "reoutline_train_splat", "render_reoutline_splat",
+        "render_reoutlined_views", "reinject_anchor_reoutlined",
     ]
 
     def _spec(self):
@@ -2639,22 +2771,98 @@ class TestTheReoutlineBranch(unittest.TestCase):
         down = self._step(spec, "reoutline_downscale")
         self.assertEqual(down.params, {"width": 480, "height": 832})
         self.assertEqual(down.inputs, {"images": "dataset.images", "masks": "dataset.masks"})
-        up = self._step(spec, "reoutline_upscale_mattes")
+        up = self._step(spec, "reoutline_upscale")
         self.assertEqual(up.params, {"width": "${globals.resolution.0}",
                                      "height": "${globals.resolution.1}"})
-        self.assertEqual(up.inputs, {"masks": "scene.reoutline.mattes"})
-        self.assertEqual(up.outputs, {"masks": "scene.outline_masks"})
+        self.assertEqual(up.inputs, {"images": "scene.reoutline.denoised",
+                                     "masks": "scene.reoutline.mattes"})
+        self.assertEqual(up.outputs, {"images": "scene.reoutline.frames",
+                                      "masks": "scene.reoutline.frame_mattes"})
+
+    def test_the_splat_is_trained_on_the_orbit_cameras_from_the_upscaled_pass(self):
+        """The outline is the splat's coverage, so the splat has to be fitted
+        on the very cameras the orbit is re-rendered from, to frames at
+        those cameras' size; and only to the 480p pass — none of the
+        supporting views, weights, rig or mesh the intermediate takes,
+        which would pull it toward something other than that pass."""
+        spec = self._spec()
+        train = self._step(spec, "reoutline_train_splat")
+        self.assertEqual(train.step, "brush")
+        self.assertEqual(train.inputs, {
+            "cameras": "dataset.cameras",
+            "image_names": "dataset.image_names",
+            "points_3d": "dataset.points_3d",
+            "images": "scene.reoutline.frames",
+            "masks": "scene.reoutline.frame_mattes",
+        })
+        self.assertEqual(train.outputs, {"splat_path": "scene.reoutline.splat_path"})
+        # The intermediate's silhouette knobs, no alignment, no polish, and
+        # the .ply in the debug bundle beside intermediate_splat.ply.
+        intermediate = self._step(spec, "train_splat")
+        for key in ("total_steps", "polish_steps", "align_iters", "match_alpha_weight"):
+            with self.subTest(param=key):
+                self.assertEqual(train.params[key], intermediate.params[key])
+        self.assertEqual(train.params["export_dir"], intermediate.params["export_dir"])
+        self.assertEqual(train.params["export_name"], "reoutline_splat.ply")
+        self.assertNotEqual(train.params["export_name"], intermediate.params["export_name"])
+        self.assertNotIn("hollow_weight", train.params)
+
+    def test_the_outline_is_the_splat_rendered_on_the_dataset_cameras(self):
+        """No pattern: render_splat reuses the dataset's cameras verbatim,
+        which is what puts silhouette i on frame i. Only the alpha is
+        published, at the render's size, so `render` accepts it."""
+        spec = self._spec()
+        render = self._step(spec, "render_reoutline_splat")
+        self.assertEqual(render.step, "render_splat")
+        self.assertEqual(render.inputs, {"splat_path": "scene.reoutline.splat_path",
+                                         "dataset": "dataset"})
+        self.assertNotIn("pattern", render.params)
+        self.assertNotIn("override_cam_from_mesh", render.params)
+        self.assertFalse(render.params.get("confidence", False))
+        self.assertEqual((render.params["width"], render.params["height"]),
+                         ("${globals.resolution.0}", "${globals.resolution.1}"))
+        self.assertEqual(render.outputs, {"masks": "scene.outline_masks"})
 
     def test_the_re_render_is_the_first_render_plus_the_mattes(self):
         """Same params, so the same cameras; and it republishes nothing about
-        them, so nothing can drift."""
+        them, so nothing can drift. The one param that differs is the fill's
+        darkness, and it is the setting for a re-outlined drawing."""
         spec = self._spec()
         first = self._step(spec, "render_initial_views")
         again = self._step(spec, "render_reoutlined_views")
-        self.assertEqual(again.params, first.params)
+        self.assertEqual(again.params, dict(first.params, outline_strength="${globals.reoutlined_strength}"))
+        self.assertEqual(first.params["outline_strength"], "${globals.outline_strength}")
         self.assertEqual(again.inputs, dict(first.inputs, outline_masks="scene.outline_masks"))
         self.assertEqual(set(again.outputs), {"images", "masks", "inactive_masks"})
         self.assertEqual(again.outputs["images"], "dataset.images")
+
+    def test_the_two_fill_strengths_are_settings_with_one_home_each(self):
+        """`outline_strength` is the faint fill of the body model's
+        silhouette — what pass 1 sees with the branch off, and what the 480p
+        pass sees with it on; `reoutlined_strength` is the darker fill of the
+        splat's, what pass 1 sees with the branch on, and is greyed out
+        behind the switch. Each is read by exactly one render, as
+        `${globals.<name>}`, which is what drops the render step's own
+        `outline_strength` from the per-step panel."""
+        from pipeline.templating import global_ref
+
+        spec = self._spec()
+        by_name = {p.name: p for p in spec.settings}
+        plain, reoutlined = by_name["outline_strength"], by_name["reoutlined_strength"]
+        self.assertEqual((plain.type, plain.default, plain.requires), (float, 6.25, ""))
+        self.assertEqual((reoutlined.type, reoutlined.default, reoutlined.requires),
+                         (float, 20.0, "re_outline"))
+        readers = {}
+        for step in spec.steps:
+            ref = global_ref(step.params.get("outline_strength"))
+            if ref is not None:
+                readers.setdefault(ref, []).append(step.id)
+        self.assertEqual(readers, {"outline_strength": ["render_initial_views"],
+                                   "reoutlined_strength": ["render_reoutlined_views"]})
+        # No render sets a literal darkness of its own.
+        for step in spec.steps:
+            if step.step == "render" and "outline_strength" in step.params:
+                self.assertIsNotNone(global_ref(step.params["outline_strength"]), step.id)
 
     def test_the_anchor_goes_back_in_after_the_re_render(self):
         spec = self._spec()

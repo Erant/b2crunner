@@ -90,6 +90,13 @@ class Param:
     draws it in; the only value that means anything today is `outputs`,
     which puts a setting in the Outputs box beside the deliverable
     checkboxes it modifies (the SeedVR2 upscale is the case).
+
+    `requires`, also a settings-block field, names another setting this one
+    is only meaningful with — the same word an output's `requires:` uses,
+    and the same UI: the control is drawn greyed out while the named
+    setting is off, and follows it. Unlike an output, nothing is forced at
+    run time: a setting behind an off switch is read by steps that are
+    themselves `when:`-gated on that switch, so it simply goes unread.
     """
 
     name: str
@@ -102,6 +109,7 @@ class Param:
     advanced: bool = False
     label: str = ""
     group: str = ""
+    requires: str = ""
 
     @property
     def title(self) -> str:

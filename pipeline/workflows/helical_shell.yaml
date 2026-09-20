@@ -505,22 +505,61 @@ settings:
       96% of the rendered weight agrees with its splat's class, median
       confidence 0.99, boundaries and the silhouette are where it wavers.
 
+  - name: outline_strength
+    label: Outline strength
+    type: float
+    default: 6.25
+    minimum: 0.0
+    maximum: 100.0
+    help: >-
+      How dark the flat silhouette fill in the first drawing is, as a
+      percentage from the #7F7F7F ground (0, no silhouette) to black
+      (100). This is the drawing whose outline is the BODY MODEL's — wrong
+      wherever hair and clothing leave it — so it is kept faint on purpose,
+      a hint under the skeleton rather than a shape to trace: 6.25 lands the
+      fill one sixteenth of the way to black (#777777). With `re_outline`
+      off this drawing is what pass 1 conditions on; with it on, it is what
+      the 480p re-outline denoise conditions on, and pass 1 gets the
+      re-outlined drawing at `reoutlined_strength` instead. Was the render
+      step's own 12.6% (#6F6F6F) until 2026-09-20.
+
   - name: re_outline
     label: Re-outline (experimental)
     type: bool
     default: false
     advanced: true
     help: >-
-      Draw the silhouette pass 1 conditions on from a matte of the subject
+      Draw the silhouette pass 1 conditions on from a splat of the subject
       instead of from the body mesh. The mesh outline is wrong wherever hair
       and clothing extend past the body model; this runs the same control
       video through an extra Wan 2.2 denoise at 480x832 (pass 1's settings
-      exactly), mattes the result with rmbg, and re-renders the orbit with
-      that matte as the outline — skeleton, face splat and everything after
-      unchanged. Costs a third 81-frame denoise (the resident experts are
-      reused, so no second load). Off is the run as it was;
-      `debug/reoutline/` in the result .zip holds the 480p frames and their
-      mattes when it is on. See docs/re-outline.md.
+      exactly), mattes the result with rmbg, trains a splat to those mattes
+      on the orbit's own cameras, and re-renders the orbit with the splat's
+      coverage as the outline — one subject every frame agrees on, rather
+      than 81 mattes that do not. Skeleton, face splat and everything after
+      are unchanged. Costs a third 81-frame denoise (the resident experts
+      are reused, so no second load) and a third splat training. Off is the
+      run as it was; `debug/reoutline/` in the result .zip holds the 480p
+      frames and their mattes when it is on, and `debug/reoutline_splat.ply`
+      the splat. See docs/re-outline.md.
+
+  - name: reoutlined_strength
+    label: Re-outlined strength
+    type: float
+    default: 20.0
+    minimum: 0.0
+    maximum: 100.0
+    advanced: true
+    requires: re_outline
+    help: >-
+      With `re_outline` on: how dark the silhouette fill is in the drawing
+      pass 1 conditions on, the one whose outline is the re-outline splat's
+      coverage — the subject's own shape, hair and clothing included, that
+      every frame of the 480p pass had to agree on. That outline can be
+      trusted where the body model's cannot, so it is drawn darker: 20
+      lands the fill a fifth of the way to black (#666666), against
+      `outline_strength`'s 6.25 for the model's. Greyed out with
+      `re_outline` off, when no step reads it.
 
 outputs:
   # What stage 6 can produce, and the switch each one is. `name:` is the
@@ -1093,9 +1132,12 @@ steps:
       # Flat silhouette base + the usual skeleton overlay, with the face
       # splat composited last. The base layer's background is always
       # #7F7F7F (render.py forces it, `bg_color` below does not reach it),
-      # and `outline_strength` sets how dark the fill is — left at its
-      # default, which lands the fill on #6F6F6F, just off the ground.
+      # and `outline_strength` sets how dark the fill is: the setting of
+      # that name, the faint one, because this silhouette is the body
+      # model's (see the setting). render_reoutlined_views is this block
+      # with `reoutlined_strength` here — the ONE line the two differ in.
       render_mode: outline+skeleton+splat
+      outline_strength: ${globals.outline_strength}
       # Tell the denoise which pixels are already real: 0.0 where the face
       # splat covers the frame, 1.0 everywhere else, in
       # wan22_vace_denoise's `control_masks` convention. ON here although
@@ -1302,11 +1344,12 @@ steps:
       masks: dataset.masks
 
   # ------------------------------------------------- re-outline (experimental)
-  # Six steps, every one gated on `re_outline`, that replace the silhouette
-  # in the drawings above with one cut from a matte of the SUBJECT. With the
-  # setting off none of them runs and pass 1 conditions on the render as it
-  # stands; with it on, the last two steps rewrite dataset.images and
-  # dataset.masks and pass 1 conditions on those instead.
+  # Eight steps, every one gated on `re_outline`, that replace the
+  # silhouette in the drawings above with the coverage of a SPLAT OF THE
+  # SUBJECT. With the setting off none of them runs and pass 1 conditions
+  # on the render as it stands; with it on, the last two steps rewrite
+  # dataset.images and dataset.masks and pass 1 conditions on those
+  # instead.
   #
   # Why: the outline is the mesh's, and the mesh is a naked body model.
   # Wherever hair, a coat or a platform sole leaves that model the outline
@@ -1315,10 +1358,14 @@ steps:
   # scalp 7 px low and the feet 22 px high on cyber_6f). A denoised copy
   # of these very frames — the same control video, the same photograph at
   # the anchor, pass 1's own settings — has the subject where the model
-  # paints it, hair and all, and rmbg cuts that out cleanly. At 480x832 the
-  # pass costs a fraction of pass 1; what it produces is thrown away except
-  # for its silhouette. The skeleton and face splat are re-drawn from the
-  # same mesh and .ply as before, on the same cameras.
+  # paints it, hair and all. At 480x832 the pass costs a fraction of pass
+  # 1, and what it produces is thrown away except for its shape: rmbg
+  # mattes it, a splat is trained to those mattes on these very cameras,
+  # and the splat's coverage on each camera is the outline. The splat is
+  # the point — one 3-D subject every frame's matte had to agree on, so
+  # the outline is consistent across the orbit where the mattes, like the
+  # frames they were cut from, are not. The skeleton and face splat are
+  # re-drawn from the same mesh and .ply as before, on the same cameras.
   #
   # The anchor is injected BEFORE this branch (reinject_anchor_initial,
   # above), so the extra pass sees the warped photograph at the anchor
@@ -1432,11 +1479,14 @@ steps:
     outputs:
       images: scene.reoutline.denoised
 
-  # The subject, cut out of the denoised 480p frames. `debug_dir` is what
-  # puts this pass on disk at all — nothing else reads scene.reoutline.*
-  # after the resize below — so the frames and their mattes land in the
-  # result .zip's debug/ beside denoise_pass1_input/, which is the drawing
-  # they replace the outline of.
+  # The subject, cut out of the denoised 480p frames: the alpha the splat
+  # below is fitted to, frame by frame. Not the outline itself any more —
+  # per-frame mattes disagree with each other about where the subject's
+  # edge is exactly as the denoised frames do, and an outline that jumps
+  # from frame to frame is the thing pass 1 should not be conditioned on.
+  # `debug_dir` is what puts this pass on disk at all, so the frames and
+  # their mattes land in the result .zip's debug/ beside
+  # denoise_pass1_input/, which is the drawing they replace the outline of.
   - id: reoutline_matte
     step: rmbg
     dispatch: in_process
@@ -1448,18 +1498,92 @@ steps:
     outputs:
       masks: scene.reoutline.mattes
 
-  # Back onto the render's pixel grid. `render` refuses a matte of any other
-  # size rather than resampling it, and this is the one place the size is
-  # decided: the same plain resize as the downscale, inverted.
-  - id: reoutline_upscale_mattes
+  # Back onto the render's pixel grid, frames and mattes together: the
+  # same plain resize as the downscale, inverted. The training below runs
+  # on dataset.cameras, which describe the render size, and brush writes
+  # each camera's own width and height into the COLMAP model it trains
+  # from, so the frames have to be that size — it is the frames that move
+  # onto the cameras' grid, not the cameras that are rescaled to the
+  # frames. The upscaled frames are soft; this splat is kept for its
+  # coverage, and coverage does not care.
+  - id: reoutline_upscale
     step: resize_batch
     dispatch: in_process
     when: ${globals.re_outline}
     inputs:
+      images: scene.reoutline.denoised
       masks: scene.reoutline.mattes
     params:
       width: ${globals.resolution.0}
       height: ${globals.resolution.1}
+    outputs:
+      images: scene.reoutline.frames
+      masks: scene.reoutline.frame_mattes
+
+  # A splat of the 480p pass, on the render's own cameras — one subject
+  # that all 81 mattes have to agree on, instead of 81 mattes. Where a
+  # frame's matte bulges or thins on its own the training cannot fit it,
+  # and the splat's coverage from that camera is what the other views
+  # say; where they agree (hair, hem, soles) the coverage follows them.
+  # That consensus is the outline, rendered below on every camera.
+  #
+  # Only the training views: no supporting views, no loss weights, no
+  # normals, no body rig and no hollow loss. The colour this splat learns
+  # is never looked at, and the hollow loss would penalise weight behind
+  # the body model's surface on a training whose whole purpose is the
+  # subject that the body model leaves out. The knobs are train_splat's
+  # (below) where it has measured them: `match_alpha_weight` 0.5 is the
+  # value that fitted the intermediate's silhouette to its matte with 17%
+  # fewer dark wedges at -0.003 IoU, and `total_steps` 30000 is the count
+  # that measurement was made at — nothing has looked at how much sooner
+  # a silhouette settles than a texture does, and that is the obvious
+  # place to take time out of this branch once a run has been read.
+  # `align_iters` 0 as on train_splat: the alignment pulls the frames onto
+  # the splat's consensus, which is a texture-sharpness lever.
+  - id: reoutline_train_splat
+    step: brush
+    dispatch: in_process
+    when: ${globals.re_outline}
+    inputs:
+      cameras: dataset.cameras
+      image_names: dataset.image_names
+      points_3d: dataset.points_3d
+      images: scene.reoutline.frames
+      masks: scene.reoutline.frame_mattes
+    params:
+      total_steps: 30000
+      polish_steps: 0
+      align_iters: 0
+      match_alpha_weight: 0.5
+      # Into the result .zip's debug/, beside intermediate_splat.ply and
+      # for the same reason: when the re-outlined drawing comes out wrong
+      # this is the first thing to look at, and a splat left under
+      # output_root/brush/ is on the volume and gone with the pod.
+      export_dir: ${globals.output_root}/debug
+      export_name: reoutline_splat.ply
+    outputs:
+      splat_path: scene.reoutline.splat_path
+
+  # The splat's coverage on every orbit camera. No `pattern`, so
+  # render_splat reuses the dataset's cameras verbatim — the 81
+  # render_initial_views built and the training above fitted to — which
+  # is what puts silhouette i on the camera frame i is about to be
+  # re-rendered from. Only the alpha is kept: `render` cuts it at
+  # `outline_mask_threshold` (0.5) and blurs it as it would the mesh's.
+  # No backdrop and no confidence gate — the gate composites over grey
+  # and returns the gate rather than coverage, and the backdrop is
+  # images-only either way; both would be spent on frames nobody reads.
+  - id: render_reoutline_splat
+    step: render_splat
+    dispatch: in_process
+    when: ${globals.re_outline}
+    inputs:
+      splat_path: scene.reoutline.splat_path
+      dataset: dataset
+    params:
+      width: ${globals.resolution.0}
+      height: ${globals.resolution.1}
+      background: ""
     outputs:
       masks: scene.outline_masks
 
@@ -1501,9 +1625,13 @@ steps:
       # Flat silhouette base + the usual skeleton overlay, with the face
       # splat composited last. The base layer's background is always
       # #7F7F7F (render.py forces it, `bg_color` below does not reach it),
-      # and `outline_strength` sets how dark the fill is — left at its
-      # default, which lands the fill on #6F6F6F, just off the ground.
+      # and `outline_strength` sets how dark the fill is: here the
+      # `reoutlined_strength` setting, the darker one, because this
+      # silhouette is the re-outline splat's and can be trusted (see the
+      # setting). The ONE line this block differs from
+      # render_initial_views' in; tests/test_workflows.py pins that.
       render_mode: outline+skeleton+splat
+      outline_strength: ${globals.reoutlined_strength}
       # Tell the denoise which pixels are already real: 0.0 where the face
       # splat covers the frame, 1.0 everywhere else, in
       # wan22_vace_denoise's `control_masks` convention. ON here although

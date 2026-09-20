@@ -45,10 +45,12 @@ The three differ only in what they tell the UI:
 
   * `settings:` is a declared knob — a `Param` (pipeline/step.py), with the
     same `type`/`default`/`help`/`choices`/`minimum`/`maximum`/`advanced`
-    vocabulary a step param has, plus a `label:` and a `group:`. The UI draws
-    these, through the same widget code it draws step params with. This is
-    where `resolution` and `framing` live: what more than one step must agree
-    on AND what somebody actually wants to change.
+    vocabulary a step param has, plus a `label:`, a `group:` and an optional
+    `requires:` naming a setting it is only meaningful with (drawn greyed
+    out while that one is off). The UI draws these, through the same widget
+    code it draws step params with. This is where `resolution` and
+    `framing` live: what more than one step must agree on AND what somebody
+    actually wants to change.
   * `outputs:` is a deliverable — a switch its export steps read through
     `when:`, plus the `dir:` it lands in under `output_root` (so a finished
     run can be packaged without a hardcoded list of subdirectory names) and
@@ -108,7 +110,7 @@ PARAM_TYPES: Dict[str, type] = {
 
 _SETTING_KEYS = frozenset({
     "name", "label", "type", "default", "help", "choices",
-    "minimum", "maximum", "advanced", "group",
+    "minimum", "maximum", "advanced", "group", "requires",
 })
 
 _OUTPUT_KEYS = frozenset({"name", "label", "dir", "default", "help", "requires"})
@@ -171,6 +173,7 @@ def setting_from_dict(data: Dict[str, Any]) -> Param:
         advanced=bool(data.get("advanced", False)),
         label=data.get("label", ""),
         group=data.get("group", ""),
+        requires=data.get("requires", "") or "",
     )
 
 
@@ -489,6 +492,20 @@ class WorkflowSpec:
                     f"'{output.requires}', which it does not declare. "
                     f"It declares: {', '.join(sorted(declared))}."
                 )
+        # A setting's `requires:` is the same contract, and the UI greys the
+        # control out behind the named switch — so the name has to be a
+        # setting (an output is a deliverable, not a switch a knob follows),
+        # and not the setting itself.
+        settings_by_name = {param.name for param in self.settings}
+        for param in self.settings:
+            if not param.requires:
+                continue
+            if param.requires == param.name or param.requires not in settings_by_name:
+                raise ValueError(
+                    f"Workflow '{self.name}' setting '{param.name}' requires "
+                    f"'{param.requires}', which is not another declared setting. "
+                    f"It declares: {', '.join(sorted(settings_by_name))}."
+                )
 
         # A setting nothing reads is a dead control: it draws, it records an
         # override, and the run ignores it. Cheap to catch, and the one new
@@ -499,6 +516,7 @@ class WorkflowSpec:
             read |= referenced_globals(step.params)
             read |= referenced_globals(step.when)
         read |= {output.requires for output in self.outputs if output.requires}
+        read |= {param.requires for param in self.settings if param.requires}
         orphans = sorted(
             param.name for param in self.settings if param.name not in read
         )

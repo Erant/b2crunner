@@ -432,9 +432,10 @@ class RenderStep(Step):
              thresholded at `outline_mask_threshold`, then filled, coloured
              and blurred exactly as the mesh silhouette would be
              (body2colmap `render_outline(mask=...)`, 76a74bc). The
-             re-outline branch hands it rmbg's mattes of a denoised copy of
-             the first render, so the outline is the subject's — hair and
-             clothes included — rather than the body model's}
+             re-outline branch hands it the coverage of a splat trained on
+             a denoised copy of the first render, so the outline is the
+             subject's — hair and clothes included — rather than the body
+             model's}
 
     See body2colmap.path.OrbitPath / body2colmap.renderer.Renderer for the
     exact semantics of each param below — this step is a thin pass-through.

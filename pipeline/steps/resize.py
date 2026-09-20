@@ -13,13 +13,14 @@ pass run at the size its params say, with nothing for diffusers to fit.
 
 The re-outline branch of helical.yaml uses it twice: once to
 take the stage-1 control video down to 480x832 for the extra denoise, and
-once to bring rmbg's mattes of that denoise's output back up to the render
-size so `render` can draw the outline from them. Both resizes are PLAIN
-(`cv2.resize` to the target, no letterbox, no crop), and that is the point:
-720x1280 -> 480x832 is anisotropic by 2.6% (0.667 across, 0.65 down), and
-the same plain resize back cancels it exactly, so frame i's matte lands on
-frame i's original pixel grid. The denoiser sees a figure 2.6% squatter than
-the drawing; the outline drawn from its matte does not.
+once to bring that denoise's output and rmbg's mattes of it back up to the
+render size so a splat can be trained to them on the render's cameras (and
+its coverage drawn as the outline). Both resizes are PLAIN (`cv2.resize`
+to the target, no letterbox, no crop), and that is the point: 720x1280 ->
+480x832 is anisotropic by 2.6% (0.667 across, 0.65 down), and the same
+plain resize back cancels it exactly, so frame i's matte lands on frame i's
+original pixel grid. The denoiser sees a figure 2.6% squatter than the
+drawing; the frames the splat is fitted to do not.
 
 Interpolation is `auto` unless asked otherwise: INTER_AREA when shrinking
 (a box filter — the right thing for photographs and drawings going down),

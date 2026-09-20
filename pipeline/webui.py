@@ -631,12 +631,31 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
                         with gr.Accordion("Settings", open=True):
                             if not plain and not advanced:
                                 gr.Markdown("_This pipeline declares no settings._")
+                            controls = {}
                             for param in plain:
-                                draw(param)
+                                controls[param.name] = draw(param)
                             if advanced:
                                 with gr.Accordion("More settings", open=False):
                                     for param in advanced:
-                                        draw(param)
+                                        controls[param.name] = draw(param)
+
+                            # `requires:` on a setting, the same rule the
+                            # Outputs box applies to a deliverable below: a
+                            # knob only meaningful behind another switch is
+                            # drawn greyed out while it is off and follows
+                            # it. Nothing is forced at run time — the steps
+                            # reading it are gated on the same switch.
+                            for param in plain + advanced:
+                                source = controls.get(param.requires)
+                                if source is None:
+                                    continue
+                                controls[param.name].interactive = truthy(
+                                    values.get(param.requires)
+                                )
+                                source.change(
+                                    lambda on: gr.update(interactive=truthy(on)),
+                                    inputs=[source], outputs=[controls[param.name]],
+                                )
 
                         with gr.Accordion("Outputs", open=True):
                             if not outputs:

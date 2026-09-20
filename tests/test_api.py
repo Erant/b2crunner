@@ -573,6 +573,11 @@ class TestWhatAWorkflowDeclares(ApiTestCase):
         self.assertEqual(
             {o["requires"] for o in body["outputs"]}, {""},
         )
+        # A setting carries the same field, for the same greyed-out control:
+        # the re-outlined fill strength follows the re-outline switch.
+        settings = {s["name"]: s for s in body["settings"]}
+        self.assertEqual(settings["reoutlined_strength"]["requires"], "re_outline")
+        self.assertEqual(settings["outline_strength"]["requires"], "")
 
     def test_every_declared_setting_is_a_name_submit_will_accept(self):
         # The point of the endpoint: what it lists is what `settings`

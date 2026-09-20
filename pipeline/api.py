@@ -312,6 +312,9 @@ def _param_json(param) -> Dict[str, Any]:
         "maximum": param.maximum,
         "advanced": param.advanced,
         "group": param.group,
+        # As on an output: the setting this one is only meaningful with, or
+        # "", so a client can grey its control out behind that switch.
+        "requires": param.requires,
         "help": " ".join(param.help.split()),
     }
 
