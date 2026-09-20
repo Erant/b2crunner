@@ -132,7 +132,7 @@ BOOTSTRAPS = {
         "detect_face", "map_face_to_mesh", "fit_head_to_face",
         "locate_face", "crop_face", "face_seg", "face_mask",
         "face_normals", "face_splat",
-        "render_initial_views", "sync_silhouettes",
+        "render_initial_views",
         "warp_reference_to_anchor", "reinject_anchor_initial",
     ],
     # The EXPERIMENT (2026-09-19): the same bootstrap with a whole-body
@@ -147,7 +147,7 @@ BOOTSTRAPS = {
         "locate_face", "crop_face", "face_seg", "face_mask",
         "face_normals", "face_splat",
         "front_matte", "front_normals", "shell_splat",
-        "render_initial_views", "sync_silhouettes",
+        "render_initial_views",
         "warp_reference_to_anchor", "reinject_anchor_initial",
     ],
 }
@@ -1189,8 +1189,8 @@ class TestWorkflowFiles(unittest.TestCase):
         # solve of its own, on purpose: it is fitted on the orbit's ideal
         # cameras and its coverage rendered straight back onto them
         # (docs/re-outline.md). A refinement for it could not publish to
-        # dataset.cameras — those stay the ideal orbit the re-render, the
-        # sync and the main solve read — and what it would correct is
+        # dataset.cameras — those stay the ideal orbit the re-render and
+        # the main solve read — and what it would correct is
         # per-frame jitter with the common mode removed, a sharpness lever
         # for a splat kept only for its coverage. Unmeasured either way, so
         # left out rather than added on principle.
@@ -2051,23 +2051,16 @@ class TestTheReoutlineBranch(unittest.TestCase):
     def test_the_extra_denoise_is_pass_1_at_480p_and_four_steps(self):
         """Pass 1's block, apart from the size, the step count (2 high /
         2 low: the pass is kept for its shape, the low expert's extra steps
-        are texture) and the two per-step lists that count reshapes — the
-        strength schedule over four entries, and the sync steps as this
-        pass's own setting, since pass 1's [2, 3, 4] names a step a
-        four-step run does not have — plus its own sync debug dir."""
+        are texture) and the per-step list that count reshapes — the
+        strength schedule over four entries."""
         spec = self._spec()
         extra = self._step(spec, "reoutline_denoise")
         pass1 = self._step(spec, "denoise_pass1")
         self.assertEqual((pass1.params["steps_high"], pass1.params["steps_low"]), (2, 4))
         self.assertEqual(pass1.params["strength"], [1, 1, 0.5, 0.5, 0.5, 0.5])
         expected = dict(pass1.params, width=480, height=832, steps_low=2,
-                        strength=[1, 1, 0.5, 0.5],
-                        sync_steps="${globals.reoutline_sync_steps}",
-                        sync_debug_dir="${globals.output_root}/debug/sync_reoutline")
+                        strength=[1, 1, 0.5, 0.5])
         self.assertEqual(extra.params, expected)
-        sync = next(p for p in spec.settings if p.name == "reoutline_sync_steps")
-        self.assertEqual((sync.default, sync.requires), ([1, 2], "re_outline"))
-        self.assertTrue(all(0 < i < 3 for i in sync.default))
         self.assertEqual((extra.dispatch, extra.env, extra.keep_loaded),
                          (pass1.dispatch, pass1.env, pass1.keep_loaded))
         self.assertEqual(extra.inputs["reference_image"], pass1.inputs["reference_image"])
@@ -2767,23 +2760,16 @@ class TestTheReoutlineBranch(unittest.TestCase):
     def test_the_extra_denoise_is_pass_1_at_480p_and_four_steps(self):
         """Pass 1's block, apart from the size, the step count (2 high /
         2 low: the pass is kept for its shape, the low expert's extra steps
-        are texture) and the two per-step lists that count reshapes — the
-        strength schedule over four entries, and the sync steps as this
-        pass's own setting, since pass 1's [2, 3, 4] names a step a
-        four-step run does not have — plus its own sync debug dir."""
+        are texture) and the per-step list that count reshapes — the
+        strength schedule over four entries."""
         spec = self._spec()
         extra = self._step(spec, "reoutline_denoise")
         pass1 = self._step(spec, "denoise_pass1")
         self.assertEqual((pass1.params["steps_high"], pass1.params["steps_low"]), (2, 4))
         self.assertEqual(pass1.params["strength"], [1, 1, 0.5, 0.5, 0.5, 0.5])
         expected = dict(pass1.params, width=480, height=832, steps_low=2,
-                        strength=[1, 1, 0.5, 0.5],
-                        sync_steps="${globals.reoutline_sync_steps}",
-                        sync_debug_dir="${globals.output_root}/debug/sync_reoutline")
+                        strength=[1, 1, 0.5, 0.5])
         self.assertEqual(extra.params, expected)
-        sync = next(p for p in spec.settings if p.name == "reoutline_sync_steps")
-        self.assertEqual((sync.default, sync.requires), ([1, 2], "re_outline"))
-        self.assertTrue(all(0 < i < 3 for i in sync.default))
         self.assertEqual((extra.dispatch, extra.env, extra.keep_loaded),
                          (pass1.dispatch, pass1.env, pass1.keep_loaded))
         self.assertEqual(extra.inputs["reference_image"], pass1.inputs["reference_image"])

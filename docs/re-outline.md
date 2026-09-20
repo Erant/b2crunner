@@ -22,7 +22,7 @@ every one `when: ${globals.re_outline}`:
 | step | what |
 |---|---|
 | `reoutline_downscale` | `resize_batch`: the control video and its VACE flags, 720x1280 -> 480x832 |
-| `reoutline_denoise` | `wan22_vace_denoise` at 480x832, `denoise_pass1`'s block at 2 high / 2 low steps (`strength` `[1, 1, 0.5, 0.5]`, sync steps `reoutline_sync_steps` = `[1, 2]`) |
+| `reoutline_denoise` | `wan22_vace_denoise` at 480x832, `denoise_pass1`'s block at 2 high / 2 low steps (`strength` `[1, 1, 0.5, 0.5]`) |
 | `reoutline_matte` | `rmbg` over the denoised frames; `debug_dir` puts frames + mattes in `debug/reoutline/` |
 | `reoutline_upscale` | `resize_batch`: the frames AND their mattes back to the render size |
 | `reoutline_train_splat` | `brush`: a splat fitted to those frames and mattes on `dataset.cameras`; `debug/reoutline_splat.ply` |
@@ -214,8 +214,8 @@ common mode of its own solution on purpose (Trap 4), so a uniform raise
 stays in the frames and therefore in the splat. What a refinement would
 correct is per-frame jitter, which is a sharpness matter for a texture
 and mostly averages out of a coverage; and it could not publish to
-`dataset.cameras`, which have to stay the ideal orbit the re-render, the
-sync and the main solve read. If a run shows the outline visibly high
+`dataset.cameras`, which have to stay the ideal orbit the re-render and
+the main solve read. If a run shows the outline visibly high
 against the skeleton, the fix is in the drawing (shift the coverage down
 by the measured raise before `render`), not in the poses; if it shows a
 ragged edge, a refinement publishing to `scene.reoutline.cameras`, with

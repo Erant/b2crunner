@@ -419,7 +419,7 @@ not tens of minutes, even here.
 - The chunk-centre rule is now specific: latent frame j ↔ frame
   4j−1 (the third of its four), measured, not the middle.
 
-## 8. The hook (built 2026-09-19, not yet run on a pod)
+## 8. The hook (built 2026-09-19; REMOVED 2026-09-20, see section 9)
 
 M1 is in the tree as `pipeline/steps/wan22_sync.py` plus a seam in
 `wan22_vace_denoise`, off unless asked for:
@@ -445,7 +445,7 @@ M1 is in the tree as `pipeline/steps/wan22_sync.py` plus a seam in
   of a real latent's energy) with `sync_mix` of the difference, and
   returns (x_t − x0″)/σ. UniPC steps never see it; `sync_steps` on a
   UniPC phase is refused by name.
-- **Verified locally** (`docs/latent-splat-experiments/e3_local_sync_check.py`,
+- **Verified locally** (`e3_local_sync_check.py`, removed with the hook,
   E(V) of the colmap frames as x0, cyber_6f's cameras, the real VAE
   and b2ctrain on the 4070 Ti): 45 s per sync (decode 21, encode 12,
   splat 8 cold / 4 warm, render 4.4), x0 moved by 0.125 at mix 1 and
@@ -510,6 +510,55 @@ is the sync. `debug/sync_pass1/` holds every sync's decoded
 and rendered frames (every ~10th) and `sync_stats.json` (per step: how
 far the render moved x0, in full and in the low band; the timings).
 Second arm of interest: `sync_mix=[1,1,0.5]`.
+
+## 9. The A/B, and the verdict (2026-09-20)
+
+Run b10542 (the defaults: re-outline `[2, 3, 4]`, pass 1 `[2, 3, 4]`,
+pass 2 `[2, 3, 4]`, mix 1.0) against f267a0 (`sync_steps: []`,
+`sync_steps_pass2: []`), both `c06777a`, same input. Each stage's shipped
+splat rendered at its own cameras and scored inside the matte — the
+frames' detail (energy above ~4 px), the splat's fit to its frames, the
+detail the splat keeps, the rendered alpha outside the matte. Harness,
+arms and sheets in `~/Projects/b2ctrain/out/sync_ab/`.
+
+| stage | run | frame detail | fit PSNR | splat detail | alpha outside/inside |
+|---|---|---|---|---|---|
+| re-outline | ON | 17 | 31.0 | 13 | 5.3 % |
+| | OFF | 127 | 27.5 | 75 | 6.1 % |
+| pass 1 | ON | 39 | 20.4 | 39 | 6.0 % |
+| | OFF | 227 | 17.4 | 144 | 5.7 % |
+| pass 2 raw 720p | ON | 12 | | | |
+| | OFF | 131 | | | |
+| final splat | ON | 15 | 27.8 | 12 | 2.2 % |
+| | OFF | 186 | 22.6 | 106 | 2.4 % |
+
+- The sync strips 6–10x of the frames' fine detail at every stage it
+  runs, and it compounds: the final splat renders with 9x less detail.
+- The "grey cloud" the user saw on pass 2 is not alpha outside the
+  matte (equal in both runs); it is lost detail and contrast inside the
+  silhouette. It is born at step 2: x0 is already sharp there (pass 2 is
+  conditioned at 0.8 on the intermediate splat, pass 1 on a strong
+  control) and the 50k-Gaussian render that replaces 45 % of it is a
+  blur with a grey rim (`debug/sync_pass2/step_02`).
+- The fit gain is mostly blur. Same trainer recipe, no rig, on the pass-1
+  frames: ON 27.5 dB, OFF 22.9, OFF blurred (σ 1.5) to ON's detail
+  level 25.1. Half the gain is blur; ~2.4 dB is real low-band
+  consistency — but the blurred control's splat keeps MORE detail (42)
+  than ON's (32) from frames of equal detail, so what the sync leaves
+  behind is less 3D-consistent than plain blur.
+- Re-outline: hairs 0.71 % vs 0.81 %, silhouette IoU +0.008 — nothing
+  the outline's alpha needs.
+
+The premise was that x0 at steps 2–4 is inconsistent across views and a
+consensus render fixes it; both passes' x0 is already consistent enough
+that the render is a downgrade. Verdict: harmful at all three stages.
+The hook, `wan22_sync.py`, its tests, the settings (`sync_steps`,
+`sync_mix`, `sync_steps_pass2`, `reoutline_sync_steps`,
+`pass1_sampler_low`, `pass2_sampler_low`), the `sync_silhouettes` steps
+and the denoise inputs were removed from the tree the same day; the
+samplers are back to what they were before 2026-09-19 (uni_pc on the
+low expert of both passes). Any revival must be judged by the final
+splat's detail, not by fit PSNR, which blur inflates.
 
 ## Sources
 
