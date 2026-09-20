@@ -160,11 +160,25 @@ SHELL_ONLY_STEPS = (
     "render_shell_views", "inject_shell_views",
 )
 
+#: The one sentence pass 1 and the re-outline pass carry that pass 2 does
+#: not, since 2026-09-20: their control is a drawing, whose silhouette and
+#: skeleton read the same from the front and from behind, and this says the
+#: orbit is whole. It names no side and describes no rear view — the route
+#: text that was tried and reverted on 2026-09-13 (see the comment above
+#: denoise_pass1's prompt in helical.yaml). Pass 2's control is a render.
+ORBIT_SENTENCE = (
+    "The camera pans slowly around the subject in a 360 degree orbit, "
+    "moving smoothly around the subject in a continuous arc. "
+)
+_ROOM = "meeting at clear corners. "
+assert DENOISE_PROMPT.count(_ROOM) == 1
+DRAWING_PROMPT = DENOISE_PROMPT.replace(_ROOM, _ROOM + ORBIT_SENTENCE)
+
 #: helical_shell.yaml's first denoise (and its re-outline pass, which must
 #: read as pass 1 does) carries the `elevation_hint` setting appended to the
-#: pinned prompt — one sentence per language about the camera climbing,
+#: drawing prompt — one sentence per language about the camera climbing,
 #: blank for the arm without. Pass 2's prompt is the pinned one.
-HINTED_DENOISE_PROMPT = DENOISE_PROMPT + " ${globals.elevation_hint}"
+HINTED_DENOISE_PROMPT = DRAWING_PROMPT + " ${globals.elevation_hint}"
 
 
 def _workflows():
@@ -1450,22 +1464,26 @@ class TestWorkflowFiles(unittest.TestCase):
                         f"which pixels are already a real photograph",
                     )
 
-    def test_denoise_prompts_are_identical_in_every_pass(self):
+    def test_denoise_prompts_are_the_pinned_ones_in_every_pass(self):
         """See DENOISE_PROMPT's comment: the way this breaks is whitespace,
         so compare the whole string rather than eyeballing the YAML. (It
         no longer checks the ComfyUI graph — the positive prompt diverged
-        from it deliberately — but all four copies must still agree.)
+        from it deliberately — but every copy must still be one of the two
+        pinned strings.)
 
         The prompts are now a param of each wan22_vace_denoise step, not a
         workflow global — and each workflow has THREE denoise passes carrying
         their own copy since 2026-09-08: the two full-resolution passes and
         the gated 480p re-outline pass between the bootstrap and pass 1,
         which must read as pass 1 does or its silhouette is of a different
-        subject. So this checks every one.
+        subject. Since 2026-09-20 the two passes on a DRAWING (pass 1 and
+        the re-outline pass) carry ORBIT_SENTENCE and pass 2 does not. So
+        this checks every one.
         """
         # How many wan22_vace_denoise steps each file carries: the two
         # full-resolution passes plus the gated 480p re-outline pass.
         expected = {"helical.yaml": 3, "helical_shell.yaml": 3}
+        drawn = {"denoise_pass1", "reoutline_denoise"}
         # The experiment's pass 1 and re-outline pass carry the hint
         # appended (HINTED_DENOISE_PROMPT); its pass 2 does not.
         hinted = {("helical_shell.yaml", "denoise_pass1"),
@@ -1482,6 +1500,7 @@ class TestWorkflowFiles(unittest.TestCase):
                 passes += 1
                 with self.subTest(workflow=path.name, step=step.id):
                     want = (HINTED_DENOISE_PROMPT if (path.name, step.id) in hinted
+                            else DRAWING_PROMPT if step.id in drawn
                             else DENOISE_PROMPT)
                     self.assertEqual(step.params.get("prompt"), want)
                     self.assertEqual(
@@ -1560,7 +1579,7 @@ class TestWorkflowFiles(unittest.TestCase):
                     )
                 if step.id in hinted:
                     self.assertEqual(params.pop("prompt"), HINTED_DENOISE_PROMPT)
-                    self.assertEqual(base_params.pop("prompt"), DENOISE_PROMPT)
+                    self.assertEqual(base_params.pop("prompt"), DRAWING_PROMPT)
                 self.assertEqual(params, base_params)
 
         own = {"helix_amplitude_deg", "shell_tail_frames", "shell_head_frames",
@@ -1578,7 +1597,7 @@ class TestWorkflowFiles(unittest.TestCase):
         self.assertTrue(shell.globals["elevation_hint"].strip())
         self.assertEqual(
             resolve(HINTED_DENOISE_PROMPT, {"globals": {"elevation_hint": ""}}),
-            DENOISE_PROMPT + " ",
+            DRAWING_PROMPT + " ",
         )
 
     def test_every_render_with_a_backdrop_draws_the_same_room(self):
@@ -1986,13 +2005,17 @@ class TestTheDenoiseSettingsAreTheMeasuredOnes(unittest.TestCase):
         spec = WorkflowSpec.from_yaml(resolve_workflow("helical"))
         return next(s for s in spec.steps if s.id == step_id)
 
-    def test_pass_1_is_run_e4(self):
-        """The skeleton-leak sweep's E4: shift 5 erases the ink, uni_pc is
-        the reference graph's sampler and at shift 5 it no longer matters,
-        the structure steps stay at full scale and the four detail steps
-        sit at a flat half rather than a taper spent on steps 5-6."""
+    def test_pass_1_is_run_e4_on_euler(self):
+        """The skeleton-leak sweep's E4 (shift 5 erases the ink, the
+        structure steps stay at full scale and the four detail steps sit at
+        a flat half rather than a taper spent on steps 5-6) — with both
+        experts on euler since 2026-09-20 rather than E4's uni_pc on the
+        high-noise one: at shift 5 the sampler no longer mattered to the
+        leak (E2 = E4), and helical-20260920-220458 ran this way. The low
+        sampler is written out because the step's default is uni_pc."""
         params = self._step("denoise_pass1").params
-        self.assertEqual(params["sampler_high"], "uni_pc")
+        self.assertEqual((params["sampler_high"], params["sampler_low"]),
+                         ("euler", "euler"))
         self.assertEqual(params["sampler_shift"], 5)
         self.assertEqual(params["strength"], [1, 1, 0.5, 0.5, 0.5, 0.5])
         self.assertEqual((params["steps_high"], params["steps_low"]), (2, 4))
@@ -2003,7 +2026,8 @@ class TestTheDenoiseSettingsAreTheMeasuredOnes(unittest.TestCase):
         every step (strength is a fidelity-vs-texture dial; 0.8 is the
         texture compromise, and a taper to 0 is invention), 2/4 kept."""
         params = self._step("denoise_pass2").params
-        self.assertEqual(params["sampler_high"], "euler")
+        self.assertEqual((params["sampler_high"], params["sampler_low"]),
+                         ("euler", "euler"))
         self.assertEqual(params["sampler_shift"], 2.5)
         self.assertEqual(params["strength"], [0.8] * 6)
         self.assertEqual((params["steps_high"], params["steps_low"]), (2, 4))
@@ -2695,13 +2719,17 @@ class TestTheDenoiseSettingsAreTheMeasuredOnes(unittest.TestCase):
         spec = WorkflowSpec.from_yaml(resolve_workflow("helical"))
         return next(s for s in spec.steps if s.id == step_id)
 
-    def test_pass_1_is_run_e4(self):
-        """The skeleton-leak sweep's E4: shift 5 erases the ink, uni_pc is
-        the reference graph's sampler and at shift 5 it no longer matters,
-        the structure steps stay at full scale and the four detail steps
-        sit at a flat half rather than a taper spent on steps 5-6."""
+    def test_pass_1_is_run_e4_on_euler(self):
+        """The skeleton-leak sweep's E4 (shift 5 erases the ink, the
+        structure steps stay at full scale and the four detail steps sit at
+        a flat half rather than a taper spent on steps 5-6) — with both
+        experts on euler since 2026-09-20 rather than E4's uni_pc on the
+        high-noise one: at shift 5 the sampler no longer mattered to the
+        leak (E2 = E4), and helical-20260920-220458 ran this way. The low
+        sampler is written out because the step's default is uni_pc."""
         params = self._step("denoise_pass1").params
-        self.assertEqual(params["sampler_high"], "uni_pc")
+        self.assertEqual((params["sampler_high"], params["sampler_low"]),
+                         ("euler", "euler"))
         self.assertEqual(params["sampler_shift"], 5)
         self.assertEqual(params["strength"], [1, 1, 0.5, 0.5, 0.5, 0.5])
         self.assertEqual((params["steps_high"], params["steps_low"]), (2, 4))
@@ -2712,7 +2740,8 @@ class TestTheDenoiseSettingsAreTheMeasuredOnes(unittest.TestCase):
         every step (strength is a fidelity-vs-texture dial; 0.8 is the
         texture compromise, and a taper to 0 is invention), 2/4 kept."""
         params = self._step("denoise_pass2").params
-        self.assertEqual(params["sampler_high"], "euler")
+        self.assertEqual((params["sampler_high"], params["sampler_low"]),
+                         ("euler", "euler"))
         self.assertEqual(params["sampler_shift"], 2.5)
         self.assertEqual(params["strength"], [0.8] * 6)
         self.assertEqual((params["steps_high"], params["steps_low"]), (2, 4))

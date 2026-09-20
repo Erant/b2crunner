@@ -808,7 +808,7 @@ settings:
   - name: skeleton_occlusion_m
     label: Skeleton occlusion (m)
     type: float
-    default: 0.0
+    default: 0.12
     minimum: 0.0
     maximum: 1.0
     help: >-
@@ -821,9 +821,10 @@ settings:
       may sit behind the model's surface and still count as seen (its own
       flesh); torso joints get 2-2.5x and face landmarks half, by
       body2colmap's table. 0.12 was measured to keep every joint of a
-      fitted body from every side and drop the ones behind another part.
-      0 draws every bone through everything, as every run before
-      2026-09-20 did.
+      fitted body from every side and drop the ones behind another part,
+      and is the default since helical-20260920-220458, the first run
+      with it, came back with the turn intact. 0 draws every bone
+      through everything, as every run before 2026-09-20 did.
 
 outputs:
   # What stage 6 can produce, and the switch each one is. `name:` is the
@@ -1602,7 +1603,8 @@ steps:
       steps_low: 2
       cfg: 1.0
       seed: ${globals.seed}
-      sampler_high: uni_pc
+      sampler_high: euler
+      sampler_low: euler
       sampler_shift: 5
       strength: [1, 1, 0.5, 0.5]
       prompt: "人工光、柔光、低对比度、环绕运镜。时间静止，人物完全静止。身体\
@@ -1623,7 +1625,9 @@ steps:
         micro-movement, and the head keeps its exact angle throughout. The \
         frozen subject is $SUBJECT_DESC$, standing in an empty room: grey \
         walls ruled with an even grid, a dark floor and a lighter ceiling, \
-        meeting at clear corners. The room is fixed in place and the camera \
+        meeting at clear corners. The camera pans slowly around the subject \
+        in a 360 degree orbit, moving smoothly around the subject in a \
+        continuous arc. The room is fixed in place and the camera \
         travels through it, so the walls and their corners sweep past the \
         frame while the room itself never turns. Soft, low-contrast studio \
         light: the key sits high on the subject's own left, a soft fill on \
@@ -2045,7 +2049,16 @@ steps:
       # shift 8 — every one of the 17 runs deviated from it — so its only
       # fault may have been the taper's placement. The missing corner is
       # one run with these two lines reverted.
-      sampler_high: uni_pc
+      #
+      # 2026-09-20: both experts on `euler`, no longer E4's `uni_pc` on
+      # the high-noise one. The user's setting on helical-20260920-220458,
+      # the first run with the relief and occlusion drawings, which came
+      # back with the turn intact; the shift is what the sweep found
+      # mattered, and E2 (euler, shift 5) was as clean as E4 on the leak.
+      # `sampler_low` is written out because the step's default is
+      # `uni_pc`, and the re-outline pass above carries the same pair.
+      sampler_high: euler
+      sampler_low: euler
       sampler_shift: 5
       strength: [1, 1, 0.5, 0.5, 0.5, 0.5]
       # One knob sits beside it, left unset here so this pass keeps pushing
@@ -2144,6 +2157,17 @@ steps:
       # text, `026df4c`) came back good: the route sentences were the cause.
       # Stating where the camera goes and what the rear view holds costs
       # the subject their clothes; leave the orbit as 环绕运镜 alone.
+      #
+      # 2026-09-20: ONE English sentence added after the room, in this
+      # pass and the re-outline pass (not pass 2, whose control is a
+      # render): "The camera pans slowly around the subject in a 360
+      # degree orbit, moving smoothly around the subject in a continuous
+      # arc." The user's wording on helical-20260920-220458, the first
+      # run with the relief and occlusion drawings, which came back with
+      # the turn intact. It says the orbit is whole and unbroken; it does
+      # NOT name the sides or describe the rear view, which is what the
+      # reverted text above did. tests/test_workflows.py pins both
+      # strings (DRAWING_PROMPT here, DENOISE_PROMPT on pass 2).
       prompt: "人工光、柔光、低对比度、环绕运镜。时间静止，人物完全静止。身体\
         如雕塑般僵硬，胸口没有起伏，头部保持固定角度，面部肌肉完全不动，维持单\
         一的中性表情。双眼一眨不眨，眼睑保持张开且稳定，目光空洞而固定，锁定远\
@@ -2162,7 +2186,9 @@ steps:
         micro-movement, and the head keeps its exact angle throughout. The \
         frozen subject is $SUBJECT_DESC$, standing in an empty room: grey \
         walls ruled with an even grid, a dark floor and a lighter ceiling, \
-        meeting at clear corners. The room is fixed in place and the camera \
+        meeting at clear corners. The camera pans slowly around the subject \
+        in a 360 degree orbit, moving smoothly around the subject in a \
+        continuous arc. The room is fixed in place and the camera \
         travels through it, so the walls and their corners sweep past the \
         frame while the room itself never turns. Soft, low-contrast studio \
         light: the key sits high on the subject's own left, a soft fill on \
@@ -3472,7 +3498,12 @@ steps:
       # splat's face instead of repainting it, was wired on 2026-09-09 and
       # backed out the same day: it was detrimental to the splat
       # (docs/face-priority.md, "Tried and backed out").
+      # `sampler_low: euler` since 2026-09-20, with pass 1's: the step's
+      # default is `uni_pc`, and this workflow no longer runs UniPC on any
+      # expert of any pass. Unmeasured on this pass — the F sweep only
+      # flipped the high-noise expert.
       sampler_high: euler
+      sampler_low: euler
       sampler_shift: 2.5
       strength: [0.8, 0.8, 0.8, 0.8, 0.8, 0.8]
       prompt: "人工光、柔光、低对比度、环绕运镜。时间静止，人物完全静止。身体\
