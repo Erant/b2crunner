@@ -185,9 +185,11 @@ def _workflows():
     return sorted(WORKFLOW_DIR.glob("*.yaml"))
 
 
-#: The steps that rasterise the splat along a path: render_splat, and render_subject
-#: (render_splat with the mesh as an alternative source, 2026-09-17).
-_SPLAT_RENDERS = ("render_splat", "render_subject")
+#: The steps that rasterise the splat along a path. `render_subject` was a
+#: second one from 2026-09-17 to 2026-09-20 (render_splat with the removed
+#: mesh path's mesh as an alternative source); it is a `render_splat` step
+#: with that id now.
+_SPLAT_RENDERS = ("render_splat",)
 
 
 def _splat_alpha_producer(case, path, spec, mask_at: int) -> int:
@@ -2433,57 +2435,47 @@ class TestDeclaredSettings(unittest.TestCase):
                 self.assertGreaterEqual(len(readers), 3)
                 self.assertTrue(any("upscale" in r for r in readers))
 
-class TestPassTwoTakesTheMesh(unittest.TestCase):
-    """`pass2_mesh` (2026-09-17): `render_subject` — render_splat with the source
-    decided by `from_mesh` — draws the second denoise's frames from the textured
-    mesh at the cameras it resolves; off (the default since the mesh path was
-    parked on 2026-09-19), it rasterises the splat as before and the mesh branch
-    is skipped unless `export_mesh` asks for it. Both are globals now."""
+class TestPassTwoIsTheSplatsReRender(unittest.TestCase):
+    """`render_subject` is `render_splat`, the splat's own re-render along the
+    helix, and the frames pass 2 conditions on. From 2026-09-17 to 2026-09-20
+    it was a subclass that could draw the textured mesh of the mesh path
+    instead (`pass2_mesh`); the path — meshify, photo_texture, refine_texture
+    and their globals — is removed, so nothing mesh-shaped may remain."""
 
     def _spec(self):
         return WorkflowSpec.from_yaml(str(next(p for p in _workflows() if p.name == "helical.yaml")))
 
-    def test_default_off_and_the_subject_render_sits_where_the_splat_render_was(self):
-        """Parked 2026-09-19: the switch is a plain global, off — no setting, so
-        no UI control — and pass 2 draws its frames from the splat again."""
+    def test_the_subject_render_is_render_splat_and_sits_before_the_matte(self):
         spec = self._spec()
-        self.assertNotIn("pass2_mesh", {s.name for s in spec.settings})
-        self.assertNotIn("export_mesh", {s.name for s in spec.settings})
-        self.assertFalse(spec.globals["pass2_mesh"])
-        self.assertFalse(spec.globals["export_mesh"])
         ids = [s.id for s in spec.steps]
         at = ids.index("render_subject")
         step = spec.steps[at]
-        self.assertEqual(step.step, "render_subject")
-        self.assertEqual(step.params["from_mesh"], "${globals.pass2_mesh}")
+        self.assertEqual(step.step, "render_splat")
         self.assertEqual(step.params["pattern"], "helical", "the path is the same helical one")
         self.assertTrue(step.params["override_cam_from_mesh"])
-        self.assertEqual(step.inputs["mesh_dir"], "scene.mesh_dir?")
-        self.assertEqual(step.inputs["mesh_texture_path"], "scene.mesh_texture_path?")
+        for key in ("from_mesh", "mesh_blur_px", "mesh_render_dir"):
+            self.assertNotIn(key, step.params)
+        for key in ("mesh_dir", "mesh_texture_path", "mesh_photo_texture_path"):
+            self.assertNotIn(key, step.inputs)
         for field in ("images", "masks", "cameras", "anchor_position", "anchor_frame_index"):
             self.assertIn(field, step.outputs)
-        self.assertNotIn("render_mesh_views", [s.step for s in spec.steps], "one step draws the frames, whichever the source")
-        self.assertLess(ids.index("refine_texture"), at, "the texture it renders is klein's")
         self.assertLess(at, ids.index("resplat_foreground_masks"))
+        self.assertIs(spec.steps[ids.index("resplat_foreground_masks")].when, True, "the rmbg matte always runs")
         self.assertLess(ids.index("resplat_foreground_masks"), ids.index("mask_splat_fringes"))
         self.assertLess(ids.index("mask_splat_fringes"), ids.index("reinject_anchor"), "the anchor is still re-injected after")
         self.assertLess(ids.index("reinject_anchor"), ids.index("denoise_pass2"))
 
-    def test_the_switches_gate_the_mesh_branch_and_the_matte(self):
-        from pipeline.workflow import step_enabled
-
-        spec = self._spec()
-        by_id = {s.id: s for s in spec.steps}
-        base = {p.name: p.default for p in spec.settings}
-        base.update({k: v for k, v in spec.globals.items() if not isinstance(v, str) or not v.startswith("output")})
-        base.update(face_splat=True, photo_texture=True, refine_texture=True)
-        for export_mesh, pass2_mesh, mesh_runs in ((False, False, False), (True, False, True), (False, True, True), (True, True, True)):
-            g = dict(base, export_mesh=export_mesh, pass2_mesh=pass2_mesh)
-            with self.subTest(export_mesh=export_mesh, pass2_mesh=pass2_mesh):
-                for step_id in ("meshify", "photo_texture", "refine_texture"):
-                    self.assertEqual(step_enabled(by_id[step_id], g), mesh_runs, step_id)
-                self.assertTrue(step_enabled(by_id["render_subject"], g), "render_subject always runs: it sets the path")
-                self.assertEqual(step_enabled(by_id["resplat_foreground_masks"], g), not pass2_mesh, "the rmbg matte only for splat frames")
+    def test_nothing_of_the_mesh_path_remains(self):
+        for path in _workflows():
+            spec = WorkflowSpec.from_yaml(str(path))
+            with self.subTest(workflow=path.name):
+                steps = {s.step for s in spec.steps} | {s.id for s in spec.steps}
+                self.assertFalse(steps & {"meshify", "photo_texture", "refine_texture",
+                                          "render_subject_mesh", "render_mesh_views"})
+                self.assertNotIn("render_subject", {s.step for s in spec.steps})
+                names = set(spec.globals) | {p.name for p in spec.settings}
+                self.assertFalse(names & {"export_mesh", "pass2_mesh", "photo_texture", "refine_texture",
+                                          "texture_mode", "face_policy", "mesh_blur"})
 
     def test_when_forms(self):
         from pipeline.workflow import when_truthy

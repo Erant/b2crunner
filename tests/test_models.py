@@ -285,16 +285,15 @@ class TestRequiredForSteps(unittest.TestCase):
             # through torch.hub, which was the one thing sam3d_body still
             # downloaded lazily inside Step.load().
             #
-            # 2026-09-16: flux2_klein + flux2_klein_fp8 joined it — the
-            # texture refinement's model (steps/refine_texture.py). The
-            # step is gated off by default, but this set is what the
+            # 2026-09-16 to 2026-09-20 flux2_klein, flux2_klein_fp8 and
+            # qwen3_4b_fp8 were in here too — the mesh path's texture
+            # refinement, removed with the path. This set is what the
             # workflow's STEPS can want, not what a given run enables.
             "helical": {"rmbg", "sapiens2", "sapiens2_pointmap",
                                     "sapiens2_seg", "sam3dbody", "moge2",
                                     "dinov3_hub", "mediapipe", "wan22",
                                     "wan22_fp8", "wan22_lora", "seedvr2",
-                                    "colmap_onnx", "flux2_klein",
-                                    "flux2_klein_fp8", "qwen3_4b_fp8"},
+                                    "colmap_onnx"},
             # 2026-09-19: the shell experiment adds no model — its
             # whole-body pointmap shell runs the heads the face cap
             # already needs (rmbg, the normal head, the pointmap head).
@@ -302,8 +301,7 @@ class TestRequiredForSteps(unittest.TestCase):
                                     "sapiens2_seg", "sam3dbody", "moge2",
                                     "dinov3_hub", "mediapipe", "wan22",
                                     "wan22_fp8", "wan22_lora", "seedvr2",
-                                    "colmap_onnx", "flux2_klein",
-                                    "flux2_klein_fp8", "qwen3_4b_fp8"},
+                                    "colmap_onnx"},
         }
         for workflow, expected in cases.items():
             with self.subTest(workflow=workflow):
@@ -349,9 +347,7 @@ class TestRequiredForSteps(unittest.TestCase):
              "colmap_onnx"},
             # 2026-09-17 to 2026-09-19 klein and its text encoder were in here
             # too (pass 2 conditioned on the textured mesh by default); the
-            # mesh path is parked behind off globals now, so a default run
-            # never enables refine_texture and the prefetch must not wait on
-            # its 9 GB.
+            # mesh path was parked on the 19th and removed on the 20th.
         )
 
 
@@ -442,13 +438,18 @@ class TestPrefetch(unittest.TestCase):
             self.assertIn("good", calls)
 
     def test_the_default_prefetch_leaves_the_optional_sources_alone(self):
-        """The parked mesh path's klein (9 GB) is `optional`: a pod start does not
-        pull it, `--all` does, and a run that enables refine_texture fetches it
-        itself through wait_until_ready — so `optional` never means unreachable."""
-        known = models.registry()
-        optional = {k for k, v in known.items() if v.optional}
-        self.assertEqual(optional, {"flux2_klein", "flux2_klein_fp8", "qwen3_4b_fp8"})
-        self.assertTrue(all(known[k].steps == ("refine_texture",) for k in optional))
+        """An `optional` source (the mesh path's klein, 9 GB, was one from
+        2026-09-19 until the path went on 2026-09-20; none is now, so the
+        mechanism is exercised on a stand-in) is not pulled by a pod start;
+        `--all` pulls it, and a run whose enabled steps need it fetches it
+        itself through wait_until_ready — so `optional` never means
+        unreachable."""
+        known = dict(models.registry())
+        self.assertEqual({k for k, v in known.items() if v.optional}, set())
+        template = known["colmap_onnx"]
+        known["big_optional"] = template.__class__(**{**template.__dict__, "key": "big_optional",
+                                                      "steps": ("some_step",), "optional": True})
+        optional = {"big_optional"}
         fetched = []
         fake = {k: v.__class__(**{**v.__dict__, "fetch": (lambda k=k: fetched.append(k) or "/x"), "probe": lambda: False})
                 for k, v in known.items()}
@@ -465,8 +466,8 @@ class TestPrefetch(unittest.TestCase):
                 self.assertEqual(set(fetched), set(known))
             fetched.clear()
             with _OnAVolume():
-                models.wait_until_ready(["flux2_klein_fp8"], timeout=5.0, poll=0.01)
-                self.assertEqual(fetched, ["flux2_klein_fp8"], "a run that needs it fetches it")
+                models.wait_until_ready(["big_optional"], timeout=5.0, poll=0.01)
+                self.assertEqual(fetched, ["big_optional"], "a run that needs it fetches it")
 
     def test_unknown_key_is_refused_up_front(self):
         with _OnAVolume():

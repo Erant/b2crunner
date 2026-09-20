@@ -25,9 +25,10 @@ step will not download anything.
 **Blocking is scoped to the workflow, prefetching is not.** Waiting for the
 ~47 GB of Wan2.2 weights before a run whose denoise passes are switched
 off would be actively wrong. The prefetch is greedy by default — every
-source except the `optional` ones, which belong to a parked branch and are
-fetched by the run that turns it on (`wait_until_ready`, below); the
-klein trio is the case since 2026-09-19. `required_for_steps()` decides
+source except the `optional` ones, which belong to a branch off by default
+and are fetched by the run that turns it on (`wait_until_ready`, below);
+none is marked so at the moment — the mesh path's klein trio was, until the
+path was removed on 2026-09-20. `required_for_steps()` decides
 what a given run must actually wait on — fed from
 `WorkflowSpec.enabled_steps()`, so a `when:`-skipped step's checkpoint is
 not waited on either.
@@ -78,10 +79,10 @@ class ModelSource:
     gated: bool = False
     #: Not part of the default prefetch: only a run whose enabled steps
     #: need it fetches it (`wait_until_ready` does, synchronously, before
-    #: the run starts). For a model of a parked branch — klein's three
-    #: sources, 9 GB the shipped workflow never opens since the mesh path
-    #: was parked (2026-09-19). `prefetch(include_optional=True)` / the CLI's
-    #: `--all` pull these too.
+    #: the run starts). For a model of a branch that is off by default —
+    #: the removed mesh path's klein, 9 GB, was the case from 2026-09-19 to
+    #: 2026-09-20; nothing is at present. `prefetch(include_optional=True)` /
+    #: the CLI's `--all` pull these too.
     optional: bool = False
 
 
@@ -174,27 +175,6 @@ def _probe_wan22_fp8() -> bool:
     try:
         for name in (DEFAULT_FP8_HIGH, DEFAULT_FP8_LOW):
             resolve_fp8_checkpoint(name, DEFAULT_FP8_REPO, local_files_only=True)
-        return True
-    except Exception:
-        return False
-
-
-def _fetch_klein_fp8() -> str:
-    """The klein 4B fp8 transformer, one 3.8 GB file, through the step's own constants."""
-    from huggingface_hub import hf_hub_download
-
-    from .steps.refine_texture import DEFAULT_FP8_FILE, DEFAULT_FP8_REPO
-
-    return hf_hub_download(DEFAULT_FP8_REPO, DEFAULT_FP8_FILE)
-
-
-def _probe_klein_fp8() -> bool:
-    from huggingface_hub import hf_hub_download
-
-    from .steps.refine_texture import DEFAULT_FP8_FILE, DEFAULT_FP8_REPO
-
-    try:
-        hf_hub_download(DEFAULT_FP8_REPO, DEFAULT_FP8_FILE, local_files_only=True)
         return True
     except Exception:
         return False
@@ -482,7 +462,6 @@ def _registry() -> List[ModelSource]:
     from .steps.sapiens2 import DEFAULT_CHECKPOINT as SAPIENS
     from .steps.sapiens2 import DEFAULT_SEG_CHECKPOINT as SAPIENS_SEG
     from .steps.wan22_vace_denoise import DEFAULT_CHECKPOINT as WAN22
-    from .steps.refine_texture import DEFAULT_REPO as KLEIN, DEFAULT_TEXT_ENCODER as QWEN_FP8, KLEIN_ALLOW_PATTERNS, TEXT_ENCODER_ALLOW_PATTERNS
 
     # allow_patterns, or these pull the whole repo including formats the
     # pipeline never loads. Measured against the live repos:
@@ -502,8 +481,6 @@ def _registry() -> List[ModelSource]:
     seg_fetch, seg_probe = _hf_snapshot(SAPIENS_SEG, _WEIGHTS_ONLY)
     sam3d_fetch, sam3d_probe = _hf_snapshot(SAM3D)
     wan22_fetch, wan22_probe = _hf_snapshot(WAN22, WAN22_ALLOW_PATTERNS)
-    klein_fetch, klein_probe = _hf_snapshot(KLEIN, KLEIN_ALLOW_PATTERNS)
-    qwen_fetch, qwen_probe = _hf_snapshot(QWEN_FP8, TEXT_ENCODER_ALLOW_PATTERNS)
 
     return [
         ModelSource(
@@ -596,25 +573,6 @@ def _registry() -> List[ModelSource]:
         ModelSource(
             "seedvr2", "SeedVR2 3B fp8 DiT + VAE (upscale)", ("seedvr2",),
             _fetch_seedvr2, _probe_seedvr2, approx_gb=6.0,
-        ),
-        ModelSource(
-            # The texture refinement's klein: the tokenizer, the VAE and the
-            # configs from the bf16 repo — neither the transformer weights
-            # (8 GB nothing opens; the fp8 file below is what loads) nor the
-            # text encoder (8 GB of bf16; Qwen's fp8 release below is the
-            # same weights) are pulled. Only `refine_texture` wants it.
-            "flux2_klein", f"{KLEIN} (texture refinement: tokenizer, vae, configs)",
-            ("refine_texture",), klein_fetch, klein_probe, approx_gb=0.4, optional=True,
-        ),
-        ModelSource(
-            "flux2_klein_fp8", "black-forest-labs/FLUX.2-klein-4b-fp8 transformer (fp8)",
-            ("refine_texture",), _fetch_klein_fp8, _probe_klein_fp8, approx_gb=3.8, optional=True,
-        ),
-        ModelSource(
-            # klein-4B's text encoder is Qwen3-4B byte for byte; this is Qwen's
-            # own fp8 quantisation of it (steps/refine_texture.py).
-            "qwen3_4b_fp8", f"{QWEN_FP8} (klein's text encoder, fp8)",
-            ("refine_texture",), qwen_fetch, qwen_probe, approx_gb=4.9, optional=True,
         ),
         ModelSource(
             # ~65 MB for the pair. Small enough that the prefetch barely
@@ -869,7 +827,8 @@ def prefetch(
 ) -> Dict[str, Dict[str, object]]:
     """Download the named models (default: every non-`optional` one), recording progress as it goes.
 
-    The optional sources (the parked mesh path's klein, 9 GB) are left to
+    The optional sources (none at the moment; the removed mesh path's klein
+    was one) are left to
     the run that enables their step: `wait_until_ready` fetches what a run
     needs and nobody is fetching. `include_optional` pulls them here too.
 

@@ -466,8 +466,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     prefetch_p.add_argument(
         "--all", action="store_true",
-        help="Also pull the optional sources — the parked mesh path's klein (9 GB), which a "
-             "default run never opens; a run that enables refine_texture fetches them itself",
+        help="Also pull the `optional` sources, the ones a default run never opens "
+             "and a run that enables their step fetches itself (none at the moment)",
     )
     prefetch_p.add_argument(
         "--force", action="store_true",

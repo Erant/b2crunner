@@ -401,8 +401,9 @@ settings:
       its own view from the copies alone, 23.3 at 0.5, 23.5 at 0.8; the
       strength trades fidelity to the photograph against fidelity to the
       frames beside it, -1.5 dB at view 3 from 0.5 to 0.8). 0 keeps the
-      copies and no fade; the copies switch off with the step's `copies`. The mesh path's photo_texture is the same rule for
-      the atlas, measured there at +30 % subject sharpness.
+      copies and no fade; the copies switch off with the step's `copies`.
+      (The removed mesh path's photo_texture was the same rule for its
+      atlas, measured there at +30 % subject sharpness.)
 
   - name: specular_suppress
     label: Highlight suppression
@@ -630,25 +631,6 @@ outputs:
       at, on for one you may have to explain.
 
 globals:
-  # The MESH PATH's switches (2026-09-19): parked, not removed. The
-  # meshification of the intermediate splat (meshify -> photo_texture ->
-  # refine_texture, and pass 2 conditioning on the textured mesh) did not
-  # give a clearly better output and its textures had skin artefacts nobody
-  # could resolve, so the flow is the one from before 2026-09-16: pass 2
-  # conditions on the splat's own re-render, and the deliverable is the
-  # splat. The steps, their code and their tests stay; these globals gate
-  # them and keep their `${globals.*}` references resolving. To come back:
-  # `--param export_mesh=true` (the mesh as a deliverable) and/or
-  # `--param pass2_mesh=true` (pass 2 on the mesh), or move them back into
-  # `settings:` (their help texts are in git at 41071a3).
-  export_mesh: false
-  pass2_mesh: false
-  photo_texture: true
-  refine_texture: false
-  texture_mode: sheets
-  face_policy: protect_cap
-  mesh_blur: 2.0
-
   # What has no control of its own, and therefore no `settings:` entry.
   #
   # Every path this workflow writes to disk hangs off this one global, and
@@ -891,8 +873,9 @@ steps:
       parts: face
     outputs:
       box: scene.face_box
-      # The whole class map of the photograph: photo_texture's foreground,
-      # face and hair (steps/photo_texture.py) — free, the pass runs anyway.
+      # The whole class map of the photograph — free, the pass runs anyway.
+      # (Consumed by the mesh path's photo_texture until 2026-09-20; nothing
+      # reads it now.)
       labels: scene.front_labels
 
   # Cut it out at native resolution and record where it came from. `padding`
@@ -2970,123 +2953,14 @@ steps:
       body_rig: scene.body_rig
       body_rig_stats: scene.body_rig_stats
 
-  # --------------------------------------------------- the textured mesh (mesh/)
-  # The stage-2 splat as a textured mesh (steps/meshify.py; b2ctrain's
-  # mesh-* subcommands, docs/mesh-plan.md). Here rather than after the
-  # final splat because this is where its inputs are consistent: the
-  # training cameras, the Sapiens normal maps computed for THESE frames
-  # (`normal_maps`), the refit body and the face cap all describe the
-  # intermediate dataset. The experiments it ports were run on exactly
-  # this data (b2ctrain out/mesh), and its renders along the helix are the
-  # pass-2 A/B's fourth arm — now pass 2's frames themselves (`pass2_mesh`,
-  # render_subject below). Built whenever pass 2 wants it or `export_mesh`
-  # packages it.
-  - id: meshify
-    step: meshify
-    dispatch: in_process
-    when:
-      any:
-        - ${globals.export_mesh}
-        - ${globals.pass2_mesh}
-    inputs:
-      splat_path: dataset.splat_path
-      cameras: dataset.cameras
-      # The refit body when refit_body ran, SAM-3D-Body's otherwise: the
-      # fusion's prior for what no view saw, and the face's geometry.
-      mesh_world: scene.mesh_world
-      # The face cap through the refined anchor camera: the face's region
-      # (no depth view is fused inside it) and its colours (one Gaussian per
-      # photo pixel, projected from the photograph's camera). Optional: with
-      # the face branch off the face is the splat's, geometry and colour.
-      cap_path: scene.face_splat_path?
-      normal_maps: scene.normal_maps?
-      masks: dataset.masks?
-      anchor_frame_index: dataset.extras.anchor_frame_index?
-    params:
-      output_dir: ${globals.output_root}/mesh
-    outputs:
-      mesh_dir: scene.mesh_dir
-      mesh_stats: scene.mesh_stats
-
-  # The photograph projected straight into the atlas (steps/photo_texture.py):
-  # every texel its camera sees is sampled from it at native resolution,
-  # the bake around it levelled to its tone, the face core marked for klein
-  # to leave alone. Needs the face branch: the class map is locate_face's,
-  # the camera is the one face_splat_refined hangs the cap on.
-  - id: photo_texture
-    step: photo_texture
-    dispatch: in_process
-    when:
-      - any:
-          - ${globals.export_mesh}
-          - ${globals.pass2_mesh}
-      - ${globals.photo_texture}
-      - ${globals.face_splat}
-    inputs:
-      mesh_dir: scene.mesh_dir
-      mesh_stats: scene.mesh_stats?
-      image: scene.front_image
-      labels: scene.front_labels?
-      # sam3d_body's outputs: the photograph's focal length.
-      mesh_output: scene
-      cameras: dataset.cameras
-      anchor_frame_index: dataset.extras.anchor_frame_index?
-      given_camera: scene.image_warp.camera?
-    outputs:
-      texture_path: scene.mesh_photo_texture
-      protect_path: scene.mesh_photo_protect
-      photo_texture_stats: scene.photo_texture_stats
-
-  # klein over the atlas (steps/refine_texture.py), the face left as the
-  # photograph's pixels (`face_policy: protect_cap`). In the wan22 env: the
-  # same diffusers / torchao the denoise runs on, and the same fp8 loading
-  # (pipeline/flux2_fp8.py). The raster halves are b2ctrain calls from
-  # inside the step; klein loads once for the whole loop.
-  - id: refine_texture
-    step: refine_texture
-    dispatch: subprocess
-    env: wan22
-    when:
-      - any:
-          - ${globals.export_mesh}
-          - ${globals.pass2_mesh}
-      - ${globals.refine_texture}
-    inputs:
-      mesh_dir: scene.mesh_dir
-      mesh_stats: scene.mesh_stats?
-      # The photograph's front panel, and the back panel (or the rear view
-      # pick_rear_view chose for a single photo) as klein's references.
-      front_image: scene.front_image
-      back_image: dataset.reference_image?
-      caption: dataset.prompt?
-      # photo_texture's texture and the texels it hands klein (the face
-      # core, or everything the photograph owns); the baked atlas without it.
-      texture_path: scene.mesh_photo_texture?
-      protect_path: scene.mesh_photo_protect?
-    params:
-      output_dir: ${globals.output_root}/mesh
-      mode: ${globals.texture_mode}
-      face_policy: ${globals.face_policy}
-      # Every sheet's (or view's) input, repaint mask and repaint, for the eye.
-      debug_dir: ${globals.output_root}/debug/refine_texture
-    outputs:
-      texture_path: scene.mesh_texture_path
-      mesh_path: scene.mesh_klein_path
-      refine_texture_stats: scene.refine_texture_stats
-
+  # The splat's own re-render along the helix, the frames pass 2 conditions
+  # on. (2026-09-16 to 2026-09-20 this step could draw the textured mesh of
+  # the mesh path instead, `pass2_mesh`; the mesh path is removed.)
   - id: render_subject
-    step: render_subject
+    step: render_splat
     dispatch: in_process
     inputs:
       splat_scene: scene.splat
-      # The textured mesh (steps/mesh_views.py): with `pass2_mesh` the frames
-      # are the meshify mesh with the best texture on hand (klein's when
-      # refine_texture ran, else the photograph's, else the bake) rendered at the very cameras
-      # this step resolves — the path, the anchor and its extras are the same
-      # either way, and nothing downstream can tell the sources apart by shape.
-      mesh_dir: scene.mesh_dir?
-      mesh_texture_path: scene.mesh_texture_path?
-      mesh_photo_texture_path: scene.mesh_photo_texture?
       # The trained .ply itself, so the render reads it where it lies. Without
       # this the step stages `splat_scene` through SplatScene.to_ply, which
       # writes the standard 3DGS columns only: the ev_* block train_splat
@@ -3212,11 +3086,6 @@ steps:
       # the fade params at all, and never did. The shell it fades against is
       # an ellipsoid fitted to MESH VERTICES, and a .ply has none.
       background: ""
-      from_mesh: ${globals.pass2_mesh}
-      # The mesh frames softened inside their silhouette (steps/mesh_views.py's
-      # blur_within) — the stand-in for the klein pass since 2026-09-17.
-      mesh_blur_px: ${globals.mesh_blur}
-      mesh_render_dir: ${globals.output_root}/debug/mesh_views
     outputs:
       images: dataset.images
       masks: dataset.masks
@@ -3250,13 +3119,10 @@ steps:
   # render above. Culled pixels come through BLACK, and black on a grey
   # composite is a hole in the subject rather than a hole in the frame.
   # The matte mask_splat composites with: measured against the splat frames
-  # by rmbg (2026-09-05). A mesh render's alpha IS its silhouette, so with
-  # `pass2_mesh` the step is skipped and render_subject's masks stand.
+  # by rmbg (2026-09-05).
   - id: resplat_foreground_masks
     step: rmbg
     dispatch: in_process
-    when:
-      not: ${globals.pass2_mesh}
     inputs:
       images: dataset.images
     outputs:

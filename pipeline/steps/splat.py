@@ -557,8 +557,9 @@ class RenderSplatStep(Step):
     def _render_frames(self, inputs: Dict[str, Any], params: Dict[str, Any], *, scene, splat_path, cameras, image_names,
                        width: int, height: int, bg_color, render_path, confidence, sh_degree: int):
         """The frames at the resolved cameras: (BGR images, float masks). The splat rasterised, culled
-        behind the body mesh when `cull_mesh` is wired. `render_subject` (steps/mesh_views.py) swaps this
-        for the textured mesh; everything around it — the path, the anchor, the backdrop — is shared."""
+        behind the body mesh when `cull_mesh` is wired. A hook: everything around it — the path, the
+        anchor, the backdrop — is the step's, and a subclass that draws the frames from something else
+        (the removed mesh path's `render_subject` did, 2026-09-18 to 2026-09-20) overrides this alone."""
         cull_mesh = inputs.get("cull_mesh")
         if cull_mesh is None:
             return _rasterize(

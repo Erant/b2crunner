@@ -340,23 +340,6 @@ def check_trainer_binaries() -> Check:
                 status = FAIL
             else:
                 lines.append("  probe --depth present (body refit)")
-            # The mesh deliverable (steps/meshify.py, off by default) drives
-            # the mesh-* subcommands; a build without them fails that step
-            # only, so this is a warning, not a failure.
-            try:
-                fuse = _run([path, "mesh-fuse", "--help"], timeout=30)
-                fuse_text = fuse.stdout + fuse.stderr
-            except (subprocess.TimeoutExpired, OSError):
-                fuse_text = ""
-            if "--prior" in fuse_text:
-                lines.append("  mesh-* subcommands present (meshify / refine_texture)")
-            else:
-                lines.append(
-                    "  no `mesh-fuse` — the mesh deliverable (export_mesh) needs a "
-                    "b2ctrain from 2026-09-16 or later (5ac7465); off by default"
-                )
-                if status == OK:
-                    status = WARN
             if "--align-iters" not in help_text:
                 # Not a failure: steps/brush.py's `align_backend: auto`
                 # falls back to its own render/warp/re-invoke loop, which

@@ -979,6 +979,11 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   keeps the cap's footprint as fused (`--keep`). The bootstrap's
   `face_splat` keeps the pointmap: it is composited onto the drawings and
   denoised twice, never trained on.
+- **REMOVED 2026-09-20** (parked 2026-09-19, never turned back on): the
+  mesh path below — its steps, `view_atlas.py`, `flux2_fp8.py`, the klein and
+  Qwen fp8 model sources, and `render_subject`'s mesh source. `render_subject`
+  is a plain `render_splat` again. The entry is kept as the record of what it
+  was; the measurements are in b2ctrain out/mesh.
 - `meshify` / `photo_texture` / `refine_texture` — the textured-mesh
   deliverable (`export_mesh`): b2ctrain's mesh-* chain on the stage-2
   splat, the photograph sampled straight into the atlas, then klein over
