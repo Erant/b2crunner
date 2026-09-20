@@ -204,6 +204,29 @@ class TestSuppliedOutline(_RenderStepCase):
         mask = self.recorder.calls[0][1]["modes"]["outline"]["mask"]
         self.assertFalse(mask.any())
 
+    def test_clean_px_strips_hairs_and_fills_gaps_but_not_the_body(self):
+        """A splat's coverage grows opaque needles along the orbit plane;
+        an opening+closing of the cut silhouette takes them off (and the
+        thin gaps between them) and leaves the body where it was."""
+        body = np.zeros((32, 32), dtype=np.float32)
+        body[8:24, 8:24] = 1.0            # a 16x16 body
+        hairy = body.copy()
+        hairy[12, 24:31] = 1.0            # a 1-px horizontal hair off its right edge
+        hairy[16:20, 15] = 0.0            # a 1-px gap through it
+        self._run_with([hairy, hairy], n_frames=2, resolution=[32, 32],
+                       outline_mask_clean_px=5)
+        mask = self.recorder.calls[0][1]["modes"]["outline"]["mask"]
+        self.assertFalse(mask[12, 24:31].any(), "the hair survived")
+        self.assertTrue(mask[16:20, 15].all(), "the gap survived")
+        # The body is kept to within the disc's rounding of its corners.
+        self.assertTrue(mask[10:22, 10:22].all())
+        self.assertFalse(mask[:7].any() or mask[25:].any() or mask[:, :7].any() or mask[:, 25:].any())
+        # And 0, the default, is the silhouette exactly as cut.
+        self.recorder.calls.clear()
+        self._run_with([hairy, hairy], n_frames=2, resolution=[32, 32])
+        mask = self.recorder.calls[0][1]["modes"]["outline"]["mask"]
+        self.assertTrue(np.array_equal(mask, hairy >= 0.5))
+
     def test_a_uint8_matte_is_normalised_first(self):
         mattes = [(m * 255).astype(np.uint8) for m in self._mattes()]
         self._run_with(mattes)

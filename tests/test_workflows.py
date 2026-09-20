@@ -2048,14 +2048,26 @@ class TestTheReoutlineBranch(unittest.TestCase):
             with self.subTest(step=step_id):
                 self.assertEqual(self._step(spec, step_id).when, "${globals.re_outline}")
 
-    def test_the_extra_denoise_is_pass_1_at_480p(self):
+    def test_the_extra_denoise_is_pass_1_at_480p_and_four_steps(self):
+        """Pass 1's block, apart from the size, the step count (2 high /
+        2 low: the pass is kept for its shape, the low expert's extra steps
+        are texture) and the two per-step lists that count reshapes — the
+        strength schedule over four entries, and the sync steps as this
+        pass's own setting, since pass 1's [2, 3, 4] names a step a
+        four-step run does not have — plus its own sync debug dir."""
         spec = self._spec()
         extra = self._step(spec, "reoutline_denoise")
         pass1 = self._step(spec, "denoise_pass1")
-        # ... and its own sync debug dir, the one per-step path in the block.
-        expected = dict(pass1.params, width=480, height=832,
+        self.assertEqual((pass1.params["steps_high"], pass1.params["steps_low"]), (2, 4))
+        self.assertEqual(pass1.params["strength"], [1, 1, 0.5, 0.5, 0.5, 0.5])
+        expected = dict(pass1.params, width=480, height=832, steps_low=2,
+                        strength=[1, 1, 0.5, 0.5],
+                        sync_steps="${globals.reoutline_sync_steps}",
                         sync_debug_dir="${globals.output_root}/debug/sync_reoutline")
         self.assertEqual(extra.params, expected)
+        sync = next(p for p in spec.settings if p.name == "reoutline_sync_steps")
+        self.assertEqual((sync.default, sync.requires), ([1, 2], "re_outline"))
+        self.assertTrue(all(0 < i < 3 for i in sync.default))
         self.assertEqual((extra.dispatch, extra.env, extra.keep_loaded),
                          (pass1.dispatch, pass1.env, pass1.keep_loaded))
         self.assertEqual(extra.inputs["reference_image"], pass1.inputs["reference_image"])
@@ -2097,12 +2109,14 @@ class TestTheReoutlineBranch(unittest.TestCase):
             "masks": "scene.reoutline.frame_mattes",
         })
         self.assertEqual(train.outputs, {"splat_path": "scene.reoutline.splat_path"})
-        # The intermediate's silhouette knobs, no alignment, no polish, and
-        # the .ply in the debug bundle beside intermediate_splat.ply.
+        # The intermediate's silhouette knobs, no alignment, no polish, half
+        # the iterations (the texture is thrown away), and the .ply in the
+        # debug bundle beside intermediate_splat.ply.
         intermediate = self._step(spec, "train_splat")
-        for key in ("total_steps", "polish_steps", "align_iters", "match_alpha_weight"):
+        for key in ("polish_steps", "align_iters", "match_alpha_weight"):
             with self.subTest(param=key):
                 self.assertEqual(train.params[key], intermediate.params[key])
+        self.assertEqual(train.params["total_steps"], intermediate.params["total_steps"] // 2)
         self.assertEqual(train.params["export_dir"], intermediate.params["export_dir"])
         self.assertEqual(train.params["export_name"], "reoutline_splat.ply")
         self.assertNotEqual(train.params["export_name"], intermediate.params["export_name"])
@@ -2126,12 +2140,15 @@ class TestTheReoutlineBranch(unittest.TestCase):
 
     def test_the_re_render_is_the_first_render_plus_the_mattes(self):
         """Same params, so the same cameras; and it republishes nothing about
-        them, so nothing can drift. The one param that differs is the fill's
-        darkness, and it is the setting for a re-outlined drawing."""
+        them, so nothing can drift. Two params differ: the fill's darkness,
+        which is the setting for a re-outlined drawing, and the cleaning of
+        the splat's coverage, which a mesh silhouette does not need."""
         spec = self._spec()
         first = self._step(spec, "render_initial_views")
         again = self._step(spec, "render_reoutlined_views")
-        self.assertEqual(again.params, dict(first.params, outline_strength="${globals.reoutlined_strength}"))
+        self.assertEqual(again.params, dict(first.params, outline_strength="${globals.reoutlined_strength}",
+                                            outline_mask_clean_px=9))
+        self.assertNotIn("outline_mask_clean_px", first.params)
         self.assertEqual(first.params["outline_strength"], "${globals.outline_strength}")
         self.assertEqual(again.inputs, dict(first.inputs, outline_masks="scene.outline_masks"))
         self.assertEqual(set(again.outputs), {"images", "masks", "inactive_masks"})
@@ -2747,14 +2764,26 @@ class TestTheReoutlineBranch(unittest.TestCase):
             with self.subTest(step=step_id):
                 self.assertEqual(self._step(spec, step_id).when, "${globals.re_outline}")
 
-    def test_the_extra_denoise_is_pass_1_at_480p(self):
+    def test_the_extra_denoise_is_pass_1_at_480p_and_four_steps(self):
+        """Pass 1's block, apart from the size, the step count (2 high /
+        2 low: the pass is kept for its shape, the low expert's extra steps
+        are texture) and the two per-step lists that count reshapes — the
+        strength schedule over four entries, and the sync steps as this
+        pass's own setting, since pass 1's [2, 3, 4] names a step a
+        four-step run does not have — plus its own sync debug dir."""
         spec = self._spec()
         extra = self._step(spec, "reoutline_denoise")
         pass1 = self._step(spec, "denoise_pass1")
-        # ... and its own sync debug dir, the one per-step path in the block.
-        expected = dict(pass1.params, width=480, height=832,
+        self.assertEqual((pass1.params["steps_high"], pass1.params["steps_low"]), (2, 4))
+        self.assertEqual(pass1.params["strength"], [1, 1, 0.5, 0.5, 0.5, 0.5])
+        expected = dict(pass1.params, width=480, height=832, steps_low=2,
+                        strength=[1, 1, 0.5, 0.5],
+                        sync_steps="${globals.reoutline_sync_steps}",
                         sync_debug_dir="${globals.output_root}/debug/sync_reoutline")
         self.assertEqual(extra.params, expected)
+        sync = next(p for p in spec.settings if p.name == "reoutline_sync_steps")
+        self.assertEqual((sync.default, sync.requires), ([1, 2], "re_outline"))
+        self.assertTrue(all(0 < i < 3 for i in sync.default))
         self.assertEqual((extra.dispatch, extra.env, extra.keep_loaded),
                          (pass1.dispatch, pass1.env, pass1.keep_loaded))
         self.assertEqual(extra.inputs["reference_image"], pass1.inputs["reference_image"])
@@ -2796,12 +2825,14 @@ class TestTheReoutlineBranch(unittest.TestCase):
             "masks": "scene.reoutline.frame_mattes",
         })
         self.assertEqual(train.outputs, {"splat_path": "scene.reoutline.splat_path"})
-        # The intermediate's silhouette knobs, no alignment, no polish, and
-        # the .ply in the debug bundle beside intermediate_splat.ply.
+        # The intermediate's silhouette knobs, no alignment, no polish, half
+        # the iterations (the texture is thrown away), and the .ply in the
+        # debug bundle beside intermediate_splat.ply.
         intermediate = self._step(spec, "train_splat")
-        for key in ("total_steps", "polish_steps", "align_iters", "match_alpha_weight"):
+        for key in ("polish_steps", "align_iters", "match_alpha_weight"):
             with self.subTest(param=key):
                 self.assertEqual(train.params[key], intermediate.params[key])
+        self.assertEqual(train.params["total_steps"], intermediate.params["total_steps"] // 2)
         self.assertEqual(train.params["export_dir"], intermediate.params["export_dir"])
         self.assertEqual(train.params["export_name"], "reoutline_splat.ply")
         self.assertNotEqual(train.params["export_name"], intermediate.params["export_name"])
@@ -2825,12 +2856,15 @@ class TestTheReoutlineBranch(unittest.TestCase):
 
     def test_the_re_render_is_the_first_render_plus_the_mattes(self):
         """Same params, so the same cameras; and it republishes nothing about
-        them, so nothing can drift. The one param that differs is the fill's
-        darkness, and it is the setting for a re-outlined drawing."""
+        them, so nothing can drift. Two params differ: the fill's darkness,
+        which is the setting for a re-outlined drawing, and the cleaning of
+        the splat's coverage, which a mesh silhouette does not need."""
         spec = self._spec()
         first = self._step(spec, "render_initial_views")
         again = self._step(spec, "render_reoutlined_views")
-        self.assertEqual(again.params, dict(first.params, outline_strength="${globals.reoutlined_strength}"))
+        self.assertEqual(again.params, dict(first.params, outline_strength="${globals.reoutlined_strength}",
+                                            outline_mask_clean_px=9))
+        self.assertNotIn("outline_mask_clean_px", first.params)
         self.assertEqual(first.params["outline_strength"], "${globals.outline_strength}")
         self.assertEqual(again.inputs, dict(first.inputs, outline_masks="scene.outline_masks"))
         self.assertEqual(set(again.outputs), {"images", "masks", "inactive_masks"})

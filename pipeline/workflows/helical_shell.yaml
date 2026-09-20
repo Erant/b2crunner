@@ -533,7 +533,8 @@ settings:
       instead of from the body mesh. The mesh outline is wrong wherever hair
       and clothing extend past the body model; this runs the same control
       video through an extra Wan 2.2 denoise at 480x832 (pass 1's settings
-      exactly), mattes the result with rmbg, trains a splat to those mattes
+      at four steps, 2 high / 2 low), mattes the result with rmbg, trains a
+      splat to those mattes
       on the orbit's own cameras, and re-renders the orbit with the splat's
       coverage as the outline — one subject every frame agrees on, rather
       than 81 mattes that do not. Skeleton, face splat and everything after
@@ -560,6 +561,20 @@ settings:
       lands the fill a fifth of the way to black (#666666), against
       `outline_strength`'s 6.25 for the model's. Greyed out with
       `re_outline` off, when no step reads it.
+
+  - name: reoutline_sync_steps
+    label: Re-outline 3D sync steps
+    type: list
+    default: [1, 2]
+    advanced: true
+    requires: re_outline
+    help: >-
+      With `re_outline` on: `sync_steps` for the 480p re-outline denoise,
+      which runs four steps (2 high, 2 low) where pass 1 runs six, so it
+      cannot read pass 1's list — [2, 3, 4] names a step it does not have.
+      [1, 2] is the same idea over four: skip the first step, which
+      predicts a blur, and the last, which is the output. Empty is off.
+      Shares `sync_mix` with pass 1.
 
 outputs:
   # What stage 6 can produce, and the switch each one is. `name:` is the
@@ -1397,14 +1412,21 @@ steps:
       images: scene.reoutline.images
       masks: scene.reoutline.masks
 
-  # denoise_pass1's block, character for character, at 480x832. The 480
-  # and 832 are literals on purpose: this pass runs at the low size
+  # denoise_pass1's block at 480x832 and four steps instead of six. The
+  # 480 and 832 are literals on purpose: this pass runs at the low size
   # whatever the run's `resolution` is, that is the point of it. The
-  # prompts are pinned by tests/test_workflows.py against every
-  # wan22_vace_denoise step, this one included. `keep_loaded: true` puts it
-  # on the same resident worker as the two passes below (the runner keys
-  # workers on dispatch/env/keep_loaded), and width/height are not load
-  # params, so the experts are loaded once for all three.
+  # steps are 2 high / 2 low rather than pass 1's 2 / 4 (2026-09-20): the
+  # pass is kept for its shape, and the low expert's extra steps are
+  # texture. That changes the shape of two per-step lists — `strength` is
+  # pass 1's schedule over four entries (the high steps at full scale, the
+  # low ones at half), and the sync steps are this pass's own setting,
+  # `reoutline_sync_steps`, because pass 1's [2, 3, 4] names a step a
+  # four-step run does not have. The prompts are pinned by
+  # tests/test_workflows.py against every wan22_vace_denoise step, this
+  # one included. `keep_loaded: true` puts it on the same resident worker
+  # as the two passes below (the runner keys workers on
+  # dispatch/env/keep_loaded), and width/height/steps are not load params,
+  # so the experts are loaded once for all three.
   - id: reoutline_denoise
     step: wan22_vace_denoise
     dispatch: subprocess
@@ -1427,16 +1449,16 @@ steps:
       width: 480
       height: 832
       steps_high: 2
-      steps_low: 4
+      steps_low: 2
       cfg: 1.0
       seed: ${globals.seed}
-      sync_steps: ${globals.sync_steps}
+      sync_steps: ${globals.reoutline_sync_steps}
       sync_mix: ${globals.sync_mix}
       sync_debug_dir: ${globals.output_root}/debug/sync_reoutline
       sampler_low: ${globals.pass1_sampler_low}
       sampler_high: uni_pc
       sampler_shift: 5
-      strength: [1, 1, 0.5, 0.5, 0.5, 0.5]
+      strength: [1, 1, 0.5, 0.5]
       prompt: "人工光、柔光、低对比度、环绕运镜。时间静止，人物完全静止。身体\
         如雕塑般僵硬，胸口没有起伏，头部保持固定角度，面部肌肉完全不动，维持单\
         一的中性表情。双眼一眨不眨，眼睑保持张开且稳定，目光空洞而固定，锁定远\
@@ -1534,12 +1556,13 @@ steps:
   # subject that the body model leaves out. The knobs are train_splat's
   # (below) where it has measured them: `match_alpha_weight` 0.5 is the
   # value that fitted the intermediate's silhouette to its matte with 17%
-  # fewer dark wedges at -0.003 IoU, and `total_steps` 30000 is the count
-  # that measurement was made at — nothing has looked at how much sooner
-  # a silhouette settles than a texture does, and that is the obvious
-  # place to take time out of this branch once a run has been read.
-  # `align_iters` 0 as on train_splat: the alignment pulls the frames onto
-  # the splat's consensus, which is a texture-sharpness lever.
+  # fewer dark wedges at -0.003 IoU. `total_steps` is HALF train_splat's
+  # 30000: the texture is thrown away, and the back half of a training is
+  # where the texture sharpens while the coverage has long settled —
+  # unmeasured for this splat, but 30000 was only ever the count the alpha
+  # knob happened to be measured at. `align_iters` 0 as on train_splat:
+  # the alignment pulls the frames onto the splat's consensus, which is a
+  # texture-sharpness lever.
   - id: reoutline_train_splat
     step: brush
     dispatch: in_process
@@ -1551,7 +1574,7 @@ steps:
       images: scene.reoutline.frames
       masks: scene.reoutline.frame_mattes
     params:
-      total_steps: 30000
+      total_steps: 15000
       polish_steps: 0
       align_iters: 0
       match_alpha_weight: 0.5
@@ -1632,6 +1655,16 @@ steps:
       # render_initial_views' in; tests/test_workflows.py pins that.
       render_mode: outline+skeleton+splat
       outline_strength: ${globals.reoutlined_strength}
+      # The other line this block has that render_initial_views' does not.
+      # The coverage of a splat trained on a single-elevation orbit carries
+      # opaque needle Gaussians along the cameras' horizontal rays at the
+      # body's edge — horizontal hairs from every other camera on the ring,
+      # and thin gaps between them (helical-20260920-150953, the first run
+      # of this branch: 0.78% of the fill thinner than 9 px, against 0.04%
+      # of the mattes the splat was fitted to). An opening+closing of the
+      # cut silhouette at 9 px takes all of it off for 0.04% of a matte's
+      # own thin structure, fingers kept. See the param's help.
+      outline_mask_clean_px: 9
       # Tell the denoise which pixels are already real: 0.0 where the face
       # splat covers the frame, 1.0 everywhere else, in
       # wan22_vace_denoise's `control_masks` convention. ON here although

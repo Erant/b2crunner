@@ -22,7 +22,7 @@ every one `when: ${globals.re_outline}`:
 | step | what |
 |---|---|
 | `reoutline_downscale` | `resize_batch`: the control video and its VACE flags, 720x1280 -> 480x832 |
-| `reoutline_denoise` | `wan22_vace_denoise` at 480x832, `denoise_pass1`'s block character for character |
+| `reoutline_denoise` | `wan22_vace_denoise` at 480x832, `denoise_pass1`'s block at 2 high / 2 low steps (`strength` `[1, 1, 0.5, 0.5]`, sync steps `reoutline_sync_steps` = `[1, 2]`) |
 | `reoutline_matte` | `rmbg` over the denoised frames; `debug_dir` puts frames + mattes in `debug/reoutline/` |
 | `reoutline_upscale` | `resize_batch`: the frames AND their mattes back to the render size |
 | `reoutline_train_splat` | `brush`: a splat fitted to those frames and mattes on `dataset.cameras`; `debug/reoutline_splat.ply` |
@@ -31,9 +31,10 @@ every one `when: ${globals.re_outline}`:
 | `reinject_anchor_reoutlined` | `inject_anchor` over the fresh render |
 
 The extra pass sees exactly what pass 1 sees — the same drawings, the
-photograph at the anchor frame with its 0.0 VACE mask, the same reference,
-seed and strength schedule — only smaller. Its output is thrown away except
-for its shape: rmbg cuts the subject out of each frame, hair and all, a
+photograph at the anchor frame with its 0.0 VACE mask, the same reference
+and seed — only smaller, and in four steps rather than six (2 high / 2 low;
+the low expert's extra steps are texture, and the texture is thrown away).
+Its output is thrown away except for its shape: rmbg cuts the subject out of each frame, hair and all, a
 splat is trained to those mattes on the very cameras the frames were drawn
 from, and the orbit is rendered again with the splat's coverage on each
 camera as the outline. The skeleton and the face splat are re-drawn from
@@ -58,16 +59,63 @@ the same cameras it is one 3-D subject seen from 81 places, which is what
 an outline for a camera orbit should be.
 
 The training is the intermediate splat's silhouette recipe and nothing
-else: `match_alpha_weight` 0.5 and `total_steps` 30000 as `train_splat`
-has them, `align_iters` 0, `polish_steps` 0, and none of the supporting
-views, loss weights, normals, body rig or hollow loss the intermediate
-takes — this splat's colour is never looked at, and the hollow loss
-penalises weight behind the body model's surface on a training whose
-whole purpose is what the body model leaves out. 30000 is the count the
-silhouette knob was measured at, not a count anyone has tuned for a splat
-kept only for its coverage; how much sooner a silhouette settles than a
-texture does is the obvious place to take time out of this branch once a
-run has been read.
+else: `match_alpha_weight` 0.5 as `train_splat` has it, `align_iters` 0,
+`polish_steps` 0, and none of the supporting views, loss weights, normals,
+body rig or hollow loss the intermediate takes — this splat's colour is
+never looked at, and the hollow loss penalises weight behind the body
+model's surface on a training whose whole purpose is what the body model
+leaves out. `total_steps` is 15000, half the intermediate's: the texture
+is thrown away, and the back half of a training is where the texture
+sharpens while the coverage has long settled. Unmeasured for this splat;
+30000 was only ever the count the alpha knob happened to be measured at.
+
+## The first run, and the hairs (helical-20260920-150953)
+
+The branch's first pod run came back with the re-outlined drawing fringed
+by horizontal hairs on every edge and pocked with small holes. Rendering
+`debug/reoutline_splat.ply` on the run's own cameras locally and comparing
+against the mattes it was trained to:
+
+- The hairs are opaque needle Gaussians, not haze: the fill above alpha
+  0.9 has as much thin structure as the fill above 0.5. Raising
+  `outline_mask_threshold` does nothing; the evidence gate
+  (`confidence: true` on the render) halves the hairs but leaves the gaps
+  and drops 4% of the fill (the hands go first).
+- 0.78% of the fill is thinner than 9 px, against 0.04% of the mattes —
+  twenty times the subject's own thin structure — and 0.53% of it is gaps
+  thinner than 9 px, against 0.11%.
+- Mechanism: on a single-elevation orbit every camera ray is horizontal,
+  so a Gaussian at the silhouette seen edge-on by one camera is free to
+  stretch along that camera's ray, and every other camera on the ring sees
+  the stretch as a horizontal streak. The per-frame disagreement of the
+  480p frames (this run's subject walks) is what lets them survive the
+  alpha loss.
+- Fix, measured: `outline_mask_clean_px: 9` on `render_reoutlined_views`
+  — an opening then closing of the cut silhouette with a 9 px disc, before
+  the blur. Thin structure 0.78% -> 0.00%, IoU against the mattes 0.9425
+  -> 0.9489, 0.04% of a matte's own structure lost (fingers survive at
+  this resolution). The trainer has no anisotropy control to do it at the
+  source — and, tried locally the same day, one would not help: a cap on
+  each Gaussian's longest/middle scale ratio (8, 4, 2) leaves the hairs
+  exactly where they are (0.76 -> 0.78 / 0.77 / 0.86% thin), and the
+  export-time in-mask prune at 0.8 shrinks the body (IoU 0.9426 ->
+  0.9346) before it clears them (0.69%). They are not needles and not
+  out-of-hull floaters: by the ply's evidence they are low-opacity discs
+  straddling the silhouette, inside the matte in most views and outside
+  in a few — the consensus disagreeing with single frames, drawn as
+  streaks because the disagreement lies along the ring's horizontal rays.
+  The intermediate splat, checked at pass 2's helical cameras, has no
+  such streaks (0.12% thin, no arm differs). b2ctrain/out/needle/README.md
+  has the tables.
+
+Two other things the same comparison showed, unfixed: the splat sits a
+uniform 3.4 px to the RIGHT of every frame's matte all the way round the
+orbit (a uniform image-space offset in the denoised frames — the lateral
+cousin of the anchor raise — since no world offset can look the same from
+every azimuth), and at the anchor frame the splat's feet are 30 px above
+the photograph's while the head matches (the mesh's feet sit 22 px high,
+docs/vace-denoise-findings-2026-09-07.md, and the denoise followed the
+drawing).
 
 ## The two fill strengths
 

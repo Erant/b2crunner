@@ -65,6 +65,7 @@ import os
 import sys
 from typing import Any, Dict, List, Optional, Tuple
 
+import cv2
 import numpy as np
 
 from ..masks import normalize_mask
@@ -360,9 +361,26 @@ def _inactive_masks(
     ]
 
 
+def _clean_silhouette(silhouette: np.ndarray, diameter: int) -> np.ndarray:
+    """Open then close a bool silhouette with a disc of `diameter` px.
+
+    The opening strips every protrusion thinner than the disc, the closing
+    fills every gap thinner than it; the body itself, being wider than
+    either, comes back where it was. Elliptical so a diagonal hair is as
+    thin as a horizontal one.
+    """
+    if diameter <= 0:
+        return silhouette
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (diameter, diameter))
+    u8 = silhouette.astype(np.uint8)
+    u8 = cv2.morphologyEx(u8, cv2.MORPH_OPEN, kernel)
+    u8 = cv2.morphologyEx(u8, cv2.MORPH_CLOSE, kernel)
+    return u8.astype(bool)
+
+
 def _resolve_outline_masks(
     mattes: Optional[List[np.ndarray]], *, n_frames: int, width: int, height: int,
-    threshold: float, render_mode: str,
+    threshold: float, render_mode: str, clean_px: int = 0,
 ) -> Optional[List[np.ndarray]]:
     """The per-frame boolean silhouettes an `outline*` mode draws from, or
     None to draw the mesh's.
@@ -373,7 +391,8 @@ def _resolve_outline_masks(
     for that, and it is named in the error so the fix is one line of
     workflow. The threshold is applied here, once, so body2colmap gets the
     bool it asks for and the blur it applies afterwards is the only
-    softening left.
+    softening left; `clean_px` (the `outline_mask_clean_px` param) is the
+    one other thing done to the cut silhouette, between the two.
     """
     if mattes is None:
         return None
@@ -400,12 +419,12 @@ def _resolve_outline_masks(
                 f"pixel grid first (a `resize_batch` step at the render "
                 f"resolution); this step does not resample them."
             )
-        silhouettes.append(matte >= threshold)
+        silhouettes.append(_clean_silhouette(matte >= threshold, clean_px))
     covered = [float(m.mean()) for m in silhouettes]
     logger.info(
-        "render: outline from %d supplied mattes, threshold %.2f, coverage "
-        "%.1f%%-%.1f%% of the frame",
-        len(silhouettes), threshold, 100.0 * min(covered), 100.0 * max(covered),
+        "render: outline from %d supplied mattes, threshold %.2f, clean %d px, "
+        "coverage %.1f%%-%.1f%% of the frame",
+        len(silhouettes), threshold, clean_px, 100.0 * min(covered), 100.0 * max(covered),
     )
     return silhouettes
 
@@ -510,6 +529,20 @@ class RenderStep(Step):
               "as the mesh silhouette is, so a soft rmbg edge is re-softened "
               "rather than carried. Ignored without the input",
               minimum=0.0, maximum=1.0, advanced=True),
+        Param("outline_mask_clean_px", int, 0,
+              "With an `outline_masks` input only: a morphological opening "
+              "then closing of the thresholded silhouette with a disc of this "
+              "diameter, in pixels, so anything thinner than it — a "
+              "protrusion or a gap — is removed before the blur. 0 leaves the "
+              "silhouette as cut. For a silhouette that is a splat's "
+              "coverage: a splat trained on a single-elevation orbit grows "
+              "opaque needle Gaussians along the cameras' horizontal rays "
+              "at the body's edge, which the orbit's other cameras see as "
+              "horizontal hairs (measured on helical-20260920-150953: 0.78% "
+              "of the fill thinner than 9 px against 0.04% of the mattes "
+              "it was fitted to; 9 removes all of it and 0.04% of a matte's "
+              "own thin structure, fingers kept)",
+              minimum=0, advanced=True),
         Param("splat_max_angle_deg", float, 60.0,
               "The `+splat` modes only: composite the splat on every frame whose "
               "view of it is within this angle of the photograph's. Past it the "
@@ -955,6 +988,7 @@ class RenderStep(Step):
             inputs.get("outline_masks"),
             n_frames=len(cameras), width=width, height=height,
             threshold=params["outline_mask_threshold"], render_mode=render_mode,
+            clean_px=params["outline_mask_clean_px"],
         )
 
         # The environment behind every frame (steps/backdrop.py). Handed to
