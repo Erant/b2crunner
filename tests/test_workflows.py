@@ -2066,10 +2066,10 @@ class TestTheReoutlineBranch(unittest.TestCase):
         self.assertEqual(order[first:first + len(self.BRANCH)], self.BRANCH)
         self.assertEqual(order[first + len(self.BRANCH)], "dump_denoise_input")
 
-    def test_every_step_is_gated_on_the_setting_and_it_defaults_off(self):
+    def test_every_step_is_gated_on_the_setting_and_it_defaults_on(self):
         spec = self._spec()
         setting = next(s for s in spec.settings if s.name == "re_outline")
-        self.assertIs(setting.default, False)
+        self.assertIs(setting.default, True)
         for step_id in self.BRANCH:
             with self.subTest(step=step_id):
                 self.assertEqual(self._step(spec, step_id).when, "${globals.re_outline}")
@@ -2770,10 +2770,10 @@ class TestTheReoutlineBranch(unittest.TestCase):
         self.assertEqual(order[first:first + len(self.BRANCH)], self.BRANCH)
         self.assertEqual(order[first + len(self.BRANCH)], "dump_denoise_input")
 
-    def test_every_step_is_gated_on_the_setting_and_it_defaults_off(self):
+    def test_every_step_is_gated_on_the_setting_and_it_defaults_on(self):
         spec = self._spec()
         setting = next(s for s in spec.settings if s.name == "re_outline")
-        self.assertIs(setting.default, False)
+        self.assertIs(setting.default, True)
         for step_id in self.BRANCH:
             with self.subTest(step=step_id):
                 self.assertEqual(self._step(spec, step_id).when, "${globals.re_outline}")

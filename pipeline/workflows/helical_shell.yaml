@@ -288,6 +288,7 @@ settings:
     label: Refine camera poses (COLMAP)
     type: bool
     default: true
+    advanced: true
     help: >-
       Bundle-adjust the generated orbit against the frames themselves before
       each brush training, with the gauge restored afterwards so the splat keeps
@@ -309,6 +310,7 @@ settings:
     label: Refit the body model to the intermediate splat
     type: bool
     default: true
+    advanced: true
     help: >-
       After the first training, move SAM-3D-Body's mesh and skeleton onto the
       splat (pipeline/steps/body_refit.py, docs/body-refit.md): the splat
@@ -327,6 +329,7 @@ settings:
     label: Per-view body rig on the intermediate training
     type: bool
     default: true
+    advanced: true
     help: >-
       Deform the intermediate splat per training view with the INITIAL body's
       skeleton (pipeline/body_rig.py), the way `body_rig` already does for the
@@ -347,6 +350,7 @@ settings:
     label: Per-view face fit and the anchor's eyes
     type: bool
     default: true
+    advanced: true
     help: >-
       Before the final training, fit the refit body's head to every frame
       that shows the face (neck/head pose plus the MHR expression
@@ -367,6 +371,7 @@ settings:
     label: Per-view face deltas in the rig (rig v3)
     type: bool
     default: false
+    advanced: true
     help: >-
       Hand the trainer the per-view head fit as vertex displacements of the
       rig's face core (`build_face_rig`, rig v3), so the canonical face
@@ -388,6 +393,7 @@ settings:
     default: 0.5
     minimum: 0.0
     maximum: 1.0
+    advanced: true
     help: >-
       In the intermediate training, how far the denoised frames yield to the
       photograph wherever its camera sees the body head-on enough
@@ -411,6 +417,7 @@ settings:
     default: 0.0
     minimum: 0.0
     maximum: 1.0
+    advanced: true
     help: >-
       Pull the highlights down on the first denoise's output before the
       intermediate splat is trained on it, 0 (off) to 1. The second denoise
@@ -429,6 +436,7 @@ settings:
     label: Body-part label per splat
     type: bool
     default: true
+    advanced: true
     help: >-
       Segment every final frame with Sapiens2 (Goliath body parts: face, hair,
       hands, arms, legs, clothing, shoes...) and vote the classes onto the
@@ -446,6 +454,7 @@ settings:
     default: 6.25
     minimum: 0.0
     maximum: 100.0
+    advanced: true
     help: >-
       How dark the flat silhouette fill in the first drawing is, as a
       percentage from the #7F7F7F ground (0, no silhouette) to black
@@ -459,9 +468,9 @@ settings:
       step's own 12.6% (#6F6F6F) until 2026-09-20.
 
   - name: re_outline
-    label: Re-outline (experimental)
+    label: Re-outline
     type: bool
-    default: false
+    default: true
     advanced: true
     help: >-
       Draw the silhouette pass 1 conditions on from a splat of the subject
@@ -474,10 +483,12 @@ settings:
       coverage as the outline — one subject every frame agrees on, rather
       than 81 mattes that do not. Skeleton, face splat and everything after
       are unchanged. Costs a third 81-frame denoise (the resident experts
-      are reused, so no second load) and a third splat training. Off is the
-      run as it was; `debug/reoutline/` in the result .zip holds the 480p
-      frames and their mattes when it is on, and `debug/reoutline_splat.ply`
-      the splat. See docs/re-outline.md.
+      are reused, so no second load) and a third splat training. On by
+      default since 2026-09-21, after helical-20260920-150953 and the runs
+      that followed it; off, pass 1 conditions on the body model's outline
+      at `outline_strength`, as every run before did. `debug/reoutline/` in
+      the result .zip holds the 480p frames and their mattes when it is on,
+      and `debug/reoutline_splat.ply` the splat. See docs/re-outline.md.
 
   - name: reoutlined_strength
     label: Re-outlined strength
@@ -501,6 +512,7 @@ settings:
     label: Outline relief
     default: none
     choices: [none, depth]
+    advanced: true
     help: >-
       What fills the silhouette in both drawings (the body model's and,
       with `re_outline`, the splat's). `none` is the flat grey of the
@@ -541,6 +553,7 @@ settings:
     default: 0.12
     minimum: 0.0
     maximum: 1.0
+    advanced: true
     help: >-
       In both drawings, hide every skeleton joint the body model hides
       from the camera, and every bone ending on one — the far arm behind
@@ -1307,7 +1320,7 @@ steps:
       images: dataset.images
       masks: dataset.masks
 
-  # ------------------------------------------------- re-outline (experimental)
+  # ------------------------------------------------- re-outline
   # Eight steps, every one gated on `re_outline`, that replace the
   # silhouette in the drawings above with the coverage of a SPLAT OF THE
   # SUBJECT. With the setting off none of them runs and pass 1 conditions

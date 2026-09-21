@@ -545,6 +545,21 @@ class TestWhatAWorkflowDeclares(ApiTestCase):
         self.assertEqual(by_name["resolution"]["choices"][0], [720, 1280])
         self.assertIs(by_name["face_splat"]["advanced"], True)
 
+    def test_only_the_four_run_knobs_are_in_the_open(self):
+        # Everything that proved itself (COLMAP refinement, the body refit,
+        # the per-view rigs, the outline and occlusion strengths, the
+        # re-outline branch) is behind the More settings fold since
+        # 2026-09-21; the Settings box is what you set per run.
+        body = self.client.get(
+            f"{API_PREFIX}/workflows/helical", headers=AUTH
+        ).json()
+        plain = [s["name"] for s in body["settings"]
+                 if not s["advanced"] and s.get("group") != "outputs"]
+        self.assertEqual(plain, ["resolution", "framing", "input_layout", "seed"])
+        by_name = {s["name"]: s for s in body["settings"]}
+        self.assertIs(by_name["re_outline"]["default"], True)
+        self.assertEqual(by_name["skeleton_occlusion_m"]["default"], 0.12)
+
     def test_the_debug_bundle_is_one_of_the_declared_outputs(self):
         # It has to draw in the Outputs box and be settable by name, which
         # is what declaring it as an output buys — and what a client

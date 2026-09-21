@@ -1,7 +1,8 @@
 # Re-outline: the silhouette from a splat of the subject, not the mesh
 
-*2026-09-08; the splat since 2026-09-20. Experimental, off by default
-(`re_outline` in helical.yaml). Never yet run on a pod.*
+*2026-09-08; the splat since 2026-09-20. On by default since 2026-09-21
+(`re_outline` in helical.yaml, behind the More settings fold); first pod
+run helical-20260920-150953.*
 
 ## The problem
 
