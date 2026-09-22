@@ -1210,7 +1210,13 @@ class TestWorkflowFiles(unittest.TestCase):
         # per-frame jitter with the common mode removed, a sharpness lever
         # for a splat kept only for its coverage. Unmeasured either way, so
         # left out rather than added on principle.
-        unrefined = {"reoutline_train_splat"}
+        #
+        # The orbit extension's guide training is the other: its render has
+        # to land on the analytic continuation of the path the frames were
+        # made on, and a solve would move the middle cameras that
+        # continuation is anchored to. refine_cameras_final covers all of
+        # its frames afterwards (steps/extend_orbit.py).
+        unrefined = {"reoutline_train_splat", "extend_train_splat"}
         for path in _workflows():
             spec = WorkflowSpec.from_yaml(str(path))
             ids = [s.id for s in spec.steps]
@@ -1483,8 +1489,10 @@ class TestWorkflowFiles(unittest.TestCase):
         this checks every one.
         """
         # How many wan22_vace_denoise steps each file carries: the two
-        # full-resolution passes plus the gated 480p re-outline pass.
-        expected = {"helical.yaml": 3, "helical_shell.yaml": 3}
+        # full-resolution passes, the gated 480p re-outline pass, and the
+        # two gated orbit-extension passes (2026-09-21), which are pass 2's
+        # block on the two extension videos and carry pass 2's prompt.
+        expected = {"helical.yaml": 5, "helical_shell.yaml": 5}
         drawn = {"denoise_pass1", "reoutline_denoise"}
         # The experiment's pass 1 and re-outline pass carry the hint
         # appended (HINTED_DENOISE_PROMPT); its pass 2 does not.
@@ -1889,11 +1897,12 @@ class TestTheFirstDenoiseInputIsKept(unittest.TestCase):
 
 class TestOnlyTheHelicalRerenderCapsTheShBands(unittest.TestCase):
     """`render_subject` is the one render_splat that sets `sh_degree`, and
-    it sets 2. Every other instance leaves the step's default (3, every
-    band the splat carries) alone — pinned as a workflow decision rather
-    than as a step default, because a `sh_degree:` line quietly added to
-    the face cap's render would change what the final training is
-    supervised by."""
+    it sets 2 — and the two `extend_render_*` steps, which are that render
+    again on the extended cameras (TestTheOrbitExtension pins they agree),
+    say the same. Every other instance leaves the step's default (3, every band the
+    splat carries) alone — pinned as a workflow decision rather than as a
+    step default, because a `sh_degree:` line quietly added to the face
+    cap's render would change what the final training is supervised by."""
 
     def test_render_subject_says_two_and_nothing_else_says_anything(self):
         from pipeline.cli import resolve_workflow
@@ -1904,6 +1913,8 @@ class TestOnlyTheHelicalRerenderCapsTheShBands(unittest.TestCase):
         self.assertGreater(len(renders), 1)
         setting = {s.id: s.params.get("sh_degree") for s in renders}
         self.assertEqual(setting.pop("render_subject"), 2)
+        self.assertEqual(setting.pop("extend_render_intermediate"), 2)
+        self.assertEqual(setting.pop("extend_render_retrained"), 2)
         self.assertEqual(set(setting.values()), {None}, setting)
 
 
@@ -2486,8 +2497,18 @@ class TestPassTwoIsTheSplatsReRender(unittest.TestCase):
         self.assertTrue(when_truthy([{"any": [False, True]}, True]))
         self.assertTrue(when_truthy({"not": "false"}))
         self.assertFalse(when_truthy({"not": True}))
+        # `eq:` compares as strings, so a value typed into a text box and
+        # the YAML literal it is meant to match agree.
+        self.assertTrue(when_truthy({"eq": ["retrained", "retrained"]}))
+        self.assertTrue(when_truthy({"eq": [" retrained", "retrained"]}))
+        self.assertFalse(when_truthy({"eq": ["intermediate", "retrained"]}))
+        self.assertTrue(when_truthy({"eq": [40, "40"]}))
+        self.assertFalse(when_truthy({"not": {"eq": ["none", "none"]}}))
+        self.assertTrue(when_truthy([True, {"not": {"eq": ["retrained", "none"]}}]))
         with self.assertRaises(ValueError):
             when_truthy({"all": [True]})
+        with self.assertRaises(ValueError):
+            when_truthy({"eq": ["one"]})
 
 
 if __name__ == "__main__":
@@ -2593,11 +2614,12 @@ class TestTheFirstDenoiseInputIsKept(unittest.TestCase):
 
 class TestOnlyTheHelicalRerenderCapsTheShBands(unittest.TestCase):
     """`render_subject` is the one render_splat that sets `sh_degree`, and
-    it sets 2. Every other instance leaves the step's default (3, every
-    band the splat carries) alone — pinned as a workflow decision rather
-    than as a step default, because a `sh_degree:` line quietly added to
-    the face cap's render would change what the final training is
-    supervised by."""
+    it sets 2 — and the two `extend_render_*` steps, which are that render
+    again on the extended cameras (TestTheOrbitExtension pins they agree),
+    say the same. Every other instance leaves the step's default (3, every band the
+    splat carries) alone — pinned as a workflow decision rather than as a
+    step default, because a `sh_degree:` line quietly added to the face
+    cap's render would change what the final training is supervised by."""
 
     def test_render_subject_says_two_and_nothing_else_says_anything(self):
         from pipeline.cli import resolve_workflow
@@ -2608,6 +2630,8 @@ class TestOnlyTheHelicalRerenderCapsTheShBands(unittest.TestCase):
         self.assertGreater(len(renders), 1)
         setting = {s.id: s.params.get("sh_degree") for s in renders}
         self.assertEqual(setting.pop("render_subject"), 2)
+        self.assertEqual(setting.pop("extend_render_intermediate"), 2)
+        self.assertEqual(setting.pop("extend_render_retrained"), 2)
         self.assertEqual(set(setting.values()), {None}, setting)
 
 
@@ -2919,6 +2943,257 @@ class TestTheReoutlineBranch(unittest.TestCase):
         matte = self._step(spec, "reoutline_matte")
         scope = {"globals": dict(spec.globals, output_root="/out")}
         self.assertEqual(resolve(matte.params, scope)["debug_dir"], "/out/debug/reoutline")
+
+
+class TestTheOrbitExtension(unittest.TestCase):
+    """The gated stage 4a that lengthens the helix with two VACE video
+    extensions (steps/extend_orbit.py): ten steps between pass 2 and the
+    pre-upscale export. What is pinned is what makes each extension pass 2
+    continued — the path solved from render_subject's own helix params,
+    the guide rendered as render_subject renders from whichever splat
+    `extend_guide` names, both extension passes pass 2's block on pass
+    2's own frame count — and that with the setting off nothing of it
+    runs and the dataset is untouched until the splice.
+    """
+
+    BRANCH = [
+        "extend_path", "extend_masks", "extend_train_splat", "extend_render_intermediate",
+        "extend_render_retrained", "extend_guide_masks", "extend_assemble",
+        "denoise_extension_before", "denoise_extension_after", "extend_splice",
+    ]
+    # Which of them each `extend_guide` value runs, beside the always-on rest.
+    BY_GUIDE = {
+        "retrained": {"extend_masks", "extend_train_splat", "extend_render_retrained",
+                      "extend_guide_masks"},
+        "intermediate": {"extend_render_intermediate", "extend_guide_masks"},
+        "none": set(),
+    }
+    ALWAYS = {"extend_path", "extend_assemble", "denoise_extension_before",
+              "denoise_extension_after", "extend_splice"}
+
+    def _spec(self):
+        from pipeline.cli import resolve_workflow
+
+        return WorkflowSpec.from_yaml(resolve_workflow("helical"))
+
+    def _step(self, spec, step_id):
+        return next(s for s in spec.steps if s.id == step_id)
+
+    def test_it_sits_between_pass_2_and_the_pre_upscale_export(self):
+        spec = self._spec()
+        order = [s.id for s in spec.steps]
+        first = order.index("denoise_pass2") + 1
+        self.assertEqual(order[first:first + len(self.BRANCH)], self.BRANCH)
+        self.assertEqual(order[first + len(self.BRANCH)], "export_masks_preupscale")
+
+    def test_every_step_is_gated_and_the_setting_defaults_off(self):
+        spec = self._spec()
+        settings = {s.name: s for s in spec.settings}
+        self.assertIs(settings["extend_orbit"].default, False)
+        self.assertEqual(settings["extend_guide"].default, "retrained")
+        self.assertEqual(settings["extend_guide"].choices, ("retrained", "intermediate", "none"))
+        self.assertEqual(settings["extend_guide"].requires, "extend_orbit")
+        self.assertEqual(settings["extend_overlap_before"].default, 40)
+        self.assertEqual(settings["extend_overlap_after"].default, 41)
+        for name in ("extend_overlap_before", "extend_overlap_after"):
+            self.assertEqual(settings[name].requires, "extend_orbit")
+        for step_id in self.BRANCH:
+            with self.subTest(step=step_id):
+                when = self._step(spec, step_id).when
+                gate = when if isinstance(when, str) else when[0]
+                self.assertEqual(gate, "${globals.extend_orbit}")
+        # Off, the branch is inert: nothing in it is enabled.
+        spec.globals["extend_orbit"] = False
+        enabled = {s.id for s in spec.enabled_steps()}
+        self.assertFalse(enabled & set(self.BRANCH))
+        # On, each guide runs its own splat's steps and nothing of the
+        # other's; the assembly is told which.
+        spec.globals["extend_orbit"] = True
+        for mode, own in self.BY_GUIDE.items():
+            with self.subTest(guide=mode):
+                spec.globals["extend_guide"] = mode
+                enabled = {s.id for s in spec.enabled_steps()}
+                self.assertEqual(enabled & set(self.BRANCH), self.ALWAYS | own)
+        self.assertEqual(self._step(spec, "extend_assemble").params["guide"],
+                         "${globals.extend_guide}")
+
+    def test_the_dataset_is_pass_2s_until_the_splice(self):
+        """The guide is trained and rendered from pass 2's frames as pass 2
+        left them, and the passes' control videos live beside the dataset;
+        only the splice rewrites it — and it rewrites all of it at once."""
+        spec = self._spec()
+        for step_id in self.BRANCH[:-1]:
+            with self.subTest(step=step_id):
+                writes = set(self._step(spec, step_id).outputs.values())
+                self.assertFalse(
+                    writes & {"dataset.images", "dataset.cameras", "dataset.image_names",
+                              "dataset.extras.anchor_frame_index", "dataset.splat_path"},
+                    f"'{step_id}' rewrites the dataset ahead of the splice: {writes}",
+                )
+        splice = self._step(spec, "extend_splice")
+        self.assertEqual(splice.outputs, {
+            "images": "dataset.images", "masks": "dataset.masks",
+            "cameras": "dataset.cameras", "image_names": "dataset.image_names",
+            "anchor_frame_index": "dataset.extras.anchor_frame_index",
+        })
+
+    def test_the_path_is_render_subjects_helix_continued_by_pass_2s_own_length(self):
+        """The step rebuilds render_subject's path from these params and
+        refuses to continue one it cannot reproduce, so the two blocks must
+        agree; each extension pass is as long as pass 2 (in distribution),
+        and the two overlaps are the settings — 40 and 41 at their defaults,
+        so that each pass's mask changes on a latent frame's edge."""
+        spec = self._spec()
+        path = self._step(spec, "extend_path")
+        subject = self._step(spec, "render_subject")
+        self.assertEqual(subject.params["pattern"], "helical")
+        for key in ("n_frames", "n_loops", "amplitude_deg", "lead_in_deg", "lead_out_deg"):
+            with self.subTest(param=key):
+                self.assertEqual(path.params[key], subject.params[key])
+        self.assertEqual(path.params["phase_frames"], subject.params["n_frames"])
+        self.assertEqual(path.params["overlap_before"], "${globals.extend_overlap_before}")
+        self.assertEqual(path.params["overlap_after"], "${globals.extend_overlap_after}")
+        from pipeline.steps.extend_orbit import latent_aligned
+        before = spec.globals["extend_overlap_before"]
+        after = spec.globals["extend_overlap_after"]
+        self.assertTrue(latent_aligned(subject.params["n_frames"] - before))
+        self.assertTrue(latent_aligned(after))
+        self.assertEqual(path.inputs, {"cameras": "dataset.cameras", "extras": "dataset.extras"})
+        self.assertEqual(path.outputs, {
+            "cameras": "scene.extended.cameras", "image_names": "scene.extended.image_names",
+            "before": "scene.extended.before", "after": "scene.extended.after",
+            "overlap_before": "scene.extended.overlap_before",
+            "overlap_after": "scene.extended.overlap_after",
+        })
+
+    def test_either_guide_is_rendered_as_render_subject_renders(self):
+        """Same bands, gate, cull colour and confidence tuning, on the
+        extended cameras handed in rather than a pattern of its own; the
+        two renders differ in the splat they read and nothing else. The
+        intermediate one reads dataset.splat_path, which is still the
+        first training's export here — nothing between train_splat and
+        this stage rewrites it."""
+        spec = self._spec()
+        subject = self._step(spec, "render_subject")
+        renders = {name: self._step(spec, name) for name in
+                   ("extend_render_intermediate", "extend_render_retrained")}
+        for name, render in renders.items():
+            with self.subTest(step=name):
+                self.assertEqual(render.step, "render_splat")
+                self.assertEqual(render.inputs["cameras"], "scene.extended.cameras")
+                self.assertEqual(render.inputs["dataset"], "dataset")
+                self.assertNotIn("pattern", render.params)
+                self.assertNotIn("override_cam_from_mesh", render.params)
+                for key in ("width", "height", "sh_degree", "confidence", "cull_color",
+                            "conf_args", "background"):
+                    self.assertEqual(render.params[key], subject.params[key], key)
+                self.assertEqual(render.outputs, {"images": "scene.extended.guide_images"})
+        self.assertEqual(renders["extend_render_intermediate"].inputs["splat_path"],
+                         "dataset.splat_path")
+        self.assertEqual(renders["extend_render_retrained"].inputs["splat_path"],
+                         "scene.extended.splat_path")
+        self.assertEqual(renders["extend_render_intermediate"].params,
+                         renders["extend_render_retrained"].params)
+        order = [s.id for s in spec.steps]
+        writers = [s.id for s in spec.steps
+                   if "dataset.splat_path" in s.outputs.values()
+                   and order.index("train_splat") < order.index(s.id)
+                   < order.index("extend_render_intermediate")]
+        self.assertEqual(writers, [])
+        matte = self._step(spec, "extend_guide_masks")
+        self.assertEqual(matte.step, "rmbg")
+        self.assertEqual(matte.inputs, {"images": "scene.extended.guide_images"})
+        self.assertEqual(matte.outputs, {"masks": "scene.extended.guide_masks"})
+
+    def test_the_retrained_splat_is_fitted_on_pass_2s_frames_with_the_intermediates_knobs(self):
+        spec = self._spec()
+        train = self._step(spec, "extend_train_splat")
+        matte = self._step(spec, "extend_masks")
+        self.assertEqual(matte.step, "rmbg")
+        self.assertEqual(matte.inputs, {"images": "dataset.images"})
+        self.assertEqual(matte.outputs, {"masks": "dataset.masks"})
+        self.assertEqual(train.step, "brush")
+        self.assertEqual(train.inputs, {
+            "cameras": "dataset.cameras", "image_names": "dataset.image_names",
+            "points_3d": "dataset.points_3d", "images": "dataset.images",
+            "masks": "dataset.masks", "mesh": "scene.mesh_world?", "body_rig": "scene.body_rig?",
+        })
+        intermediate = self._step(spec, "train_splat")
+        for key in ("total_steps", "polish_steps", "align_iters", "hollow_weight",
+                    "match_alpha_weight", "export_evidence", "export_dir"):
+            with self.subTest(param=key):
+                self.assertEqual(train.params[key], intermediate.params[key])
+        self.assertEqual(train.params["export_name"], "extension_splat.ply")
+        self.assertEqual(train.outputs, {"splat_path": "scene.extended.splat_path"})
+
+    def test_the_two_control_videos_are_cut_from_the_frames_and_the_guide(self):
+        from pipeline.templating import resolve
+
+        spec = self._spec()
+        assemble = self._step(spec, "extend_assemble")
+        self.assertEqual(assemble.inputs, {
+            "dataset": "dataset",
+            "cameras": "scene.extended.cameras",
+            "image_names": "scene.extended.image_names",
+            "before": "scene.extended.before",
+            "after": "scene.extended.after",
+            "overlap_before": "scene.extended.overlap_before",
+            "overlap_after": "scene.extended.overlap_after",
+            "guide_images": "scene.extended.guide_images?",
+            "guide_masks": "scene.extended.guide_masks?",
+        })
+        scope = {"globals": dict(spec.globals, output_root="/out")}
+        self.assertEqual(resolve(assemble.params, scope), {
+            "guide": spec.globals["extend_guide"],
+            "inactive_source": "guide",
+            "bg_color": [0.5, 0.5, 0.5],
+            "debug_dir": "/out/debug/extension_input",
+        })
+        # The composite colour is pass 2's control's.
+        self.assertEqual(assemble.params["bg_color"],
+                         self._step(spec, "mask_splat_fringes").params["bg_color"])
+        self.assertEqual(assemble.outputs, {
+            "before_images": "scene.extended.before_phase.images",
+            "before_masks": "scene.extended.before_phase.masks",
+            "after_images": "scene.extended.after_phase.images",
+            "after_masks": "scene.extended.after_phase.masks",
+        })
+
+    def test_both_extension_passes_are_pass_2s_block_on_their_own_video(self):
+        spec = self._spec()
+        pass2 = self._step(spec, "denoise_pass2")
+        for name, phase in (("denoise_extension_before", "before_phase"),
+                            ("denoise_extension_after", "after_phase")):
+            with self.subTest(step=name):
+                extra = self._step(spec, name)
+                self.assertEqual(extra.params, pass2.params)
+                self.assertEqual((extra.dispatch, extra.env, extra.keep_loaded),
+                                 (pass2.dispatch, pass2.env, pass2.keep_loaded))
+                self.assertEqual(extra.inputs, {
+                    "control_video": f"scene.extended.{phase}.images",
+                    "control_masks": f"scene.extended.{phase}.masks",
+                    "reference_image": pass2.inputs["reference_image"],
+                    "subject_desc": pass2.inputs["subject_desc"],
+                })
+                self.assertEqual(extra.outputs, {"images": f"scene.extended.{phase}.denoised"})
+
+    def test_the_splice_reads_both_passes_and_the_path(self):
+        spec = self._spec()
+        splice = self._step(spec, "extend_splice")
+        self.assertEqual(splice.step, "splice_extension")
+        self.assertEqual(splice.inputs, {
+            "dataset": "dataset",
+            "before_denoised": "scene.extended.before_phase.denoised",
+            "after_denoised": "scene.extended.after_phase.denoised",
+            "cameras": "scene.extended.cameras",
+            "image_names": "scene.extended.image_names",
+            "before": "scene.extended.before",
+            "after": "scene.extended.after",
+            "overlap_before": "scene.extended.overlap_before",
+            "overlap_after": "scene.extended.overlap_after",
+            "anchor_frame_index": "dataset.extras.anchor_frame_index?",
+        })
+        self.assertEqual(splice.params, {})
 
 
 class TestDeclaredSettings(unittest.TestCase):

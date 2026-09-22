@@ -241,6 +241,8 @@ class RenderSplatStep(Step):
              plus optionally {"dataset": Dataset} — the source dataset,
              used for framing bounds, focal-length inheritance, camera
              reuse, point-cloud preservation and extras pass-through,
+             and optionally {"cameras": List[Camera]} — rendered verbatim
+             in place of the dataset's (no `pattern` with it),
              and optionally {"given_anchor_camera": Camera} — the anchor
              camera as the source render built it (its `image_warp.camera`);
              with `override_cam_from_mesh` on, the new path is carried,
@@ -265,7 +267,10 @@ class RenderSplatStep(Step):
 
     With no `pattern`, the source dataset's cameras are reused verbatim —
     that is how `outline.json` re-renders the exact same views from a
-    trained splat so `replace_views` can swap them back in.
+    trained splat so `replace_views` can swap them back in. A `cameras`
+    input takes their place: those are rendered verbatim instead, which is
+    how the orbit extension renders a path the dataset does not hold yet
+    (steps/extend_orbit.py). Pattern-only params are ignored either way.
 
     The `dataset` input is normally the same subject the splat is of, so its
     framing box is the right one to orbit. When it is not — rendering the
@@ -439,6 +444,7 @@ class RenderSplatStep(Step):
         cameras, focal_length, effective_mm, anchor_frame_index = _resolve_cameras(
             scene=scene, dataset=dataset, params=params, width=width, height=height,
             given_anchor_camera=inputs.get("given_anchor_camera"),
+            given_cameras=inputs.get("cameras"),
         )
 
         # BLACK, not white. Two reasons, and the second is the one that
@@ -913,7 +919,7 @@ def _describe_splat_arg(cmd: List[str]) -> str:
 
 def _resolve_cameras(
     *, scene, dataset, params: Dict[str, Any], width: int, height: int,
-    given_anchor_camera: Any = None,
+    given_anchor_camera: Any = None, given_cameras: Any = None,
 ) -> Tuple[list, float, float, Optional[int]]:
     """Work out which cameras to render from, and at what focal length.
 
@@ -923,7 +929,8 @@ def _resolve_cameras(
     or a GPU.
 
     `given_anchor_camera` only matters to the anchored path: see
-    _carry_anchor_refinement.
+    _carry_anchor_refinement. `given_cameras` (the step's `cameras` input)
+    is rendered verbatim and wants no `pattern`, like the dataset's own.
     """
     from body2colmap.camera import Camera
     from body2colmap.path import (
@@ -983,6 +990,25 @@ def _resolve_cameras(
         _mm_to_pixels(effective_mm, width) if effective_mm > 0
         else compute_default_focal_length(width)
     )
+
+    # Cameras handed in are rendered as they are, and a pattern beside them
+    # is a contradiction rather than a tie-break.
+    if given_cameras is not None:
+        if pattern:
+            raise ValueError(
+                f"render_splat was given cameras to render AND a pattern ({pattern!r}) "
+                f"to build new ones — drop one of the two."
+            )
+        if override_cam_from_mesh:
+            raise ValueError(
+                "override_cam_from_mesh requires a 'pattern' — given cameras are "
+                "rendered verbatim, there is no path to anchor."
+            )
+        given_cameras = list(given_cameras)
+        if not given_cameras:
+            raise ValueError("render_splat was given an empty camera list to render")
+        logger.info("render_splat: rendering the %d cameras handed in", len(given_cameras))
+        return given_cameras, focal_length, effective_mm, None
 
     # No pattern — the declared default, an empty string. Reuse the
     # dataset's cameras verbatim. Its anchor keys then

@@ -33,7 +33,8 @@ wires the rest itself:
         outputs:
           denoised: dataset.images    # written back into the shared Context
         when: ${globals.run_denoise}  # optional; skip the step when falsy
-                                      # a list is `and`: all of them truthy
+                                      # a list is `and`: all of them truthy;
+                                      # {any: [...]}, {not: x}, {eq: [a, b]}
 
 **One flat namespace, three ways to declare into it.** A `settings:` entry,
 an `outputs:` entry and a bare `globals:` key all land in `spec.globals`,
@@ -613,17 +614,30 @@ def step_enabled(step: StepSpec, workflow_globals: Dict[str, Any]) -> bool:
 
 
 def when_truthy(value: Any) -> bool:
-    """A resolved `when:`: a list is a conjunction, `{any: [...]}` a disjunction, `{not: x}` a negation, anything else plain truthiness.
+    """A resolved `when:`: a list is a conjunction, `{any: [...]}` a disjunction, `{not: x}` a negation, `{eq: [a, b]}` an equality, anything else plain truthiness.
 
     The `any:` form exists for a branch two switches can want — the mesh
     steps run for the `export_mesh` output OR because pass 2 conditions on
-    the mesh — without inventing an expression language in YAML.
+    the mesh — without inventing an expression language in YAML. `eq:` is
+    for a setting with more than two values (`extend_guide`: which splat
+    renders the extension's control video), whose arms are otherwise not
+    gateable at all: a choice's string is truthy whatever it says. Both
+    sides are compared as strings, since one of them always came through
+    a `${globals.x}` that may itself have been typed.
     """
     if isinstance(value, dict):
         if set(value) == {"not"}:
             return not when_truthy(value["not"])
+        if set(value) == {"eq"}:
+            if not isinstance(value["eq"], list) or len(value["eq"]) != 2:
+                raise ValueError(f"a `when:` {{eq: [a, b]}} takes exactly two values, got {value!r}")
+            left, right = value["eq"]
+            return str(left).strip() == str(right).strip()
         if set(value) != {"any"} or not isinstance(value["any"], list):
-            raise ValueError(f"a `when:` mapping must be exactly {{any: [...]}} or {{not: ...}}, got {value!r}")
+            raise ValueError(
+                f"a `when:` mapping must be exactly {{any: [...]}}, {{not: ...}} or "
+                f"{{eq: [a, b]}}, got {value!r}"
+            )
         return any(when_truthy(item) for item in value["any"])
     if isinstance(value, list):
         return all(when_truthy(item) for item in value)

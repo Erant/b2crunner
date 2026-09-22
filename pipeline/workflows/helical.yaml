@@ -851,6 +851,98 @@ settings:
       with it, came back with the turn intact. 0 draws every bone
       through everything, as every run before 2026-09-20 did.
 
+  - name: extend_orbit
+    label: Extend the orbit
+    type: bool
+    default: false
+    advanced: true
+    help: >-
+      After the second denoise, lengthen the helical orbit with two VACE
+      video extensions (steps/extend_orbit.py), each an 81-frame pass like
+      pass 2 itself. The BEFORE pass ends on pass 2's first 40 frames as
+      INACTIVE frames — mask 0, real pixels, the flag the anchor frame has
+      always carried — and paints 41 new frames ahead of them; the AFTER
+      pass starts on pass 2's last 41 and paints 40 after (the overlaps
+      below, one apart so each pass's mask changes on a latent frame's
+      edge). The new cameras continue render_subject's helix at its own
+      step: the lead-in's flat -30 deg elevation carried on ahead of it,
+      the lead-out's +30 deg after. What the passes see is a render of a
+      splat along the whole 162-frame path — which splat is
+      `extend_guide`'s choice; what they hand back for the overlap is
+      discarded, pass 2's frames stay. Everything downstream — the
+      upscale, the final camera solve, the face fits, the deliverable
+      training — then runs on 162 views instead of 81. OFF by default:
+      two more denoises at pass 2's cost (the resident experts serve
+      them, no reload), a fourth splat training with `retrained`, and
+      twice the frames through everything after. UNMEASURED on a pod as
+      of 2026-09-21; `debug/extension_input/{before,after}/` in the
+      result hold the two control videos and `debug/extension_splat.ply`
+      the retrained splat.
+
+  - name: extend_guide
+    label: Extension guide
+    default: retrained
+    choices: [retrained, intermediate, none]
+    advanced: true
+    requires: extend_orbit
+    help: >-
+      With `extend_orbit` on: which splat is rendered along the 162-frame
+      path as the two extension passes' control video, with pass 2's own
+      confidence gate, matte and grey composite. `intermediate`: the splat
+      already trained after pass 1 (debug/intermediate_splat.ply, the one
+      render_subject drew pass 2's control from), rendered on the longer
+      path and used directly — its middle 81 frames ARE pass 2's control.
+      `retrained`: a new splat trained on pass 2's 81 denoised frames
+      (pre-upscale, the intermediate training's silhouette knobs, no
+      alignment), rendered on the same path: 81 frames at the cameras it
+      was fitted on and 81 novel views, with the trainer having enforced
+      a consistency across views the denoised frames themselves lack —
+      the reason to run the comparison. Either way each pass conditions
+      on the render from end to end, inactive frames included
+      (`assemble_extension`'s `inactive_source`), so it sees one coherent
+      render with no seam at the overlap, and what it hands back for the
+      overlap is thrown away anyway. `none` is the baseline without a
+      render: the inactive frames are pass 2's own and the new frames are
+      flat 0.5 grey, zero in the reactive latent — VACE's plain extension,
+      the model continuing the orbit from the real frames and the prompt
+      alone.
+
+  - name: extend_overlap_before
+    label: Extension overlap, BEFORE pass (frames)
+    type: int
+    default: 40
+    minimum: 1
+    maximum: 80
+    advanced: true
+    requires: extend_orbit
+    help: >-
+      With `extend_orbit` on: how many of pass 2's FIRST frames close the
+      BEFORE pass as its inactive frames. The pass is 81 frames (the count
+      the model was calibrated at; `phase_frames` on extend_path), so it
+      paints 81 minus this many new frames ahead of them: 41 at 40, which
+      is 425 deg on this helix's 10.37 deg a frame, not 360 — a turn is
+      34.7 frames here. Wan's temporal VAE encodes frame 0 alone and then
+      every 4 frames, so the mask changes on a latent edge only when the
+      new-frame count is 4k+1: 41 (overlap 40), 37 (44), 33 (48). Any
+      other value runs, with a warning, one latent straddling the
+      boundary.
+
+  - name: extend_overlap_after
+    label: Extension overlap, AFTER pass (frames)
+    type: int
+    default: 41
+    minimum: 1
+    maximum: 80
+    advanced: true
+    requires: extend_orbit
+    help: >-
+      With `extend_orbit` on: how many of pass 2's LAST frames open the
+      AFTER pass as its inactive frames; it paints 81 minus this many new
+      frames after them (40 at 41, 415 deg). One more than the BEFORE
+      pass's on purpose: here the inactive block starts the video, so it
+      is this count itself that has to be 4k+1 for the mask to change on
+      a latent edge — 41, 45 (36 new), 49 (32 new).
+
 outputs:
   # What stage 6 can produce, and the switch each one is. `name:` is the
   # workflow global the `when:` on its export steps reads, so the switch is
@@ -3437,6 +3529,374 @@ steps:
         动, 小头, 小脸"
     outputs:
       images: dataset.images
+
+  # --------------------------------------------------------------- stage 4a
+  # The orbit extension (`extend_orbit`, steps/extend_orbit.py): two more
+  # 81-frame passes, each sharing pass 2's first 40 / last 41 frames as
+  # VACE inactive frames and painting 41 / 40 new ones along the same
+  # helix continued — one ahead of pass 2's orbit, one after — and the
+  # dataset leaves this stage 162 frames long. Ten gated steps, five of
+  # them gated on `extend_guide` as well: the retrained splat's matte and
+  # training and its render (`retrained`), the intermediate splat's
+  # render (`intermediate`), and the render's matte (either). With the
+  # setting off nothing here runs and the dataset reaches stage 4b exactly
+  # as denoise_pass2 left it.
+  # Until extend_splice the dataset is pass 2's 81 frames untouched: the
+  # passes' control videos live under scene.extended.
+  #
+  # The extended cameras first, so the guide render has somewhere to
+  # render to. The helix params are render_subject's, copied: the step
+  # rebuilds that path from them and refuses to continue one it cannot
+  # reproduce (tests/test_workflows.py pins the two blocks agree). The
+  # middle 81 cameras of what it publishes ARE dataset.cameras, verbatim,
+  # and the new ones carry the same rigid motion render_subject carried
+  # from the refined anchor. `phase_frames` is pass 2's own length: each
+  # extension pass is a video the model was calibrated for, and 4k+1 for
+  # the temporal VAE.
+  - id: extend_path
+    step: extend_helical_path
+    dispatch: in_process
+    when: ${globals.extend_orbit}
+    inputs:
+      cameras: dataset.cameras
+      extras: dataset.extras
+    params:
+      phase_frames: 81
+      overlap_before: ${globals.extend_overlap_before}
+      overlap_after: ${globals.extend_overlap_after}
+      n_frames: 81
+      n_loops: 2
+      amplitude_deg: 30.0
+      lead_in_deg: 30.0
+      lead_out_deg: 90.0
+    outputs:
+      cameras: scene.extended.cameras
+      image_names: scene.extended.image_names
+      before: scene.extended.before
+      after: scene.extended.after
+      overlap_before: scene.extended.overlap_before
+      overlap_after: scene.extended.overlap_after
+
+  # The retrained guide splat: pass 2's output, matted, fitted on the
+  # cameras it was made on. The matte overwrites the all-1.0 VACE batch
+  # pass 2 read, which is past its use — the extension passes carry their
+  # own flags and extend_splice writes a fresh batch.
+  - id: extend_masks
+    step: rmbg
+    dispatch: in_process
+    when:
+      - ${globals.extend_orbit}
+      - {eq: ["${globals.extend_guide}", retrained]}
+    inputs:
+      images: dataset.images
+    outputs:
+      masks: dataset.masks
+
+  # train_splat's silhouette and hollow knobs, no alignment, no polish,
+  # the evidence the render's gate reads. No solve of its own, like the
+  # re-outline training: its render has to land exactly on the analytic
+  # extension of the path the frames were made on, and refining the
+  # middle would move the very cameras the extension continues (the
+  # final solve, refine_cameras_final, covers all 162 frames afterwards).
+  # No photograph copies or face views either: the frames it fits already
+  # carry the anchor as pass 2 painted it. Mesh and rig as the final
+  # training takes them — the refit body when export_ply and refit_body
+  # are on, optional so their absence leaves the fit plain.
+  - id: extend_train_splat
+    step: brush
+    dispatch: in_process
+    when:
+      - ${globals.extend_orbit}
+      - {eq: ["${globals.extend_guide}", retrained]}
+    inputs:
+      cameras: dataset.cameras
+      image_names: dataset.image_names
+      points_3d: dataset.points_3d
+      images: dataset.images
+      masks: dataset.masks
+      mesh: scene.mesh_world?
+      body_rig: scene.body_rig?
+    params:
+      total_steps: 30000
+      polish_steps: 0
+      align_iters: 0
+      hollow_weight: 0.5
+      match_alpha_weight: 0.5
+      export_evidence: true
+      # Into debug/ beside intermediate_splat.ply, for the same reason: it
+      # is what the extension frames were painted from.
+      export_dir: ${globals.output_root}/debug
+      export_name: extension_splat.ply
+    outputs:
+      splat_path: scene.extended.splat_path
+
+  # render_subject's render — the same bands, gate, cull colour and
+  # confidence tuning — on the extended cameras rather than a pattern, of
+  # whichever splat `extend_guide` names: two steps, one per splat, one
+  # of which runs, both writing the same path. The `cameras` input is
+  # rendered verbatim; `dataset` is wired for the focal length only. All
+  # 162 are rendered: each pass's control video is cut from the whole,
+  # inactive frames included. tests/test_workflows.py pins the two blocks
+  # to each other and to render_subject's.
+  #
+  # `intermediate`: dataset.splat_path is still train_splat's export here
+  # (train_final_splat overwrites it in stage 6), the splat render_subject
+  # itself rendered — so the middle 81 frames of this render reproduce
+  # pass 2's control video, and the 81 outside it are that splat's novel
+  # views.
+  - id: extend_render_intermediate
+    step: render_splat
+    dispatch: in_process
+    when:
+      - ${globals.extend_orbit}
+      - {eq: ["${globals.extend_guide}", intermediate]}
+    inputs:
+      splat_path: dataset.splat_path
+      cameras: scene.extended.cameras
+      dataset: dataset
+    params:
+      width: ${globals.resolution.0}
+      height: ${globals.resolution.1}
+      sh_degree: 2
+      confidence: true
+      cull_color: [0.5, 0.5, 0.5]
+      conf_args: ["--conf-tau", "0.3", "--conf-angle-margin", "45"]
+      background: ""
+    outputs:
+      images: scene.extended.guide_images
+
+  # `retrained`: the splat fitted just above, on pass 2's own frames.
+  - id: extend_render_retrained
+    step: render_splat
+    dispatch: in_process
+    when:
+      - ${globals.extend_orbit}
+      - {eq: ["${globals.extend_guide}", retrained]}
+    inputs:
+      splat_path: scene.extended.splat_path
+      cameras: scene.extended.cameras
+      dataset: dataset
+    params:
+      width: ${globals.resolution.0}
+      height: ${globals.resolution.1}
+      sh_degree: 2
+      confidence: true
+      cull_color: [0.5, 0.5, 0.5]
+      conf_args: ["--conf-tau", "0.3", "--conf-angle-margin", "45"]
+      background: ""
+    outputs:
+      images: scene.extended.guide_images
+
+  # resplat_foreground_masks for the guide: the matte measured against the
+  # render, not the gate — see that step. Whichever render ran.
+  - id: extend_guide_masks
+    step: rmbg
+    dispatch: in_process
+    when:
+      - ${globals.extend_orbit}
+      - {not: {eq: ["${globals.extend_guide}", none]}}
+    inputs:
+      images: scene.extended.guide_images
+    outputs:
+      masks: scene.extended.guide_masks
+
+  # The two control videos, cut from the extended path: BEFORE = 41 new
+  # frames (mask 1) then pass 2's first 40 (mask 0); AFTER = pass 2's last
+  # 41 (mask 0) then 40 new (mask 1). The new frames carry the matted
+  # guide over 0.5 grey (mask_splat's composite, the colour pass 2's
+  # control ends on) or the grey alone; with a guide the inactive frames
+  # carry the render too (`inactive_source`), so each pass sees one
+  # coherent render — see the setting. The guide reads are optional (`?`)
+  # because the guide steps are gated; `guide` says whether they were
+  # expected. Both videos are dumped as pass 1's control video is.
+  - id: extend_assemble
+    step: assemble_extension
+    dispatch: in_process
+    when: ${globals.extend_orbit}
+    inputs:
+      dataset: dataset
+      cameras: scene.extended.cameras
+      image_names: scene.extended.image_names
+      before: scene.extended.before
+      after: scene.extended.after
+      overlap_before: scene.extended.overlap_before
+      overlap_after: scene.extended.overlap_after
+      guide_images: scene.extended.guide_images?
+      guide_masks: scene.extended.guide_masks?
+    params:
+      guide: ${globals.extend_guide}
+      inactive_source: guide
+      bg_color: [0.5, 0.5, 0.5]
+      debug_dir: ${globals.output_root}/debug/extension_input
+    outputs:
+      before_images: scene.extended.before_phase.images
+      before_masks: scene.extended.before_phase.masks
+      after_images: scene.extended.after_phase.images
+      after_masks: scene.extended.after_phase.masks
+
+  # denoise_pass2's block, twice: same sampler, shift, schedule, prompt
+  # and reference — the control is a render or nothing, never a drawing,
+  # so pass 2's settings are the ones that apply. keep_loaded so both join
+  # the two passes' resident worker rather than loading the experts again.
+  # `strength` is the knob to watch: the scale applies to the whole hint,
+  # inactive frames included, and 1.0 was pass 2's fidelity end (F1) — a
+  # run whose new frames drift from the real ones they continue has that
+  # to raise. tests/test_workflows.py pins both blocks to pass 2's.
+  - id: denoise_extension_before
+    step: wan22_vace_denoise
+    dispatch: subprocess
+    env: wan22
+    keep_loaded: true
+    when: ${globals.extend_orbit}
+    inputs:
+      control_video: scene.extended.before_phase.images
+      control_masks: scene.extended.before_phase.masks
+      reference_image: dataset.reference_image
+      subject_desc: dataset.prompt
+    params:
+      width: ${globals.resolution.0}
+      height: ${globals.resolution.1}
+      steps_high: 2
+      steps_low: 4
+      cfg: 1.0
+      seed: ${globals.seed}
+      sampler_high: euler
+      sampler_low: euler
+      sampler_shift: 2.5
+      strength: [0.8, 0.8, 0.8, 0.8, 0.8, 0.8]
+      prompt: "人工光、柔光、低对比度、环绕运镜。时间静止，人物完全静止。身体\
+        如雕塑般僵硬，胸口没有起伏，头部保持固定角度，面部肌肉完全不动，维持单\
+        一的中性表情。双眼一眨不眨，眼睑保持张开且稳定，目光空洞而固定，锁定远\
+        处墙面上的一个点，对镜头毫无察觉、毫无反应。人物站在一间空房间里：灰色\
+        墙面上有均匀的网格线，深色地板，浅色天花板，墙面相交处有清晰的墙角。房\
+        间本身固定不动，镜头以匀速、固定焦距围绕主体平滑移动，墙角依次从画面中\
+        掠过。灯光属于房间本身，位置固定：主光始终来自人物自身的左前方，右侧是\
+        柔和的补光。人物身上的明暗、阴影与高光始终停留在同一片皮肤和衣物上，每\
+        一帧完全相同——左侧始终是受光面，右侧始终是柔和的暗面；镜头绕到人物右侧\
+        时，看到的正是那一侧的暗面。房间里的阴影同样固定：墙面上的明暗、以及人\
+        物投在地面上的影子，始终落在房间中的同一位置，不随镜头移动。 Time is \
+        frozen and only the camera moves. The gaze stays anchored to that \
+        point on the wall as the camera passes, so the eyes slide across the \
+        frame, always aimed past the lens at the wall behind it. Eyelids stay \
+        open and steady, the expression holds without a single \
+        micro-movement, and the head keeps its exact angle throughout. The \
+        frozen subject is $SUBJECT_DESC$, standing in an empty room: grey \
+        walls ruled with an even grid, a dark floor and a lighter ceiling, \
+        meeting at clear corners. The room is fixed in place and the camera \
+        travels through it, so the walls and their corners sweep past the \
+        frame while the room itself never turns. Soft, low-contrast studio \
+        light: the key sits high on the subject's own left, a soft fill on \
+        their right, both fixed to the room and holding still while the \
+        camera arcs around. Every highlight and shadow stays welded to the \
+        same patch of skin and cloth from the first frame to the last, so \
+        their left remains the lit side and their right remains the \
+        soft-shadowed side for the whole circle; as the camera arcs round to \
+        their right it sees that shadowed side. The room's shadows are just \
+        as fixed: the shading on the walls and the shadow the subject casts \
+        on the floor stay in the same place in the room in every frame, and \
+        do not swing round with the camera. Matte skin, matte cloth, \
+        photorealistic, sharp focus, identical face, clothing and lighting in \
+        every frame."
+      negative_prompt: "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静\
+        止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的\
+        手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体\
+        ，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走, \
+        chewing, tattoos, 眼球运动，眨眼，眼动追踪，微表情，面部抽动，头部移\
+        动, 小头, 小脸"
+    outputs:
+      images: scene.extended.before_phase.denoised
+
+  - id: denoise_extension_after
+    step: wan22_vace_denoise
+    dispatch: subprocess
+    env: wan22
+    keep_loaded: true
+    when: ${globals.extend_orbit}
+    inputs:
+      control_video: scene.extended.after_phase.images
+      control_masks: scene.extended.after_phase.masks
+      reference_image: dataset.reference_image
+      subject_desc: dataset.prompt
+    params:
+      width: ${globals.resolution.0}
+      height: ${globals.resolution.1}
+      steps_high: 2
+      steps_low: 4
+      cfg: 1.0
+      seed: ${globals.seed}
+      sampler_high: euler
+      sampler_low: euler
+      sampler_shift: 2.5
+      strength: [0.8, 0.8, 0.8, 0.8, 0.8, 0.8]
+      prompt: "人工光、柔光、低对比度、环绕运镜。时间静止，人物完全静止。身体\
+        如雕塑般僵硬，胸口没有起伏，头部保持固定角度，面部肌肉完全不动，维持单\
+        一的中性表情。双眼一眨不眨，眼睑保持张开且稳定，目光空洞而固定，锁定远\
+        处墙面上的一个点，对镜头毫无察觉、毫无反应。人物站在一间空房间里：灰色\
+        墙面上有均匀的网格线，深色地板，浅色天花板，墙面相交处有清晰的墙角。房\
+        间本身固定不动，镜头以匀速、固定焦距围绕主体平滑移动，墙角依次从画面中\
+        掠过。灯光属于房间本身，位置固定：主光始终来自人物自身的左前方，右侧是\
+        柔和的补光。人物身上的明暗、阴影与高光始终停留在同一片皮肤和衣物上，每\
+        一帧完全相同——左侧始终是受光面，右侧始终是柔和的暗面；镜头绕到人物右侧\
+        时，看到的正是那一侧的暗面。房间里的阴影同样固定：墙面上的明暗、以及人\
+        物投在地面上的影子，始终落在房间中的同一位置，不随镜头移动。 Time is \
+        frozen and only the camera moves. The gaze stays anchored to that \
+        point on the wall as the camera passes, so the eyes slide across the \
+        frame, always aimed past the lens at the wall behind it. Eyelids stay \
+        open and steady, the expression holds without a single \
+        micro-movement, and the head keeps its exact angle throughout. The \
+        frozen subject is $SUBJECT_DESC$, standing in an empty room: grey \
+        walls ruled with an even grid, a dark floor and a lighter ceiling, \
+        meeting at clear corners. The room is fixed in place and the camera \
+        travels through it, so the walls and their corners sweep past the \
+        frame while the room itself never turns. Soft, low-contrast studio \
+        light: the key sits high on the subject's own left, a soft fill on \
+        their right, both fixed to the room and holding still while the \
+        camera arcs around. Every highlight and shadow stays welded to the \
+        same patch of skin and cloth from the first frame to the last, so \
+        their left remains the lit side and their right remains the \
+        soft-shadowed side for the whole circle; as the camera arcs round to \
+        their right it sees that shadowed side. The room's shadows are just \
+        as fixed: the shading on the walls and the shadow the subject casts \
+        on the floor stay in the same place in the room in every frame, and \
+        do not swing round with the camera. Matte skin, matte cloth, \
+        photorealistic, sharp focus, identical face, clothing and lighting in \
+        every frame."
+      negative_prompt: "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静\
+        止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的\
+        手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体\
+        ，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走, \
+        chewing, tattoos, 眼球运动，眨眼，眼动追踪，微表情，面部抽动，头部移\
+        动, 小头, 小脸"
+    outputs:
+      images: scene.extended.after_phase.denoised
+
+  # The extended dataset: the BEFORE pass's 41 new frames, pass 2's 81
+  # byte for byte, the AFTER pass's 40 new frames, on the extended
+  # cameras; what the passes returned for the overlap is dropped. From
+  # here the dataset is 162 frames long and the anchor index has moved
+  # with it. dataset.masks becomes the all-1.0 batch of that length, what
+  # mask_splat leaves and the next rmbg replaces.
+  - id: extend_splice
+    step: splice_extension
+    dispatch: in_process
+    when: ${globals.extend_orbit}
+    inputs:
+      dataset: dataset
+      before_denoised: scene.extended.before_phase.denoised
+      after_denoised: scene.extended.after_phase.denoised
+      cameras: scene.extended.cameras
+      image_names: scene.extended.image_names
+      before: scene.extended.before
+      after: scene.extended.after
+      overlap_before: scene.extended.overlap_before
+      overlap_after: scene.extended.overlap_after
+      anchor_frame_index: dataset.extras.anchor_frame_index?
+    outputs:
+      images: dataset.images
+      masks: dataset.masks
+      cameras: dataset.cameras
+      image_names: dataset.image_names
+      anchor_frame_index: dataset.extras.anchor_frame_index
 
   # --------------------------------------------------------------- stage 4b
   # Debug deliverable: a COLMAP dataset from the pre-upscale frames, for

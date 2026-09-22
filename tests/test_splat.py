@@ -170,6 +170,29 @@ class TestRenderSplatCameras(unittest.TestCase):
                 scene=self.scene, dataset=None, params={}, width=720, height=1280
             )
 
+    def test_given_cameras_are_rendered_verbatim(self):
+        """The `cameras` input (the orbit extension's path) takes the place
+        of the dataset's, and wants no pattern beside it."""
+        given = list(reversed(self.ds.cameras))[:5]
+        cameras, _fl, mm, anchor = self._resolve({}, given_cameras=given)
+        self.assertEqual(len(cameras), 5)
+        for got, want in zip(cameras, given):
+            self.assertIs(got, want)
+        self.assertIsNone(anchor)
+        self.assertAlmostEqual(mm, self.ds.extras["focal_length_mm"])
+        # ...and without a dataset at all: nothing about them needs one.
+        cameras, _fl, _mm, _ = _resolve_cameras(
+            scene=self.scene, dataset=None, params=_rs_params({}), width=720, height=1280,
+            given_cameras=given,
+        )
+        self.assertEqual(len(cameras), 5)
+        with self.assertRaisesRegex(ValueError, "AND a pattern"):
+            self._resolve({"pattern": "circular", "n_frames": 4}, given_cameras=given)
+        with self.assertRaisesRegex(ValueError, "no path to anchor"):
+            self._resolve({"override_cam_from_mesh": True}, given_cameras=given)
+        with self.assertRaisesRegex(ValueError, "empty camera list"):
+            self._resolve({}, given_cameras=[])
+
     def test_inherited_focal_length_reproduces_recorded_intrinsics(self):
         """The dataset records focal_length_mm=60.6958 and cameras with
         fx=1213.917px at 720 wide. Inheriting the former must reproduce the

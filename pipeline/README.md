@@ -122,6 +122,13 @@ pipeline/
 │   ├── resize.py        resize_batch: frames/masks onto another pixel grid (the re-outline branch)
 │   ├── pixel_ops.py     pixel_ops: pixel-space operations on a batch, each off by default
 │   │                    (specular_suppress on pass 1's output, before the splat is trained)
+│   ├── extend_orbit.py  extend_helical_path / assemble_extension / splice_extension:
+│   │                    the gated stage 4a that continues render_subject's helix 41
+│   │                    frames ahead and 40 after and paints them with two more 81-frame
+│   │                    passes sharing pass 2's first 40 / last 41 frames as VACE's
+│   │                    inactive frames, on latent edges, conditioned on a render of
+│   │                    the intermediate splat or of one retrained on pass 2's frames
+│   │                    (`extend_orbit` / `extend_guide`; never on a pod)
 │   ├── rmbg.py          real, verified (single-image + batch paths)
 │   ├── wan22_vace_denoise.py  real, verified against real inference
 │   ├── sapiens2.py      real, verified (single-image + batch paths)
