@@ -43,11 +43,17 @@ class StepRecord:
     elapsed: float = 0.0
     # Paths to this step's preview frames, filled in as it finishes.
     previews: List[str] = field(default_factory=list)
+    # True when the step ended with the sampled frames identical to the
+    # last sheet on record, so its previews were dropped rather than
+    # written — distinct from "no images yet", which is an empty
+    # `previews` with this False.
+    unchanged: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "index": self.index, "step_id": self.step_id, "step_name": self.step_name,
             "status": self.status, "elapsed": self.elapsed, "previews": list(self.previews),
+            "unchanged": self.unchanged,
         }
 
     @classmethod
@@ -56,6 +62,7 @@ class StepRecord:
             index=data["index"], step_id=data["step_id"], step_name=data["step_name"],
             status=data.get("status", "pending"), elapsed=data.get("elapsed", 0.0),
             previews=list(data.get("previews", [])),
+            unchanged=bool(data.get("unchanged", False)),
         )
 
 
@@ -218,6 +225,25 @@ def write_previews(images, masks, names, destination: Path) -> List[str]:
         )
         written.append(str(path))
     return written
+
+
+def same_previews(new: List[str], old: List[str]) -> bool:
+    """Whether two contact sheets show the same frames.
+
+    Compared by position and by file bytes: `write_previews` is
+    deterministic, so a step that left the sampled frames untouched encodes
+    to byte-identical JPEGs, and positions rather than names because a
+    step may rename the frames it did not change. Many steps touch nothing
+    visible — camera refinement, splat training, the mesh fits — and a row
+    that repeats the one above it only hides the step that did break
+    something.
+    """
+    if not new or len(new) != len(old):
+        return False
+    try:
+        return all(Path(a).read_bytes() == Path(b).read_bytes() for a, b in zip(new, old))
+    except OSError:
+        return False
 
 
 def tail_lines(path: Path, max_lines: int = 4000, max_bytes: int = 2_000_000) -> str:

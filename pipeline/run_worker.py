@@ -30,6 +30,7 @@ import argparse
 import json
 import logging
 import os
+import shutil
 import signal
 import sys
 import time
@@ -40,7 +41,9 @@ from typing import Optional
 from . import steps  # noqa: F401  registers every Step; this is an entrypoint
 from .dataset import Dataset
 from .logging_setup import setup_logging
-from .run_state import PREVIEW_DIRNAME, RunJob, RunState, StepRecord, write_previews
+from .run_state import (
+    PREVIEW_DIRNAME, RunJob, RunState, StepRecord, same_previews, write_previews,
+)
 from .runner import RunCancelled, RunEvent, WorkflowRunner
 from .workflow import WorkflowSpec, apply_ui_overrides, load_envs
 
@@ -64,6 +67,10 @@ class _StatusWriter:
     def __init__(self, state: RunState, status_path: Path) -> None:
         self.state = state
         self.status_path = status_path
+        # The last sheet kept, for `_capture_previews` to compare the next
+        # one against — the latest step's, or an earlier step's when the
+        # steps since changed nothing visible.
+        self._last_previews: list[str] = []
 
     def publish(self) -> None:
         tmp = self.status_path.with_suffix(self.status_path.suffix + ".tmp")
@@ -74,15 +81,17 @@ class _StatusWriter:
         self.state.message = text
         self.publish()
 
-    def _capture_previews(self, event: RunEvent) -> list[str]:
+    def _capture_previews(self, event: RunEvent) -> tuple[list[str], bool]:
+        """This step's preview paths, and whether they were dropped for
+        being identical to the last sheet kept."""
         if event.context is None or not self.state.output_dir:
-            return []
+            return [], False
         try:
             images = event.context.get("dataset.images")
         except (KeyError, AttributeError, TypeError):
-            return []
+            return [], False
         if not images:
-            return []
+            return [], False
         try:
             masks = event.context.get("dataset.masks")
         except (KeyError, AttributeError, TypeError):
@@ -97,13 +106,23 @@ class _StatusWriter:
             / f"{event.index:02d}_{event.step_id}"
         )
         try:
-            return write_previews(images, masks, names, destination)
+            previews = write_previews(images, masks, names, destination)
         except Exception:  # a debugging aid must never take down the run
             logger.warning("could not write previews for step %s", event.step_id, exc_info=True)
-            return []
+            return [], False
+        # A step that left the sampled frames as it found them gets no row
+        # of its own: the sheet is for spotting the step that changed
+        # something, and a repeated row only pushes that one further down.
+        if same_previews(previews, self._last_previews):
+            shutil.rmtree(destination, ignore_errors=True)
+            return [], True
+        self._last_previews = previews
+        return previews, False
 
     def __call__(self, event: RunEvent) -> None:
-        previews = self._capture_previews(event) if event.kind == "step_end" else []
+        previews, unchanged = (
+            self._capture_previews(event) if event.kind == "step_end" else ([], False)
+        )
 
         if event.kind == "step_start":
             self.state.current = event.index
@@ -114,6 +133,7 @@ class _StatusWriter:
             record.status = "done"
             record.elapsed = event.elapsed
             record.previews = previews
+            record.unchanged = unchanged
         elif event.kind == "step_error":
             record = self.state.steps[event.index - 1]
             record.status = "failed"

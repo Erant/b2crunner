@@ -164,10 +164,12 @@ class TestCaptureIsNeverFatal(unittest.TestCase):
 
     def test_a_context_with_no_images_yet(self):
         """Every step before `render` in a from-a-photo workflow."""
-        self.assertEqual(self.writer._capture_previews(self._event(_FakeContext({}))), [])
+        self.assertEqual(
+            self.writer._capture_previews(self._event(_FakeContext({}))), ([], False)
+        )
 
     def test_no_context_at_all(self):
-        self.assertEqual(self.writer._capture_previews(self._event(None)), [])
+        self.assertEqual(self.writer._capture_previews(self._event(None)), ([], False))
 
     def test_a_write_that_blows_up_is_swallowed(self):
         context = _FakeContext({
@@ -178,7 +180,9 @@ class TestCaptureIsNeverFatal(unittest.TestCase):
         with unittest.mock.patch.object(
             run_worker, "write_previews", side_effect=OSError("disk full")
         ):
-            self.assertEqual(self.writer._capture_previews(self._event(context)), [])
+            self.assertEqual(
+                self.writer._capture_previews(self._event(context)), ([], False)
+            )
 
     def test_the_happy_path_records_against_the_step(self):
         context = _FakeContext({
@@ -202,6 +206,92 @@ class TestCaptureIsNeverFatal(unittest.TestCase):
             webui.preview_step_choices(self.writer.state),
             [webui.PREVIEW_ALL, "01 denoise_pass1"],
         )
+
+
+class TestUnchangedStepsHaveNoRow(unittest.TestCase):
+    """Camera refinement, splat training, the fits: most of a run's steps
+    leave the sampled frames exactly as they found them, and a row that
+    repeats the one above it only pushes the step that did change
+    something further down the sheet."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        ids = ["render", "refine_cameras", "denoise"]
+        self.writer = run_worker._StatusWriter(
+            RunState(
+                total=3,
+                steps=[StepRecord(i + 1, sid, sid) for i, sid in enumerate(ids)],
+                output_dir=Path(self.tmp.name),
+            ),
+            status_path=Path(self.tmp.name) / "status.json",
+        )
+        self.ids = ids
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _end(self, index, value, names=None):
+        context = _FakeContext({
+            "dataset.images": [np.full((64, 32, 3), value, np.uint8) for _ in range(20)],
+            "dataset.masks": None,
+            "dataset.image_names": names or [f"frame_{i + 1:05d}_.png" for i in range(20)],
+        })
+        self.writer(RunEvent(
+            kind="step_end", workflow="t", index=index, total=3,
+            step_id=self.ids[index - 1], step_name=self.ids[index - 1], context=context,
+        ))
+
+    def test_a_step_that_changed_nothing_is_dropped_and_the_next_compares_to_the_last_kept(self):
+        self._end(1, 100)
+        self._end(2, 100)
+        self._end(3, 180)
+
+        first, second, third = self.writer.state.steps
+        self.assertEqual(len(first.previews), 8)
+        self.assertEqual(second.previews, [])
+        self.assertTrue(second.unchanged)
+        self.assertEqual(len(third.previews), 8)
+        self.assertFalse(third.unchanged)
+        # The dropped sheet does not linger on disk either.
+        self.assertFalse((Path(self.tmp.name) / run_state.PREVIEW_DIRNAME / "02_refine_cameras").exists())
+
+        gallery = webui.preview_gallery(self.writer.state)
+        self.assertEqual(len(gallery), 16)
+        self.assertFalse(any("refine_cameras" in caption for _, caption in gallery))
+        self.assertNotIn("02 refine_cameras", webui.preview_step_choices(self.writer.state))
+
+    def test_a_rename_alone_is_not_a_change(self):
+        self._end(1, 100)
+        self._end(2, 100, names=[f"view_{i:03d}.png" for i in range(20)])
+        self.assertTrue(self.writer.state.steps[1].unchanged)
+
+    def test_a_masked_step_keeps_its_row(self):
+        """The compositing exists so that a mask-only step *is* a change."""
+        self._end(1, 100)
+        masks = [np.zeros((64, 32), np.float32) for _ in range(20)]
+        for mask in masks:
+            mask[10:50, 5:25] = 1.0
+        context = _FakeContext({
+            "dataset.images": [np.full((64, 32, 3), 100, np.uint8) for _ in range(20)],
+            "dataset.masks": masks,
+            "dataset.image_names": [f"frame_{i + 1:05d}_.png" for i in range(20)],
+        })
+        self.writer(RunEvent(
+            kind="step_end", workflow="t", index=2, total=3,
+            step_id="refine_cameras", step_name="refine_cameras", context=context,
+        ))
+        self.assertEqual(len(self.writer.state.steps[1].previews), 8)
+        self.assertFalse(self.writer.state.steps[1].unchanged)
+
+    def test_the_flag_survives_the_status_file(self):
+        self._end(1, 100)
+        self._end(2, 100)
+        self.writer.publish()
+        loaded = RunState.from_dict(
+            __import__("json").loads((Path(self.tmp.name) / "status.json").read_text())
+        )
+        self.assertTrue(loaded.steps[1].unchanged)
+        self.assertFalse(loaded.steps[0].unchanged)
 
 
 if __name__ == "__main__":

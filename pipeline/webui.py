@@ -801,8 +801,9 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
                 f"### Per-step frames\n_{PREVIEW_FRAMES} frames spaced evenly "
                 "through the batch, captured after every step, so a step that "
                 "breaks the output can be identified by looking rather than by "
-                "reading the log. One row per step, in run order. They appear "
-                "here as the run goes._"
+                "reading the log. One row per step, in run order; a step that "
+                "left these frames exactly as it found them has no row. They "
+                "appear here as the run goes._"
             )
             preview_step_in = gr.Dropdown(
                 choices=[PREVIEW_ALL], value=PREVIEW_ALL, label="Step",
