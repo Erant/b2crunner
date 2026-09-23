@@ -1055,6 +1055,12 @@ class Wan22VaceDenoiseStep(Step):
               "cpu_offload. 1 holds the least and is the default; raising it "
               "trades VRAM for fewer, larger transfers", advanced=True,
               minimum=1),
+        Param("low_vram", bool, False,
+              "ComfyUI-style low-VRAM mode for ~12 GB cards: VACE hints computed "
+              "one at a time, per-token work chunked, weights streamed from the "
+              "mmap'd checkpoints without host copies, VAE tiled. Transformer "
+              "output bitwise the stock one's; overrides "
+              "cpu_offload/offload_blocks_per_group", advanced=True),
         Param("device", str, "cuda", "Torch device", advanced=True),
     )
 
@@ -1077,7 +1083,8 @@ class Wan22VaceDenoiseStep(Step):
         "checkpoint", "fp8_repo", "fp8_checkpoint_high", "fp8_checkpoint_low",
         "fp8_config", "use_lora", "lora_repo", "lora_subfolder",
         "lora_high", "lora_low", "lora_strength_high", "lora_strength_low",
-        "attention_backend", "cpu_offload", "offload_blocks_per_group", "device",
+        "attention_backend", "cpu_offload", "offload_blocks_per_group", "low_vram",
+        "device",
     )
 
     def __init__(self) -> None:
@@ -1266,7 +1273,13 @@ class Wan22VaceDenoiseStep(Step):
         self._device = device
         self._cpu_offload = params["cpu_offload"]
         self._blocks_per_group = params["offload_blocks_per_group"]
-        if self._cpu_offload:
+        if params["low_vram"]:
+            # Replaces the placement below outright — see _apply_low_vram.
+            # Nothing is resident between forwards either, so release_vram
+            # treats it as the offloaded placement.
+            self._cpu_offload = True
+            self._apply_low_vram(pipe, device)
+        elif self._cpu_offload:
             self._apply_group_offload(pipe, device)
         else:
             pipe.to(device)
@@ -1417,6 +1430,53 @@ class Wan22VaceDenoiseStep(Step):
                 # already set.
                 low_cpu_mem_usage=True,
             )
+
+    def _apply_low_vram(self, pipe, device: str) -> None:
+        """ComfyUI-style placement for a 12 GB card with ~29 GB of host RAM.
+
+        Two changes against the group-offloaded placement, both measured on
+        an RTX 4070 Ti at 720x1280x81 (79,200 tokens), one fp8 expert:
+
+        * The transformers run pipeline/wan_lowvram.py's forward: VACE
+          hints computed one at a time beside the main block they feed, and
+          the per-token work chunked. Stock: OOM on a 1.51 GiB fp32 upcast
+          in the hint precompute. Low-VRAM: peak 7.3 GiB, ~107 s a forward
+          with the Lightning LoRA live — the same arithmetic, bitwise (see
+          tests/test_wan_lowvram.py).
+        * Every component streams its weights with `wan_lowvram.
+          stream_weights` instead of `apply_group_offloading`. The latter's
+          unstreamed offload returns weights with `module.to("cpu")`, a
+          fresh anonymous host copy of each: 17.4 GB of RSS per expert after
+          one forward, where the mmap'd checkpoint alone is page cache. Two
+          experts would not fit this box's RAM; with the streamer the
+          originals are never copied and RSS stays at the LoRA's ~2 GB.
+
+        diffusers finds the execution device from group-offload or
+        accelerate hooks, and these are neither, so the pipeline is told it
+        directly — otherwise it would build latents on the CPU where the
+        weights live.
+        """
+        import torch
+
+        from .. import wan_lowvram
+
+        for transformer in (pipe.transformer, pipe.transformer_2):
+            if transformer is not None:
+                wan_lowvram.install(transformer)
+        for module in pipe.components.values():
+            if isinstance(module, torch.nn.Module):
+                wan_lowvram.stream_weights(module, device)
+        # Untiled, the VAE encode of 81 frames at 720x1280 OOMs on 12 GB
+        # (a 1018 MiB allocation with 7.6 GiB already held). ComfyUI tiles
+        # too. This is the one part of low_vram that is not bitwise the
+        # stock path: tiles are blended at their seams.
+        pipe.vae.enable_tiling()
+        base = type(pipe)
+        execution_device = torch.device(device)
+        pipe.__class__ = type(
+            f"LowVram{base.__name__}", (base,),
+            {"_execution_device": property(lambda self: execution_device)},
+        )
 
     def unload(self) -> None:
         self._pipe = None

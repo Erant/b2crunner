@@ -536,6 +536,22 @@ settings:
       42) before this became a setting. Change it to draw a different sample
       of the same pipeline.
 
+  - name: low_vram
+    label: Low VRAM
+    type: bool
+    default: false
+    help: >-
+      Run the Wan denoise passes the way ComfyUI does on a ~12 GB card: the
+      eight VACE hints computed one at a time beside the block they feed
+      instead of all held at once, the per-token work chunked, and the
+      weights streamed a block at a time from the memory-mapped checkpoints
+      without host copies, and the VAE tiled. The transformer's arithmetic
+      is the stock forward's, bitwise; the tiled VAE blends its seams, so
+      the frames are near-identical rather than identical. About 7.5 GiB of
+      VRAM and ~3 GB of host RAM beyond the page cache. Measured on an RTX 4070 Ti at 720x1280x81:
+      ~105 s a denoise step (ComfyUI with SageAttention: ~120 s). Off is the
+      32 GB-card path.
+
   - name: run_upscale
     label: Upscale dataset
     type: bool
@@ -1702,6 +1718,7 @@ steps:
       steps_low: 2
       cfg: 1.0
       seed: ${globals.seed}
+      low_vram: ${globals.low_vram}
       sampler_high: euler
       sampler_low: euler
       sampler_shift: 5
@@ -2111,6 +2128,7 @@ steps:
       steps_low: 4
       cfg: 1.0
       seed: ${globals.seed}
+      low_vram: ${globals.low_vram}
       # The sampler and the scale schedule are run E4's, the settled result
       # of the 2026-09-08 skeleton-leak sweep (docs/vace-denoise-findings-
       # 2026-09-07.md, section 5; sidecar docs/vace-leak-sweep/E4-shift5-
@@ -3445,6 +3463,7 @@ steps:
       steps_low: 4
       cfg: 1.0
       seed: ${globals.seed}
+      low_vram: ${globals.low_vram}
       # The pass-2 quality sweep's settings (docs/vace-denoise-findings-
       # 2026-09-07.md, section 6; six runs F1-F6 on E4's pass 1, 2026-09-08),
       # applied 2026-09-09. This pass's control is a splat render, not a
@@ -3760,6 +3779,7 @@ steps:
       steps_low: 4
       cfg: 1.0
       seed: ${globals.seed}
+      low_vram: ${globals.low_vram}
       sampler_high: euler
       sampler_low: euler
       sampler_shift: 2.5
@@ -3824,6 +3844,7 @@ steps:
       steps_low: 4
       cfg: 1.0
       seed: ${globals.seed}
+      low_vram: ${globals.low_vram}
       sampler_high: euler
       sampler_low: euler
       sampler_shift: 2.5
