@@ -340,5 +340,116 @@ class TestSpliceExtension(unittest.TestCase):
             self._splice(after_len=6)
 
 
+def _subject(seed: int, size: int = 48):
+    """A textured square on 0.5 grey and its matte: colours spread enough in
+    L and chroma that contrast and saturation are measurable."""
+    rng = np.random.default_rng(seed)
+    image = np.full((size, size, 3), 127, dtype=np.uint8)
+    mask = np.zeros((size, size), dtype=np.float32)
+    lo, hi = size // 6, size - size // 6
+    image[lo:hi, lo:hi] = rng.integers(40, 216, size=(hi - lo, hi - lo, 3), dtype=np.uint8)
+    mask[lo:hi, lo:hi] = 1.0
+    return image, mask
+
+
+def _graded(image, mask, l_scale, chroma_scale):
+    """`image` with its subject's L spread and chroma scaled, as a pass adds
+    them — apply_colour_match's own transform, about the subject's mean."""
+    from pipeline.steps.extend_orbit import _lab, apply_colour_match
+
+    l_mean = float(_lab(image)[mask > 0.5][:, 0].mean())
+    return apply_colour_match(
+        image, {"l_mean": l_mean, "l_target": l_mean, "l_scale": l_scale,
+                "chroma_scale": chroma_scale}, mask)
+
+
+def _ratios(frames, guides, masks):
+    from pipeline.steps.extend_orbit import _colour_stats
+
+    (_, f_std, f_chroma), (_, g_std, g_chroma) = _colour_stats(frames, guides, masks, 1)
+    return f_std / g_std, f_chroma / g_chroma
+
+
+class TestColourMatch(unittest.TestCase):
+    """The pass's own cast (L spread x1.25, chroma x1.2 over the guide, where
+    pass 2's frames match it) is measured and taken back out."""
+
+    def setUp(self):
+        subjects = [_subject(seed) for seed in range(6)]
+        self.guides = [image for image, _ in subjects]
+        self.masks = [mask for _, mask in subjects]
+        self.new = [_graded(g, m, 1.25, 1.2) for g, m in zip(self.guides[:3], self.masks[:3])]
+
+    def test_the_cast_is_measured_and_undone(self):
+        from pipeline.steps.extend_orbit import apply_colour_match, fit_colour_match
+
+        match = fit_colour_match(self.new, self.guides[:3], self.masks[:3],
+                                 self.guides[3:], self.guides[3:], self.masks[3:], erode_px=1)
+        self.assertAlmostEqual(match["l_scale"], 0.8, delta=0.03)
+        self.assertAlmostEqual(match["chroma_scale"], 1 / 1.2, delta=0.03)
+        fixed = [apply_colour_match(f, match, m) for f, m in zip(self.new, self.masks[:3])]
+        l_ratio, chroma_ratio = _ratios(fixed, self.guides[:3], self.masks[:3])
+        self.assertAlmostEqual(l_ratio, 1.0, delta=0.03)
+        self.assertAlmostEqual(chroma_ratio, 1.0, delta=0.03)
+
+    def test_the_grey_outside_the_weight_is_untouched(self):
+        from pipeline.steps.extend_orbit import apply_colour_match
+
+        match = {"l_mean": 30.0, "l_target": 40.0, "l_scale": 0.8, "chroma_scale": 0.8}
+        out = apply_colour_match(self.new[0], match, self.masks[0])
+        outside = self.masks[0] < 0.5
+        np.testing.assert_array_equal(out[outside], self.new[0][outside])
+
+    def test_nothing_to_measure_is_none(self):
+        from pipeline.steps.extend_orbit import fit_colour_match
+
+        empty = [np.zeros_like(m) for m in self.masks]
+        self.assertIsNone(fit_colour_match(self.new, self.guides[:3], empty[:3],
+                                           self.guides[3:], self.guides[3:], empty[3:]))
+
+
+class TestSpliceColourMatch(unittest.TestCase):
+    """The splice with a guide: the new frames corrected, pass 2's kept."""
+
+    def _run(self, params=None, with_guide=True):
+        # 2 new before, 5 of pass 2, 1 new after (_COUNTS); guide = the clean
+        # subject at every camera, pass 2's frames = the guide, the passes'
+        # returns = the guide with the cast.
+        subjects = [_subject(seed, size=96) for seed in range(8)]
+        guides = [image for image, _ in subjects]
+        masks = [mask for _, mask in subjects]
+        source = guides[2:7]
+        cast = [_graded(g, m, 1.25, 1.2) for g, m in zip(guides, masks)]
+        before_out = cast[0:2] + source[:3]
+        after_out = source[1:] + cast[7:8]
+        inputs = {
+            "dataset": _dataset(source),
+            "before_denoised": before_out, "after_denoised": after_out,
+            "cameras": [object()] * 8,
+            "image_names": [f"frame_{i + 1:05d}_.png" for i in range(8)],
+            **_COUNTS,
+        }
+        if with_guide:
+            inputs.update(guide_images=guides, guide_masks=masks)
+        return guides, masks, source, cast, run_step("splice_extension", inputs, params or {})
+
+    def test_the_new_frames_are_brought_to_pass_2s_colour(self):
+        guides, masks, source, cast, out = self._run({"colour_grow_px": 1})
+        for got, want in zip(out["images"][2:7], source):
+            self.assertIs(got, want)
+        new = [0, 1, 7]
+        l_ratio, chroma_ratio = _ratios([out["images"][i] for i in new],
+                                        [guides[i] for i in new], [masks[i] for i in new])
+        self.assertAlmostEqual(l_ratio, 1.0, delta=0.05)
+        self.assertAlmostEqual(chroma_ratio, 1.0, delta=0.05)
+
+    def test_off_or_unguided_the_frames_go_in_as_returned(self):
+        for kwargs in ({"params": {"colour_match": False}}, {"with_guide": False}):
+            with self.subTest(**kwargs):
+                _, _, _, cast, out = self._run(**kwargs)
+                self.assertIs(out["images"][0], cast[0])
+                self.assertIs(out["images"][-1], cast[7])
+
+
 if __name__ == "__main__":
     unittest.main()

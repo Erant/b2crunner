@@ -3195,8 +3195,10 @@ class TestTheOrbitExtension(unittest.TestCase):
             "overlap_before": "scene.extended.overlap_before",
             "overlap_after": "scene.extended.overlap_after",
             "anchor_frame_index": "dataset.extras.anchor_frame_index?",
+            "guide_images": "scene.extended.guide_images?",
+            "guide_masks": "scene.extended.guide_masks?",
         })
-        self.assertEqual(splice.params, {})
+        self.assertEqual(splice.params, {"colour_match": True})
 
 
 class TestDeclaredSettings(unittest.TestCase):

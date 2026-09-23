@@ -3745,7 +3745,11 @@ steps:
   # cameras; what the passes returned for the overlap is dropped. From
   # here the dataset is 162 frames long and the anchor index has moved
   # with it. dataset.masks becomes the all-1.0 batch of that length, what
-  # mask_splat leaves and the next rmbg replaces.
+  # mask_splat leaves and the next rmbg replaces. The passes come back more
+  # saturated and contrasty than pass 2 (e9eb3a: chroma +15-20 %), so each
+  # pass's new frames are first brought to pass 2's colour, measured against
+  # the guide render at both sets' cameras (`colour_match`; no guide, no
+  # match).
   - id: extend_splice
     step: splice_extension
     dispatch: in_process
@@ -3761,6 +3765,10 @@ steps:
       overlap_before: scene.extended.overlap_before
       overlap_after: scene.extended.overlap_after
       anchor_frame_index: dataset.extras.anchor_frame_index?
+      guide_images: scene.extended.guide_images?
+      guide_masks: scene.extended.guide_masks?
+    params:
+      colour_match: true
     outputs:
       images: dataset.images
       masks: dataset.masks

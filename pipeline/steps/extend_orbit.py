@@ -497,6 +497,107 @@ class AssembleExtensionStep(Step):
         return result
 
 
+# The colour match's guard rails. The factors measured on e9eb3a were
+# 0.85-0.88; one outside this band is a broken measurement (a guide that
+# missed the subject, a matte of nothing), not a colour cast to undo.
+_COLOUR_FACTOR_RANGE = (0.6, 1.4)
+# Pixels a frame and its guide render must share before their statistics
+# mean anything, per set.
+_COLOUR_MIN_PIXELS = 1000
+
+
+def _lab(image_bgr: np.ndarray) -> np.ndarray:
+    import cv2
+
+    return cv2.cvtColor(image_bgr.astype(np.float32) / 255.0, cv2.COLOR_BGR2LAB)
+
+
+def _colour_stats(frames, guides, masks, erode_px: int):
+    """Pooled L mean, L std and mean chroma of `frames` and of `guides` over
+    the same pixels: each guide's matte, eroded so the frame's own edge (the
+    subject never lands on the render to the pixel) stays out."""
+    import cv2
+
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * erode_px + 1,) * 2)
+    f_px, g_px = [], []
+    for frame, guide, mask in zip(frames, guides, masks):
+        inside = cv2.erode((np.asarray(mask, dtype=np.float32) > 0.5).astype(np.uint8), kernel) > 0
+        f_px.append(_lab(frame)[inside])
+        g_px.append(_lab(guide)[inside])
+    f, g = np.concatenate(f_px), np.concatenate(g_px)
+    if len(f) < _COLOUR_MIN_PIXELS:
+        return None
+
+    def stats(lab):
+        return lab[:, 0].mean(), lab[:, 0].std(), np.hypot(lab[:, 1], lab[:, 2]).mean()
+
+    return stats(f), stats(g)
+
+
+def fit_colour_match(new_frames, new_guides, new_masks,
+                     ref_frames, ref_guides, ref_masks, erode_px: int = 4):
+    """How to bring one extension pass's new frames to pass 2's colour.
+
+    The pass adds its own contrast and saturation (e9eb3a: chroma x1.15-1.20,
+    L spread x1.16-1.27, the same across all its new frames), and the two
+    sets never share a view, so neither is compared with the other directly:
+    each is compared with the guide render at its own cameras, and the
+    frames the pass shared with pass 2 (`ref_*`, pass 2's frames there)
+    calibrate what "matching the render" looks like. The render itself is
+    flatter at the new views than at the ones its splat was fitted on, so
+    matching it outright would dull the new frames. Moment matching, not a
+    regression: the frames and the render never register to the pixel, and a
+    least-squares fit through that misregistration undershoots (x0.71 where
+    the chroma ratio says x0.85).
+
+    Returns {"l_mean", "l_target", "l_scale", "chroma_scale"} for
+    `apply_colour_match`, or None when there is not enough of the subject to
+    measure."""
+    new = _colour_stats(new_frames, new_guides, new_masks, erode_px)
+    ref = _colour_stats(ref_frames, ref_guides, ref_masks, erode_px)
+    if new is None or ref is None:
+        return None
+    (nf_mean, nf_std, nf_chroma), (ng_mean, ng_std, ng_chroma) = new
+    (rf_mean, rf_std, rf_chroma), (rg_mean, rg_std, rg_chroma) = ref
+    return {
+        "l_mean": float(nf_mean),
+        "l_target": float(ng_mean + (rf_mean - rg_mean)),
+        "l_scale": float((rf_std / rg_std) / (nf_std / ng_std)),
+        "chroma_scale": float((rf_chroma / rg_chroma) / (nf_chroma / ng_chroma)),
+    }
+
+
+def apply_colour_match(frame_bgr: np.ndarray, match: Dict[str, float],
+                       weight: Optional[np.ndarray] = None) -> np.ndarray:
+    """One frame through `fit_colour_match`'s correction, in Lab: L spread
+    about the pass's mean onto the calibrated target, a and b scaled about
+    neutral (saturation, not hue). `weight` (HxW in [0, 1]) blends it in, so
+    the grey the pass was drawn on stays that grey for the rmbg after."""
+    import cv2
+
+    lab = _lab(frame_bgr)
+    out = lab.copy()
+    out[..., 0] = match["l_target"] + (lab[..., 0] - match["l_mean"]) * match["l_scale"]
+    out[..., 1:] *= match["chroma_scale"]
+    if weight is not None:
+        w = np.clip(np.asarray(weight, dtype=np.float32), 0.0, 1.0)[..., None]
+        out = lab + (out - lab) * w
+    bgr = cv2.cvtColor(out, cv2.COLOR_LAB2BGR)
+    return np.clip(np.rint(bgr * 255.0), 0, 255).astype(np.uint8)
+
+
+def _feathered(mask: np.ndarray, grow_px: int) -> np.ndarray:
+    """A guide matte grown by `grow_px` and softened over as many, the
+    weight the correction is blended in with: the subject in the new frame
+    is where the render put it, give or take."""
+    import cv2
+
+    hard = (np.asarray(mask, dtype=np.float32) > 0.5).astype(np.uint8)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * grow_px + 1,) * 2)
+    grown = cv2.dilate(hard, kernel).astype(np.float32)
+    return cv2.GaussianBlur(grown, (0, 0), max(grow_px / 2.0, 0.5))
+
+
 @register_step("splice_extension")
 class SpliceExtensionStep(Step):
     """The extended dataset: each pass's new frames around pass 2's own.
@@ -505,17 +606,34 @@ class SpliceExtensionStep(Step):
               pass's output, "after_denoised": the AFTER pass's, "cameras",
               "image_names", "before", "after", "overlap_before",
               "overlap_after": extend_helical_path's,
-              "anchor_frame_index"?: pass 2's}
+              "anchor_frame_index"?: pass 2's,
+              "guide_images"?, "guide_masks"?: the guide render of the
+              whole extended path and its matte (assemble_extension's),
+              which the colour match measures against}
     outputs: {"images": before + n + after frames, "masks": the all-1.0
               VACE batch of that length (what mask_splat leaves; the next
               rmbg replaces it), "cameras", "image_names",
               "anchor_frame_index": moved by `before`}
 
     The overlap frames each pass returned — its version of pass 2's frames
-    — are dropped: pass 2's stay, byte for byte.
+    — are dropped: pass 2's stay, byte for byte. With `colour_match` and a
+    guide, each pass's new frames are brought to pass 2's contrast and
+    saturation first (`fit_colour_match`); with no guide (`extend_guide:
+    none`) there is nothing to measure against and they go in as returned.
     """
 
-    PARAMS = ()
+    PARAMS = (
+        Param("colour_match", bool, True,
+              "Bring each pass's new frames to pass 2's contrast and saturation, "
+              "measured against the guide render at both sets' cameras. The passes "
+              "come back more saturated and contrasty than pass 2 (e9eb3a: chroma "
+              "+15-20 %, L spread +16-27 %), the same across all their new frames. "
+              "Needs a guide; without one the frames go in as returned"),
+        Param("colour_grow_px", int, 12,
+              "How far past the guide's matte the correction reaches, feathered over "
+              "as many pixels; beyond it the pass's grey stays untouched",
+              advanced=True),
+    )
 
     def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
         dataset = inputs["dataset"]
@@ -547,7 +665,12 @@ class SpliceExtensionStep(Step):
                     f"against pass 2's {width}x{height}"
                 )
 
-        images = before_out[:before] + source + after_out[overlap_after:]
+        new_before, new_after = before_out[:before], after_out[overlap_after:]
+        if params["colour_match"]:
+            new_before, new_after = self._colour_match(
+                inputs, params, source, new_before, new_after, overlap_before, overlap_after,
+            )
+        images = new_before + source + new_after
         masks = [np.ones((height, width), dtype=np.float32) for _ in images]
         result: Dict[str, Any] = {
             "images": images, "masks": masks, "cameras": cameras, "image_names": image_names,
@@ -561,3 +684,52 @@ class SpliceExtensionStep(Step):
             total, before, n, after, overlap_before, overlap_after,
         )
         return result
+
+    @staticmethod
+    def _colour_match(inputs, params, source, new_before, new_after, overlap_before, overlap_after):
+        guides, guide_masks = inputs.get("guide_images"), inputs.get("guide_masks")
+        before, n, after = len(new_before), len(source), len(new_after)
+        total = before + n + after
+        if guides is None or guide_masks is None:
+            logger.info("splice_extension: no guide render arrived (extend_guide none) — the "
+                        "colour match has nothing to measure against; the new frames go in as "
+                        "returned")
+            return new_before, new_after
+        if len(guides) != total or len(guide_masks) != total:
+            raise ValueError(
+                f"splice_extension: the guide render has {len(guides)} frames / "
+                f"{len(guide_masks)} mattes against the {total}-camera path"
+            )
+        # Global index ranges: the pass's new frames, and pass 2's frames it
+        # shared with that pass.
+        phases = (
+            ("BEFORE", new_before, range(0, before), range(before, before + overlap_before)),
+            ("AFTER", new_after, range(before + n, total),
+             range(before + n - overlap_after, before + n)),
+        )
+        corrected = []
+        for name, frames, new_idx, ref_idx in phases:
+            match = fit_colour_match(
+                frames, [guides[i] for i in new_idx], [guide_masks[i] for i in new_idx],
+                [source[i - before] for i in ref_idx], [guides[i] for i in ref_idx],
+                [guide_masks[i] for i in ref_idx],
+            )
+            low, high = _COLOUR_FACTOR_RANGE
+            if match is None or not all(
+                    low <= match[k] <= high for k in ("l_scale", "chroma_scale")):
+                logger.warning(
+                    "splice_extension: the %s pass's colour match is out of bounds (%s) — "
+                    "its new frames go in as returned", name, match,
+                )
+                corrected.append(frames)
+                continue
+            logger.info(
+                "splice_extension: %s pass colour match — L spread x%.3f, chroma x%.3f, "
+                "L mean %.1f -> %.1f", name, match["l_scale"], match["chroma_scale"],
+                match["l_mean"], match["l_target"],
+            )
+            corrected.append([
+                apply_colour_match(frame, match, _feathered(guide_masks[i], params["colour_grow_px"]))
+                for frame, i in zip(frames, new_idx)
+            ])
+        return corrected[0], corrected[1]
