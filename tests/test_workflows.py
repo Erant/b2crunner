@@ -2984,7 +2984,10 @@ class TestTheOrbitExtension(unittest.TestCase):
         order = [s.id for s in spec.steps]
         first = order.index("denoise_pass2") + 1
         self.assertEqual(order[first:first + len(self.BRANCH)], self.BRANCH)
-        self.assertEqual(order[first + len(self.BRANCH)], "export_masks_preupscale")
+        # The orbit record's snapshot follows the splice (tests/
+        # test_orbit_record.py), then the pre-upscale export.
+        self.assertEqual(order[first + len(self.BRANCH):first + len(self.BRANCH) + 2],
+                         ["snapshot_orbit", "export_masks_preupscale"])
 
     def test_every_step_is_gated_and_the_setting_defaults_on(self):
         spec = self._spec()

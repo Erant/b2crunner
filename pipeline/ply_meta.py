@@ -106,7 +106,7 @@ def embed_comments(path: str | Path, comments: Sequence[str], *, replace_prefix:
     return sum(1 for line in new_header if line.startswith("comment "))
 
 
-def _fmt(name: str, arr: Any) -> str:
+def _fmt(name: str, arr: Any, prefix: str = PREFIX, float_fmt: str = "%.9g") -> str:
     a = np.asarray(arr)
     shape = "x".join(str(d) for d in a.shape) if a.ndim else "1"
     flat = a.reshape(-1)
@@ -115,8 +115,8 @@ def _fmt(name: str, arr: Any) -> str:
     else:
         if not np.all(np.isfinite(flat.astype(np.float64))):
             raise ValueError(f"{name} has non-finite values")
-        body = " ".join("%.9g" % float(v) for v in flat)
-    return f"{PREFIX}{name} {shape} {body}"
+        body = " ".join(float_fmt % float(v) for v in flat)
+    return f"{prefix}{name} {shape} {body}"
 
 
 def body_comments(pose_params: Dict[str, Any], world_from_raw: Dict[str, Any], *,

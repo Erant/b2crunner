@@ -3898,6 +3898,40 @@ steps:
       image_names: dataset.image_names
       anchor_frame_index: dataset.extras.anchor_frame_index
 
+  # What the orbit extension needs to run AFTER the fact, on the delivered
+  # splat (pipeline/orbit_record.py): the helix and every camera the frames
+  # were made on, the anchor, the extras the anchor solver reads, the prompt
+  # and the conditioning images. Taken here because this is the last point
+  # the dataset still holds them: the orbit is final (extended above, if
+  # extend_orbit ran), and next come the upscale, which rescales the
+  # intrinsics, and refine_cameras_final, which moves the cameras. The helix
+  # params are render_subject's, copied as extend_path's are. The record
+  # waits in scene.orbit_record until embed_orbit_record writes it into
+  # scene.ply's header.
+  - id: snapshot_orbit
+    step: snapshot_orbit
+    dispatch: in_process
+    when: ${globals.export_ply}
+    inputs:
+      dataset: dataset
+      before: scene.extended.before?
+      after: scene.extended.after?
+      overlap_before: scene.extended.overlap_before?
+      overlap_after: scene.extended.overlap_after?
+      front_image: scene.front_image?
+    params:
+      n_frames: 81
+      n_loops: 2
+      amplitude_deg: 30.0
+      lead_in_deg: 30.0
+      lead_out_deg: 90.0
+      pass_frames: 81
+      run_seed: ${globals.seed}
+      resolution: ${globals.resolution}
+      framing: ${globals.framing}
+    outputs:
+      record: scene.orbit_record
+
   # --------------------------------------------------------------- stage 4b
   # Debug deliverable: a COLMAP dataset from the pre-upscale frames, for
   # comparing splat quality with and without SeedVR2. Part of the debug
@@ -4389,3 +4423,19 @@ steps:
       # Overwrites the stage-2 intermediate, so Dataset.to_disk's splat.ply
       # and the CLI's closing "splat:" line both name the final one.
       splat_path: dataset.splat_path
+
+  # The orbit record into scene.ply's header as b2c.orbit.* comments, beside
+  # the b2c.mhr.* body, and the images a later extension conditions on
+  # (reference.png, anchor.png, front.png) written into ply/ beside it, so
+  # the result .zip carries them. After the training, because every brush
+  # export rewrites the file. The final cameras join the record here.
+  - id: embed_orbit_record
+    step: embed_orbit_record
+    dispatch: in_process
+    when: ${globals.export_ply}
+    inputs:
+      splat_path: dataset.splat_path
+      record: scene.orbit_record
+      cameras: dataset.cameras
+    outputs:
+      files: scene.orbit_record_files

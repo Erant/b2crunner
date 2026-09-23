@@ -157,7 +157,7 @@ class TestEveryRegisteredStep(unittest.TestCase):
         named here so adding another is a deliberate act: `splice_extension`
         (2026-09-21) is pure wiring — which frames go where is fixed by the
         counts its inputs carry, and there is nothing to tune."""
-        takes_none = {"generate_firstlast", "splice_extension"}
+        takes_none = {"generate_firstlast", "splice_extension", "embed_orbit_record"}
         for name, step_class in sorted(STEP_REGISTRY.items()):
             if name.startswith("_test"):
                 continue
