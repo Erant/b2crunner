@@ -1577,6 +1577,7 @@ steps:
     inputs:
       images: scene.reoutline.denoised
     params:
+      low_vram: ${globals.low_vram}
       debug_dir: ${globals.output_root}/debug/reoutline
     outputs:
       masks: scene.reoutline.mattes
@@ -2216,6 +2217,8 @@ steps:
     dispatch: in_process
     inputs:
       images: dataset.images
+    params:
+      low_vram: ${globals.low_vram}
     outputs:
       masks: dataset.masks
 
@@ -3248,6 +3251,8 @@ steps:
     dispatch: in_process
     inputs:
       images: dataset.images
+    params:
+      low_vram: ${globals.low_vram}
     outputs:
       masks: dataset.masks
 
@@ -3478,6 +3483,8 @@ steps:
       - {eq: ["${globals.extend_guide}", retrained]}
     inputs:
       images: dataset.images
+    params:
+      low_vram: ${globals.low_vram}
     outputs:
       masks: dataset.masks
 
@@ -3586,6 +3593,8 @@ steps:
       - {not: {eq: ["${globals.extend_guide}", none]}}
     inputs:
       images: scene.extended.guide_images
+    params:
+      low_vram: ${globals.low_vram}
     outputs:
       masks: scene.extended.guide_masks
 
@@ -3855,6 +3864,8 @@ steps:
       - ${globals.run_upscale}
     inputs:
       images: dataset.images
+    params:
+      low_vram: ${globals.low_vram}
     outputs:
       masks: dataset.masks
 
@@ -3930,6 +3941,8 @@ steps:
     dispatch: in_process
     inputs:
       images: dataset.images
+    params:
+      low_vram: ${globals.low_vram}
     outputs:
       masks: dataset.masks
 

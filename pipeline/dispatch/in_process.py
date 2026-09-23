@@ -20,6 +20,11 @@ def _release_cuda_cache() -> None:
     except ImportError:
         return
     if torch.cuda.is_available():
+        # The cuBLAS workspaces can pin a whole cached segment; see
+        # pipeline/worker.py's _empty_cuda_cache.
+        clear_workspaces = getattr(torch._C, "_cuda_clearCublasWorkspaces", None)
+        if clear_workspaces is not None:
+            clear_workspaces()
         torch.cuda.empty_cache()
 
 

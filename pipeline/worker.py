@@ -258,6 +258,14 @@ def _empty_cuda_cache() -> None:
     all of them have torch (nor should this file grow a hard dependency on
     it — see the module docstring). Failures are swallowed: a driver
     hiccup here must not fail a step that has already produced its output.
+
+    The cuBLAS workspaces go first. They are ordinary caching-allocator
+    blocks (~8 MiB), live for the life of the process, and are carved out
+    of whatever segment was free when the first matmul ran — so one can pin
+    a segment of any size. Measured after a low_vram Wan denoise on the
+    4070 Ti: 8 MiB allocated, 2004 MiB reserved in ONE segment that
+    empty_cache() cannot release; clearing the workspaces first took it to
+    2 MiB. They are re-created on the next matmul.
     """
     try:
         import torch
@@ -265,6 +273,9 @@ def _empty_cuda_cache() -> None:
         return
     try:
         if torch.cuda.is_available():
+            clear_workspaces = getattr(torch._C, "_cuda_clearCublasWorkspaces", None)
+            if clear_workspaces is not None:
+                clear_workspaces()
             torch.cuda.empty_cache()
     except Exception:
         traceback.print_exc()

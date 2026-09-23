@@ -33,6 +33,10 @@ _STD = (0.229, 0.224, 0.225)
 class RMBGStep(Step):
     PARAMS = (
         Param("batch_size", int, 8, "Images per forward pass", minimum=1, advanced=True),
+        Param("low_vram", bool, False,
+              "Halve batch_size, for a 12 GB card. At 8 frames of 1024x1024 a "
+              "batch asked for 3 GiB on top of 5.3 GiB held on the 4070 Ti",
+              advanced=True),
         Param("checkpoint", str, DEFAULT_CHECKPOINT, "HF repo for the segmentation model",
               advanced=True),
         Param("device", str, None, "Torch device; empty means cuda if available",
@@ -75,6 +79,8 @@ class RMBGStep(Step):
 
         if "images" in inputs:
             batch_size = params["batch_size"]
+            if params["low_vram"]:
+                batch_size = max(1, batch_size // 2)
             images = inputs["images"]
             masks = []
             for i in range(0, len(images), batch_size):
