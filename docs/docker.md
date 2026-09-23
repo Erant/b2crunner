@@ -58,6 +58,43 @@ docker compose -f docker/docker-compose.yml run --rm pipeline bash
 The container mounts a shared `/data` volume (weights, HF cache, datasets
 you bind-mount in, and everything a run writes).
 
+### Reusing weights you already have (2026-09-23)
+
+`B2C_WEIGHTS_DIR` points the Hugging Face hub cache at a separate,
+pre-existing mount, so ~60 GB of checkpoints are read where they already are
+instead of downloaded again into `/data/hf_cache`. Only the hub cache moves
+(`HF_HUB_CACHE`); outputs, logs, the prefetch markers, the Xet chunk cache
+and `B2C_MODELS_DIR` (seedvr2, MediaPipe, the COLMAP ONNX graphs) stay on
+`/data`. The entrypoint finds whichever layout the mount has:
+
+| Mount contains | Used as the hub cache | Typical source |
+|---|---|---|
+| `hf_cache/hub/` | `<dir>/hf_cache/hub` | an older b2c `/data` volume, a bare pod's `/workspace` |
+| `hub/` | `<dir>/hub` | a workstation's `~/.cache/huggingface` |
+| `models--*` | `<dir>` | a hub cache mounted directly |
+| nothing | `<dir>/hub` (created) | a fresh weights volume |
+
+```bash
+# this workstation's own cache, read-only
+docker compose -f docker/docker-compose.yml \
+    -f docker/docker-compose.weights.yml up
+
+# plain docker
+docker run --gpus all -v b2c_data:/data \
+    -v ~/.cache/huggingface:/weights:ro -e B2C_WEIGHTS_DIR=/weights \
+    erantimus/b2crunner:latest
+```
+
+Read-only is fine: everything already in it loads, online or offline, and
+prefetch reports what is missing. Read-write lets missing weights download
+into it — as root, so on a bind of a host directory those files are
+root-owned. On a pod, set `B2C_WEIGHTS_DIR` on the template to wherever the
+old volume is mounted.
+
+Readiness markers record the hub cache they were written against, so the
+same `/data` meeting a different weights volume (or none) re-probes rather
+than trusting markers that vouch for another cache's contents.
+
 ## What the container does when you start it
 
 `docker/entrypoint.sh` picks a mode from the first argument:

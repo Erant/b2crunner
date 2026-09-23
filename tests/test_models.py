@@ -407,6 +407,38 @@ class TestReadiness(unittest.TestCase):
                 self.assertTrue(models.is_ready("mediapipe"))
             self.assertEqual(probed, [], "the marker should have short-circuited the probe")
 
+    def test_a_marker_from_another_hub_cache_is_re_probed(self):
+        """/data can meet a different weights volume (B2C_WEIGHTS_DIR) than
+        the one its markers were written against; those markers must not
+        vouch for weights that are not in the cache now in use."""
+        with _OnAVolume():
+            probed = []
+            source = models.registry()["mediapipe"]
+
+            def counting_probe():
+                probed.append(1)
+                return False
+
+            with mock.patch.dict(os.environ, {"HF_HUB_CACHE": "/weights-a/hub"}):
+                models.mark_ready("mediapipe", "somewhere")
+            with mock.patch.object(models, "registry",
+                                   return_value={"mediapipe": source.__class__(
+                                       **{**source.__dict__, "probe": counting_probe})}):
+                with mock.patch.dict(os.environ, {"HF_HUB_CACHE": "/weights-a/hub"}):
+                    self.assertTrue(models.is_ready("mediapipe"))
+                self.assertEqual(probed, [])
+                with mock.patch.dict(os.environ, {"HF_HUB_CACHE": "/weights-b/hub"}):
+                    self.assertFalse(models.is_ready("mediapipe"))
+                self.assertEqual(probed, [1])
+
+    def test_a_marker_without_a_hub_cache_is_trusted(self):
+        """Markers from before the field existed stay valid."""
+        with _OnAVolume():
+            (models._ready_dir() / "mediapipe.json").write_text(
+                '{"key": "mediapipe", "location": "x", "fetched_at": 0}')
+            with mock.patch.dict(os.environ, {"HF_HUB_CACHE": "/anything/hub"}):
+                self.assertTrue(models.is_ready("mediapipe"))
+
 
 class TestPrefetch(unittest.TestCase):
     def test_one_failure_does_not_abort_the_rest(self):

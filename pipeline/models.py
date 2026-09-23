@@ -630,9 +630,23 @@ def is_ready(key: str) -> bool:
 
     A successful probe writes the marker, so the expensive path runs at
     most once per model per volume.
+
+    A marker records the hub cache it was written against, and only counts
+    while that is still the cache in use. The markers live on the data
+    volume but the weights need not (`B2C_WEIGHTS_DIR`, see
+    docker/entrypoint.sh), so the same /data can meet a different weights
+    volume, or none, on the next start. A marker from before this field
+    existed was necessarily written against the default cache and is taken
+    at its word.
     """
-    if (_ready_dir() / f"{key}.json").exists():
-        return True
+    marker = _ready_dir() / f"{key}.json"
+    if marker.exists():
+        try:
+            recorded = json.loads(marker.read_text()).get("hub_cache")
+        except (OSError, ValueError, AttributeError):
+            recorded = hub_cache()
+        if recorded is None or recorded == hub_cache():
+            return True
 
     source = registry().get(key)
     if source is None:
@@ -649,9 +663,23 @@ def is_ready(key: str) -> bool:
     return True
 
 
+def hub_cache() -> str:
+    """The huggingface_hub cache this process reads and writes.
+
+    Resolved from the environment the way huggingface_hub.constants does,
+    without importing it: HF_HUB_CACHE, else $HF_HOME/hub, else the default.
+    """
+    explicit = os.environ.get("HF_HUB_CACHE")
+    if explicit:
+        return str(Path(explicit).expanduser())
+    home = os.environ.get("HF_HOME") or str(Path.home() / ".cache" / "huggingface")
+    return str(Path(home).expanduser() / "hub")
+
+
 def mark_ready(key: str, location: str) -> None:
     (_ready_dir() / f"{key}.json").write_text(
-        json.dumps({"key": key, "location": location, "fetched_at": time.time()}, indent=2)
+        json.dumps({"key": key, "location": location, "fetched_at": time.time(),
+                    "hub_cache": hub_cache()}, indent=2)
     )
 
 

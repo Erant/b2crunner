@@ -623,15 +623,26 @@ def check_model_caches() -> Check:
     def _size(path: Path) -> float:
         if not path.exists():
             return 0.0
-        return sum(f.stat().st_size for f in path.rglob("*") if f.is_file()) / 1e9
+        # Not symlinks: a hub cache's snapshots/ are links to its blobs/,
+        # and following them counted every checkpoint twice.
+        return sum(f.stat().st_size for f in path.rglob("*")
+                   if f.is_file() and not f.is_symlink()) / 1e9
 
-    hf_home = Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface"))
+    from .models import hub_cache
+
+    # The hub cache, not HF_HOME: B2C_WEIGHTS_DIR (docker/entrypoint.sh)
+    # moves it onto a separate weights volume and leaves HF_HOME on /data.
+    hub = Path(hub_cache())
+    weights = os.environ.get("B2C_WEIGHTS_DIR")
     lines = [
-        f"HF cache  {hf_home}: {_size(hf_home):.1f} GB",
+        f"HF cache  {hub}: {_size(hub):.1f} GB",
         f"models    {models_dir()}: {_size(models_dir()):.1f} GB",
     ]
+    if weights:
+        lines.insert(0, f"B2C_WEIGHTS_DIR={weights}")
+        if hub.exists() and not os.access(hub, os.W_OK):
+            lines.append("  (read-only: what is missing from it cannot be downloaded)")
 
-    hub = hf_home / "hub"
     if hub.exists():
         for repo in sorted(hub.glob("models--*")):
             lines.append(f"  {repo.name.replace('models--', '').replace('--', '/')}"
@@ -639,11 +650,12 @@ def check_model_caches() -> Check:
 
     # Not a FAIL when empty: an empty cache is the correct state of a fresh
     # pod, not a fault. It is just slow, and worth knowing about in advance.
-    inside_container = not str(hf_home).startswith(str(data_dir()))
+    roots = [str(data_dir())] + ([weights] if weights else [])
+    inside_container = not any(str(hub).startswith(root) for root in roots)
     return Check(
         "model caches",
         WARN if inside_container else OK,
-        "HF_HOME is NOT on the volume — downloads will fill the container disk"
+        "the HF cache is NOT on a volume — downloads will fill the container disk"
         if inside_container else "",
         lines,
     )

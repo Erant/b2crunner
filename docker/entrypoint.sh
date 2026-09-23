@@ -51,6 +51,58 @@ prepare_volume() {
     if [ "$DATA_DIR" = "/opt/b2c_runner" ]; then
         log "WARNING: the volume is mounted over the application directory."
     fi
+
+    select_weights
+}
+
+# --------------------------------------------------------------------------
+# a pre-existing weights volume
+# --------------------------------------------------------------------------
+# B2C_WEIGHTS_DIR names a mount holding Hugging Face weights that were
+# downloaded somewhere else — a workstation's ~/.cache/huggingface, an older
+# b2c /data volume, a bare-pod /workspace — so they are read in place
+# instead of downloaded again into /data/hf_cache. Only the hub cache moves
+# (HF_HUB_CACHE, which is where every checkpoint's bytes are); outputs,
+# logs, the readiness markers, the Xet chunk cache and B2C_MODELS_DIR stay
+# on /data. Whichever of these layouts the mount has is found:
+#
+#   <dir>/hf_cache/hub   a b2c /data volume, or a bare pod's /workspace
+#   <dir>/hub            an HF_HOME, e.g. a bind of ~/.cache/huggingface
+#   <dir>/models--*      a hub cache itself
+#
+# and an empty mount becomes <dir>/hub. It may be read-only: everything
+# already in it loads, online or not (the Wan fetches were checked against
+# a read-only bind of a workstation cache, 2026-09-23), and only what is
+# missing fails to download. Mount it read-write to let missing weights download into it
+# — as root, so on a bind of a host directory the new files are root's.
+select_weights() {
+    local weights="${B2C_WEIGHTS_DIR:-}"
+    [ -n "$weights" ] || return 0
+    if [ ! -d "$weights" ]; then
+        log "WARNING: B2C_WEIGHTS_DIR=$weights is not a directory (not mounted?);"
+        log "  weights go to the default cache under $DATA_DIR instead."
+        return 0
+    fi
+    local hub
+    if [ -d "$weights/hf_cache/hub" ]; then
+        hub="$weights/hf_cache/hub"
+    elif [ -d "$weights/hub" ]; then
+        hub="$weights/hub"
+    elif compgen -G "$weights/models--*" > /dev/null; then
+        hub="$weights"
+    else
+        hub="$weights/hub"
+        mkdir -p "$hub" 2>/dev/null || true
+    fi
+    export HF_HUB_CACHE="$hub"
+    local count
+    # `|| true`: compgen fails on no match, and pipefail + set -e would
+    # take the whole entrypoint down over an empty cache.
+    count=$(compgen -G "$hub/models--*" | wc -l || true)
+    log "weights: HF_HUB_CACHE=$hub ($count repos)"
+    if [ ! -w "$hub" ]; then
+        log "  read-only: weights missing from it cannot be downloaded."
+    fi
 }
 
 # --------------------------------------------------------------------------

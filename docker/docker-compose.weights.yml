@@ -1,0 +1,17 @@
+# Overlay for docker-compose.yml: read Hugging Face weights from a cache
+# that already exists on this machine instead of downloading them again into
+# the b2c_data volume. See B2C_WEIGHTS_DIR in docker/entrypoint.sh.
+#
+#   docker compose -f docker/docker-compose.yml \
+#       -f docker/docker-compose.weights.yml up
+#
+# B2C_WEIGHTS_HOST_DIR defaults to this user's ~/.cache/huggingface. It is
+# bound read-only: nothing in it is modified, and a model it lacks fails to
+# download rather than landing in it as root-owned files. Drop the `:ro` to
+# let missing weights download into it (they will be owned by root).
+services:
+  pipeline:
+    environment:
+      - B2C_WEIGHTS_DIR=/weights
+    volumes:
+      - ${B2C_WEIGHTS_HOST_DIR:-${HOME}/.cache/huggingface}:/weights:ro
