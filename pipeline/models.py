@@ -876,7 +876,7 @@ def prefetch(
     total_gb = sum(known[key].approx_gb for key in selected)
     logger.info(
         "prefetching %d model(s), ~%.0f GB, into %s and %s",
-        len(selected), total_gb, os.environ.get("HF_HOME", "the HF cache"), models_dir(),
+        len(selected), total_gb, hub_cache(), models_dir(),
     )
 
     for key in selected:
