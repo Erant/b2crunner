@@ -255,6 +255,29 @@ class GpuScheduler:
                     slot.process.terminate()
                     return
 
+    def cancel_all(self) -> List[str]:
+        """Cancel every queued and running run; return their names.
+
+        The queue is emptied before any worker is signalled, and under the
+        same lock: a terminated worker's watcher dispatches the next queued
+        job onto the slot it frees, so the other order would start a run
+        just to cancel it.
+        """
+        with self._lock:
+            names = [job.run_name for job in self._queue]
+            self._queue.clear()
+            for name in names:
+                state = self._states.get(name)
+                if state is not None:
+                    state.status = "cancelled"
+                    state.message = "cancelled before it started"
+                    state.finished = time.time()
+            for slot in self._slots:
+                if slot.process is not None:
+                    slot.process.terminate()
+                    names.append(slot.run_name)
+        return names
+
     # -- shutdown -----------------------------------------------------------
 
     def shutdown(self, timeout: float = 0.0) -> List[str]:

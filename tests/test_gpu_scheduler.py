@@ -160,6 +160,23 @@ class TestGpuScheduler(unittest.TestCase):
 
         self.assertTrue(self.spawner.processes["a"].terminated)
 
+    def test_cancel_all_stops_running_and_queued_without_starting_the_queue(self):
+        self.scheduler.submit(_job("a"))
+        self.scheduler.submit(_job("b"))
+        _wait_until(lambda: len(self.spawner.calls) == 2)
+        self.scheduler.submit(_job("c"))
+
+        names = self.scheduler.cancel_all()
+
+        self.assertEqual(sorted(names), ["a", "b", "c"])
+        self.assertTrue(self.spawner.processes["a"].terminated)
+        self.assertTrue(self.spawner.processes["b"].terminated)
+        self.assertEqual(self.scheduler.snapshot("c").status, "cancelled")
+        # A freed slot must not pick up the cancelled "c".
+        self.spawner.complete("a", status="cancelled")
+        time.sleep(0.2)
+        self.assertEqual(len(self.spawner.calls), 2)
+
     def test_a_worker_that_dies_without_a_terminal_status_is_reported_failed(self):
         """The fallback the exit code exists for: an OOM kill leaves
         whatever was last published (`running`), not a terminal status."""

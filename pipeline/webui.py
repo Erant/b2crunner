@@ -517,10 +517,14 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
         # the dropdown re-points every other tab at it. Its rows are every
         # run on the volume, kept current by the timer wired at the bottom —
         # there is no button to press.
-        run_picker = gr.Dropdown(
-            choices=[], value=None, label="Active run",
-            info="Every run on this volume, in flight first, then most recent.",
-        )
+        with gr.Row(equal_height=True):
+            run_picker = gr.Dropdown(
+                choices=[], value=None, label="Active run",
+                info="Every run on this volume, in flight first, then most recent.",
+                scale=4,
+            )
+            cancel_btn = gr.Button("Cancel run", variant="stop", scale=1)
+            cancel_all_btn = gr.Button("Cancel all runs", variant="stop", scale=1)
         fleet_out = gr.Markdown()
 
         # Keeps the app object usable as a handle onto its own scheduler —
@@ -703,9 +707,7 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
                                 "with it._"
                             )
 
-                    with gr.Row():
-                        start_btn = gr.Button("Start run", variant="primary")
-                        cancel_btn = gr.Button("Cancel", variant="stop")
+                    start_btn = gr.Button("Start run", variant="primary")
                 with gr.Column(scale=1):
                     summary_out = gr.Markdown(workflow_summary(default_workflow))
 
@@ -1063,6 +1065,16 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
             gr.Info(f"Cancelling `{run_name}` — the Progress tab shows it stop.")
 
         cancel_btn.click(on_cancel, inputs=[run_picker], outputs=[])
+
+        def on_cancel_all() -> None:
+            names = scheduler.cancel_all()
+            if not names:
+                gr.Warning("No runs are queued or running in this server.")
+                return
+            gr.Info(f"Cancelling {len(names)} run(s): "
+                    + ", ".join(f"`{n}`" for n in names))
+
+        cancel_all_btn.click(on_cancel_all, inputs=[], outputs=[])
 
         def on_package(run_name: Optional[str]):
             """Build (or reuse) the selected run's archive — the one slow press.
