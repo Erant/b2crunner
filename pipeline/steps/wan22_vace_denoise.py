@@ -61,7 +61,7 @@ nothing reads them, and a workflow still setting them is silently ignored,
 so check for them if a run seems to be doing more work than it should.
 
 LoRA: lightx2v/Wan2.2-Lightning's 4-step distill LoRA
-(Wan2.2-T2V-A14B-4steps-lora-rank64-Seko-V1.1/{high,low}_noise_model.safetensors).
+(Wan2.2-T2V-A14B-4steps-lora-250928/{high,low}_noise_model.safetensors).
 This is a *T2V* lightning LoRA, not VACE-specific — no VACE-specific lightning
 LoRA is published as of this writing. Applying it to the VACE checkpoint
 (since VACE reuses the T2V transformer backbone plus added control
@@ -291,7 +291,7 @@ DEFAULT_FP8_REPO = "silveroxides/Wan_2.2-fp8_scaled_hybrid"
 DEFAULT_FP8_HIGH = "wan2.2_fun_vace_high_noise_14B-fp8_scaled_original.safetensors"
 DEFAULT_FP8_LOW = "wan2.2_fun_vace_low_noise_14B-fp8_scaled_original.safetensors"
 DEFAULT_LORA_REPO = "lightx2v/Wan2.2-Lightning"
-DEFAULT_LORA_SUBFOLDER = "Wan2.2-T2V-A14B-4steps-lora-rank64-Seko-V1.1"
+DEFAULT_LORA_SUBFOLDER = "Wan2.2-T2V-A14B-4steps-lora-250928"
 DEFAULT_LORA_HIGH = "high_noise_model.safetensors"
 DEFAULT_LORA_LOW = "low_noise_model.safetensors"
 
