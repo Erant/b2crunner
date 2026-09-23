@@ -2986,10 +2986,10 @@ class TestTheOrbitExtension(unittest.TestCase):
         self.assertEqual(order[first:first + len(self.BRANCH)], self.BRANCH)
         self.assertEqual(order[first + len(self.BRANCH)], "export_masks_preupscale")
 
-    def test_every_step_is_gated_and_the_setting_defaults_off(self):
+    def test_every_step_is_gated_and_the_setting_defaults_on(self):
         spec = self._spec()
         settings = {s.name: s for s in spec.settings}
-        self.assertIs(settings["extend_orbit"].default, False)
+        self.assertIs(settings["extend_orbit"].default, True)
         self.assertEqual(settings["extend_guide"].default, "retrained")
         self.assertEqual(settings["extend_guide"].choices, ("retrained", "intermediate", "none"))
         self.assertEqual(settings["extend_guide"].requires, "extend_orbit")

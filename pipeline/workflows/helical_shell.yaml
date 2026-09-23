@@ -572,7 +572,7 @@ settings:
   - name: extend_orbit
     label: Extend the orbit
     type: bool
-    default: false
+    default: true
     advanced: true
     help: >-
       After the second denoise, lengthen the helical orbit with two VACE
@@ -589,7 +589,7 @@ settings:
       `extend_guide`'s choice; what they hand back for the overlap is
       discarded, pass 2's frames stay. Everything downstream — the
       upscale, the final camera solve, the face fits, the deliverable
-      training — then runs on 162 views instead of 81. OFF by default:
+      training — then runs on 162 views instead of 81. ON by default:
       two more denoises at pass 2's cost (the resident experts serve
       them, no reload), a fourth splat training with `retrained`, and
       twice the frames through everything after. UNMEASURED on a pod as
