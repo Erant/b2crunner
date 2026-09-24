@@ -3216,7 +3216,8 @@ class TestTheOrbitExtension(unittest.TestCase):
             "guide_images": "scene.extended.guide_images?",
             "guide_masks": "scene.extended.guide_masks?",
         })
-        self.assertEqual(splice.params, {"colour_match": True})
+        # Off until the correction holds on every run (2026-09-24).
+        self.assertEqual(splice.params, {"colour_match": False})
 
 
 class TestDeclaredSettings(unittest.TestCase):
