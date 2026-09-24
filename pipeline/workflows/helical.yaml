@@ -2402,6 +2402,8 @@ steps:
     dispatch: in_process
     inputs:
       images: dataset.images
+    params:
+      low_vram: ${globals.low_vram}
     outputs:
       normal_maps: scene.normal_maps
 

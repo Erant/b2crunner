@@ -142,6 +142,11 @@ class Sapiens2LiteStep(Step):
               "Images per forward pass. Worth lowering at upscaled resolution: "
               "1080x1920 float32 normal maps are ~2 GB of host RAM for 81 frames",
               minimum=1),
+        Param("low_vram", bool, False,
+              "One image per forward, for a 12 GB card. Measured on the 4070 "
+              "Ti with the 1b checkpoint at 720x1280: 5.74 GiB of weights, "
+              "7.81 GiB peak at batch 1 (1.07 s a frame), OOM at batch 2",
+              advanced=True),
         Param("checkpoint", str, DEFAULT_CHECKPOINT,
               "HF repo for the normal-estimation model; the family is "
               "0.4b/0.8b/1b/5b. Smaller is the lever if a 12 GB card OOMs",
@@ -178,7 +183,7 @@ class Sapiens2LiteStep(Step):
             self.load(params)
 
         if "images" in inputs:
-            batch_size = params["batch_size"]
+            batch_size = 1 if params["low_vram"] else params["batch_size"]
             images = inputs["images"]
             normals = []
             for i in range(0, len(images), batch_size):
