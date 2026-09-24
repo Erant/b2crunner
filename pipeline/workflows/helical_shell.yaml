@@ -270,6 +270,22 @@ settings:
       ~105 s a denoise step (ComfyUI with SageAttention: ~120 s). Off is the
       32 GB-card path.
 
+  - name: weak_skeleton
+    label: Weak skeleton
+    type: bool
+    default: false
+    help: >-
+      Show pass 1's denoise the DWPose skeleton on its first step only; the
+      five steps after it get the same drawing with the sticks left out
+      (silhouette, relief and face splat). For subjects whose costume gives
+      a coloured line somewhere to hide — measured on a black suit with
+      glowing cyan trim (run 1127f0), where every step that saw the sticks
+      painted them as glowing piping down the legs and torso. The first step
+      is where the skeleton sets the pose and the turn; with the sticks on
+      it alone, the same seed gives the same picture without the ink, on
+      that subject and on a clean one (e9eb3a). Costs one extra render
+      composite per frame and one extra VAE encode of the control video.
+
   - name: run_upscale
     label: Upscale dataset
     type: bool
@@ -1239,6 +1255,7 @@ steps:
       outline_relief: ${globals.outline_relief}
       outline_relief_amplitude: ${globals.outline_relief_amplitude}
       skeleton_occlusion_m: ${globals.skeleton_occlusion_m}
+      skeleton_free_copy: ${globals.weak_skeleton}
       # Tell the denoise which pixels are already real: 0.0 where the face
       # splat covers the frame, 1.0 everywhere else, in
       # wan22_vace_denoise's `control_masks` convention. ON here although
@@ -1353,6 +1370,7 @@ steps:
       # rather than manufacturing its own. Turn that param off and this
       # goes back to None. See that step's note.
       inactive_masks: scene.inactive_masks
+      images_no_skeleton: scene.control_no_skeleton
       cameras: dataset.cameras
       image_names: dataset.image_names
       points_3d: dataset.points_3d
@@ -1427,6 +1445,22 @@ steps:
     outputs:
       images: dataset.images
       masks: dataset.masks
+
+  # Weak skeleton: the same anchor frames into the stick-free copy of the
+  # drawing, so the two controls differ in the stick pixels and nowhere
+  # else. Only the images are kept — the VACE masks are the main batch's.
+  - id: reinject_anchor_initial_stick_free
+    step: inject_anchor
+    dispatch: in_process
+    when: ${globals.weak_skeleton}
+    inputs:
+      images: scene.control_no_skeleton
+      cameras: dataset.cameras
+      anchor_position: dataset.extras.anchor_position
+      anchor_image: dataset.anchor_image
+      masks: scene.inactive_masks?
+    outputs:
+      images: scene.control_no_skeleton
 
   # ------------------------------------------------- re-outline
   # Eight steps, every one gated on `re_outline`, that replace the
@@ -1720,6 +1754,7 @@ steps:
       outline_relief: ${globals.outline_relief}
       outline_relief_amplitude: ${globals.outline_relief_amplitude}
       skeleton_occlusion_m: ${globals.skeleton_occlusion_m}
+      skeleton_free_copy: ${globals.weak_skeleton}
       # The other line this block has that render_initial_views' does not.
       # The coverage of a splat trained on a single-elevation orbit carries
       # opaque needle Gaussians along the cameras' horizontal rays at the
@@ -1840,6 +1875,7 @@ steps:
       images: dataset.images
       masks: dataset.masks
       inactive_masks: scene.inactive_masks
+      images_no_skeleton: scene.control_no_skeleton
 
   # And the anchor once more, over the fresh render — reinject_anchor_initial
   # exactly, reading the warped photograph it already made.
@@ -1856,6 +1892,24 @@ steps:
     outputs:
       images: dataset.images
       masks: dataset.masks
+
+  # Weak skeleton: the same anchor frames into the stick-free copy of the
+  # drawing, so the two controls differ in the stick pixels and nowhere
+  # else. Only the images are kept — the VACE masks are the main batch's.
+  - id: reinject_anchor_reoutlined_stick_free
+    step: inject_anchor
+    dispatch: in_process
+    when:
+      - ${globals.re_outline}
+      - ${globals.weak_skeleton}
+    inputs:
+      images: scene.control_no_skeleton
+      cameras: dataset.cameras
+      anchor_position: dataset.extras.anchor_position
+      anchor_image: dataset.anchor_image
+      masks: scene.inactive_masks?
+    outputs:
+      images: scene.control_no_skeleton
 
   # ------------------------------------------------ the shell's frames
   # The shell, rendered along pass 1's own cameras. `pattern: ""` (the
@@ -1982,6 +2036,7 @@ steps:
       control_masks: dataset.masks
       reference_image: dataset.reference_image
       subject_desc: dataset.prompt
+      control_video_alt: scene.control_no_skeleton?
     params:
       width: ${globals.resolution.0}
       height: ${globals.resolution.1}
@@ -2049,6 +2104,9 @@ steps:
       sampler_low: euler
       sampler_shift: 5
       strength: [1, 1, 0.5, 0.5, 0.5, 0.5]
+      # Read only when control_video_alt exists, i.e. with the
+      # Weak skeleton setting on — see that setting.
+      skeleton_steps: [1]
       # One knob sits beside it, left unset here so this pass keeps pushing
       # on every layer alike: `strength_layers` tapers each step's scale
       # across the eight VACE injection layers, shallow to deep.

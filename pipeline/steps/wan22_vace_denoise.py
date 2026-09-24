@@ -914,6 +914,102 @@ def _vace_scale_hook(step: "Wan22VaceDenoiseStep", expert: str):
     return hook
 
 
+def _alt_control_hook(step: "Wan22VaceDenoiseStep"):
+    """A forward pre-hook that swaps in the stick-free control on its steps.
+
+    Why it exists (measured 2026-09-24 on run 1127f0, a black costume with
+    glowing cyan trim in the reference photo): every denoise step that sees
+    the DWPose sticks can paint them as costume detail — glowing piping down
+    the legs and torso — and the low-noise steps do it even when the
+    high-noise ones never saw a stick. Step 1 alone is where the skeleton
+    earns its place: the same seed with the sticks on step 1 only and the
+    stick-free drawing on steps 2-6 gives the same picture — room, light,
+    costume, pose — without the ink, and silhouette IoU at least the
+    baseline's. Dropping the drawing's scale instead is not a substitute:
+    step 2 at 0.1 lost an extended arm outright.
+
+    What is swapped is the VIDEO half of `control_hidden_states`, never the
+    mask half: diffusers concatenates the VAE-encoded inactive/reactive
+    video latents with the downsampled VACE mask along channels, and both
+    controls share one mask. `step._alt_latents` is that video half for the
+    stick-free drawing, encoded by the wrappers run() puts on the pipeline
+    for one call; None is "not this run", and the hook does nothing.
+
+    The step is read off the timestep, like _step_index, but against the
+    scheduler directly — a run with a constant `strength` has no `_scales`
+    for _step_index to check its count against.
+    """
+
+    def hook(module, args, kwargs):
+        alt = step._alt_latents
+        if alt is None:
+            return None
+        import torch
+
+        incoming = kwargs.get("control_hidden_states")
+        timestep = kwargs.get("timestep")
+        if incoming is None or timestep is None:
+            raise RuntimeError(
+                "wan22_vace_denoise: skeleton_steps swaps the control per "
+                "denoise step, but the pipeline called the transformer without "
+                "control_hidden_states/timestep, so there is nothing to swap "
+                "or no way to tell which step this is"
+            )
+        timesteps = [float(value) for value in step._pipe.scheduler.timesteps]
+        value = float(timestep.flatten()[0])
+        index = min(range(len(timesteps)), key=lambda i: abs(timesteps[i] - value))
+        if index + 1 in step._skeleton_steps:
+            return None
+        channels = alt.shape[1]
+        kwargs["control_hidden_states"] = torch.cat(
+            [alt.to(incoming.device, incoming.dtype), incoming[:, channels:]], dim=1
+        )
+        return args, kwargs
+
+    return hook
+
+
+def _encode_alt_control(step: "Wan22VaceDenoiseStep", pipe, alt_video) -> list:
+    """Make the next pipe() call also encode `alt_video` into step._alt_latents.
+
+    Two instance-level wrappers, the same seam _timed_phases uses (and
+    _timed_phases wraps these in turn and deletes the instance attributes
+    when the call ends, which removes these with it). `preprocess_conditions`
+    gets the alternate frames resized/normalised exactly as the main video
+    is — same mask, same reference images — and `prepare_video_latents`
+    encodes them through the same VAE path right after the main video.
+
+    The generator's state is put back after the second encode: the VAE
+    encode samples from its posterior, and a draw the stock call never made
+    would shift the initial noise, so the weak-skeleton run would stop being
+    the same sample as the baseline at the same seed. Returns the attribute
+    names installed, for run() to remove if the call fails before
+    _timed_phases got to them.
+    """
+    state = {}
+    original_pre = pipe.preprocess_conditions
+    original_latents = pipe.prepare_video_latents
+
+    def preprocess_conditions(video, mask, reference_images, *args, **kwargs):
+        out = original_pre(video, mask, reference_images, *args, **kwargs)
+        state["video"] = original_pre(alt_video, mask, reference_images, *args, **kwargs)[0]
+        return out
+
+    def prepare_video_latents(video, mask, reference_images, generator=None, *args, **kwargs):
+        main = original_latents(video, mask, reference_images, generator, *args, **kwargs)
+        saved = generator.get_state() if generator is not None else None
+        step._alt_latents = original_latents(
+            state["video"], mask, reference_images, generator, *args, **kwargs
+        )
+        if saved is not None:
+            generator.set_state(saved)
+        return main
+
+    pipe.preprocess_conditions = preprocess_conditions
+    pipe.prepare_video_latents = prepare_video_latents
+    return ["preprocess_conditions", "prepare_video_latents"]
+
+
 @register_step("wan22_vace_denoise")
 class Wan22VaceDenoiseStep(Step):
     # The per-call knobs come first; everything from `checkpoint` down is
@@ -1013,6 +1109,14 @@ class Wan22VaceDenoiseStep(Step):
               "Per-layer multipliers on the scale above, one for each VACE "
               "injection layer (8 of them, shallow to deep); empty means 1.0 at "
               "every layer, which is the plain scale"),
+        Param("skeleton_steps", list, None,
+              "Which denoise steps (1-based, first to last) condition on "
+              "`control_video`; every other step conditions on "
+              "`control_video_alt` instead — the same drawing without its "
+              "skeleton overlay. In effect only when that input is given, so "
+              "a workflow can leave it set and gate the whole thing on "
+              "whether the stick-free copy was rendered. See "
+              "_alt_control_hook"),
         Param("prompt", str, "",
               "Positive prompt. $SUBJECT_DESC$ in it is filled in from the "
               "`subject_desc` input (dataset.prompt)"),
@@ -1123,6 +1227,12 @@ class Wan22VaceDenoiseStep(Step):
         self._sampler_high = "uni_pc"
         self._sampler_low = "uni_pc"
         self._sampled = None
+        # The weak-skeleton plan for one pass: the stick-free control's video
+        # latents (set by _encode_alt_control during pipe()) and the 1-based
+        # steps that keep the skeleton drawing. None outside a pass that
+        # asked for it — see _alt_control_hook.
+        self._alt_latents = None
+        self._skeleton_steps = ()
 
     def load(self, params: Dict[str, Any]) -> None:
         """Build the pipeline around the pre-quantized fp8 transformers.
@@ -1257,6 +1367,10 @@ class Wan22VaceDenoiseStep(Step):
             if transformer is not None:
                 transformer.register_forward_pre_hook(
                     _vace_scale_hook(self, expert), with_kwargs=True
+                )
+                # Inert unless a pass hands over `control_video_alt`.
+                transformer.register_forward_pre_hook(
+                    _alt_control_hook(self), with_kwargs=True
                 )
         # The hand-off: the high-noise expert's sampler ends (its last step
         # first-order), the low-noise expert's begins (its own order, no
@@ -1799,26 +1913,64 @@ class Wan22VaceDenoiseStep(Step):
         self._configure_sampler(pipe, params)
         self._set_expert_split(pipe, params["steps_high"], n_steps)
 
+        # Weak skeleton: the stick-free copy of the drawing on every step
+        # skeleton_steps does not name. Encoded inside the same call as the
+        # main control, so both go through identical preprocessing.
+        alt_frames = inputs.get("control_video_alt")
+        skeleton_steps = params["skeleton_steps"]
+        installed = []
+        self._alt_latents = None
+        self._skeleton_steps = ()
+        if alt_frames is not None and skeleton_steps is not None:
+            if len(alt_frames) != len(inputs["control_video"]):
+                raise ValueError(
+                    f"wan22_vace_denoise: control_video_alt has {len(alt_frames)} "
+                    f"frames, control_video {len(inputs['control_video'])} — the "
+                    "stick-free copy must be the same drawing, frame for frame"
+                )
+            bad = [s for s in skeleton_steps if not 1 <= int(s) <= n_steps]
+            if bad:
+                raise ValueError(
+                    f"wan22_vace_denoise: skeleton_steps {bad} are outside this "
+                    f"run's 1..{n_steps} denoise steps"
+                )
+            self._skeleton_steps = {int(s) for s in skeleton_steps}
+            alt_video = [Image.fromarray(_bgr_to_rgb(frame)) for frame in alt_frames]
+            installed = _encode_alt_control(self, pipe, alt_video)
+            logger.info(
+                "  weak skeleton: skeleton drawing on step(s) %s, stick-free "
+                "drawing on %s", sorted(self._skeleton_steps),
+                [s for s in range(1, n_steps + 1) if s not in self._skeleton_steps],
+            )
+
         # Timings, not just a call. Everything up to the progress bar's
         # "0%" is silent otherwise, which on a resident worker's second
         # pass reads as a two-minute hang — see _PRE_LOOP_PHASES.
         started = time.time()
-        with _timed_phases(pipe):
-            result = pipe(
-                prompt=prompt,
-                negative_prompt=params["negative_prompt"],
-                video=video,
-                mask=masks,
-                reference_images=reference_images,
-                conditioning_scale=conditioning_scale,
-                height=params["height"],
-                width=params["width"],
-                num_frames=params["length"] or len(video),
-                num_inference_steps=n_steps,
-                guidance_scale=params["cfg"],
-                generator=generator,
-                output_type="np",
-            )
+        try:
+            with _timed_phases(pipe):
+                result = pipe(
+                    prompt=prompt,
+                    negative_prompt=params["negative_prompt"],
+                    video=video,
+                    mask=masks,
+                    reference_images=reference_images,
+                    conditioning_scale=conditioning_scale,
+                    height=params["height"],
+                    width=params["width"],
+                    num_frames=params["length"] or len(video),
+                    num_inference_steps=n_steps,
+                    guidance_scale=params["cfg"],
+                    generator=generator,
+                    output_type="np",
+                )
+        finally:
+            # _timed_phases removes the instance attributes it wrapped,
+            # these included; this is for a call that failed before it did.
+            for name in installed:
+                pipe.__dict__.pop(name, None)
+            self._alt_latents = None
+            self._skeleton_steps = ()
         # Total minus the phases above minus the progress bar's own total
         # is the VAE *decode* of the finished latents, which is inline in
         # __call__ rather than a method and so cannot be wrapped.

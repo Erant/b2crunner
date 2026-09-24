@@ -545,17 +545,20 @@ class TestWhatAWorkflowDeclares(ApiTestCase):
         self.assertEqual(by_name["resolution"]["choices"][0], [720, 1280])
         self.assertIs(by_name["face_splat"]["advanced"], True)
 
-    def test_only_the_four_run_knobs_are_in_the_open(self):
+    def test_only_the_run_knobs_are_in_the_open(self):
         # Everything that proved itself (COLMAP refinement, the body refit,
         # the per-view rigs, the outline and occlusion strengths, the
         # re-outline branch) is behind the More settings fold since
-        # 2026-09-21; the Settings box is what you set per run.
+        # 2026-09-21; the Settings box is what you set per run — which is
+        # also where Low VRAM (the machine) and Weak skeleton (the subject)
+        # belong.
         body = self.client.get(
             f"{API_PREFIX}/workflows/helical", headers=AUTH
         ).json()
         plain = [s["name"] for s in body["settings"]
                  if not s["advanced"] and s.get("group") != "outputs"]
-        self.assertEqual(plain, ["resolution", "framing", "input_layout", "seed"])
+        self.assertEqual(plain, ["resolution", "framing", "input_layout", "seed",
+                                 "low_vram", "weak_skeleton"])
         by_name = {s["name"]: s for s in body["settings"]}
         self.assertIs(by_name["re_outline"]["default"], True)
         self.assertEqual(by_name["skeleton_occlusion_m"]["default"], 0.12)

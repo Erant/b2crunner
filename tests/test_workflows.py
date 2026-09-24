@@ -2072,7 +2072,9 @@ class TestTheReoutlineBranch(unittest.TestCase):
 
     def test_it_sits_between_the_anchor_injection_and_the_dump(self):
         spec = self._spec()
-        order = [s.id for s in spec.steps]
+        # The Weak skeleton setting's anchor injections ride beside the two
+        # the branch is placed against; they are not part of the branch.
+        order = [s.id for s in spec.steps if not s.id.endswith("_stick_free")]
         first = order.index("reinject_anchor_initial") + 1
         self.assertEqual(order[first:first + len(self.BRANCH)], self.BRANCH)
         self.assertEqual(order[first + len(self.BRANCH)], "dump_denoise_input")
@@ -2097,6 +2099,10 @@ class TestTheReoutlineBranch(unittest.TestCase):
         self.assertEqual(pass1.params["strength"], [1, 1, 0.5, 0.5, 0.5, 0.5])
         expected = dict(pass1.params, width=480, height=832, steps_low=2,
                         strength=[1, 1, 0.5, 0.5])
+        # Weak skeleton is pass 1's alone: this pass is kept for its
+        # silhouette, which stick ink does not reach.
+        del expected["skeleton_steps"]
+        self.assertNotIn("control_video_alt", extra.inputs)
         self.assertEqual(extra.params, expected)
         self.assertEqual((extra.dispatch, extra.env, extra.keep_loaded),
                          (pass1.dispatch, pass1.env, pass1.keep_loaded))
@@ -2181,7 +2187,10 @@ class TestTheReoutlineBranch(unittest.TestCase):
         self.assertNotIn("outline_mask_clean_px", first.params)
         self.assertEqual(first.params["outline_strength"], "${globals.outline_strength}")
         self.assertEqual(again.inputs, dict(first.inputs, outline_masks="scene.outline_masks"))
-        self.assertEqual(set(again.outputs), {"images", "masks", "inactive_masks"})
+        self.assertEqual(set(again.outputs),
+                         {"images", "masks", "inactive_masks", "images_no_skeleton"})
+        self.assertEqual(again.outputs["images_no_skeleton"],
+                         first.outputs["images_no_skeleton"])
         self.assertEqual(again.outputs["images"], "dataset.images")
 
     def test_the_two_fill_strengths_are_settings_with_one_home_each(self):
@@ -2789,7 +2798,9 @@ class TestTheReoutlineBranch(unittest.TestCase):
 
     def test_it_sits_between_the_anchor_injection_and_the_dump(self):
         spec = self._spec()
-        order = [s.id for s in spec.steps]
+        # The Weak skeleton setting's anchor injections ride beside the two
+        # the branch is placed against; they are not part of the branch.
+        order = [s.id for s in spec.steps if not s.id.endswith("_stick_free")]
         first = order.index("reinject_anchor_initial") + 1
         self.assertEqual(order[first:first + len(self.BRANCH)], self.BRANCH)
         self.assertEqual(order[first + len(self.BRANCH)], "dump_denoise_input")
@@ -2814,6 +2825,10 @@ class TestTheReoutlineBranch(unittest.TestCase):
         self.assertEqual(pass1.params["strength"], [1, 1, 0.5, 0.5, 0.5, 0.5])
         expected = dict(pass1.params, width=480, height=832, steps_low=2,
                         strength=[1, 1, 0.5, 0.5])
+        # Weak skeleton is pass 1's alone: this pass is kept for its
+        # silhouette, which stick ink does not reach.
+        del expected["skeleton_steps"]
+        self.assertNotIn("control_video_alt", extra.inputs)
         self.assertEqual(extra.params, expected)
         self.assertEqual((extra.dispatch, extra.env, extra.keep_loaded),
                          (pass1.dispatch, pass1.env, pass1.keep_loaded))
@@ -2898,7 +2913,10 @@ class TestTheReoutlineBranch(unittest.TestCase):
         self.assertNotIn("outline_mask_clean_px", first.params)
         self.assertEqual(first.params["outline_strength"], "${globals.outline_strength}")
         self.assertEqual(again.inputs, dict(first.inputs, outline_masks="scene.outline_masks"))
-        self.assertEqual(set(again.outputs), {"images", "masks", "inactive_masks"})
+        self.assertEqual(set(again.outputs),
+                         {"images", "masks", "inactive_masks", "images_no_skeleton"})
+        self.assertEqual(again.outputs["images_no_skeleton"],
+                         first.outputs["images_no_skeleton"])
         self.assertEqual(again.outputs["images"], "dataset.images")
 
     def test_the_two_fill_strengths_are_settings_with_one_home_each(self):
@@ -3379,3 +3397,65 @@ class TestDeclaredSettings(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestWeakSkeleton(unittest.TestCase):
+    """The Weak skeleton setting: pass 1 sees the sticks on step 1 only.
+
+    Wired the same way in both shipped files: both control renders publish
+    the stick-free copy, each gets the anchor frames its main batch gets,
+    and pass 1 reads it optionally — so with the setting off nothing writes
+    the copy and the pass is the one it always was.
+    """
+
+    def _steps(self, name):
+        from pipeline.cli import resolve_workflow
+
+        spec = WorkflowSpec.from_yaml(resolve_workflow(name))
+        return spec, {s.id: s for s in spec.steps}
+
+    def test_it_is_a_plain_setting_that_defaults_off(self):
+        for name in ("helical", "helical_shell"):
+            with self.subTest(workflow=name):
+                spec, _ = self._steps(name)
+                setting = next(s for s in spec.settings if s.name == "weak_skeleton")
+                self.assertIs(setting.default, False)
+                self.assertEqual(setting.label, "Weak skeleton")
+                self.assertFalse(setting.advanced)
+
+    def test_both_control_renders_publish_the_copy(self):
+        for name in ("helical", "helical_shell"):
+            _, by_id = self._steps(name)
+            for render_id in ("render_initial_views", "render_reoutlined_views"):
+                with self.subTest(workflow=name, step=render_id):
+                    step = by_id[render_id]
+                    self.assertEqual(step.params["skeleton_free_copy"], "${globals.weak_skeleton}")
+                    self.assertEqual(step.outputs["images_no_skeleton"], "scene.control_no_skeleton")
+
+    def test_the_copy_gets_the_anchor_frames_its_drawing_gets(self):
+        for name in ("helical", "helical_shell"):
+            spec, by_id = self._steps(name)
+            order = [s.id for s in spec.steps]
+            with self.subTest(workflow=name):
+                for main, copy, when in (
+                    ("reinject_anchor_initial", "reinject_anchor_initial_stick_free",
+                     "${globals.weak_skeleton}"),
+                    ("reinject_anchor_reoutlined", "reinject_anchor_reoutlined_stick_free",
+                     ["${globals.re_outline}", "${globals.weak_skeleton}"]),
+                ):
+                    self.assertEqual(order.index(copy), order.index(main) + 1)
+                    self.assertEqual(by_id[copy].when, when)
+                    self.assertEqual(
+                        dict(by_id[copy].inputs, images="dataset.images"), by_id[main].inputs
+                    )
+                    self.assertEqual(by_id[copy].outputs, {"images": "scene.control_no_skeleton"})
+
+    def test_pass_1_reads_it_optionally_and_keeps_the_sticks_on_step_1(self):
+        for name in ("helical", "helical_shell"):
+            with self.subTest(workflow=name):
+                _, by_id = self._steps(name)
+                pass1 = by_id["denoise_pass1"]
+                self.assertEqual(pass1.inputs["control_video_alt"], "scene.control_no_skeleton?")
+                self.assertEqual(pass1.params["skeleton_steps"], [1])
+                for other in ("reoutline_denoise", "denoise_pass2"):
+                    self.assertNotIn("control_video_alt", by_id[other].inputs)

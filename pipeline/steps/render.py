@@ -472,7 +472,9 @@ class RenderStep(Step):
              the conditioning mask under `splat_inactive_mask`, 0.0 over the
              splat and 1.0 elsewhere, and None when that flag is off (see
              `_inactive_masks`; it is a SECOND batch, not a reinterpretation
-             of "masks"), "cameras": List[Camera],
+             of "masks"), "images_no_skeleton": Optional[List[np.ndarray]]
+             — the same frames without the skeleton overlay under
+             `skeleton_free_copy`, None otherwise, "cameras": List[Camera],
              "image_names": List[str], "points_3d": (positions, colors),
              "mesh": (vertices float32 (N,3), faces int32 (F,3)) — the body
              mesh in the SAME world frame as points_3d and the cameras (after
@@ -626,6 +628,14 @@ class RenderStep(Step):
               "counts as covered at splat alpha >= 0.9, and a frame the angle "
               "cull dropped comes out wholly reactive rather than carrying no "
               "mask at all"),
+        Param("skeleton_free_copy", bool, False,
+              "The `*+skeleton` composite modes only: also publish "
+              "`images_no_skeleton`, every frame composited a second time "
+              "with the skeleton (and the face overlay it draws) left out — "
+              "same base, relief, backdrop and splat layer, so the two "
+              "batches differ in the stick pixels and nowhere else. "
+              "wan22_vace_denoise's `control_video_alt` (the Weak skeleton "
+              "setting). Off: the output is None"),
         Param("framing", str, "full", "How much of the body fills the frame",
               choices=("full", "torso", "bust", "head")),
         Param("eye_style", str, "shape",
@@ -778,6 +788,14 @@ class RenderStep(Step):
         # modes before the orbit runs). The mask says where the splat is; a
         # mode that draws no splat puts it nowhere, and "1.0 everywhere" is
         # indistinguishable from the batch inject_anchor makes for free.
+        if params["skeleton_free_copy"] and base_render_mode not in (
+            "mesh+skeleton", "depth+skeleton", "outline+skeleton"
+        ):
+            raise ValueError(
+                f"skeleton_free_copy leaves the skeleton overlay out of a second "
+                f"composite, and render_mode {render_mode!r} does not draw one "
+                f"in a composite. Use a `...+skeleton` mode, or leave it off."
+            )
         if params["splat_inactive_mask"] and not want_splat:
             raise ValueError(
                 f"splat_inactive_mask marks the splat overlay, and render_mode "
@@ -1083,6 +1101,7 @@ class RenderStep(Step):
         )
 
         rendered_images = []
+        stick_free_images = [] if params["skeleton_free_copy"] else None
         for index, camera in enumerate(cameras):
             if base_render_mode == "mesh":
                 img = renderer.render_mesh(camera=camera, mesh_color=mesh_color, bg_color=bg_color)
@@ -1144,6 +1163,13 @@ class RenderStep(Step):
                     modes=composite_modes,
                     splat_layer=splat_layers[index],
                 )
+                if stick_free_images is not None:
+                    stick_free_images.append(renderer.render_composite(
+                        camera=camera,
+                        modes={name: opts for name, opts in composite_modes.items()
+                               if name not in ("skeleton", "face")},
+                        splat_layer=splat_layers[index],
+                    )[..., [2, 1, 0]])  # RGB -> BGR, as `images` below
             else:
                 raise ValueError(f"Unknown render_mode: {render_mode}")
             if base_render_mode in ("mesh", "depth", "skeleton"):
@@ -1195,6 +1221,7 @@ class RenderStep(Step):
             "images": images,
             "masks": masks,
             "inactive_masks": inactive_masks,
+            "images_no_skeleton": stick_free_images,
             "cameras": cameras,
             "image_names": image_names,
             "points_3d": (points, colors),
