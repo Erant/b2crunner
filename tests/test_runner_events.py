@@ -29,6 +29,29 @@ class BoomStep(Step):
         raise ValueError("this step always fails")
 
 
+_RESIDENT_LOG = []
+
+
+@register_step("_test_resident")
+class ResidentStep(Step):
+    def load(self, params):
+        _RESIDENT_LOG.append("load")
+
+    def unload(self):
+        _RESIDENT_LOG.append("unload")
+
+    def run(self, inputs, params):
+        _RESIDENT_LOG.append("run")
+        return {"value": params.get("value")}
+
+
+@register_step("_test_log")
+class LogStep(Step):
+    def run(self, inputs, params):
+        _RESIDENT_LOG.append("other")
+        return {}
+
+
 def _make_spec(step_dicts, globals_=None):
     from pipeline.workflow import StepSpec
 
@@ -57,6 +80,20 @@ class TestRunnerEvents(unittest.TestCase):
         self.assertTrue(all(e.total == 2 for e in seen))
         self.assertEqual(ctx.get("out.one"), 1)
         self.assertEqual(ctx.get("out.two"), 2)
+
+    def test_resident_dispatcher_closes_after_its_last_step(self):
+        # helical's Wan worker stayed in host RAM until the run ended and the
+        # upscale was OOM-killed beside it; it must go once nothing uses it.
+        spec = _make_spec([
+            {"id": "a", "step": "_test_resident", "keep_loaded": True,
+             "params": {"value": 1}, "outputs": {"value": "out.a"}},
+            {"id": "b", "step": "_test_resident", "keep_loaded": True,
+             "params": {"value": 2}, "outputs": {"value": "out.b"}},
+            {"id": "c", "step": "_test_log"},
+        ])
+        _RESIDENT_LOG.clear()
+        WorkflowRunner(spec).run({"dataset": None})
+        self.assertEqual(_RESIDENT_LOG, ["load", "run", "run", "unload", "other"])
 
     def test_step_error_event_then_reraise(self):
         spec = _make_spec([{"id": "kaboom", "step": "_test_boom"}])

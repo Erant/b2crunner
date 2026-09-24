@@ -143,6 +143,16 @@ class WorkflowRunner:
         logger.info("=" * 72)
         self._emit(RunEvent(kind="workflow_start", workflow=self.spec.name, total=total))
 
+        # The last enabled step on each dispatcher. A resident worker used to
+        # live until the end of the run, so helical's ~10 GB Wan worker sat
+        # idle in host RAM through the steps after the last denoise and the
+        # upscale's worker was OOM-killed beside it on a 32 GB box.
+        last_use = {
+            self._dispatcher_key(step_spec): index
+            for index, step_spec in enumerate(self.spec.steps, start=1)
+            if enabled[index - 1]
+        }
+
         try:
             for index, step_spec in enumerate(self.spec.steps, start=1):
                 if not enabled[index - 1]:
@@ -158,6 +168,9 @@ class WorkflowRunner:
                     )
                     continue
                 self._run_one(step_spec, index, total, ctx, template_scope)
+                key = self._dispatcher_key(step_spec)
+                if last_use[key] == index:
+                    self._close_dispatcher(key)
         finally:
             for dispatcher in self._dispatchers.values():
                 dispatcher.close()
@@ -280,7 +293,7 @@ class WorkflowRunner:
         # the same env that did *not* ask for residency would inherit — or
         # deny — it purely by declaration order, which is invisible in the
         # YAML and would show up as a mystery 47 GB reload.
-        key = (step_spec.dispatch, step_spec.env, step_spec.keep_loaded)
+        key = self._dispatcher_key(step_spec)
         if key not in self._dispatchers:
             env_config = self.envs.get(step_spec.env, {}) if step_spec.env else {}
             if step_spec.env and not env_config and step_spec.dispatch != "in_process":
@@ -298,6 +311,20 @@ class WorkflowRunner:
                 step_spec.dispatch, env_config, keep_loaded=step_spec.keep_loaded
             )
         return self._dispatchers[key]
+
+    @staticmethod
+    def _dispatcher_key(step_spec: StepSpec) -> tuple:
+        return (step_spec.dispatch, step_spec.env, step_spec.keep_loaded)
+
+    def _close_dispatcher(self, key: tuple) -> None:
+        dispatcher = self._dispatchers.pop(key, None)
+        if dispatcher is None:
+            return
+        logger.info("no later step uses %s; closing its dispatcher", ":".join(str(k) for k in key[:2] if k))
+        try:
+            dispatcher.close()
+        except Exception:  # a finished dispatcher must not fail the run
+            logger.exception("closing the %s dispatcher failed; continuing", key)
 
 
 def _duration(seconds: float) -> str:
