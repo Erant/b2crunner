@@ -341,17 +341,17 @@ class SidecarSubmissionTests(unittest.TestCase):
         self.assertIn("a.yaml", str(ctx.exception))
         self.assertIn("no_such_setting", str(ctx.exception))
 
-    def test_a_sidecar_switching_every_output_off_is_refused(self):
-        with self.assertRaises(SubmitError) as ctx:
-            self.submit([self.planned(
-                "a.jpg",
-                global_overrides={
-                    "export_colmap": False, "export_ply": False,
-                    "export_debug": True,
-                },
-                settings_path=Path("a.yaml"),
-            )])
-        self.assertIn("a.yaml", str(ctx.exception))
+    def test_a_sidecar_naming_a_retired_switch_is_let_through(self):
+        """`export_colmap` and `export_debug` went on 2026-09-26. A sidecar
+        written before that still names them; what it asked for is what
+        every run does now (or is picked when packaging), so the run goes
+        ahead rather than being refused over a name."""
+        jobs = self.submit([self.planned(
+            "a.jpg",
+            global_overrides={"export_colmap": True, "export_debug": False},
+            settings_path=Path("a.yaml"),
+        )])
+        self.assertEqual(len(jobs), 1)
 
     def test_a_refusal_late_in_the_batch_queues_nothing(self):
         """Half a batch submitted and then refused is the shape that
@@ -375,10 +375,10 @@ class SidecarSubmissionTests(unittest.TestCase):
                          global_overrides={"export_ply": False},
                          settings_path=Path("a.yaml")),
             self.planned("b.jpg"),
-        ], global_overrides={"export_debug": False})
+        ], global_overrides={"extra_debug": True})
         self.assertFalse(jobs[0].global_overrides["export_ply"])
         self.assertTrue(jobs[1].global_overrides["export_ply"])
-        self.assertFalse(jobs[1].global_overrides["export_debug"])
+        self.assertTrue(jobs[1].global_overrides["extra_debug"])
 
 
 class OutputSwitchTests(unittest.TestCase):
@@ -396,44 +396,39 @@ class OutputSwitchTests(unittest.TestCase):
         spec.globals.update(globals_)
         return spec
 
-    def test_the_declared_defaults_are_both_deliverables(self):
+    def test_only_the_ply_is_a_switch(self):
+        """The COLMAP dataset is `always` since 2026-09-26 and the debug
+        bundle is chosen at packaging time, so the .ply is the one switch
+        left — and switching it off still leaves a run with a deliverable."""
+        self.assertEqual(runs.resolve_outputs(self.spec()), {"export_ply": True})
         self.assertEqual(
-            runs.resolve_outputs(self.spec()),
-            {"export_colmap": True, "export_ply": True, "export_debug": True},
+            runs.resolve_outputs(self.spec(export_ply=False)), {"export_ply": False},
         )
+        self.assertNotIn("export_colmap", self.spec().globals)
 
-    def test_the_debug_bundle_is_not_a_deliverable_on_its_own(self):
-        """It draws as a checkbox and travels as a switch, but a run that
-        exports only `debug/` produces nothing: `_write_run_members`
-        refuses to build an archive out of it, the same way it refuses to
-        build one out of `log.txt`. Counting it here would let that past
-        and hand back nothing after an hour of GPU.
+    def switchable_spec(self, **globals_):
+        """The shipped workflow with its COLMAP dataset given a switch back.
 
-        It is not empty, either — since 2026-09-08 it carries the two debug
-        COLMAP datasets that used to be outputs of their own. A run for
-        those alone is still a run with nothing to deliver.
+        With `colmap/` always written no shipped combination exports
+        nothing, but the rule is the outputs schema's, so it is tested
+        against a spec where it can still fire.
         """
-        with self.assertRaises(SubmitError):
-            runs.resolve_outputs(self.spec(
-                export_colmap=False, export_ply=False, export_debug=True,
-            ))
-
-    def test_switching_the_debug_bundle_off_leaves_a_run_valid(self):
-        resolved = runs.resolve_outputs(self.spec(export_debug=False))
-        self.assertIs(resolved["export_debug"], False)
-        self.assertIs(resolved["export_colmap"], True)
+        spec = self.spec()
+        colmap = next(o for o in spec.outputs if o.name == "export_colmap")
+        colmap.always = False
+        spec.globals["export_colmap"] = True
+        spec.globals.update(globals_)
+        return spec
 
     def requiring_spec(self, **globals_):
-        """The shipped workflow with a `requires:` declared on one output.
+        """`switchable_spec` with a `requires:` declared on one output.
 
         No shipped output declares one: the pre-upscale COLMAP export did
-        until 2026-09-08, when it became a member of the debug bundle and
-        its `when:` grew the `run_upscale` half instead. The rule below is
-        the outputs schema's rather than that export's, and the web UI
-        greys a checkbox out on it, so it is tested here against a spec
-        that declares one rather than deleted with its last user.
+        until 2026-09-08. The rule below is the outputs schema's rather
+        than that export's, and the web UI greys a checkbox out on it, so
+        it is tested here against a spec that declares one.
         """
-        spec = self.spec(**globals_)
+        spec = self.switchable_spec(**globals_)
         ply = next(o for o in spec.outputs if o.name == "export_ply")
         ply.requires = "run_upscale"
         return spec
@@ -469,8 +464,8 @@ class OutputSwitchTests(unittest.TestCase):
 
     def test_nothing_selected_is_an_error(self):
         with self.assertRaises(SubmitError):
-            runs.resolve_outputs(self.spec(
-                export_colmap=False, export_ply=False, export_debug=False,
+            runs.resolve_outputs(self.switchable_spec(
+                export_colmap=False, export_ply=False,
             ))
 
 

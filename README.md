@@ -38,9 +38,10 @@ the run's output directory:
                              (upscale runs only)
 ```
 
-The last three are the Debug bundle output: they ride into the result .zip
-under `debug/` when it is on, and the two COLMAP datasets are not written
-at all when it is off.
+The last three ride into the result .zip under `debug/` when you ask for
+it at packaging time (Results tab "Include debug/", `/result?debug=true`).
+The two COLMAP datasets are written only with the "Extra debug outputs"
+setting (`extra_debug`, off by default).
 
 ## Install
 
@@ -78,11 +79,11 @@ python -m pipeline.cli run helical --reference-image sheet.png \
 # every step's own params (add --all for the ones nothing overrides)
 python -m pipeline.cli params helical
 
-# without the debug bundle: no debug/ in the .zip, and neither of the two
-# debug COLMAP datasets — including the one the first brush training is
-# handed, which is what to look at when the helical re-render comes out wrong
+# with the two debug COLMAP datasets — including the one the first brush
+# training is handed, which is what to look at when the helical re-render
+# comes out wrong
 python -m pipeline.cli run helical --reference-image sheet.png \
-    --param export_debug=false
+    --param extra_debug=true
 
 # what can this machine actually run? (GPU, Vulkan, EGL, venvs, HF access)
 python -m pipeline.cli doctor
@@ -90,8 +91,8 @@ python -m pipeline.cli doctor
 # the web UI: upload a reference sheet, or a .zip of image/prompt pairs (one
 # run per pair, fanned across every GPU — and an optional image1.yaml beside
 # a pair runs that one at its own settings); watch progress, pull the result
-# back as one .zip. Its Settings and Outputs boxes are the workflow's own
-# `settings:` / `outputs:` blocks; the ~300 per-step knobs are still all
+# back as one .zip. Its Settings box is the workflow's own `settings:`
+# block plus the switches in `outputs:`; the ~300 per-step knobs are still all
 # there, behind the "Per-step settings" fold.
 #
 # The same command also serves an HTTP API at /api/v1 on the same port —

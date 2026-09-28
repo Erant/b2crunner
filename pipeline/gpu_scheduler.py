@@ -278,6 +278,21 @@ class GpuScheduler:
                     names.append(slot.run_name)
         return names
 
+    def forget(self, run_names: List[str]) -> None:
+        """Drop these runs from the list, if they are over.
+
+        A queued or running run is kept whatever the caller asked: its
+        watcher still writes into `_states`, and the row is how it is seen.
+        """
+        with self._lock:
+            for name in run_names:
+                state = self._states.get(name)
+                if state is not None and state.status in ("queued", "running"):
+                    continue
+                self._states.pop(name, None)
+                if name in self._order:
+                    self._order.remove(name)
+
     # -- shutdown -----------------------------------------------------------
 
     def shutdown(self, timeout: float = 0.0) -> List[str]:

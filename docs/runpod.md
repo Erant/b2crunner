@@ -103,7 +103,7 @@ and what you put in it decides what runs — no input picker:
   SAM-3D-Body reconstruction and the anchor warp, back half to the denoise
   pass as its reference view), renders its own anchored views, and then
   runs the workflow's own six-stage tail over that dataset — same
-  `colmap/` and `ply/` deliverables, same Outputs box. The prologue also
+  `colmap/` and `ply/` deliverables, same settings. The prologue also
   builds a Gaussian cap of the face from the front half (the Sapiens2
   pointmap head, ~6.5 GB more prefetch).
 - **A `.zip` of image/prompt pairs** — `image1.jpg` + `image1.txt`,
@@ -171,55 +171,46 @@ else instead.
 `python -m pipeline.cli params <workflow>` prints the same settings and
 outputs on the command line, `--all` adds every step param.
 
-**Outputs** picks what the run produces, and is likewise the workflow's own
-`outputs:` block. These are real switches, not filters on the result — an
-unchecked step does not run:
+Every run writes `colmap/`. The rest of what used to be an Outputs box
+(gone 2026-09-26) is under **More settings**:
 
-- **COLMAP dataset** / **Trained `.ply`** — one, the other, or both; at
-  least one has to be selected. The `.ply` is a second full
-  30,000-iteration brush training, so unchecking it is worth an hour.
+- **Trained `.ply`** (on by default) — a second full 30,000-iteration
+  brush training, so unchecking it is worth an hour. Sets `export_ply`.
 - **Upscale dataset** (on by default) — runs the SeedVR2 upscale
   (720×1280 → 1080×1920) before the export. Off is the shorter pipeline
   that used to be the separate `fast_helical` workflow — the way to check
   whether the upscale is what degrades the output. Sets the `run_upscale`
   global.
-- **Debug bundle** (on by default) — the `debug/` directory in the result
-  `.zip`: refine_cameras' given-vs-refined camera models, the face splat's
-  stats and depth visualisations, the face `.ply` files,
-  `denoise_pass1_input/` — the control video the **first** denoise is
-  handed, its 81 frames carrying the VACE mask in their alpha channel,
-  beside the reference sheet, the warped anchor photograph, the prompt and
-  the cameras, in `load_dataset`'s own format — and
-  `intermediate_splat.ply` — the splat the helical re-render is built from,
-  and therefore the first thing to look at when that re-render is wrong.
-  The dataset dump is the only look at the drawings a run was denoised
-  *from*: every other export describes frames from after a denoise.
+- **Extra debug outputs** (off by default) — the two debug COLMAP
+  datasets, the only part of `debug/` that is not a side effect of work
+  the run does anyway (one of them costs an RMBG pass). Sets `extra_debug`.
 
-  It also carries the two debug COLMAP datasets, which had a checkbox each
-  until 2026-09-08 and are now this one switch:
-
-  - `debug/colmap_intermediate/` — the dataset the **first** brush training
+  - `colmap_intermediate/` — the dataset the **first** brush training
     is handed: the frames as `denoise_pass1` leaves them, plus the RMBG
     mattes and normal maps computed for that training, and a pose for every
     supporting view. Every other export in a run describes frames from
     after the helical re-render; this is the only look at what the splat
     driving that re-render actually saw.
-  - `debug/colmap_preupscale/` — the same export from the frames as they
+  - `colmap_preupscale/` — the same export from the frames as they
     are *before* SeedVR2, so you can train a splat on each and compare.
     Only with **Upscale dataset** on: with it off those frames are
-    `colmap/`'s, and this used to be a greyed-out checkbox saying so.
+    `colmap/`'s.
 
-  Most of the bundle costs nothing to produce — those dumps are a side
-  effect of steps the run needs anyway, written to the volume either way,
-  and the switch decides only whether they are packaged. The two COLMAP
-  datasets are the exception: nothing else in the run wants them, so this
-  switch skips them outright. Worth turning off for a run you are only
-  going to look at, because the intermediate splat is hundreds of MB
-  against a few hundred KB for the camera dumps. It is not a deliverable on
-  its own — a run with every other output off is still refused.
+Everything else in `debug/` is written by every run: refine_cameras'
+given-vs-refined camera models, the face splat's stats and depth
+visualisations, the face `.ply` files, `denoise_pass1_input/` — the
+control video the **first** denoise is handed, its 81 frames carrying the
+VACE mask in their alpha channel, beside the reference sheet, the warped
+anchor photograph, the prompt and the cameras, in `load_dataset`'s own
+format — and `intermediate_splat.ply`, the splat the helical re-render is
+built from. Whether it goes into the `.zip` is picked when you package it:
+**Include debug/** on the Results and All results tabs,
+`/result?debug=true` on the API, `api result --debug` from the client. Off
+by default, because the intermediate splat is hundreds of MB against a
+few hundred KB for the camera dumps.
 
 The **Results** tab has three things: the one `.zip` of the run's
-deliverables (`colmap/` and/or `ply/`, plus `debug/` if you asked for it,
+deliverables (`colmap/` and `ply/`, plus `debug/` if you tick it,
 and nothing else — the run directory's own frames stay on the volume), the
 final frames, and a **per-step contact sheet**: eight frames spaced evenly
 through the batch, captured after every step, one row per step in run
@@ -257,13 +248,12 @@ python -m pipeline.cli params helical --all
 python -m pipeline.cli run helical --reference-image /data/sheet.png \
     --param run_upscale=false
 
-# the same output switches the UI's Outputs box drives. export_debug is
-# what turns the two debug COLMAP exports on and off with it:
+# no final .ply, and the two debug COLMAP datasets on:
 # colmap_intermediate/ is the dataset the FIRST brush training is handed
 # (denoised frames + their mattes and normals), colmap_preupscale/ the same
 # idea one stage before SeedVR2 (upscale runs only)
 python -m pipeline.cli run helical --reference-image /data/sheet.png \
-    --param export_ply=false --param export_debug=true
+    --param export_ply=false --param extra_debug=true
 ```
 
 ## Automating it

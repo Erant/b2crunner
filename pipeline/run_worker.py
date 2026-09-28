@@ -187,7 +187,7 @@ def _run(job: RunJob, status_path: Path) -> int:
         # RunState.outputs. Taken after apply_output_requirements, so a
         # `requires:` that forced one off is reflected.
         writer.state.outputs = {
-            output.name: bool(spec.globals.get(output.name))
+            output.name: output.always or bool(spec.globals.get(output.name))
             for output in spec.outputs
         }
         writer.state.total = len(spec.steps)

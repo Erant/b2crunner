@@ -241,10 +241,10 @@ class TestAgainstAServer(unittest.TestCase):
         with self.assertRaises(ApiError) as caught:
             self.client.submit(
                 reference_image=str(self._sheet()),
-                settings={"export_colmap": False, "export_ply": False},
+                settings={"no_such_setting": False},
             )
         self.assertEqual(caught.exception.status, 400)
-        self.assertIn("Pick at least one output", caught.exception.detail)
+        self.assertIn("Not settings of", caught.exception.detail)
         self.assertEqual(self.submitted, [])
 
     def test_naming_both_or_neither_source_is_refused_before_any_request(self):
@@ -645,7 +645,7 @@ class TestShutdownWhenDone(unittest.TestCase):
                        "state": {"name": "r", "status": "done",
                                  "started": 1.0, "finished": 2.0, "message": "complete"}}
 
-            def download_result(self, name, into, on_progress=None):
+            def download_result(self, name, into, on_progress=None, debug=False):
                 calls.append("download")
                 if not download_ok:
                     raise ApiError(404, "produced no deliverables")
@@ -663,7 +663,7 @@ class TestShutdownWhenDone(unittest.TestCase):
         args = argparse.Namespace(
             image="sheet.png", prompt="", remote=False, param=None, workflow="",
             output=self._tmp.name, interval=0.0, download_anyway=False,
-            shutdown_when_done=flag,
+            shutdown_when_done=flag, debug=False,
         )
         import io
         from contextlib import redirect_stdout

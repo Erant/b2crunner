@@ -147,7 +147,7 @@ def _report_end(client: B2CClient, state: Dict[str, Any]) -> None:
             print(f"(could not read the log: {exc})")
 
 
-def _download(client: B2CClient, name: str, into: Path) -> int:
+def _download(client: B2CClient, name: str, into: Path, debug: bool = False) -> int:
     reported = [0]
 
     def progress(written: int, total: int) -> None:
@@ -162,7 +162,7 @@ def _download(client: B2CClient, name: str, into: Path) -> int:
             print(f"  {decile * 10:>3}%  {_size(written)} of {_size(total)}", flush=True)
 
     try:
-        path = client.download_result(name, into, on_progress=progress)
+        path = client.download_result(name, into, on_progress=progress, debug=debug)
     except ApiError as exc:
         if exc.status == 404:
             print(f"no deliverables to download: {exc.detail}")
@@ -209,7 +209,7 @@ def cmd_run(args: argparse.Namespace) -> int:
               "pass --download-anyway to try regardless")
         return 1
     print()
-    failed = _download(client, name, Path(args.output))
+    failed = _download(client, name, Path(args.output), debug=args.debug)
     if args.shutdown_when_done:
         if failed:
             # Only once the .zip is on this disk. Stopping the container is
@@ -316,7 +316,7 @@ def cmd_log(args: argparse.Namespace) -> int:
 
 
 def cmd_result(args: argparse.Namespace) -> int:
-    return _download(_client(args), args.name, Path(args.output))
+    return _download(_client(args), args.name, Path(args.output), debug=args.debug)
 
 
 def cmd_cancel(args: argparse.Namespace) -> int:
@@ -425,6 +425,7 @@ def add_parser(subparsers) -> argparse.ArgumentParser:
     run_p = action("run", help="Submit, follow every stage, then download the result")
     submission_args(run_p)
     run_p.add_argument("-o", "--output", default=".", help="Where to save the result .zip")
+    run_p.add_argument("--debug", action="store_true", help="Include debug/ in the .zip")
     run_p.add_argument("--interval", type=float, default=5.0, help="Seconds between polls")
     run_p.add_argument(
         "--shutdown-when-done", action="store_true",
@@ -475,6 +476,7 @@ def add_parser(subparsers) -> argparse.ArgumentParser:
     result_p = action("result", help="Download a finished run's .zip")
     result_p.add_argument("name")
     result_p.add_argument("-o", "--output", default=".")
+    result_p.add_argument("--debug", action="store_true", help="Include debug/ in the .zip")
     result_p.set_defaults(func=cmd_result)
 
     cancel_p = action("cancel", help="Stop a run at its next step boundary")

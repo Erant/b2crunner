@@ -287,6 +287,45 @@ class TestEveryRunOnTheVolume(_BundleCase):
             self.assertEqual([s.name for s in runs.completed_runs()],
                              ["cancelled-late"])
 
+    def test_clear_deletes_every_run_that_is_over_and_nothing_in_flight(self):
+        from pipeline.gpu_scheduler import GpuScheduler
+
+        for name, status in (("done", "done"), ("failed", "failed"),
+                             ("cancelled", "cancelled"), ("in-flight", "running")):
+            run = _run_dir(self.runs, colmap=True, ply=False, name=name)
+            self._status(run, status=status)
+            (self.root / "logs" / f"{name}.log").write_text("hello\n")
+            (self.jobs / f"{name}.job.json").write_text("{}")
+        _run_dir(self.runs, colmap=True, ply=False, name="from-the-cli")
+        (self.runs / "done-result.zip").write_bytes(b"zip")
+        (self.runs / runs.BUNDLE_NAME).write_bytes(b"zip")
+        scheduler = GpuScheduler(gpu_count=1, work_dir=self.jobs,
+                                 spawn=lambda *a: self.fail("nothing was submitted"))
+
+        with unittest.mock.patch.object(runs, "output_dir", lambda: self.runs):
+            cleared = runs.clear_finished_runs(scheduler)
+            left = [s.name for s in runs.merged_runs(scheduler)]
+
+        self.assertEqual(set(cleared), {"done", "failed", "cancelled", "from-the-cli"})
+        self.assertEqual(left, ["in-flight"])
+        self.assertEqual(sorted(p.name for p in self.runs.iterdir()), ["in-flight"])
+        self.assertEqual([p.name for p in (self.root / "logs").iterdir()], ["in-flight.log"])
+        self.assertEqual(sorted(p.name for p in self.jobs.iterdir()),
+                         ["in-flight.job.json", "in-flight.status.json"])
+
+    def test_clear_leaves_a_status_file_pointing_outside_the_volume_alone(self):
+        from pipeline.gpu_scheduler import GpuScheduler
+
+        elsewhere = _run_dir(self.root, colmap=True, ply=False, name="elsewhere")
+        self._status(elsewhere, status="done")
+        scheduler = GpuScheduler(gpu_count=1, work_dir=self.jobs,
+                                 spawn=lambda *a: self.fail("nothing was submitted"))
+
+        with unittest.mock.patch.object(runs, "output_dir", lambda: self.runs):
+            self.assertEqual(runs.clear_finished_runs(scheduler), ["elsewhere"])
+
+        self.assertTrue((elsewhere / "colmap").is_dir())
+
     def test_contents_names_every_part_of_the_archive(self):
         run = _run_dir(self.runs, colmap=True, ply=True, name="described")
         _touch(run / "face" / "face.ply", 2048)
@@ -480,22 +519,22 @@ class TestEveryRunOnTheVolume(_BundleCase):
 
 class TestOutputSelection(unittest.TestCase):
     def test_the_shipped_workflow_declares_its_deliverables(self):
-        """The Outputs box IS the workflow's `outputs:` block: its labels,
-        its order, and the `dir:` each one lands in."""
+        """What a run is packaged from is the workflow's `outputs:` block:
+        its labels, its order, and the `dir:` each one lands in. Since
+        2026-09-26 colmap/ is `always`, the .ply's switch is under More
+        settings, and `debug/` is not an output (chosen when packaging)."""
         outputs = runs.workflow_outputs("helical")
         self.assertEqual(
-            [(o.name, o.directory) for o in outputs],
-            [("export_colmap", "colmap"),
-             ("export_ply", "ply"),
-             ("export_debug", "debug")],
+            [(o.name, o.directory, o.always) for o in outputs],
+            [("export_colmap", "colmap", True),
+             ("export_ply", "ply", False)],
             # 2026-09-16 to 2026-09-19 the textured mesh (steps/meshify.py) had a
             # fourth checkbox; the mesh path was parked, then removed (2026-09-20).
         )
         self.assertTrue(all(o.label and o.help for o in outputs))
         # The two debug COLMAP datasets had a checkbox each until
-        # 2026-09-08. They are members of the debug bundle now — its
-        # `when:` on their export steps, `DEBUG_SUBDIRS` for the archive —
-        # so the box is three checkboxes rather than five.
+        # 2026-09-08. They are `extra_debug` now, and packaged with debug/
+        # through `DEBUG_SUBDIRS`.
         self.assertEqual(
             {"colmap_intermediate", "colmap_preupscale"} & set(runs.DEBUG_SUBDIRS),
             {"colmap_intermediate", "colmap_preupscale"},
@@ -841,13 +880,9 @@ class TestTheDebugDirectoryRidesAlong(_BundleCase):
             self._names(runs.build_result_zip(run)),
         )
 
-    def test_switching_the_debug_bundle_off_leaves_it_out(self):
-        """The switch decides packaging, not writing.
-
-        Every step writes its dumps regardless — they are a side effect of
-        steps the run needs anyway — so the directory being on disk says
-        nothing about whether it was wanted. What the run published does.
-        """
+    def test_packaging_without_debug_leaves_it_out(self):
+        """Packaging decides, not writing: every run writes debug/, and the
+        Results tab's "Include debug/" picks whether it goes in."""
         run = _run_dir(self.root, colmap=True, ply=False, name="no-debug")
         self._debug_files(run)
         _touch(run / "debug" / "intermediate_splat.ply", 4096)
@@ -858,26 +893,9 @@ class TestTheDebugDirectoryRidesAlong(_BundleCase):
         # The files are still on the volume; only the archive skipped them.
         self.assertTrue((run / "debug" / "intermediate_splat.ply").is_file())
 
-    def test_a_run_that_published_no_outputs_still_gets_its_debug(self):
-        # Runs from before the switch existed. Losing content silently on
-        # an upgrade would be the worse default.
-        state = RunState(name="old", workflow="helical", status="done")
-        self.assertTrue(runs.wants_debug(state))
-
-    def test_the_published_switch_is_what_decides(self):
-        for wanted in (True, False):
-            with self.subTest(wanted=wanted):
-                state = RunState(
-                    name="r", workflow="helical", status="done",
-                    outputs={"export_colmap": True, "export_debug": wanted},
-                )
-                self.assertEqual(runs.wants_debug(state), wanted)
-
     def test_debug_is_not_packaged_twice(self):
-        """`export_debug` declares `dir: debug` so it draws as a checkbox,
-        but the debug branch is what carries that directory — without
-        keeping it out of `result_subdirs` every member would appear
-        twice."""
+        """The debug branch is what carries debug/ — without keeping it out
+        of `result_subdirs` every member would appear twice."""
         self.assertNotIn("debug", runs.result_subdirs("helical"))
         run = _run_dir(self.root, colmap=True, ply=False, name="once")
         self._debug_files(run)

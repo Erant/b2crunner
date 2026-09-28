@@ -36,8 +36,8 @@ workflow picker either.
 **The form is the pipeline's, not this module's.** A workflow declares what
 it exposes — a `settings:` block of typed, labelled, documented knobs and an
 `outputs:` block of deliverables (see pipeline/workflow.py) — and the Run tab
-draws exactly that: a Settings box, an Outputs box, and nothing else in
-front. The per-step params are still all there, editable, behind one
+draws exactly that: a Settings box (the settings plus the outputs that
+have a switch), and nothing else in front. The per-step params are still all there, editable, behind one
 "Per-step settings" fold in the second column, which is where they belong:
 there are ~300 of them and on any given run you touch none.
 
@@ -109,9 +109,9 @@ from .run_state import PREVIEW_FRAMES, RunState, tail_lines
 from .cli import available_workflows
 from .runs import (
     BUNDLE_NAME, IMAGE_SUFFIXES, WORKFLOW_DEFAULT, SubmitError,
-    build_bundle_zip, build_result_zip, completed_runs, existing_result_zip,
+    build_bundle_zip, build_result_zip, clear_finished_runs, completed_runs, existing_result_zip,
     find_run, merged_runs, resolve_upload, result_dirs, result_subdirs,
-    run_contents, run_log_path, run_recency, submit_runs, wants_debug,
+    run_contents, run_log_path, run_recency, submit_runs,
     workflow_param_panel,
 )
 from .step import Param
@@ -132,7 +132,7 @@ _EXIT_FULLSCREEN_JS = (
 )
 
 # Nothing about a particular workflow's settings or deliverables lives in
-# this module any more: the Outputs box, the Settings box and the download's
+# this module any more: the Settings box and the download's
 # contents are all read off the workflow's own `settings:` / `outputs:`
 # blocks (see pipeline/workflow.py). What used to be here — OUTPUT_PARAMS,
 # RESULT_SUBDIRS, HIDDEN_GLOBALS, RESOLUTION_CHOICES, GLOBAL_CHOICES — was
@@ -427,8 +427,13 @@ def _log_tail(state: RunState) -> str:
     return tail_lines(path, max_lines=_LOG_TAIL_LINES, max_bytes=_LOG_TAIL_BYTES)
 
 
-def _result_summary(state: RunState) -> tuple[str, List[str], Optional[str]]:
+def _result_summary(
+    state: RunState, debug: bool = False,
+) -> tuple[str, List[str], Optional[str]]:
     """What the Results tab says about a run: (markdown, final frames, archive).
+
+    `debug` is the tab's "Include debug/" checkbox: the archive reported is
+    the one packaged that way.
 
     Read-only. The archive is only reported when one is already built and
     current (`existing_result_zip`); building one is the Package button's
@@ -467,7 +472,7 @@ def _result_summary(state: RunState) -> tuple[str, List[str], Optional[str]]:
         lines.append("- **`log.txt`** — the log this run wrote")
 
     archive = existing_result_zip(
-        Path(directory), state.workflow, state.log_path, debug=wants_debug(state),
+        Path(directory), state.workflow, state.log_path, debug=debug,
     )
     verb = "contains" if archive else "will contain"
     if archive:
@@ -525,6 +530,7 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
             )
             cancel_btn = gr.Button("Cancel run", variant="stop", scale=1)
             cancel_all_btn = gr.Button("Cancel all runs", variant="stop", scale=1)
+            clear_btn = gr.Button("Clear runs", variant="secondary", scale=1)
         fleet_out = gr.Markdown()
 
         # Keeps the app object usable as a handle onto its own scheduler —
@@ -554,8 +560,8 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
                     # Every workflow file in pipeline/workflows/, the shipped
                     # default selected. One entry today; the picker stays
                     # (added 2026-09-13 for an experiment since removed) so
-                    # a second workflow needs no new wiring. The panel, the
-                    # Outputs box and the summary all follow the pick, and
+                    # a second workflow needs no new wiring. The panel and
+                    # the summary follow the pick, and
                     # the per-run overrides are dropped on a change because
                     # they are keyed to the workflow they were drawn for.
                     workflow_in = gr.Dropdown(
@@ -611,20 +617,20 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
                         )
                         return widget
 
-                    # The two boxes a person actually uses, both drawn from
-                    # the workflow's own `settings:` and `outputs:` blocks.
-                    # The 300-odd per-step knobs live in the other column,
-                    # behind one fold.
+                    # The box a person actually uses, drawn from the
+                    # workflow's own `settings:` and the switches of its
+                    # `outputs:` (the trained .ply; an `always` output has
+                    # none). The 300-odd per-step knobs live in the other
+                    # column, behind one fold.
                     @gr.render(inputs=[workflow_in])
                     def render_settings(name):
                         spec, settings, outputs, _steps = workflow_param_panel(name)
                         values = spec.globals
 
-                        in_outputs = [s for s in settings if s.group == "outputs"]
-                        plain = [s for s in settings
-                                 if s.group != "outputs" and not s.advanced]
-                        advanced = [s for s in settings
-                                    if s.group != "outputs" and s.advanced]
+                        switches = [o.as_param() for o in outputs if o.switch]
+                        panel = list(settings) + switches
+                        plain = [s for s in panel if not s.advanced]
+                        advanced = [s for s in panel if s.advanced]
 
                         def draw(param):
                             return _control(
@@ -643,69 +649,24 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
                                     for param in advanced:
                                         controls[param.name] = draw(param)
 
-                            # `requires:` on a setting, the same rule the
-                            # Outputs box applies to a deliverable below: a
-                            # knob only meaningful behind another switch is
-                            # drawn greyed out while it is off and follows
-                            # it. Nothing is forced at run time — the steps
-                            # reading it are gated on the same switch.
-                            for param in plain + advanced:
-                                source = controls.get(param.requires)
+                            # `requires:` on a setting or an output: a knob
+                            # only meaningful behind another switch is drawn
+                            # greyed out while it is off and follows it. The
+                            # run-side half is the steps' own `when:` and,
+                            # for an output, `resolve_outputs`.
+                            requires = {s.name: s.requires for s in settings}
+                            requires.update({o.name: o.requires for o in outputs if o.switch})
+                            for param in panel:
+                                source = controls.get(requires.get(param.name) or "")
                                 if source is None:
                                     continue
                                 controls[param.name].interactive = truthy(
-                                    values.get(param.requires)
+                                    values.get(requires[param.name])
                                 )
                                 source.change(
                                     lambda on: gr.update(interactive=truthy(on)),
                                     inputs=[source], outputs=[controls[param.name]],
                                 )
-
-                        with gr.Accordion("Outputs", open=True):
-                            if not outputs:
-                                gr.Markdown("_This pipeline declares no outputs._")
-                            # A setting in the outputs group is drawn first:
-                            # it modifies the deliverables rather than the
-                            # run (the SeedVR2 upscale is the case), and the
-                            # checkboxes below can depend on it.
-                            widgets = {param.name: draw(param) for param in in_outputs}
-                            for output in outputs:
-                                param = output.as_param()
-                                required = (
-                                    values.get(output.requires)
-                                    if output.requires else True
-                                )
-                                widgets[output.name] = _control(
-                                    param, values.get(output.name, output.default),
-                                    f"{name}:globals:{output.name}", "globals",
-                                )
-                                if output.requires:
-                                    widgets[output.name].interactive = truthy(required)
-
-                            # `requires:` in the UI: a deliverable that is
-                            # only meaningful alongside another setting
-                            # follows that setting's control. The run-side
-                            # half of the same rule is `resolve_outputs`,
-                            # which forces it off whatever the panel says.
-                            for output in outputs:
-                                source = widgets.get(output.requires)
-                                if source is None:
-                                    continue
-                                source.change(
-                                    lambda on: gr.update(interactive=truthy(on)),
-                                    inputs=[source], outputs=[widgets[output.name]],
-                                )
-
-                            gr.Markdown(
-                                "_What the run produces, and what the Results tab's "
-                                ".zip contains. Each box switches its export steps "
-                                "off entirely — unticking the .ply skips a whole "
-                                "30,000-iteration brush training. The debug bundle "
-                                "is the half-exception: most of it is written either "
-                                "way and the box only decides what is packaged, but "
-                                "the two debug COLMAP datasets it carries are skipped "
-                                "with it._"
-                            )
 
                     start_btn = gr.Button("Start run", variant="primary")
                 with gr.Column(scale=1):
@@ -715,7 +676,7 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
                     # one accordion per step, each holding that step's own
                     # declared params. Folded away by default and folded
                     # again inside — this is ~300 controls, and the reason
-                    # the Settings and Outputs boxes exist.
+                    # the Settings box exists.
                     with gr.Accordion("Per-step settings", open=False):
                         gr.Markdown(
                             "_The knobs the pipeline does not expose. A dot marks "
@@ -796,6 +757,12 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
             results_info = gr.Markdown()
             with gr.Row():
                 package_btn = gr.Button("Package .zip", variant="primary", scale=1)
+                results_debug_in = gr.Checkbox(
+                    value=False, label="Include debug/", scale=1,
+                    info="Camera dumps, face splats, the intermediate splat "
+                         "(hundreds of MB) and, if the run had Extra debug "
+                         "outputs on, two more COLMAP datasets.",
+                )
                 results_zip = gr.File(label="Result (.zip)", scale=3)
             results_gallery = gr.Gallery(label="Final frames", columns=6, height=400)
 
@@ -835,6 +802,10 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
                          "archive — one download instead of N. It is a second "
                          "full copy of the deliverables on the volume, so it "
                          "is off unless you ask.",
+                )
+                all_debug_in = gr.Checkbox(
+                    value=False, label="Include debug/", scale=1,
+                    info="Each run's debug/ directory, as on the Results tab.",
                 )
             all_info = gr.Markdown()
             all_table = gr.Dataframe(
@@ -911,7 +882,7 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
         ]
 
         def view(run_name: Optional[str], memo: Optional[dict], step_filter: str,
-                 force: bool) -> tuple:
+                 debug: bool, force: bool) -> tuple:
             """Everything about `run_name`, or `gr.update()` where nothing moved.
 
             `force` repaints regardless — the page load and a picker change,
@@ -924,7 +895,8 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
             run_name = run_name or ""
             state = (find_run(scheduler, run_name) if run_name else None) or RunState()
             live = state.status in ("queued", "running")
-            sig = [run_name, state.status, state.current, state.total, int(state.finished)]
+            sig = [run_name, state.status, state.current, state.total, int(state.finished),
+                   bool(debug)]
             stale = force or sig != memo.get("sig")
 
             fleet = _fleet_status(scheduler)
@@ -957,7 +929,7 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
                 filter_upd = previews_upd = keep
 
             if stale:
-                info_upd, frames_upd, zip_upd = _result_summary(state)
+                info_upd, frames_upd, zip_upd = _result_summary(state, bool(debug))
                 path = run_log_path(state.output_dir, state.log_path)
                 log_file_upd = gr.update(
                     value=str(path) if path else None, visible=path is not None,
@@ -971,8 +943,8 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
                 info_upd, frames_upd, zip_upd, filter_upd, previews_upd, memo,
             )
 
-        def on_tick(run_name, memo, step_filter):
-            *painted, memo = view(run_name, memo, step_filter, force=False)
+        def on_tick(run_name, memo, step_filter, debug=False):
+            *painted, memo = view(run_name, memo, step_filter, debug, force=False)
             # The picker's rows carry each run's status icon, so they move
             # as runs start and finish; resent only then, so an open
             # dropdown is not redrawn under the pointer every two seconds.
@@ -981,35 +953,39 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
             memo["choices"] = choices
             return (picker, *painted, memo)
 
-        def on_load(run_name, memo, step_filter):
+        def on_load(run_name, memo, step_filter, debug=False):
             """A fresh page: every run on the volume, the most recent selected."""
             choices = _run_choices(scheduler)
             names = [value for _, value in choices]
             selected = run_name if run_name in names else (names[0] if names else None)
-            *painted, memo = view(selected, memo, step_filter, force=True)
+            *painted, memo = view(selected, memo, step_filter, debug, force=True)
             memo["choices"] = choices
             return (gr.update(choices=choices, value=selected), *painted, memo)
 
-        def on_change(run_name, memo, step_filter):
-            return view(run_name, memo, step_filter, force=True)
+        def on_change(run_name, memo, step_filter, debug=False):
+            return view(run_name, memo, step_filter, debug, force=True)
 
         timer = gr.Timer(2.0)
         timer.tick(
-            on_tick, inputs=[run_picker, memo, preview_step_in],
+            on_tick, inputs=[run_picker, memo, preview_step_in, results_debug_in],
             outputs=[run_picker, *view_outputs],
         )
         app.load(
-            on_load, inputs=[run_picker, memo, preview_step_in],
+            on_load, inputs=[run_picker, memo, preview_step_in, results_debug_in],
             outputs=[run_picker, *view_outputs], show_progress="hidden",
         )
         # `.change`, not `.input`: a run submitted below selects itself
         # programmatically, and that has to repaint too.
         run_picker.change(
-            on_change, inputs=[run_picker, memo, preview_step_in],
+            on_change, inputs=[run_picker, memo, preview_step_in, results_debug_in],
             outputs=view_outputs, show_progress="hidden",
         )
         preview_step_in.change(
-            on_change, inputs=[run_picker, memo, preview_step_in],
+            on_change, inputs=[run_picker, memo, preview_step_in, results_debug_in],
+            outputs=view_outputs, show_progress="hidden",
+        )
+        results_debug_in.change(
+            on_change, inputs=[run_picker, memo, preview_step_in, results_debug_in],
             outputs=view_outputs, show_progress="hidden",
         )
 
@@ -1076,7 +1052,19 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
 
         cancel_all_btn.click(on_cancel_all, inputs=[], outputs=[])
 
-        def on_package(run_name: Optional[str]):
+        def on_clear(run_name: Optional[str]):
+            names = clear_finished_runs(scheduler)
+            if not names:
+                gr.Warning("No finished, failed or cancelled runs to clear.")
+                return gr.update()
+            gr.Info(f"Deleted {len(names)} run(s) and their results.")
+            choices = _run_choices(scheduler)
+            keep = run_name if run_name in {value for _label, value in choices} else None
+            return gr.update(choices=choices, value=keep)
+
+        clear_btn.click(on_clear, inputs=[run_picker], outputs=[run_picker])
+
+        def on_package(run_name: Optional[str], debug: bool = False):
             """Build (or reuse) the selected run's archive — the one slow press.
 
             Separate from looking at a run on purpose: the first archive of
@@ -1097,16 +1085,19 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
                 )
             archive = build_result_zip(
                 Path(state.output_dir), state.workflow, state.log_path, reuse=True,
-                debug=wants_debug(state),
+                debug=bool(debug),
             )
             if not archive:
                 raise gr.Error("This run produced no deliverables to package.")
-            info, _frames, _archive = _result_summary(state)
+            info, _frames, _archive = _result_summary(state, bool(debug))
             return info, archive
 
-        package_btn.click(on_package, inputs=[run_picker], outputs=[results_info, results_zip])
+        package_btn.click(
+            on_package, inputs=[run_picker, results_debug_in],
+            outputs=[results_info, results_zip],
+        )
 
-        def on_all_results(bundle: bool):
+        def on_all_results(bundle: bool, debug: bool):
             """Package every finished run on the volume, streaming as it goes.
 
             A generator, unlike everything else on the page: the first press
@@ -1132,10 +1123,10 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
                     f"Packaging **{index} of {len(runs)}** — `{state.name}`…",
                     rows, archives, gr.update(), thumbs,
                 )
-                contents, size = run_contents(state)
+                contents, size = run_contents(state, bool(debug))
                 archive = build_result_zip(
                     Path(state.output_dir), state.workflow, state.log_path,
-                    reuse=True, debug=wants_debug(state),
+                    reuse=True, debug=bool(debug),
                 )
                 if archive:
                     archives.append(archive)
@@ -1160,7 +1151,7 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
             if bundle:
                 yield ("Building the combined .zip…", rows, archives,
                        gr.update(), thumbs)
-                path = build_bundle_zip(runs, reuse=True)
+                path = build_bundle_zip(runs, reuse=True, debug=bool(debug))
                 if path:
                     combined = gr.update(visible=True, value=path)
                     info.append(
@@ -1169,7 +1160,7 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
             yield "\n\n".join(info), rows, archives, combined, thumbs
 
         all_refresh.click(
-            on_all_results, inputs=[bundle_in],
+            on_all_results, inputs=[bundle_in, all_debug_in],
             outputs=[all_info, all_table, all_files, bundle_out, all_gallery],
         )
 

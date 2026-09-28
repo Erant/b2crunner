@@ -86,10 +86,9 @@ class Param:
     `settings:` block (pipeline/workflow.py), whose knobs are the ones a
     person actually sees. A step param is labelled by its `name` — that is
     the name you would type after `--param` — but a pipeline setting is a
-    control on a form and gets a written label. `group` names the box the UI
-    draws it in; the only value that means anything today is `outputs`,
-    which puts a setting in the Outputs box beside the deliverable
-    checkboxes it modifies (the SeedVR2 upscale is the case).
+    control on a form and gets a written label. `group` is carried and
+    printed by `pipeline.cli params`; the UI no longer draws by it (the
+    Outputs box it chose went on 2026-09-26).
 
     `requires`, also a settings-block field, names another setting this one
     is only meaningful with — the same word an output's `requires:` uses,

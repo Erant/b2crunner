@@ -114,7 +114,9 @@ _SETTING_KEYS = frozenset({
     "minimum", "maximum", "advanced", "group", "requires",
 })
 
-_OUTPUT_KEYS = frozenset({"name", "label", "dir", "default", "help", "requires"})
+_OUTPUT_KEYS = frozenset({
+    "name", "label", "dir", "default", "help", "requires", "advanced", "always",
+})
 
 
 def setting_from_dict(data: Dict[str, Any]) -> Param:
@@ -192,6 +194,12 @@ class Output:
     The pre-upscale COLMAP export is the case: with the upscale off it would
     be byte-identical to the ordinary one, so its checkbox is disabled and
     the global forced false rather than quietly exporting something else.
+
+    `always` is an output every run produces: no switch, so no global and
+    no control, only the `dir:` packaging needs. The COLMAP dataset is the
+    case — writing it is seconds, so a switch for it saved nothing.
+    `advanced` draws the switch under More settings like an advanced
+    setting.
     """
 
     name: str
@@ -200,6 +208,8 @@ class Output:
     default: bool = True
     help: str = ""
     requires: str = ""
+    advanced: bool = False
+    always: bool = False
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "Output":
@@ -217,6 +227,11 @@ class Output:
                 "under output_root its export steps write, which is how a "
                 "finished run is packaged."
             )
+        if data.get("always") and set(data) & {"default", "requires", "advanced"}:
+            raise ValueError(
+                f"output {data['name']!r}: an `always` output has no switch, "
+                "so `default`, `requires` and `advanced` mean nothing on it."
+            )
         return cls(
             name=data["name"],
             label=data.get("label", ""),
@@ -224,7 +239,14 @@ class Output:
             default=bool(data.get("default", True)),
             help=data.get("help", ""),
             requires=data.get("requires", ""),
+            advanced=bool(data.get("advanced", False)),
+            always=bool(data.get("always", False)),
         )
+
+    @property
+    def switch(self) -> bool:
+        """Whether this output has a switch (a global, a control) at all."""
+        return not self.always
 
     @property
     def title(self) -> str:
@@ -234,7 +256,7 @@ class Output:
         """This switch as the `Param` the UI draws and coercion goes through."""
         return Param(
             name=self.name, type=bool, default=self.default,
-            help=self.help, label=self.title,
+            help=self.help, label=self.title, advanced=self.advanced,
         )
 
 
@@ -277,9 +299,9 @@ class StepSpec:
     # caller to pick which ones to pay for, and a 30,000-iteration brush run
     # is not something to start and throw away.
     #
-    # A LIST is every one of them, i.e. `and`: the pre-upscale COLMAP dump
-    # wants the debug bundle AND the upscale, because with the upscale off
-    # it is the ordinary colmap/ under a second name. That is the whole
+    # A LIST is every one of them, i.e. `and`: the final training's body
+    # refit wants `refit_body` AND `export_ply`, because without the final
+    # training nothing reads it. That is the whole
     # expression language — no `or`, no negation. Anything that is not a
     # plain conjunction wants a global that already says what it means,
     # not an expression parser in a config file.
@@ -357,7 +379,7 @@ class WorkflowSpec:
         merged: Dict[str, Any] = {}
         for source, entries in (
             ("settings", [(s.name, s.default) for s in settings]),
-            ("outputs", [(o.name, o.default) for o in outputs]),
+            ("outputs", [(o.name, o.default) for o in outputs if o.switch]),
             ("globals", list((data.get("globals") or {}).items())),
         ):
             for key, value in entries:
@@ -386,7 +408,9 @@ class WorkflowSpec:
         is exactly why it gets no control.
         """
         declared = {setting.name: setting for setting in self.settings}
-        declared.update({output.name: output.as_param() for output in self.outputs})
+        declared.update({
+            output.name: output.as_param() for output in self.outputs if output.switch
+        })
         return declared
 
     def coerce_global(self, name: str, value: Any) -> Any:
@@ -419,6 +443,8 @@ class WorkflowSpec:
         """
         resolved: Dict[str, bool] = {}
         for output in self.outputs:
+            if not output.switch:
+                continue
             wanted = truthy(self.globals.get(output.name, output.default))
             if output.requires and not truthy(self.globals.get(output.requires)):
                 wanted = False
@@ -541,6 +567,27 @@ def _among(value: Any, choices: Any) -> bool:
     return False
 
 
+# Switches the shipped workflows used to declare, and why each went. A
+# caller still sending one (an API script, a `--param` in a shell history)
+# is told and carries on, rather than refused: what it asked for is what
+# every run does now, or is asked for when the run is packaged instead.
+RETIRED_GLOBALS: Dict[str, str] = {
+    "export_colmap": "every run writes colmap/ now",
+    "export_debug": (
+        "debug/ is always written and chosen when the result is packaged; "
+        "the two debug COLMAP datasets are the extra_debug setting"
+    ),
+}
+
+
+def retired_globals(spec: WorkflowSpec, overrides: Dict[str, Any]) -> List[str]:
+    """The keys of `overrides` that are retired switches this spec no longer has."""
+    return sorted(
+        key for key in overrides
+        if key in RETIRED_GLOBALS and key not in spec.globals
+    )
+
+
 def apply_ui_overrides(
     spec: WorkflowSpec,
     global_overrides: Dict[str, Any],
@@ -619,8 +666,8 @@ def when_truthy(value: Any) -> bool:
     The `any:` form exists for a branch two switches can want — the mesh
     steps run for the `export_mesh` output OR because pass 2 conditions on
     the mesh — without inventing an expression language in YAML. `eq:` is
-    for a setting with more than two values (`extend_guide`: which splat
-    renders the extension's control video), whose arms are otherwise not
+    for a setting with more than two values (it was written for the
+    extension's guide choice, since dropped), whose arms are otherwise not
     gateable at all: a choice's string is truthy whatever it says. Both
     sides are compared as strings, since one of them always came through
     a `${globals.x}` that may itself have been typed.

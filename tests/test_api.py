@@ -294,8 +294,6 @@ class TestSubmitting(ApiTestCase):
         self.submit_sheet(settings=json.dumps({"export_ply": False}))
         overrides = self.submitted[0].global_overrides
         self.assertIs(overrides["export_ply"], False)
-        self.assertIs(overrides["export_colmap"], True)
-        self.assertIs(overrides["export_debug"], True)
 
     def test_a_json_body_can_name_a_sheet_already_on_the_volume(self):
         sheet = self.data / "staged.png"
@@ -315,14 +313,14 @@ class TestWhatItRefuses(ApiTestCase):
         self.assertIn(fragment, response.json()["detail"])
         self.assertEqual(self.submitted, [], "a refused submission still queued work")
 
-    def test_a_submission_that_exports_nothing(self):
-        self.assertRefused(
-            self.submit_sheet(settings=json.dumps({
-                "export_colmap": False, "export_ply": False,
-                "export_debug": True,
-            })),
-            "Pick at least one output",
-        )
+    def test_the_retired_output_switches_are_let_through(self):
+        """`export_colmap` and `export_debug` went on 2026-09-26; a script
+        still sending them gets the run it asked for, not a 400."""
+        response = self.submit_sheet(settings=json.dumps({
+            "export_colmap": True, "export_debug": False,
+        }))
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertEqual(len(self.submitted), 1)
 
     def test_a_file_that_is_neither_an_image_nor_a_zip(self):
         self.assertRefused(
@@ -414,12 +412,9 @@ class TestWhatItRefuses(ApiTestCase):
         self.assertRefused(
             self.post(
                 files={"file": ("batch.zip", buffer.getvalue(), "application/zip")},
-                data={"settings": json.dumps({
-                    "export_colmap": False, "export_ply": False,
-                    "export_debug": True,
-                })},
+                data={"settings": json.dumps({"nosuchsetting": 1})},
             ),
-            "Pick at least one output",
+            "nosuchsetting",
         )
         self.assertEqual(list(runs.upload_dir().iterdir()), [])
 
@@ -550,33 +545,32 @@ class TestWhatAWorkflowDeclares(ApiTestCase):
         # the per-view rigs, the outline and occlusion strengths, the
         # re-outline branch) is behind the More settings fold since
         # 2026-09-21; the Settings box is what you set per run — which is
-        # also where Low VRAM (the machine) and Weak skeleton (the subject)
-        # belong.
+        # also where Low VRAM (the machine) belongs. Weak skeleton joined the
+        # fold on 2026-09-26, on by default, and the upscale left the
+        # Outputs box (gone) for it.
         body = self.client.get(
             f"{API_PREFIX}/workflows/helical", headers=AUTH
         ).json()
-        plain = [s["name"] for s in body["settings"]
-                 if not s["advanced"] and s.get("group") != "outputs"]
+        plain = [s["name"] for s in body["settings"] if not s["advanced"]]
         self.assertEqual(plain, ["resolution", "framing", "input_layout", "seed",
-                                 "low_vram", "weak_skeleton"])
+                                 "low_vram"])
+        self.assertEqual([o["name"] for o in body["outputs"] if not o["advanced"]
+                          and not o["always"]], [])
         by_name = {s["name"]: s for s in body["settings"]}
         self.assertIs(by_name["re_outline"]["default"], True)
         self.assertEqual(by_name["skeleton_occlusion_m"]["default"], 0.12)
 
-    def test_the_debug_bundle_is_one_of_the_declared_outputs(self):
-        # It has to draw in the Outputs box and be settable by name, which
-        # is what declaring it as an output buys — and what a client
-        # reading this schema needs in order to turn it off.
+    def test_debug_is_chosen_when_the_result_is_packaged(self):
+        # Not an output since 2026-09-26: every run writes debug/, and
+        # `/result?debug=true` is what puts it in the .zip. The two
+        # debug-only COLMAP datasets are a setting, off by default.
         body = self.client.get(
             f"{API_PREFIX}/workflows/helical", headers=AUTH
         ).json()
-        debug = next(o for o in body["outputs"] if o["name"] == "export_debug")
-        self.assertEqual(debug["dir"], "debug")
-        self.assertIs(debug["default"], True)
-
-    def test_switching_the_debug_bundle_off_travels_to_the_job(self):
-        self.submit_sheet(settings=json.dumps({"export_debug": False}))
-        self.assertIs(self.submitted[0].global_overrides["export_debug"], False)
+        self.assertNotIn("export_debug", {o["name"] for o in body["outputs"]})
+        extra = next(s for s in body["settings"] if s["name"] == "extra_debug")
+        self.assertIs(extra["default"], False)
+        self.assertIs(extra["advanced"], True)
 
     def test_the_outputs_are_published_with_their_directories_and_requires(self):
         body = self.client.get(
@@ -631,6 +625,19 @@ class TestCollectingTheResult(ApiTestCase):
                 sorted(archive.namelist()),
                 ["colmap/cameras.txt", "colmap/images.txt", "log.txt"],
             )
+
+    def test_debug_goes_in_only_when_asked_for(self):
+        run_dir = self.finished_run(name="debug-run")
+        (run_dir / "debug").mkdir()
+        (run_dir / "debug" / "stats.json").write_text("{}")
+        for query, wanted in (("", False), ("?debug=true", True)):
+            with self.subTest(query=query):
+                response = self.client.get(
+                    f"{API_PREFIX}/runs/debug-run/result{query}", headers=AUTH,
+                )
+                self.assertEqual(response.status_code, 200)
+                with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+                    self.assertEqual("debug/stats.json" in archive.namelist(), wanted)
 
     def test_it_is_refused_while_the_run_is_still_going(self):
         # Its exports are the last steps: packaging one now hands back half

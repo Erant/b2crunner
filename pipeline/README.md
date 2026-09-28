@@ -125,10 +125,10 @@ pipeline/
 │   ├── extend_orbit.py  extend_helical_path / assemble_extension / splice_extension:
 │   │                    the gated stage 4a that continues render_subject's helix 41
 │   │                    frames ahead and 40 after and paints them with two more 81-frame
-│   │                    passes sharing pass 2's first 40 / last 41 frames as VACE's
-│   │                    inactive frames, on latent edges, conditioned on a render of
-│   │                    the intermediate splat or of one retrained on pass 2's frames
-│   │                    (`extend_orbit` / `extend_guide`; never on a pod)
+│   │                    passes overlapping pass 2's first 40 / last 41 frames with
+│   │                    VACE inactive frames, on latent edges, conditioned on a render
+│   │                    of a splat retrained on pass 2's frames along each pass's own
+│   │                    ramp out of the band (`extend_orbit` / `extend_tilt_deg`)
 │   ├── rmbg.py          real, verified (single-image + batch paths)
 │   ├── wan22_vace_denoise.py  real, verified against real inference
 │   ├── sapiens2.py      real, verified (single-image + batch paths)
@@ -379,21 +379,23 @@ settings:                    # the knobs the web UI draws, in this order
     choices: [[720, 1280], [600, 1040]]
     help: Frame size, width x height.
     # also: minimum / maximum (a slider), advanced (behind "More settings"),
-    # group: outputs (drawn in the Outputs box instead of Settings)
+    # requires: <another setting> (greyed out while that one is off)
 
 outputs:                     # the deliverables, and the switch each one is
+  - name: export_colmap
+    label: COLMAP dataset
+    dir: colmap              # where it lands under output_root
+    always: true             # no switch: every run writes it
   - name: export_ply         # the global its export steps read via `when:`
     label: Trained .ply
-    dir: ply                 # where it lands under output_root
+    dir: ply
     default: true
+    advanced: true           # its checkbox sits under "More settings"
     help: A second brush training, flow-aligned.
-  - name: export_debug
-    label: Debug bundle
-    dir: debug               # what a step's `when:` skips, or packaging drops
-    default: true
-    help: The camera dumps, the face splats, the debug COLMAP datasets.
     # also: requires: <another switch> — forced off, and its checkbox
     # disabled, when that one is off. Nothing shipped declares one today.
+# debug/ is not an output: every run writes it, and packaging decides
+# whether it goes into the .zip.
 
 globals:                     # plumbing with no control of its own
   output_root: output/helical
@@ -478,8 +480,8 @@ falsy as *strings* too — a `when:` usually resolves through a param
 somebody typed, and `bool("false")` is `True`.
 
 A **list** `when:` is a conjunction: every entry has to be truthy. That is
-the whole expression language — the debug bundle's pre-upscale COLMAP dump
-wants `export_debug` and `run_upscale` both on, and anything less
+the whole expression language — the pre-upscale debug COLMAP dump
+wants `extra_debug` and `run_upscale` both on, and anything less
 mechanical than an `and` wants a global that already says what it means.
 
 See `pipeline/workflows/helical.yaml` for a full multi-step,

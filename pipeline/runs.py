@@ -40,7 +40,9 @@ from .logging_setup import timestamped_run_name
 from .paths import log_dir, output_dir, run_jobs_dir, upload_dir
 from .run_state import RunJob, RunState
 from .step import Param
-from .workflow import Output, WorkflowSpec, apply_ui_overrides
+from .workflow import (
+    RETIRED_GLOBALS, Output, WorkflowSpec, apply_ui_overrides, retired_globals,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -89,24 +91,15 @@ def resolve_outputs(spec: WorkflowSpec) -> Dict[str, bool]:
 
     Raises `SubmitError` if nothing would be exported: a run that produces no
     deliverable leaves nothing to download, and it is an hour of GPU either
-    way.
-
-    The debug bundle does not count towards that. It is declared as an
-    output so it draws as a checkbox and travels as a switch, but it is not
-    something a run *produces* — `_write_run_members` refuses to build an
-    archive out of it alone, exactly as it refuses to build one out of
-    `log.txt`. Counting it would let "colmap off, ply off, debug on" past
-    this check and then hand back nothing at the end of an hour.
+    way. An `always` output (the COLMAP dataset) is always something, so a
+    workflow that declares one never trips this.
     """
     resolved = spec.apply_output_requirements()
-    deliverables = {
-        name: wanted for name, wanted in resolved.items()
-        if name not in _debug_output_names(spec.name)
-    }
-    if deliverables and not any(deliverables.values()):
+    always = any(output.always for output in spec.outputs)
+    if resolved and not always and not any(resolved.values()):
         raise SubmitError(
             "Pick at least one output — a run that exports nothing leaves "
-            "nothing to download. (The debug bundle is not one on its own.)"
+            "nothing to download."
         )
     return resolved
 
@@ -168,7 +161,7 @@ def workflow_param_panel(
         colmap_export and the final training wrote under the process's cwd
         and the Results tab reported that the run had produced nothing.
         Undeclared means undrawable now, so that cannot come back.
-      * `outputs` — the deliverables, for the Outputs box.
+      * `outputs` — the deliverables; the switchable ones draw in Settings.
       * `steps` — one entry per step, `{"id", "step", "params": [Param],
         "overrides": {...}, "global_refs": {...}}`, for the per-step fold.
         `overrides` is what this workflow set on top, already
@@ -532,7 +525,10 @@ def _refuse_unknown_overrides(
     from .registry import get_step_class
 
     declared = spec.declared_globals()
-    unknown = sorted(set(global_overrides) - set(declared))
+    retired = retired_globals(spec, global_overrides)
+    for key in retired:
+        logger.warning("ignoring %s: %s", key, RETIRED_GLOBALS[key])
+    unknown = sorted(set(global_overrides) - set(declared) - set(retired))
     if unknown:
         raise SubmitError(
             f"Not settings of '{spec.name}': {', '.join(unknown)}. "
@@ -812,18 +808,6 @@ def _spec_output_dirs(path: Path) -> Dict[str, str]:
     return dirs
 
 
-def _debug_output_names(workflow: str = "") -> List[str]:
-    """Declared outputs whose `dir:` is one `debug_dirs` already carries.
-
-    `export_debug` declares `dir: debug` so it draws as a checkbox and
-    reads as an output like any other — but `debug/` is packaged by the
-    debug branch, which remaps `face/` under it and deflates the text.
-    Without this the archive would carry every debug member twice.
-    """
-    owned = set(DEBUG_SUBDIRS.values()) | set(DEBUG_SUBDIRS)
-    return [name for name, directory in _output_dirs(workflow).items() if directory in owned]
-
-
 def result_dirs(run_dir: Optional[Path], workflow: str = "") -> Dict[str, Path]:
     """The deliverable subdirectories this run actually produced.
 
@@ -857,11 +841,9 @@ def result_dirs(run_dir: Optional[Path], workflow: str = "") -> Dict[str, Path]:
 # export steps write — what the first brush training was fed, and the
 # frames as they were before the upscale. None of these is a deliverable,
 # so they are carried beside `result_dirs`' rather than declared in a
-# workflow's `outputs:` block; the debug bundle's own switch is what
-# decides whether they are packaged, and for the two COLMAP datasets
-# whether they are written at all (`when: ${globals.export_debug}` on the
-# steps — they are the one thing here that is not already a side effect of
-# work the run does anyway).
+# workflow's `outputs:` block. Every run writes all of them; whether they
+# go into an archive is chosen when it is packaged (the `debug` argument
+# below, the Results tab's checkbox, `/result?debug=true`).
 #
 # They keep their run-directory names and are only remapped on the way
 # into the archive, so a path written down in a script or a notebook
@@ -1030,7 +1012,7 @@ def archive_is_current(
     return _archive_holds(archive, [(Path(run_dir), workflow, log_path, "", debug)])
 
 
-def bundle_is_current(archive: Path, states: List[RunState]) -> bool:
+def bundle_is_current(archive: Path, states: List[RunState], debug: bool = True) -> bool:
     """True when the combined bundle already holds these runs as they stand.
 
     The same three checks as `archive_is_current`, over every run at
@@ -1038,14 +1020,13 @@ def bundle_is_current(archive: Path, states: List[RunState]) -> bool:
     cannot see: a run that finished since the last press, or one pruned
     off the volume, is a different list of names.
     """
-    return _archive_holds(archive, _bundle_parts(states))
+    return _archive_holds(archive, _bundle_parts(states, debug))
 
 
-def _bundle_parts(states: List[RunState]) -> List[_ArchivePart]:
+def _bundle_parts(states: List[RunState], debug: bool = True) -> List[_ArchivePart]:
     """What `build_bundle_zip` writes for `states`, run by run."""
     return [
-        (Path(state.output_dir), state.workflow, state.log_path, state.name,
-         wants_debug(state))
+        (Path(state.output_dir), state.workflow, state.log_path, state.name, debug)
         for state in states if state.output_dir
     ]
 
@@ -1214,7 +1195,9 @@ def build_result_zip(
 BUNDLE_NAME = "all-results.zip"
 
 
-def build_bundle_zip(states: List[RunState], reuse: bool = False) -> Optional[str]:
+def build_bundle_zip(
+    states: List[RunState], reuse: bool = False, debug: bool = True,
+) -> Optional[str]:
     """Every run's deliverables in one archive, each under its own run name.
 
     Built from the run directories rather than by zipping up the per-run
@@ -1233,13 +1216,13 @@ def build_bundle_zip(states: List[RunState], reuse: bool = False) -> Optional[st
     # and for the same reason — this path is fixed, so two presses of the
     # button write the same file. See `build_result_zip`.
     with _archive_lock(archive):
-        if reuse and bundle_is_current(archive, states):
+        if reuse and bundle_is_current(archive, states, debug):
             return str(archive)
         staging = archive.with_suffix(f".zip.{secrets.token_hex(4)}.part")
         try:
             with zipfile.ZipFile(staging, "w", compression=zipfile.ZIP_STORED) as bundle:
                 bundle.comment = ARCHIVE_FORMAT
-                for run_dir, workflow, log_path, prefix, debug in _bundle_parts(states):
+                for run_dir, workflow, log_path, prefix, debug in _bundle_parts(states, debug):
                     if _write_run_members(
                         bundle, run_dir, workflow, log_path, prefix=prefix, debug=debug,
                     ):
@@ -1313,28 +1296,9 @@ def completed_runs() -> List[RunState]:
     ]
 
 
-def wants_debug(state: RunState) -> bool:
-    """Whether this run asked for its `debug/` directory in the archive.
-
-    From what the run published, not from what is on disk: every step
-    writes its debug dumps regardless, because they are a side effect of
-    steps the run needs anyway — so the directory being there says nothing
-    about whether it was wanted.
-
-    A run that published no `outputs` at all predates the switch. It gets
-    the debug bundle, which is what those runs were packaged with, rather
-    than silently losing content on an upgrade.
-    """
-    for name in _debug_output_names(state.workflow):
-        if name in state.outputs:
-            return bool(state.outputs[name])
-    return True
-
-
-def run_contents(state: RunState) -> "tuple[str, int]":
+def run_contents(state: RunState, debug: bool = True) -> "tuple[str, int]":
     """One run's deliverables as a summary line and a total size in bytes."""
     parts, total = [], 0
-    debug = wants_debug(state)
     for name, path in sorted(result_dirs(state.output_dir, state.workflow).items()):
         files = [f for f in path.rglob("*") if f.is_file()]
         for f in files:
@@ -1379,6 +1343,53 @@ def merged_runs(scheduler: GpuScheduler) -> List[RunState]:
         key=lambda state: (state.status in ("queued", "running"), run_recency(state)),
         reverse=True,
     )
+
+
+def _inside(path: Path, root: Path) -> bool:
+    """`path` is strictly below `root` — never the root itself."""
+    path, root = Path(path).resolve(), Path(root).resolve()
+    return path != root and path.is_relative_to(root)
+
+
+def clear_finished_runs(scheduler: GpuScheduler) -> List[str]:
+    """Delete every run that is over, from the list and from the volume.
+
+    "Over" is done, failed, cancelled, or `unknown` (an output directory
+    nobody published a status for). A run whose status says queued or
+    running is left alone even if no worker here owns it: that is also
+    what a `pipeline.cli` run from an SSH shell looks like while it works.
+
+    Everything the run left is removed: its output directory, its
+    `<run>-result.zip`, its log, and its job/status files — and the
+    all-results bundle, which copies them. The upload it
+    was made from is not — one zip fans out to several runs. Paths a status
+    file names are only deleted inside the directory they belong in, so a
+    hand-edited status file cannot point this at anything else.
+    """
+    cleared = []
+    for state in merged_runs(scheduler):
+        if state.status in ("queued", "running") or not state.name:
+            continue
+        run_dir = Path(state.output_dir) if state.output_dir else output_dir() / state.name
+        if _inside(run_dir, output_dir()):
+            shutil.rmtree(run_dir, ignore_errors=True)
+            archive = result_archive_path(run_dir)
+            with _archive_lock(archive):
+                archive.unlink(missing_ok=True)
+        log = run_log_path(run_dir, state.log_path)
+        if log is not None and _inside(log, log_dir()):
+            log.unlink(missing_ok=True)
+        for suffix in (".job.json", ".status.json"):
+            (run_jobs_dir() / f"{state.name}{suffix}").unlink(missing_ok=True)
+        cleared.append(state.name)
+    if cleared:
+        # Holds a copy of the cleared runs' deliverables; the next press of
+        # All results builds it again from what is left.
+        bundle = output_dir() / BUNDLE_NAME
+        with _archive_lock(bundle):
+            bundle.unlink(missing_ok=True)
+    scheduler.forget(cleared)
+    return cleared
 
 
 def find_run(scheduler: GpuScheduler, name: str) -> Optional[RunState]:

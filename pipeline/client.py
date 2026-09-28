@@ -336,8 +336,11 @@ class B2CClient:
         name: str,
         destination: Path,
         on_progress: Optional[Callable[[int, int], None]] = None,
+        debug: bool = False,
     ) -> Path:
         """Stream the run's `.zip` to `destination`; return the file written.
+
+        `debug` adds the run's `debug/` directory to the archive.
 
         `destination` names a file only when it ends in `.zip`; anything
         else is a directory, created if it does not exist, and the server's
@@ -365,6 +368,7 @@ class B2CClient:
 
         response = self._request(
             "GET", f"/runs/{name}/result", stream=True, timeout=(self.timeout, None),
+            params={"debug": "true"} if debug else None,
         )
         if target.is_dir() or target.suffix.lower() != ".zip":
             target.mkdir(parents=True, exist_ok=True)

@@ -54,7 +54,7 @@ from .gpu_scheduler import GpuScheduler
 from .run_state import tail_lines
 from .runs import (
     WORKFLOW_DEFAULT, SubmitError, build_result_zip, check_submission,
-    discover_runs, find_run, merged_runs, wants_debug,
+    discover_runs, find_run, merged_runs,
     resolve_upload, run_log_path, submit_runs, workflow_param_panel,
 )
 
@@ -417,6 +417,7 @@ def build_router(
                 {
                     "name": o.name, "label": o.label, "dir": o.directory,
                     "default": o.default, "requires": o.requires, "help": o.help,
+                    "advanced": o.advanced, "always": o.always,
                 }
                 for o in outputs
             ],
@@ -545,8 +546,9 @@ def build_router(
         return {"name": name, "path": str(path), "log": tail_lines(path, max_lines=tail)}
 
     @router.get("/runs/{name}/result")
-    def get_result(name: str) -> FileResponse:
-        """The run's deliverables as one .zip — `colmap/`, `ply/`, `debug/`, `log.txt`.
+    def get_result(name: str, debug: bool = Query(False)) -> FileResponse:
+        """The run's deliverables as one .zip — `colmap/`, `ply/`, `log.txt`,
+        and `debug/` with `?debug=true`.
 
         Refused while the run is still going: the exports are its last
         steps, so packaging one mid-flight hands back half a dataset that
@@ -565,7 +567,7 @@ def build_router(
             )
         archive = build_result_zip(
             state.output_dir, state.workflow, state.log_path, reuse=True,
-            debug=wants_debug(state),
+            debug=debug,
         )
         if archive is None:
             raise HTTPException(

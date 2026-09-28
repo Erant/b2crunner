@@ -326,7 +326,6 @@ class TestRequiredForSteps(unittest.TestCase):
         """The prefetch reads enabled_steps(), so switching an output off
         also drops whatever only that output needed."""
         spec = WorkflowSpec.from_yaml(resolve_workflow("helical"))
-        spec.globals["export_colmap"] = False
         spec.globals["export_ply"] = False
         # Nothing outside stage 2 has used sapiens2 since 2026-09-06 (the
         # deliverable training stopped supervising on normals and its
@@ -334,14 +333,13 @@ class TestRequiredForSteps(unittest.TestCase):
         # the assertion that matters is that the skipped steps are gone from
         # what gets scanned at all.
         enabled = {s.id for s in spec.enabled_steps()}
-        self.assertNotIn("export_colmap", enabled)
         self.assertNotIn("train_final_splat", enabled)
         self.assertEqual(
             set(models.required_for_steps(s.step for s in spec.enabled_steps())),
             {"rmbg", "sapiens2", "sapiens2_pointmap", "sapiens2_seg", "sam3dbody",
              "moge2", "dinov3_hub", "mediapipe", "wan22", "wan22_fp8",
              "wan22_lora", "seedvr2",
-             # Still here with both exports off: the stage-2 refinement runs
+             # Still here with the .ply off: the stage-2 refinement runs
              # ahead of the training that drives the helical re-render, which
              # is not one of the deliverables these switches gate.
              "colmap_onnx"},

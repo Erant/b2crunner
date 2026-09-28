@@ -41,7 +41,7 @@ from .logging_setup import setup_logging, timestamped_run_name
 from .paths import REPO_ROOT, configure_tmpdir, output_dir
 from .runner import WorkflowRunner
 from .step import ParamError
-from .workflow import WorkflowSpec, load_envs
+from .workflow import RETIRED_GLOBALS, WorkflowSpec, load_envs, retired_globals
 
 logger = logging.getLogger("pipeline.cli")
 
@@ -116,6 +116,9 @@ def apply_param_overrides(
     """
     from .registry import get_step_class
 
+    for key in retired_globals(spec, global_overrides):
+        logger.warning("ignoring --param %s: %s", key, RETIRED_GLOBALS[key])
+        del global_overrides[key]
     unknown = sorted(set(global_overrides) - set(spec.globals))
     if unknown:
         raise SystemExit(
@@ -193,7 +196,7 @@ def run_workflow(args: argparse.Namespace) -> int:
                 name, next(o.requires for o in spec.outputs if o.name == name),
             )
     if spec.outputs and not any(
-        spec.globals[output.name] for output in spec.outputs
+        output.always or spec.globals[output.name] for output in spec.outputs
     ):
         logger.warning(
             "no outputs selected: this run will produce no deliverable. "
@@ -348,10 +351,8 @@ def show_params(args: argparse.Namespace) -> int:
         print("\noutputs:   (deliverables; --param <name>=false to skip one)")
         for output in spec.outputs:
             needs = f" (needs {output.requires})" if output.requires else ""
-            print(
-                f"  {output.name:<28} {_short(spec.globals[output.name])}"
-                f" -> {output.directory}/{needs}"
-            )
+            value = "always" if output.always else _short(spec.globals[output.name])
+            print(f"  {output.name:<28} {value} -> {output.directory}/{needs}")
 
     plumbing = {
         key: value for key, value in spec.globals.items()
