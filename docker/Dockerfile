@@ -61,7 +61,7 @@
 # an ENV for a run's log to fall back on (see "Build provenance" at the
 # bottom). A global ARG has no value inside a stage until the stage says
 # `ARG B2CTRAIN_REF` again, which both do. Bump it here, once.
-ARG B2CTRAIN_REF=dd549af4fe30a08017f981750ee483c32bb1d803
+ARG B2CTRAIN_REF=1e52979aaafb3047fa2fbac30a3506d22ce925bb
 
 # =============================================================================
 # Stage 1: b2ctrain

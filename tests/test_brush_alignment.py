@@ -411,6 +411,46 @@ class TestTheGrowthKnobs(unittest.TestCase):
         self.assertEqual(_value(runs[1]["cmd"], "--growth-stop-iter"), "0")
 
 
+class TestTheNormalsGrowthThreshold(unittest.TestCase):
+    """The normal loss grows the splat (+147k with the random background);
+    normals_growth_grad_threshold brings the count back, and only for a run
+    that actually supervises on normals."""
+
+    def test_it_applies_when_normals_train(self):
+        cmd = _Loop(_inputs(with_normals=True), align_iters=0,
+                    normals_growth_grad_threshold=0.0035).runs[0]["cmd"]
+        self.assertEqual(_value(cmd, "--growth-grad-threshold"), "0.0035")
+
+    def test_not_without_normal_maps(self):
+        cmd = _Loop(align_iters=0, normals_growth_grad_threshold=0.0035).runs[0]["cmd"]
+        self.assertNotIn("--growth-grad-threshold", cmd)
+
+    def test_not_with_the_loss_off(self):
+        cmd = _Loop(_inputs(with_normals=True), align_iters=0, normal_loss_strength=0.0,
+                    normals_growth_grad_threshold=0.0035).runs[0]["cmd"]
+        self.assertNotIn("--growth-grad-threshold", cmd)
+
+    def test_an_explicit_threshold_wins(self):
+        cmd = _Loop(_inputs(with_normals=True), align_iters=0, growth_grad_threshold=0.0012,
+                    normals_growth_grad_threshold=0.0035).runs[0]["cmd"]
+        self.assertEqual(_value(cmd, "--growth-grad-threshold"), "0.0012")
+
+
+class TestTheRandomBackground(unittest.TestCase):
+    def test_off_by_default(self):
+        cmd = _Loop(align_iters=0).runs[0]["cmd"]
+        self.assertNotIn("--background-color", cmd)
+        self.assertNotIn("--background-noise-strength", cmd)
+
+    def test_every_invocation_gets_it(self):
+        """A refit against black would bring the dark edge splats back."""
+        runs = _Loop(align_iters=2, random_background=True).runs
+        self.assertEqual(len(runs), 3)
+        for run in runs:
+            self.assertEqual(_value(run["cmd"], "--background-color"), "0.5,0.5,0.5")
+            self.assertEqual(_value(run["cmd"], "--background-noise-strength"), "0.5")
+
+
 class TestWhatTheRunLeavesBehind(unittest.TestCase):
     """A 30,000-iteration training plus four alignment passes is an hour of
     GPU, and everything the loop touches is transient: the warped frames go

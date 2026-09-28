@@ -3913,12 +3913,9 @@ steps:
   # stage 6: that one runs after the upscale, on 1080x1920 frames.
   #
   # No normals. This export used to carry a `normals/` sidecar estimated by
-  # sapiens2_lite, for a brush training to supervise on; normal supervision
-  # is off for the deliverable splat since 2026-09-06 — measured as a
-  # straight loss, -18% band-limited sharpness AND -1.8 dB fidelity, and
-  # recomputing the maps from better images does not rescue it
-  # (docs/final-splat-alignment-guide.md §1) — so the maps had no consumer
-  # left, at ~2 GB of host RAM and a Sapiens2 pass each.
+  # sapiens2_lite, for a brush training to supervise on. The deliverable
+  # training supervises on normals again since 2026-09-28, but on its own
+  # maps of the final, upscaled frames (final_normal_maps), not these.
   - id: export_masks_preupscale
     step: rmbg
     dispatch: in_process
@@ -4009,21 +4006,10 @@ steps:
     outputs:
       masks: dataset.masks
 
-  # There used to be a second sapiens2_lite here, estimating normals for
-  # these frames — the stage-2 maps do not describe them, since
-  # render_subject replaced the dataset wholesale with a longer orbit and
-  # the upscale changed the resolution — so that the deliverable training
-  # could supervise on them. It is gone with the supervision itself
-  # (2026-09-06): the normal loss measured as a straight loss on this splat,
-  # -18% band-limited sharpness AND -1.8 dB fidelity, and recomputing the
-  # maps from the aligned images rescued nothing (22.0 against 21.8, inside
-  # the noise) — the harm is the loss term, not the quality of the maps
-  # feeding it. See docs/final-splat-alignment-guide.md §1. That took ~2 GB
-  # of host RAM and a Sapiens2 pass over 81 upscaled frames with it, and
-  # both deliverables below now go without a `normals/` sidecar.
-  #
-  # This says nothing about the STAGE-2 training, where normal supervision
-  # still helps and scene.normal_maps is still computed and wired.
+  # The deliverable training's normals are estimated further down
+  # (final_normal_maps), after the eye paste, on the frames exactly as it
+  # trains on them — the stage-2 maps do not describe these frames: the
+  # orbit was replaced, extended and upscaled since.
 
   # ------------------------------------------- refining the cameras (stage 6)
   # The same refinement again, and it is needed again for the same reason:
@@ -4201,13 +4187,34 @@ steps:
     outputs:
       labels: scene.seg_labels
 
+  # The deliverable training's normal maps (2026-09-28), Sapiens2 1b over the
+  # final frames after the eye paste — what train_final_splat supervises on.
+  # Off between 2026-09-06 and 2026-09-28 (docs/final-splat-alignment-guide.md
+  # §1 measured -18% sharpness, -1.8 dB); back because of what they do to
+  # the GEOMETRY an animated splat needs: on two subjects the arm splats more
+  # than 2 cm off the refit body went 20% -> 7% and 22% -> 10%. Against the
+  # random background and at an equal splat count the cost is ~3% sharpness
+  # (b2ctrain docs/random-background.md). ~0.9 s a frame at 1080x1920 on a
+  # 4070 Ti with low_vram; batch 4 because 162 float32 maps of that size are
+  # ~4 GB of host RAM before the batch's own.
+  - id: final_normal_maps
+    step: sapiens2_lite
+    dispatch: in_process
+    when: ${globals.export_ply}
+    inputs:
+      images: dataset.images
+    params:
+      low_vram: ${globals.low_vram}
+      batch_size: 4
+    outputs:
+      normal_maps: scene.final_normal_maps
+
   # Deliverable 1: a COLMAP dataset. `layout: brush` puts the frames in
   # images/ beside the three .txt files — what brush itself reads, and what
   # somebody handed this directory expects, rather than the flat
   # frames-beside-the-txt layout the ComfyUI colmap.json stage wrote. No
-  # normals/ since 2026-09-06 (see above): the training that read them
-  # stopped, and a sidecar nothing in this pipeline consumes is not worth a
-  # Sapiens2 pass over 81 upscaled frames.
+  # normals/: final_normal_maps goes to the training only (~300 MB of PNGs
+  # a bundle would carry for nobody).
   - id: export_colmap
     step: colmap_export
     dispatch: in_process
@@ -4234,9 +4241,11 @@ steps:
   #
   # It is the training the 2026-09-06 measurement session was run against
   # (docs/final-splat-alignment-guide.md), and the two things that session
-  # found are set below: normal supervision off, and the alignment loop on.
-  # Both are steps/brush.py defaults now, so what is spelled out here is the
-  # part that would be a silent regression if it moved.
+  # found are set below: the alignment loop on, and normal supervision off
+  # — which held until 2026-09-28, when it came back with a random training
+  # background and a raised growth threshold (see the params). What is
+  # spelled out here is the part that would be a silent regression if it
+  # moved.
   # The photograph wins in the FINAL training too (2026-09-19, measured on
   # two subjects' pass-2 exports: +1.8 / +2.8 dB at the photograph's view,
   # its face +1.8 / +5.4 dB, sharpness x2, every other view unchanged).
@@ -4294,10 +4303,10 @@ steps:
       # per Gaussian. Optional, so `splat_labels: false` leaves this
       # training byte-identical to before.
       labels: scene.seg_labels?
-      # No normal_maps, and no step computing them any more (see above).
-      # brush only emits the normal-loss flags when this input is wired, so
-      # the absence is already the whole of "supervision off" — the explicit
-      # 0.0 below is there in case anyone wires it back.
+      # The final frames' normal maps (final_normal_maps): brush writes
+      # them as the normals/ sidecar and emits the normal-loss flags; the
+      # alignment refits run without the loss whatever this says.
+      normal_maps: scene.final_normal_maps?
       #
       # NOT `scene.support_views.*` here, deliberately. The face splat's
       # renders were taken along the CIRCULAR bootstrap orbit and belong to
@@ -4335,12 +4344,27 @@ steps:
       # off this margin applies to SAM-3D-Body's own mesh, where 5 cm was the safe
       # setting (docs/body-refit.md).
       hollow_margin: 0.03
-      # Normal supervision off, measured on THIS training (guide §1): it
-      # costs 4.7 band-limited s1 (-18%) and 1.8 dB of fidelity at once,
-      # which is the tell that it is a straight loss rather than a
-      # sharpness-for-accuracy trade. Inert while no normal_maps input is
-      # wired, and the guard if one ever is again.
-      normal_loss_strength: 0.0
+      # Normal supervision, back on 2026-09-28 (off since 2026-09-06, guide
+      # §1): 0.05 from step 5000, the stage-2 training's values. It is the
+      # geometry that is bought — arm splats more than 2 cm off the refit
+      # body 20% -> 7% (2bccb7) and 22% -> 10% (1d747b) — not sharpness,
+      # which it costs ~3% at an equal splat count (b2ctrain
+      # docs/random-background.md).
+      normal_loss_strength: 0.05
+      normal_loss_step_start: 5000
+      # The normal loss is a second gradient source and growth is
+      # gradient-triggered: 553k splats against 389k at brush's 0.0025.
+      # 0.0035 brings it back to 396k with the placement benefit intact.
+      # Applies only while normal_maps is wired and the strength is > 0.
+      normals_growth_grad_threshold: 0.0035
+      # Against b2ctrain's near-black training background, the soft
+      # silhouette edges of the transparent frames are fitted by opaque dark
+      # splats as well as by semi-transparent ones — dark streaks along the
+      # tops of raised arms seen from above (silhouette edges in every orbit
+      # view). A uniform random background per step removes them: no
+      # see-through gaps on white, sharpness unchanged. Normals against
+      # black make the streaks WORSE, so the two go together.
+      random_background: true
       # The alignment loop, four iterations (steps/brush.py's own default,
       # spelled out because it is the single biggest measured lever on the
       # deliverable and roughly 5 minutes of the run): 21.1 -> 23.8 face

@@ -995,6 +995,28 @@ class BrushStep(Step):
               "aligned to a converged one give 24.7 against 22.5 "
               "(docs/final-splat-alignment-guide.md §2)",
               minimum=0, advanced=True),
+        Param("normals_growth_grad_threshold", float, None,
+              "growth_grad_threshold for a run that trains with normal supervision "
+              "(normal_maps wired and normal_loss_strength > 0), when "
+              "growth_grad_threshold itself is empty. The normal loss is a second "
+              "gradient source from normal_loss_step_start on and growth is "
+              "gradient-triggered, so the same threshold grows more: +63k splats "
+              "on the final training, +147k with random_background. 0.0035 brings "
+              "that back to the count without normals (396k against 389k, "
+              "b2ctrain docs/random-background.md) and keeps what the normals are "
+              "for — arm splats more than 2 cm off the body 5.9% against 15.0% — "
+              "at ~3% less sharpness than the full-growth run. Empty leaves the "
+              "threshold alone", minimum=0.0, advanced=True),
+        Param("random_background", bool, False,
+              "Train the transparent views against a uniform random background "
+              "(--background-color 0.5,0.5,0.5 --background-noise-strength 0.5) "
+              "instead of b2ctrain's near-black default (0,0,0 with 0.1 noise). "
+              "Against black, a soft silhouette edge is fitted as well by an "
+              "opaque DARK splat as by a semi-transparent one, and the tops of "
+              "raised arms — silhouette edges in every orbit view — collect them: "
+              "dark streaks seen from above. A background that changes every step "
+              "leaves no colour to hide in (b2ctrain docs/random-background.md: "
+              "the streaks gone, no see-through gaps, sharpness unchanged)"),
         Param("normal_loss_strength", float, 0.05,
               "Weight on the normal-map supervision loss; 0 disables it", minimum=0.0),
         Param("normal_loss_step_start", int, 5000,
@@ -1138,6 +1160,15 @@ class BrushStep(Step):
         normal_loss_strength = params["normal_loss_strength"]
         normal_loss_step_start = params["normal_loss_step_start"]
         normal_loss_every = params["normal_loss_every"]
+        # The growth threshold a normal-supervised run falls back to: only
+        # when the normal loss will actually run, and never over an explicit
+        # growth_grad_threshold.
+        if (growth_grad_threshold is None and params["normals_growth_grad_threshold"] is not None
+                and normal_maps is not None and normal_loss_strength > 0):
+            growth_grad_threshold = params["normals_growth_grad_threshold"]
+            logger.info("brush: normal supervision on, growth threshold %s "
+                        "(normals_growth_grad_threshold)", growth_grad_threshold)
+        random_background = params["random_background"]
         export_evidence = params["export_evidence"]
         evidence_prune_inmask = params["evidence_prune_inmask"]
         evidence_normal_weight = params["evidence_normal_weight"]
@@ -1350,6 +1381,12 @@ class BrushStep(Step):
                     cmd.extend(["--growth-grad-threshold", str(growth_grad_threshold)])
                 if growth_select_fraction is not None:
                     cmd.extend(["--growth-select-fraction", str(growth_select_fraction)])
+                # Every invocation of the run, the alignment and polish refits
+                # included: a refit against black would bring the dark edge
+                # splats straight back.
+                if random_background:
+                    cmd.extend(["--background-color", "0.5,0.5,0.5",
+                                "--background-noise-strength", "0.5"])
                 if with_viewer:
                     cmd.append("--with-viewer")
                 # Not passed unless a caller explicitly asked for one:

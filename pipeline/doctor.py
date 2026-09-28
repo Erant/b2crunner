@@ -279,6 +279,8 @@ def check_trainer_binaries() -> Check:
         "B2CRIG3",
         # The per-splat label vote (seg_label/seg_conf in the .ply, b2ctrain 2977f0e).
         "--export-labels",
+        # random_background (the final training): brush's own flags, never absent.
+        "--background-color", "--background-noise-strength",
     ]
     lines, status = [], OK
 
