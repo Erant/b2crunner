@@ -413,7 +413,7 @@ class TestWorkflowFiles(unittest.TestCase):
         training that has stopped supervising on them
         (docs/final-splat-alignment-guide.md §1).
 
-        `export_debug` because this is a member of the debug bundle, and
+        `extra_debug` because this is a debug-only dataset, and
         `run_upscale` because with the upscale off these are colmap/'s own
         frames — which is what `requires: run_upscale` said while it was an
         output of its own, up to 2026-09-08.
@@ -424,22 +424,23 @@ class TestWorkflowFiles(unittest.TestCase):
             if step.id in preupscale:
                 self.assertEqual(
                     step.when,
-                    ["${globals.export_debug}", "${globals.run_upscale}"],
+                    ["${globals.extra_debug}", "${globals.run_upscale}"],
                 )
-        # Both on (the defaults) is the only combination that runs them.
+        # Off by default; both on is the only combination that runs them.
+        self.assertFalse(preupscale & {s.id for s in spec.enabled_steps()})
+        spec.globals.update(extra_debug=True, run_upscale=True)
         self.assertTrue(preupscale <= {s.id for s in spec.enabled_steps()})
-        for off in ("export_debug", "run_upscale"):
+        for off in ("extra_debug", "run_upscale"):
             with self.subTest(off=off):
-                spec.globals.update(export_debug=True, run_upscale=True)
+                spec.globals.update(extra_debug=True, run_upscale=True)
                 spec.globals[off] = False
                 self.assertFalse(preupscale & {s.id for s in spec.enabled_steps()})
 
     def test_the_intermediate_colmap_rides_the_debug_bundle_and_exports_brush_s_own_input(self):
         """The debug export of what the FIRST brush training is handed. One
-        step, gated by `export_debug` since 2026-09-08 — it is archived
-        under `debug/`, and it is the one member of that bundle that is not
-        a free side effect of work the run does anyway, so the switch skips
-        it rather than only dropping it from the .zip. The part worth
+        step, gated by `extra_debug` (off by default) since 2026-09-26 — it
+        is archived under `debug/`, and unlike the rest of it is not a free
+        side effect of work the run does anyway. The part worth
         pinning is the wiring: it must read the very same context paths
         `train_splat` does. Recomputing the mattes or the normals here
         would export something subtly different from what was trained on,
@@ -453,14 +454,13 @@ class TestWorkflowFiles(unittest.TestCase):
             with self.subTest(workflow=path.name):
                 self.assertIn("export_colmap_intermediate", steps)
                 export = steps["export_colmap_intermediate"]
-                self.assertEqual(export.when, "${globals.export_debug}")
-                self.assertTrue(spec.globals["export_debug"])
-                self.assertIn("export_colmap_intermediate",
-                              {s.id for s in spec.enabled_steps()})
-                spec.globals["export_debug"] = False
+                self.assertEqual(export.when, "${globals.extra_debug}")
+                self.assertFalse(spec.globals["extra_debug"])
                 self.assertNotIn("export_colmap_intermediate",
                                  {s.id for s in spec.enabled_steps()})
-                spec.globals["export_debug"] = True
+                spec.globals["extra_debug"] = True
+                self.assertIn("export_colmap_intermediate",
+                              {s.id for s in spec.enabled_steps()})
 
                 ids = [s.id for s in spec.steps]
                 self.assertLess(ids.index("export_colmap_intermediate"),
@@ -1794,10 +1794,6 @@ class TestWorkflowFiles(unittest.TestCase):
                 )
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestTheIntermediateSplatIsKept(unittest.TestCase):
     """The first brush training exports somewhere the result .zip carries.
 
@@ -1913,8 +1909,7 @@ class TestOnlyTheHelicalRerenderCapsTheShBands(unittest.TestCase):
         self.assertGreater(len(renders), 1)
         setting = {s.id: s.params.get("sh_degree") for s in renders}
         self.assertEqual(setting.pop("render_subject"), 2)
-        self.assertEqual(setting.pop("extend_render_intermediate"), 2)
-        self.assertEqual(setting.pop("extend_render_retrained"), 2)
+        self.assertEqual(setting.pop("extend_render_guide"), 2)
         self.assertEqual(set(setting.values()), {None}, setting)
 
 
@@ -2237,6 +2232,295 @@ class TestTheReoutlineBranch(unittest.TestCase):
         self.assertEqual(resolve(matte.params, scope)["debug_dir"], "/out/debug/reoutline")
 
 
+class TestPassTwoIsTheSplatsReRender(unittest.TestCase):
+    """`render_subject` is `render_splat`, the splat's own re-render along the
+    helix, and the frames pass 2 conditions on. From 2026-09-17 to 2026-09-20
+    it was a subclass that could draw the textured mesh of the mesh path
+    instead (`pass2_mesh`); the path — meshify, photo_texture, refine_texture
+    and their globals — is removed, so nothing mesh-shaped may remain."""
+
+    def _spec(self):
+        return WorkflowSpec.from_yaml(str(next(p for p in _workflows() if p.name == "helical.yaml")))
+
+    def test_the_subject_render_is_render_splat_and_sits_before_the_matte(self):
+        spec = self._spec()
+        ids = [s.id for s in spec.steps]
+        at = ids.index("render_subject")
+        step = spec.steps[at]
+        self.assertEqual(step.step, "render_splat")
+        self.assertEqual(step.params["pattern"], "helical", "the path is the same helical one")
+        self.assertTrue(step.params["override_cam_from_mesh"])
+        for key in ("from_mesh", "mesh_blur_px", "mesh_render_dir"):
+            self.assertNotIn(key, step.params)
+        for key in ("mesh_dir", "mesh_texture_path", "mesh_photo_texture_path"):
+            self.assertNotIn(key, step.inputs)
+        for field in ("images", "masks", "cameras", "anchor_position", "anchor_frame_index"):
+            self.assertIn(field, step.outputs)
+        self.assertLess(at, ids.index("resplat_foreground_masks"))
+        self.assertIs(spec.steps[ids.index("resplat_foreground_masks")].when, True, "the rmbg matte always runs")
+        self.assertLess(ids.index("resplat_foreground_masks"), ids.index("mask_splat_fringes"))
+        self.assertLess(ids.index("mask_splat_fringes"), ids.index("reinject_anchor"), "the anchor is still re-injected after")
+        self.assertLess(ids.index("reinject_anchor"), ids.index("denoise_pass2"))
+
+    def test_nothing_of_the_mesh_path_remains(self):
+        for path in _workflows():
+            spec = WorkflowSpec.from_yaml(str(path))
+            with self.subTest(workflow=path.name):
+                steps = {s.step for s in spec.steps} | {s.id for s in spec.steps}
+                self.assertFalse(steps & {"meshify", "photo_texture", "refine_texture",
+                                          "render_subject_mesh", "render_mesh_views"})
+                self.assertNotIn("render_subject", {s.step for s in spec.steps})
+                names = set(spec.globals) | {p.name for p in spec.settings}
+                self.assertFalse(names & {"export_mesh", "pass2_mesh", "photo_texture", "refine_texture",
+                                          "texture_mode", "face_policy", "mesh_blur"})
+
+    def test_when_forms(self):
+        from pipeline.workflow import when_truthy
+
+        self.assertTrue(when_truthy({"any": [False, "true"]}))
+        self.assertFalse(when_truthy({"any": [False, "false"]}))
+        self.assertFalse(when_truthy([{"any": [True]}, False]))
+        self.assertTrue(when_truthy([{"any": [False, True]}, True]))
+        self.assertTrue(when_truthy({"not": "false"}))
+        self.assertFalse(when_truthy({"not": True}))
+        # `eq:` compares as strings, so a value typed into a text box and
+        # the YAML literal it is meant to match agree.
+        self.assertTrue(when_truthy({"eq": ["retrained", "retrained"]}))
+        self.assertTrue(when_truthy({"eq": [" retrained", "retrained"]}))
+        self.assertFalse(when_truthy({"eq": ["intermediate", "retrained"]}))
+        self.assertTrue(when_truthy({"eq": [40, "40"]}))
+        self.assertFalse(when_truthy({"not": {"eq": ["none", "none"]}}))
+        self.assertTrue(when_truthy([True, {"not": {"eq": ["retrained", "none"]}}]))
+        with self.assertRaises(ValueError):
+            when_truthy({"all": [True]})
+        with self.assertRaises(ValueError):
+            when_truthy({"eq": ["one"]})
+
+
+class TestTheOrbitExtension(unittest.TestCase):
+    """The gated stage 4a that lengthens the helix with two VACE video
+    extensions (steps/extend_orbit.py): nine steps between pass 2 and the
+    pre-upscale export. What is pinned is what makes each extension pass 2
+    continued — the path solved from render_subject's own helix params,
+    the guide (a splat retrained on pass 2's frames) rendered as
+    render_subject renders at the passes' own cameras, both extension
+    passes pass 2's block on pass 2's own frame count — and that with the
+    setting off nothing of it runs and the dataset is untouched until the
+    splice.
+    """
+
+    BRANCH = [
+        "extend_path", "extend_masks", "extend_train_splat", "extend_render_guide",
+        "extend_guide_masks", "extend_assemble",
+        "denoise_extension_before", "denoise_extension_after", "extend_splice",
+    ]
+
+    def _spec(self):
+        from pipeline.cli import resolve_workflow
+
+        return WorkflowSpec.from_yaml(resolve_workflow("helical"))
+
+    def _step(self, spec, step_id):
+        return next(s for s in spec.steps if s.id == step_id)
+
+    def test_it_sits_between_pass_2_and_the_pre_upscale_export(self):
+        spec = self._spec()
+        order = [s.id for s in spec.steps]
+        first = order.index("denoise_pass2") + 1
+        self.assertEqual(order[first:first + len(self.BRANCH)], self.BRANCH)
+        # The orbit record's snapshot follows the splice (tests/
+        # test_orbit_record.py), then the pre-upscale export.
+        self.assertEqual(order[first + len(self.BRANCH):first + len(self.BRANCH) + 2],
+                         ["snapshot_orbit", "export_masks_preupscale"])
+
+    def test_every_step_is_gated_and_the_setting_defaults_on(self):
+        spec = self._spec()
+        settings = {s.name: s for s in spec.settings}
+        self.assertIs(settings["extend_orbit"].default, True)
+        self.assertNotIn("extend_guide", settings)
+        self.assertEqual(settings["extend_overlap_before"].default, 40)
+        self.assertEqual(settings["extend_overlap_after"].default, 41)
+        self.assertEqual(settings["extend_tilt_deg"].default, 10.0)
+        for name in ("extend_overlap_before", "extend_overlap_after", "extend_tilt_deg"):
+            self.assertEqual(settings[name].requires, "extend_orbit")
+        for step_id in self.BRANCH:
+            with self.subTest(step=step_id):
+                self.assertEqual(self._step(spec, step_id).when, "${globals.extend_orbit}")
+        # Off, the branch is inert: nothing in it is enabled.
+        spec.globals["extend_orbit"] = False
+        enabled = {s.id for s in spec.enabled_steps()}
+        self.assertFalse(enabled & set(self.BRANCH))
+        # On, all of it.
+        spec.globals["extend_orbit"] = True
+        enabled = {s.id for s in spec.enabled_steps()}
+        self.assertEqual(enabled & set(self.BRANCH), set(self.BRANCH))
+
+    def test_the_dataset_is_pass_2s_until_the_splice(self):
+        """The guide is trained and rendered from pass 2's frames as pass 2
+        left them, and the passes' control videos live beside the dataset;
+        only the splice rewrites it — and it rewrites all of it at once."""
+        spec = self._spec()
+        for step_id in self.BRANCH[:-1]:
+            with self.subTest(step=step_id):
+                writes = set(self._step(spec, step_id).outputs.values())
+                self.assertFalse(
+                    writes & {"dataset.images", "dataset.cameras", "dataset.image_names",
+                              "dataset.extras.anchor_frame_index", "dataset.splat_path"},
+                    f"'{step_id}' rewrites the dataset ahead of the splice: {writes}",
+                )
+        splice = self._step(spec, "extend_splice")
+        self.assertEqual(splice.outputs, {
+            "images": "dataset.images", "masks": "dataset.masks",
+            "cameras": "dataset.cameras", "image_names": "dataset.image_names",
+            "anchor_frame_index": "dataset.extras.anchor_frame_index",
+        })
+
+    def test_the_path_is_render_subjects_helix_continued_by_pass_2s_own_length(self):
+        """The step rebuilds render_subject's path from these params and
+        refuses to continue one it cannot reproduce, so the two blocks must
+        agree; each extension pass is as long as pass 2 (in distribution),
+        and the two overlaps are the settings — 40 and 41 at their defaults,
+        so that each pass's mask changes on a latent frame's edge."""
+        spec = self._spec()
+        path = self._step(spec, "extend_path")
+        subject = self._step(spec, "render_subject")
+        self.assertEqual(subject.params["pattern"], "helical")
+        for key in ("n_frames", "n_loops", "amplitude_deg", "lead_in_deg", "lead_out_deg"):
+            with self.subTest(param=key):
+                self.assertEqual(path.params[key], subject.params[key])
+        self.assertEqual(path.params["phase_frames"], subject.params["n_frames"])
+        self.assertEqual(path.params["overlap_before"], "${globals.extend_overlap_before}")
+        self.assertEqual(path.params["overlap_after"], "${globals.extend_overlap_after}")
+        self.assertEqual(path.params["tilt_deg"], "${globals.extend_tilt_deg}")
+        from pipeline.steps.extend_orbit import latent_aligned
+        before = spec.globals["extend_overlap_before"]
+        after = spec.globals["extend_overlap_after"]
+        self.assertTrue(latent_aligned(subject.params["n_frames"] - before))
+        self.assertTrue(latent_aligned(after))
+        self.assertEqual(path.inputs, {"cameras": "dataset.cameras", "extras": "dataset.extras"})
+        self.assertEqual(path.outputs, {
+            "cameras": "scene.extended.cameras", "image_names": "scene.extended.image_names",
+            "before": "scene.extended.before", "after": "scene.extended.after",
+            "overlap_before": "scene.extended.overlap_before",
+            "overlap_after": "scene.extended.overlap_after",
+            "tilt_deg": "scene.extended.tilt_deg",
+            "pass_cameras": "scene.extended.pass_cameras",
+        })
+
+    def test_the_guide_is_rendered_as_render_subject_renders(self):
+        """Same bands, gate, cull colour and confidence tuning, of the
+        retrained splat, at the passes' own cameras handed in rather than a
+        pattern of its own."""
+        spec = self._spec()
+        subject = self._step(spec, "render_subject")
+        render = self._step(spec, "extend_render_guide")
+        self.assertEqual(render.step, "render_splat")
+        self.assertEqual(render.inputs, {"splat_path": "scene.extended.splat_path",
+                                         "cameras": "scene.extended.pass_cameras",
+                                         "dataset": "dataset"})
+        self.assertNotIn("pattern", render.params)
+        self.assertNotIn("override_cam_from_mesh", render.params)
+        for key in ("width", "height", "sh_degree", "confidence", "cull_color",
+                    "conf_args", "background"):
+            self.assertEqual(render.params[key], subject.params[key], key)
+        self.assertEqual(render.outputs, {"images": "scene.extended.guide_images"})
+        matte = self._step(spec, "extend_guide_masks")
+        self.assertEqual(matte.step, "rmbg")
+        self.assertEqual(matte.inputs, {"images": "scene.extended.guide_images"})
+        self.assertEqual(matte.outputs, {"masks": "scene.extended.guide_masks"})
+
+    def test_the_retrained_splat_is_fitted_on_pass_2s_frames_with_the_intermediates_knobs(self):
+        spec = self._spec()
+        train = self._step(spec, "extend_train_splat")
+        matte = self._step(spec, "extend_masks")
+        self.assertEqual(matte.step, "rmbg")
+        self.assertEqual(matte.inputs, {"images": "dataset.images"})
+        self.assertEqual(matte.outputs, {"masks": "dataset.masks"})
+        self.assertEqual(train.step, "brush")
+        self.assertEqual(train.inputs, {
+            "cameras": "dataset.cameras", "image_names": "dataset.image_names",
+            "points_3d": "dataset.points_3d", "images": "dataset.images",
+            "masks": "dataset.masks", "mesh": "scene.mesh_world?", "body_rig": "scene.body_rig?",
+        })
+        intermediate = self._step(spec, "train_splat")
+        for key in ("total_steps", "polish_steps", "align_iters", "hollow_weight",
+                    "match_alpha_weight", "export_evidence", "export_dir"):
+            with self.subTest(param=key):
+                self.assertEqual(train.params[key], intermediate.params[key])
+        self.assertEqual(train.params["export_name"], "extension_splat.ply")
+        self.assertEqual(train.outputs, {"splat_path": "scene.extended.splat_path"})
+
+    def test_the_two_control_videos_are_the_guide_at_the_passes_cameras(self):
+        from pipeline.templating import resolve
+
+        spec = self._spec()
+        assemble = self._step(spec, "extend_assemble")
+        self.assertEqual(assemble.inputs, {
+            "dataset": "dataset",
+            "pass_cameras": "scene.extended.pass_cameras",
+            "image_names": "scene.extended.image_names",
+            "before": "scene.extended.before",
+            "after": "scene.extended.after",
+            "overlap_before": "scene.extended.overlap_before",
+            "overlap_after": "scene.extended.overlap_after",
+            "guide_images": "scene.extended.guide_images",
+            "guide_masks": "scene.extended.guide_masks",
+        })
+        scope = {"globals": dict(spec.globals, output_root="/out")}
+        self.assertEqual(resolve(assemble.params, scope), {
+            "bg_color": [0.5, 0.5, 0.5],
+            "debug_dir": "/out/debug/extension_input",
+        })
+        # The composite colour is pass 2's control's.
+        self.assertEqual(assemble.params["bg_color"],
+                         self._step(spec, "mask_splat_fringes").params["bg_color"])
+        self.assertEqual(assemble.outputs, {
+            "before_images": "scene.extended.before_phase.images",
+            "before_masks": "scene.extended.before_phase.masks",
+            "after_images": "scene.extended.after_phase.images",
+            "after_masks": "scene.extended.after_phase.masks",
+        })
+
+    def test_both_extension_passes_are_pass_2s_block_on_their_own_video(self):
+        spec = self._spec()
+        pass2 = self._step(spec, "denoise_pass2")
+        for name, phase in (("denoise_extension_before", "before_phase"),
+                            ("denoise_extension_after", "after_phase")):
+            with self.subTest(step=name):
+                extra = self._step(spec, name)
+                self.assertEqual(extra.params, pass2.params)
+                self.assertEqual((extra.dispatch, extra.env, extra.keep_loaded),
+                                 (pass2.dispatch, pass2.env, pass2.keep_loaded))
+                self.assertEqual(extra.inputs, {
+                    "control_video": f"scene.extended.{phase}.images",
+                    "control_masks": f"scene.extended.{phase}.masks",
+                    "reference_image": pass2.inputs["reference_image"],
+                    "subject_desc": pass2.inputs["subject_desc"],
+                })
+                self.assertEqual(extra.outputs, {"images": f"scene.extended.{phase}.denoised"})
+
+    def test_the_splice_reads_both_passes_and_the_path(self):
+        spec = self._spec()
+        splice = self._step(spec, "extend_splice")
+        self.assertEqual(splice.step, "splice_extension")
+        self.assertEqual(splice.inputs, {
+            "dataset": "dataset",
+            "before_denoised": "scene.extended.before_phase.denoised",
+            "after_denoised": "scene.extended.after_phase.denoised",
+            "cameras": "scene.extended.cameras",
+            "image_names": "scene.extended.image_names",
+            "before": "scene.extended.before",
+            "after": "scene.extended.after",
+            "overlap_before": "scene.extended.overlap_before",
+            "overlap_after": "scene.extended.overlap_after",
+            "anchor_frame_index": "dataset.extras.anchor_frame_index?",
+            "guide_images": "scene.extended.guide_images",
+            "guide_masks": "scene.extended.guide_masks",
+        })
+        # Off until the correction holds on every run (2026-09-24).
+        self.assertEqual(splice.params, {"colour_match": False})
+
+
 class TestDeclaredSettings(unittest.TestCase):
     """The `settings:` and `outputs:` blocks, which are the whole UI.
 
@@ -2321,6 +2605,55 @@ class TestDeclaredSettings(unittest.TestCase):
         with self.assertRaises(ValueError) as caught:
             WorkflowSpec.from_yaml(path).validate()
         self.assertIn("unused", str(caught.exception))
+
+    def test_an_always_output_has_no_switch(self):
+        """`always:` is packaged from its `dir:` and nothing else: no
+        global, no control, and a submission naming it has nothing to set."""
+        path = self._write(
+            "name: always\n"
+            "outputs:\n"
+            "  - name: export_it\n    dir: it\n    always: true\n"
+            "  - name: export_other\n    dir: other\n    advanced: true\n"
+            "steps:\n"
+            "  - id: a\n    step: rmbg\n    dispatch: in_process\n"
+            "    when: ${globals.export_other}\n"
+        )
+        spec = WorkflowSpec.from_yaml(path)
+        spec.validate()
+        self.assertNotIn("export_it", spec.globals)
+        self.assertEqual(set(spec.declared_globals()), {"export_other"})
+        self.assertTrue(spec.declared_globals()["export_other"].advanced)
+        self.assertEqual(spec.output_dirs(), {"export_it": "it", "export_other": "other"})
+        self.assertEqual(spec.apply_output_requirements(), {"export_other": True})
+
+    def test_an_always_output_with_switch_keys_is_refused(self):
+        for key in ("default: false", "requires: x", "advanced: true"):
+            with self.subTest(key=key):
+                path = self._write(
+                    "name: contradiction\n"
+                    "outputs:\n"
+                    f"  - name: export_it\n    dir: it\n    always: true\n    {key}\n"
+                    "steps:\n"
+                    "  - id: a\n    step: rmbg\n    dispatch: in_process\n"
+                )
+                with self.assertRaises(ValueError) as caught:
+                    WorkflowSpec.from_yaml(path)
+                self.assertIn("always", str(caught.exception))
+
+    def test_the_cli_lets_a_retired_switch_through(self):
+        """`--param export_debug=true` from a shell history is told and
+        ignored, not a SystemExit."""
+        from pipeline.cli import apply_param_overrides, resolve_workflow
+
+        spec = WorkflowSpec.from_yaml(resolve_workflow("helical"))
+        overrides = {"export_debug": "true", "export_colmap": "false", "seed": "3"}
+        with self.assertLogs("pipeline.cli", level="WARNING") as logs:
+            apply_param_overrides(spec, overrides, {})
+        self.assertEqual(spec.globals["seed"], 3)
+        self.assertNotIn("export_debug", spec.globals)
+        self.assertEqual(len(logs.output), 2)
+        with self.assertRaises(SystemExit):
+            apply_param_overrides(spec, {"export_debugg": "true"}, {})
 
     def test_a_name_declared_twice_is_refused(self):
         path = self._write(
@@ -2455,950 +2788,6 @@ class TestDeclaredSettings(unittest.TestCase):
                 self.assertGreaterEqual(len(readers), 3)
                 self.assertTrue(any("upscale" in r for r in readers))
 
-class TestPassTwoIsTheSplatsReRender(unittest.TestCase):
-    """`render_subject` is `render_splat`, the splat's own re-render along the
-    helix, and the frames pass 2 conditions on. From 2026-09-17 to 2026-09-20
-    it was a subclass that could draw the textured mesh of the mesh path
-    instead (`pass2_mesh`); the path — meshify, photo_texture, refine_texture
-    and their globals — is removed, so nothing mesh-shaped may remain."""
-
-    def _spec(self):
-        return WorkflowSpec.from_yaml(str(next(p for p in _workflows() if p.name == "helical.yaml")))
-
-    def test_the_subject_render_is_render_splat_and_sits_before_the_matte(self):
-        spec = self._spec()
-        ids = [s.id for s in spec.steps]
-        at = ids.index("render_subject")
-        step = spec.steps[at]
-        self.assertEqual(step.step, "render_splat")
-        self.assertEqual(step.params["pattern"], "helical", "the path is the same helical one")
-        self.assertTrue(step.params["override_cam_from_mesh"])
-        for key in ("from_mesh", "mesh_blur_px", "mesh_render_dir"):
-            self.assertNotIn(key, step.params)
-        for key in ("mesh_dir", "mesh_texture_path", "mesh_photo_texture_path"):
-            self.assertNotIn(key, step.inputs)
-        for field in ("images", "masks", "cameras", "anchor_position", "anchor_frame_index"):
-            self.assertIn(field, step.outputs)
-        self.assertLess(at, ids.index("resplat_foreground_masks"))
-        self.assertIs(spec.steps[ids.index("resplat_foreground_masks")].when, True, "the rmbg matte always runs")
-        self.assertLess(ids.index("resplat_foreground_masks"), ids.index("mask_splat_fringes"))
-        self.assertLess(ids.index("mask_splat_fringes"), ids.index("reinject_anchor"), "the anchor is still re-injected after")
-        self.assertLess(ids.index("reinject_anchor"), ids.index("denoise_pass2"))
-
-    def test_nothing_of_the_mesh_path_remains(self):
-        for path in _workflows():
-            spec = WorkflowSpec.from_yaml(str(path))
-            with self.subTest(workflow=path.name):
-                steps = {s.step for s in spec.steps} | {s.id for s in spec.steps}
-                self.assertFalse(steps & {"meshify", "photo_texture", "refine_texture",
-                                          "render_subject_mesh", "render_mesh_views"})
-                self.assertNotIn("render_subject", {s.step for s in spec.steps})
-                names = set(spec.globals) | {p.name for p in spec.settings}
-                self.assertFalse(names & {"export_mesh", "pass2_mesh", "photo_texture", "refine_texture",
-                                          "texture_mode", "face_policy", "mesh_blur"})
-
-    def test_when_forms(self):
-        from pipeline.workflow import when_truthy
-
-        self.assertTrue(when_truthy({"any": [False, "true"]}))
-        self.assertFalse(when_truthy({"any": [False, "false"]}))
-        self.assertFalse(when_truthy([{"any": [True]}, False]))
-        self.assertTrue(when_truthy([{"any": [False, True]}, True]))
-        self.assertTrue(when_truthy({"not": "false"}))
-        self.assertFalse(when_truthy({"not": True}))
-        # `eq:` compares as strings, so a value typed into a text box and
-        # the YAML literal it is meant to match agree.
-        self.assertTrue(when_truthy({"eq": ["retrained", "retrained"]}))
-        self.assertTrue(when_truthy({"eq": [" retrained", "retrained"]}))
-        self.assertFalse(when_truthy({"eq": ["intermediate", "retrained"]}))
-        self.assertTrue(when_truthy({"eq": [40, "40"]}))
-        self.assertFalse(when_truthy({"not": {"eq": ["none", "none"]}}))
-        self.assertTrue(when_truthy([True, {"not": {"eq": ["retrained", "none"]}}]))
-        with self.assertRaises(ValueError):
-            when_truthy({"all": [True]})
-        with self.assertRaises(ValueError):
-            when_truthy({"eq": ["one"]})
-
-
-if __name__ == "__main__":
-    unittest.main()
-
-
-class TestTheIntermediateSplatIsKept(unittest.TestCase):
-    """The first brush training exports somewhere the result .zip carries.
-
-    That splat is what the helical re-render is built from, so it is the
-    first thing to look at when the re-render is wrong — and it is only
-    reachable afterwards if it lands under the run's `debug/`, which is
-    what `runs.DEBUG_SUBDIRS` packages. An `output_dir` here instead would
-    put it in `brush/training_<ms>/`: on the volume, and gone with the pod.
-    """
-
-    def test_the_first_training_exports_into_debug(self):
-        from pipeline.cli import resolve_workflow
-        from pipeline.templating import resolve
-        from pipeline.workflow import WorkflowSpec
-
-        spec = WorkflowSpec.from_yaml(resolve_workflow("helical"))
-        scope = {"globals": dict(spec.globals, output_root="/out")}
-        trainings = {
-            step.id: resolve(step.params, scope)
-            for step in spec.steps if step.step == "brush"
-        }
-        self.assertIn("train_splat", trainings)
-        intermediate = trainings["train_splat"]
-        self.assertEqual(intermediate.get("export_dir"), "/out/debug")
-        self.assertTrue(str(intermediate.get("export_name", "")).endswith(".ply"))
-        # `output_dir` would win nothing here (export_dir takes precedence),
-        # but leaving both set would be a contradiction to read later.
-        self.assertIsNone(intermediate.get("output_dir"))
-
-    def test_the_two_trainings_cannot_collide(self):
-        from pipeline.cli import resolve_workflow
-        from pipeline.templating import resolve
-        from pipeline.workflow import WorkflowSpec
-
-        spec = WorkflowSpec.from_yaml(resolve_workflow("helical"))
-        scope = {"globals": dict(spec.globals, output_root="/out")}
-        exports = [
-            (resolve(step.params, scope).get("export_dir"),
-             resolve(step.params, scope).get("export_name"))
-            for step in spec.steps if step.step == "brush"
-        ]
-        self.assertEqual(len(exports), len(set(exports)), f"two trainings share a path: {exports}")
-
-
-class TestTheFirstDenoiseInputIsKept(unittest.TestCase):
-    """The control video pass 1 is handed lands in the debug bundle.
-
-    Everything else a run exports describes frames from AFTER a denoise —
-    `colmap_intermediate/` is pass 1's output, `colmap/` is pass 2's. The
-    drawings that caused them lived in memory only, so "was the skeleton
-    too much ink", "did the face splat land on the face" and "does the
-    anchor frame carry the photograph" could be asked of a finished run
-    only by re-running the first fourteen steps from the same upload — and
-    not at all once the upload was gone.
-    """
-
-    def _spec(self):
-        from pipeline.cli import resolve_workflow
-        from pipeline.workflow import WorkflowSpec
-
-        return WorkflowSpec.from_yaml(resolve_workflow("helical"))
-
-    def test_the_dataset_is_saved_under_debug(self):
-        from pipeline.templating import resolve
-
-        spec = self._spec()
-        scope = {"globals": dict(spec.globals, output_root="/out")}
-        saves = {
-            step.id: resolve(step.params, scope)["directory"]
-            for step in spec.steps if step.step == "save_dataset"
-        }
-        self.assertIn("dump_denoise_input", saves)
-        self.assertEqual(saves["dump_denoise_input"], "/out/debug/denoise_pass1_input")
-        for step_id, directory in saves.items():
-            self.assertTrue(
-                directory.startswith("/out/debug/"),
-                f"{step_id} writes to {directory!r}, which the result .zip never sees")
-        self.assertEqual(len(set(saves.values())), len(saves))
-
-    def test_it_saves_what_the_denoise_reads(self):
-        """After the anchor injection, before pass 1 — so the frames on disk
-        carry the warped photograph and the 0.0 VACE mask at the anchor,
-        which is the half of the input a mesh render cannot be re-derived
-        into."""
-        spec = self._spec()
-        order = [step.id for step in spec.steps]
-        self.assertLess(order.index("reinject_anchor_initial"), order.index("dump_denoise_input"))
-        self.assertLess(order.index("dump_denoise_input"), order.index("denoise_pass1"))
-        dump = next(s for s in spec.steps if s.id == "dump_denoise_input")
-        denoise = next(s for s in spec.steps if s.id == "denoise_pass1")
-        self.assertEqual(dump.inputs["dataset"], "dataset")
-        # The frames and their masks are what the dump is for; both reach
-        # the denoise from the same dataset the dump wrote.
-        self.assertEqual(denoise.inputs["control_video"], "dataset.images")
-        self.assertEqual(denoise.inputs["control_masks"], "dataset.masks")
-
-
-class TestOnlyTheHelicalRerenderCapsTheShBands(unittest.TestCase):
-    """`render_subject` is the one render_splat that sets `sh_degree`, and
-    it sets 2 — and the two `extend_render_*` steps, which are that render
-    again on the extended cameras (TestTheOrbitExtension pins they agree),
-    say the same. Every other instance leaves the step's default (3, every band the
-    splat carries) alone — pinned as a workflow decision rather than as a
-    step default, because a `sh_degree:` line quietly added to the face
-    cap's render would change what the final training is supervised by."""
-
-    def test_render_subject_says_two_and_nothing_else_says_anything(self):
-        from pipeline.cli import resolve_workflow
-        from pipeline.workflow import WorkflowSpec
-
-        spec = WorkflowSpec.from_yaml(resolve_workflow("helical"))
-        renders = [s for s in spec.steps if s.step in _SPLAT_RENDERS]
-        self.assertGreater(len(renders), 1)
-        setting = {s.id: s.params.get("sh_degree") for s in renders}
-        self.assertEqual(setting.pop("render_subject"), 2)
-        self.assertEqual(setting.pop("extend_render_intermediate"), 2)
-        self.assertEqual(setting.pop("extend_render_retrained"), 2)
-        self.assertEqual(set(setting.values()), {None}, setting)
-
-
-class TestTheSingleViewInput(unittest.TestCase):
-    """A single frontal photo rides the same workflow as a sheet: the split
-    step decides which it is (`input_layout`, auto by default) and
-    publishes the verdict, and `pick_rear_view` reads that verdict after
-    pass 1 to fill the reference slot the photo could not. Neither is
-    gated — a `when:` resolves against globals before the run, so a
-    runtime verdict cannot switch a step off — and the wiring below is what
-    makes the two modes share one file (steps/reference_view.py)."""
-
-    def _spec(self):
-        from pipeline.cli import resolve_workflow
-        from pipeline.workflow import WorkflowSpec
-
-        return WorkflowSpec.from_yaml(resolve_workflow("helical"))
-
-    def _step(self, spec, step_id):
-        return next(s for s in spec.steps if s.id == step_id)
-
-    def test_the_split_reads_the_setting_and_publishes_its_verdict(self):
-        spec = self._spec()
-        setting = next(p for p in spec.settings if p.name == "input_layout")
-        self.assertEqual(setting.default, "auto")
-        self.assertEqual(list(setting.choices), ["auto", "sheet", "single"])
-        split = self._step(spec, "split_sheet")
-        self.assertEqual(split.params.get("layout"), "${globals.input_layout}")
-        self.assertEqual(split.outputs.get("layout"), "scene.input_layout")
-
-    def test_pick_rear_view_sits_after_pass_1_and_before_the_training(self):
-        spec = self._spec()
-        order = [s.id for s in spec.steps]
-        pick = order.index("pick_rear_view")
-        self.assertGreater(pick, order.index("foreground_masks"), "it needs the mattes")
-        self.assertGreater(pick, order.index("adjust_denoised"), "the treated frames")
-        self.assertLess(pick, order.index("train_splat"))
-        self.assertLess(pick, order.index("denoise_pass2"))
-        step = self._step(spec, "pick_rear_view")
-        self.assertTrue(step.when is True, "runs in both modes; see the class docstring")
-        self.assertEqual(step.inputs.get("layout"), "scene.input_layout")
-        self.assertEqual(step.inputs.get("reference_image"), "dataset.reference_image")
-        self.assertEqual(step.outputs.get("reference_image"), "dataset.reference_image")
-        self.assertEqual(step.inputs.get("masks"), "dataset.masks")
-
-    def test_the_reference_has_exactly_two_writers(self):
-        """The split (the back panel, or None) and the pick (the rear view,
-        or the back panel again). A third would be a second opinion on
-        what pass 2 conditions on."""
-        spec = self._spec()
-        writers = [
-            s.id for s in spec.steps
-            if "dataset.reference_image" in s.outputs.values()
-        ]
-        self.assertEqual(writers, ["split_sheet", "pick_rear_view"])
-
-    def test_pass_2_reads_what_the_pick_wrote(self):
-        spec = self._spec()
-        order = [s.id for s in spec.steps]
-        for step_id in ("denoise_pass2",):
-            step = self._step(spec, step_id)
-            self.assertGreater(order.index(step_id), order.index("pick_rear_view"))
-            self.assertEqual(step.inputs.get("reference_image"), "dataset.reference_image")
-        # and pass 1 reads the slot BEFORE the pick, when a photo leaves it empty
-        self.assertLess(order.index("denoise_pass1"), order.index("pick_rear_view"))
-
-
-class TestThePixelOpsShipOff(unittest.TestCase):
-    """`adjust_denoised` (pixel_ops) runs in the workflow, but every knob on
-    it is off unless a setting turns it on. The SH cap on `render_subject`
-    is aimed at part of what the highlight suppression was for — the
-    specular sparkle a re-render carries into pass 2 — so the two are kept
-    separable: the pixel op stays a choice, not a default."""
-
-    def test_specular_suppress_is_zero_and_is_what_the_step_reads(self):
-        from pipeline.cli import resolve_workflow
-        from pipeline.workflow import WorkflowSpec
-
-        spec = WorkflowSpec.from_yaml(resolve_workflow("helical"))
-        setting = next(s for s in spec.settings if s.name == "specular_suppress")
-        self.assertEqual(setting.default, 0.0)
-        step = next(s for s in spec.steps if s.id == "adjust_denoised")
-        self.assertEqual(step.step, "pixel_ops")
-        self.assertEqual(step.params["specular_suppress"],
-                         "${globals.specular_suppress}")
-
-
-class TestTheDenoiseSettingsAreTheMeasuredOnes(unittest.TestCase):
-    """The two passes ship the settings the 2026-09-08 sweeps settled on
-    (docs/vace-denoise-findings-2026-09-07.md, sections 5 and 6), applied
-    2026-09-09. Pinned because they are decisions with numbers behind them,
-    and a step default drifting under them — the step's own `sampler_shift`
-    is 8, which cost pass 2 three points of head sharpness — would be
-    silent.
-    """
-
-    def _step(self, step_id):
-        from pipeline.cli import resolve_workflow
-        from pipeline.workflow import WorkflowSpec
-
-        spec = WorkflowSpec.from_yaml(resolve_workflow("helical"))
-        return next(s for s in spec.steps if s.id == step_id)
-
-    def test_pass_1_is_run_e4_on_euler(self):
-        """The skeleton-leak sweep's E4 (shift 5 erases the ink, the
-        structure steps stay at full scale and the four detail steps sit at
-        a flat half rather than a taper spent on steps 5-6) — with both
-        experts on euler since 2026-09-20 rather than E4's uni_pc on the
-        high-noise one: at shift 5 the sampler no longer mattered to the
-        leak (E2 = E4), and helical-20260920-220458 ran this way. The low
-        sampler is written out because the step's default is uni_pc."""
-        params = self._step("denoise_pass1").params
-        self.assertEqual((params["sampler_high"], params["sampler_low"]),
-                         ("euler", "euler"))
-        self.assertEqual(params["sampler_shift"], 5)
-        self.assertEqual(params["strength"], [1, 1, 0.5, 0.5, 0.5, 0.5])
-        self.assertEqual((params["steps_high"], params["steps_low"]), (2, 4))
-
-    def test_pass_2_is_the_quality_sweep_s_corner_at_0_8(self):
-        """Euler on the opening steps at shift 2.5 (shift 8 and uni_pc each
-        cost ~3 points of head sharpness on a splat render), a flat 0.8 on
-        every step (strength is a fidelity-vs-texture dial; 0.8 is the
-        texture compromise, and a taper to 0 is invention), 2/4 kept."""
-        params = self._step("denoise_pass2").params
-        self.assertEqual((params["sampler_high"], params["sampler_low"]),
-                         ("euler", "euler"))
-        self.assertEqual(params["sampler_shift"], 2.5)
-        self.assertEqual(params["strength"], [0.8] * 6)
-        self.assertEqual((params["steps_high"], params["steps_low"]), (2, 4))
-
-
-class TestTheReoutlineBranch(unittest.TestCase):
-    """The experimental branch that redraws the silhouette from a splat of
-    the subject (docs/re-outline.md): eight gated steps between the anchor
-    injection and the first denoise. What is pinned is what makes it a
-    faithful copy of pass 1 and of the first render — a different denoise
-    would matte a different subject, a splat trained or rendered on other
-    cameras would put silhouette i on the wrong frame — and that with the
-    setting off nothing of it runs.
-    """
-
-    BRANCH = [
-        "reoutline_downscale", "reoutline_denoise", "reoutline_matte",
-        "reoutline_upscale", "reoutline_train_splat", "render_reoutline_splat",
-        "render_reoutlined_views", "reinject_anchor_reoutlined",
-    ]
-
-    def _spec(self):
-        from pipeline.cli import resolve_workflow
-
-        return WorkflowSpec.from_yaml(resolve_workflow("helical"))
-
-    def _step(self, spec, step_id):
-        return next(s for s in spec.steps if s.id == step_id)
-
-    def test_it_sits_between_the_anchor_injection_and_the_dump(self):
-        spec = self._spec()
-        # The Weak skeleton setting's anchor injections ride beside the two
-        # the branch is placed against; they are not part of the branch.
-        order = [s.id for s in spec.steps if not s.id.endswith("_stick_free")]
-        first = order.index("reinject_anchor_initial") + 1
-        self.assertEqual(order[first:first + len(self.BRANCH)], self.BRANCH)
-        self.assertEqual(order[first + len(self.BRANCH)], "dump_denoise_input")
-
-    def test_every_step_is_gated_on_the_setting_and_it_defaults_on(self):
-        spec = self._spec()
-        setting = next(s for s in spec.settings if s.name == "re_outline")
-        self.assertIs(setting.default, True)
-        for step_id in self.BRANCH:
-            with self.subTest(step=step_id):
-                self.assertEqual(self._step(spec, step_id).when, "${globals.re_outline}")
-
-    def test_the_extra_denoise_is_pass_1_at_480p_and_four_steps(self):
-        """Pass 1's block, apart from the size, the step count (2 high /
-        2 low: the pass is kept for its shape, the low expert's extra steps
-        are texture) and the per-step list that count reshapes — the
-        strength schedule over four entries."""
-        spec = self._spec()
-        extra = self._step(spec, "reoutline_denoise")
-        pass1 = self._step(spec, "denoise_pass1")
-        self.assertEqual((pass1.params["steps_high"], pass1.params["steps_low"]), (2, 4))
-        self.assertEqual(pass1.params["strength"], [1, 1, 0.5, 0.5, 0.5, 0.5])
-        expected = dict(pass1.params, width=480, height=832, steps_low=2,
-                        strength=[1, 1, 0.5, 0.5])
-        # Weak skeleton is pass 1's alone: this pass is kept for its
-        # silhouette, which stick ink does not reach.
-        del expected["skeleton_steps"]
-        self.assertNotIn("control_video_alt", extra.inputs)
-        self.assertEqual(extra.params, expected)
-        self.assertEqual((extra.dispatch, extra.env, extra.keep_loaded),
-                         (pass1.dispatch, pass1.env, pass1.keep_loaded))
-        self.assertEqual(extra.inputs["reference_image"], pass1.inputs["reference_image"])
-        self.assertEqual(extra.inputs["subject_desc"], pass1.inputs["subject_desc"])
-        # It reads the downscaled batch, not the dataset, and writes beside it.
-        self.assertEqual(extra.inputs["control_video"], "scene.reoutline.images")
-        self.assertEqual(extra.inputs["control_masks"], "scene.reoutline.masks")
-        self.assertEqual(extra.outputs, {"images": "scene.reoutline.denoised"})
-
-    def test_the_batch_is_resized_here_not_by_diffusers(self):
-        """diffusers fits a control video under the target AREA (464x832 for
-        a 720x1280 batch asked for 480x832) — see steps/resize.py."""
-        spec = self._spec()
-        down = self._step(spec, "reoutline_downscale")
-        self.assertEqual(down.params, {"width": 480, "height": 832})
-        self.assertEqual(down.inputs, {"images": "dataset.images", "masks": "dataset.masks"})
-        up = self._step(spec, "reoutline_upscale")
-        self.assertEqual(up.params, {"width": "${globals.resolution.0}",
-                                     "height": "${globals.resolution.1}"})
-        self.assertEqual(up.inputs, {"images": "scene.reoutline.denoised",
-                                     "masks": "scene.reoutline.mattes"})
-        self.assertEqual(up.outputs, {"images": "scene.reoutline.frames",
-                                      "masks": "scene.reoutline.frame_mattes"})
-
-    def test_the_splat_is_trained_on_the_orbit_cameras_from_the_upscaled_pass(self):
-        """The outline is the splat's coverage, so the splat has to be fitted
-        on the very cameras the orbit is re-rendered from, to frames at
-        those cameras' size; and only to the 480p pass — none of the
-        supporting views, weights, rig or mesh the intermediate takes,
-        which would pull it toward something other than that pass."""
-        spec = self._spec()
-        train = self._step(spec, "reoutline_train_splat")
-        self.assertEqual(train.step, "brush")
-        self.assertEqual(train.inputs, {
-            "cameras": "dataset.cameras",
-            "image_names": "dataset.image_names",
-            "points_3d": "dataset.points_3d",
-            "images": "scene.reoutline.frames",
-            "masks": "scene.reoutline.frame_mattes",
-        })
-        self.assertEqual(train.outputs, {"splat_path": "scene.reoutline.splat_path"})
-        # The intermediate's silhouette knobs, no alignment, no polish, half
-        # the iterations (the texture is thrown away), and the .ply in the
-        # debug bundle beside intermediate_splat.ply.
-        intermediate = self._step(spec, "train_splat")
-        for key in ("polish_steps", "align_iters", "match_alpha_weight"):
-            with self.subTest(param=key):
-                self.assertEqual(train.params[key], intermediate.params[key])
-        self.assertEqual(train.params["total_steps"], intermediate.params["total_steps"] // 2)
-        self.assertEqual(train.params["export_dir"], intermediate.params["export_dir"])
-        self.assertEqual(train.params["export_name"], "reoutline_splat.ply")
-        self.assertNotEqual(train.params["export_name"], intermediate.params["export_name"])
-        self.assertNotIn("hollow_weight", train.params)
-
-    def test_the_outline_is_the_splat_rendered_on_the_dataset_cameras(self):
-        """No pattern: render_splat reuses the dataset's cameras verbatim,
-        which is what puts silhouette i on frame i. Only the alpha is
-        published, at the render's size, so `render` accepts it."""
-        spec = self._spec()
-        render = self._step(spec, "render_reoutline_splat")
-        self.assertEqual(render.step, "render_splat")
-        self.assertEqual(render.inputs, {"splat_path": "scene.reoutline.splat_path",
-                                         "dataset": "dataset"})
-        self.assertNotIn("pattern", render.params)
-        self.assertNotIn("override_cam_from_mesh", render.params)
-        self.assertFalse(render.params.get("confidence", False))
-        self.assertEqual((render.params["width"], render.params["height"]),
-                         ("${globals.resolution.0}", "${globals.resolution.1}"))
-        self.assertEqual(render.outputs, {"masks": "scene.outline_masks"})
-
-    def test_the_re_render_is_the_first_render_plus_the_mattes(self):
-        """Same params, so the same cameras; and it republishes nothing about
-        them, so nothing can drift. Two params differ: the fill's darkness,
-        which is the setting for a re-outlined drawing, and the cleaning of
-        the splat's coverage, which a mesh silhouette does not need."""
-        spec = self._spec()
-        first = self._step(spec, "render_initial_views")
-        again = self._step(spec, "render_reoutlined_views")
-        self.assertEqual(again.params, dict(first.params, outline_strength="${globals.reoutlined_strength}",
-                                            outline_mask_clean_px=9))
-        self.assertNotIn("outline_mask_clean_px", first.params)
-        self.assertEqual(first.params["outline_strength"], "${globals.outline_strength}")
-        self.assertEqual(again.inputs, dict(first.inputs, outline_masks="scene.outline_masks"))
-        self.assertEqual(set(again.outputs),
-                         {"images", "masks", "inactive_masks", "images_no_skeleton"})
-        self.assertEqual(again.outputs["images_no_skeleton"],
-                         first.outputs["images_no_skeleton"])
-        self.assertEqual(again.outputs["images"], "dataset.images")
-
-    def test_the_two_fill_strengths_are_settings_with_one_home_each(self):
-        """`outline_strength` is the faint fill of the body model's
-        silhouette — what pass 1 sees with the branch off, and what the 480p
-        pass sees with it on; `reoutlined_strength` is the darker fill of the
-        splat's, what pass 1 sees with the branch on, and is greyed out
-        behind the switch. Each is read by exactly one render, as
-        `${globals.<name>}`, which is what drops the render step's own
-        `outline_strength` from the per-step panel."""
-        from pipeline.templating import global_ref
-
-        spec = self._spec()
-        by_name = {p.name: p for p in spec.settings}
-        plain, reoutlined = by_name["outline_strength"], by_name["reoutlined_strength"]
-        self.assertEqual((plain.type, plain.default, plain.requires), (float, 6.25, ""))
-        self.assertEqual((reoutlined.type, reoutlined.default, reoutlined.requires),
-                         (float, 20.0, "re_outline"))
-        readers = {}
-        for step in spec.steps:
-            ref = global_ref(step.params.get("outline_strength"))
-            if ref is not None:
-                readers.setdefault(ref, []).append(step.id)
-        self.assertEqual(readers, {"outline_strength": ["render_initial_views"],
-                                   "reoutlined_strength": ["render_reoutlined_views"]})
-        # No render sets a literal darkness of its own.
-        for step in spec.steps:
-            if step.step == "render" and "outline_strength" in step.params:
-                self.assertIsNotNone(global_ref(step.params["outline_strength"]), step.id)
-
-    def test_the_anchor_goes_back_in_after_the_re_render(self):
-        spec = self._spec()
-        first = self._step(spec, "reinject_anchor_initial")
-        again = self._step(spec, "reinject_anchor_reoutlined")
-        self.assertEqual(again.inputs, first.inputs)
-        self.assertEqual(again.outputs, first.outputs)
-
-    def test_the_480p_pass_lands_in_the_debug_bundle(self):
-        from pipeline.templating import resolve
-
-        spec = self._spec()
-        matte = self._step(spec, "reoutline_matte")
-        scope = {"globals": dict(spec.globals, output_root="/out")}
-        self.assertEqual(resolve(matte.params, scope)["debug_dir"], "/out/debug/reoutline")
-
-
-class TestTheOrbitExtension(unittest.TestCase):
-    """The gated stage 4a that lengthens the helix with two VACE video
-    extensions (steps/extend_orbit.py): ten steps between pass 2 and the
-    pre-upscale export. What is pinned is what makes each extension pass 2
-    continued — the path solved from render_subject's own helix params,
-    the guide rendered as render_subject renders from whichever splat
-    `extend_guide` names, both extension passes pass 2's block on pass
-    2's own frame count — and that with the setting off nothing of it
-    runs and the dataset is untouched until the splice.
-    """
-
-    BRANCH = [
-        "extend_path", "extend_masks", "extend_train_splat", "extend_render_intermediate",
-        "extend_render_retrained", "extend_guide_masks", "extend_assemble",
-        "denoise_extension_before", "denoise_extension_after", "extend_splice",
-    ]
-    # Which of them each `extend_guide` value runs, beside the always-on rest.
-    BY_GUIDE = {
-        "retrained": {"extend_masks", "extend_train_splat", "extend_render_retrained",
-                      "extend_guide_masks"},
-        "intermediate": {"extend_render_intermediate", "extend_guide_masks"},
-        "none": set(),
-    }
-    ALWAYS = {"extend_path", "extend_assemble", "denoise_extension_before",
-              "denoise_extension_after", "extend_splice"}
-
-    def _spec(self):
-        from pipeline.cli import resolve_workflow
-
-        return WorkflowSpec.from_yaml(resolve_workflow("helical"))
-
-    def _step(self, spec, step_id):
-        return next(s for s in spec.steps if s.id == step_id)
-
-    def test_it_sits_between_pass_2_and_the_pre_upscale_export(self):
-        spec = self._spec()
-        order = [s.id for s in spec.steps]
-        first = order.index("denoise_pass2") + 1
-        self.assertEqual(order[first:first + len(self.BRANCH)], self.BRANCH)
-        # The orbit record's snapshot follows the splice (tests/
-        # test_orbit_record.py), then the pre-upscale export.
-        self.assertEqual(order[first + len(self.BRANCH):first + len(self.BRANCH) + 2],
-                         ["snapshot_orbit", "export_masks_preupscale"])
-
-    def test_every_step_is_gated_and_the_setting_defaults_on(self):
-        spec = self._spec()
-        settings = {s.name: s for s in spec.settings}
-        self.assertIs(settings["extend_orbit"].default, True)
-        self.assertEqual(settings["extend_guide"].default, "retrained")
-        self.assertEqual(settings["extend_guide"].choices, ("retrained", "intermediate", "none"))
-        self.assertEqual(settings["extend_guide"].requires, "extend_orbit")
-        self.assertEqual(settings["extend_overlap_before"].default, 40)
-        self.assertEqual(settings["extend_overlap_after"].default, 41)
-        for name in ("extend_overlap_before", "extend_overlap_after"):
-            self.assertEqual(settings[name].requires, "extend_orbit")
-        for step_id in self.BRANCH:
-            with self.subTest(step=step_id):
-                when = self._step(spec, step_id).when
-                gate = when if isinstance(when, str) else when[0]
-                self.assertEqual(gate, "${globals.extend_orbit}")
-        # Off, the branch is inert: nothing in it is enabled.
-        spec.globals["extend_orbit"] = False
-        enabled = {s.id for s in spec.enabled_steps()}
-        self.assertFalse(enabled & set(self.BRANCH))
-        # On, each guide runs its own splat's steps and nothing of the
-        # other's; the assembly is told which.
-        spec.globals["extend_orbit"] = True
-        for mode, own in self.BY_GUIDE.items():
-            with self.subTest(guide=mode):
-                spec.globals["extend_guide"] = mode
-                enabled = {s.id for s in spec.enabled_steps()}
-                self.assertEqual(enabled & set(self.BRANCH), self.ALWAYS | own)
-        self.assertEqual(self._step(spec, "extend_assemble").params["guide"],
-                         "${globals.extend_guide}")
-
-    def test_the_dataset_is_pass_2s_until_the_splice(self):
-        """The guide is trained and rendered from pass 2's frames as pass 2
-        left them, and the passes' control videos live beside the dataset;
-        only the splice rewrites it — and it rewrites all of it at once."""
-        spec = self._spec()
-        for step_id in self.BRANCH[:-1]:
-            with self.subTest(step=step_id):
-                writes = set(self._step(spec, step_id).outputs.values())
-                self.assertFalse(
-                    writes & {"dataset.images", "dataset.cameras", "dataset.image_names",
-                              "dataset.extras.anchor_frame_index", "dataset.splat_path"},
-                    f"'{step_id}' rewrites the dataset ahead of the splice: {writes}",
-                )
-        splice = self._step(spec, "extend_splice")
-        self.assertEqual(splice.outputs, {
-            "images": "dataset.images", "masks": "dataset.masks",
-            "cameras": "dataset.cameras", "image_names": "dataset.image_names",
-            "anchor_frame_index": "dataset.extras.anchor_frame_index",
-        })
-
-    def test_the_path_is_render_subjects_helix_continued_by_pass_2s_own_length(self):
-        """The step rebuilds render_subject's path from these params and
-        refuses to continue one it cannot reproduce, so the two blocks must
-        agree; each extension pass is as long as pass 2 (in distribution),
-        and the two overlaps are the settings — 40 and 41 at their defaults,
-        so that each pass's mask changes on a latent frame's edge."""
-        spec = self._spec()
-        path = self._step(spec, "extend_path")
-        subject = self._step(spec, "render_subject")
-        self.assertEqual(subject.params["pattern"], "helical")
-        for key in ("n_frames", "n_loops", "amplitude_deg", "lead_in_deg", "lead_out_deg"):
-            with self.subTest(param=key):
-                self.assertEqual(path.params[key], subject.params[key])
-        self.assertEqual(path.params["phase_frames"], subject.params["n_frames"])
-        self.assertEqual(path.params["overlap_before"], "${globals.extend_overlap_before}")
-        self.assertEqual(path.params["overlap_after"], "${globals.extend_overlap_after}")
-        from pipeline.steps.extend_orbit import latent_aligned
-        before = spec.globals["extend_overlap_before"]
-        after = spec.globals["extend_overlap_after"]
-        self.assertTrue(latent_aligned(subject.params["n_frames"] - before))
-        self.assertTrue(latent_aligned(after))
-        self.assertEqual(path.inputs, {"cameras": "dataset.cameras", "extras": "dataset.extras"})
-        self.assertEqual(path.outputs, {
-            "cameras": "scene.extended.cameras", "image_names": "scene.extended.image_names",
-            "before": "scene.extended.before", "after": "scene.extended.after",
-            "overlap_before": "scene.extended.overlap_before",
-            "overlap_after": "scene.extended.overlap_after",
-        })
-
-    def test_either_guide_is_rendered_as_render_subject_renders(self):
-        """Same bands, gate, cull colour and confidence tuning, on the
-        extended cameras handed in rather than a pattern of its own; the
-        two renders differ in the splat they read and nothing else. The
-        intermediate one reads dataset.splat_path, which is still the
-        first training's export here — nothing between train_splat and
-        this stage rewrites it."""
-        spec = self._spec()
-        subject = self._step(spec, "render_subject")
-        renders = {name: self._step(spec, name) for name in
-                   ("extend_render_intermediate", "extend_render_retrained")}
-        for name, render in renders.items():
-            with self.subTest(step=name):
-                self.assertEqual(render.step, "render_splat")
-                self.assertEqual(render.inputs["cameras"], "scene.extended.cameras")
-                self.assertEqual(render.inputs["dataset"], "dataset")
-                self.assertNotIn("pattern", render.params)
-                self.assertNotIn("override_cam_from_mesh", render.params)
-                for key in ("width", "height", "sh_degree", "confidence", "cull_color",
-                            "conf_args", "background"):
-                    self.assertEqual(render.params[key], subject.params[key], key)
-                self.assertEqual(render.outputs, {"images": "scene.extended.guide_images"})
-        self.assertEqual(renders["extend_render_intermediate"].inputs["splat_path"],
-                         "dataset.splat_path")
-        self.assertEqual(renders["extend_render_retrained"].inputs["splat_path"],
-                         "scene.extended.splat_path")
-        self.assertEqual(renders["extend_render_intermediate"].params,
-                         renders["extend_render_retrained"].params)
-        order = [s.id for s in spec.steps]
-        writers = [s.id for s in spec.steps
-                   if "dataset.splat_path" in s.outputs.values()
-                   and order.index("train_splat") < order.index(s.id)
-                   < order.index("extend_render_intermediate")]
-        self.assertEqual(writers, [])
-        matte = self._step(spec, "extend_guide_masks")
-        self.assertEqual(matte.step, "rmbg")
-        self.assertEqual(matte.inputs, {"images": "scene.extended.guide_images"})
-        self.assertEqual(matte.outputs, {"masks": "scene.extended.guide_masks"})
-
-    def test_the_retrained_splat_is_fitted_on_pass_2s_frames_with_the_intermediates_knobs(self):
-        spec = self._spec()
-        train = self._step(spec, "extend_train_splat")
-        matte = self._step(spec, "extend_masks")
-        self.assertEqual(matte.step, "rmbg")
-        self.assertEqual(matte.inputs, {"images": "dataset.images"})
-        self.assertEqual(matte.outputs, {"masks": "dataset.masks"})
-        self.assertEqual(train.step, "brush")
-        self.assertEqual(train.inputs, {
-            "cameras": "dataset.cameras", "image_names": "dataset.image_names",
-            "points_3d": "dataset.points_3d", "images": "dataset.images",
-            "masks": "dataset.masks", "mesh": "scene.mesh_world?", "body_rig": "scene.body_rig?",
-        })
-        intermediate = self._step(spec, "train_splat")
-        for key in ("total_steps", "polish_steps", "align_iters", "hollow_weight",
-                    "match_alpha_weight", "export_evidence", "export_dir"):
-            with self.subTest(param=key):
-                self.assertEqual(train.params[key], intermediate.params[key])
-        self.assertEqual(train.params["export_name"], "extension_splat.ply")
-        self.assertEqual(train.outputs, {"splat_path": "scene.extended.splat_path"})
-
-    def test_the_two_control_videos_are_cut_from_the_frames_and_the_guide(self):
-        from pipeline.templating import resolve
-
-        spec = self._spec()
-        assemble = self._step(spec, "extend_assemble")
-        self.assertEqual(assemble.inputs, {
-            "dataset": "dataset",
-            "cameras": "scene.extended.cameras",
-            "image_names": "scene.extended.image_names",
-            "before": "scene.extended.before",
-            "after": "scene.extended.after",
-            "overlap_before": "scene.extended.overlap_before",
-            "overlap_after": "scene.extended.overlap_after",
-            "guide_images": "scene.extended.guide_images?",
-            "guide_masks": "scene.extended.guide_masks?",
-        })
-        scope = {"globals": dict(spec.globals, output_root="/out")}
-        self.assertEqual(resolve(assemble.params, scope), {
-            "guide": spec.globals["extend_guide"],
-            "inactive_source": "guide",
-            "bg_color": [0.5, 0.5, 0.5],
-            "debug_dir": "/out/debug/extension_input",
-        })
-        # The composite colour is pass 2's control's.
-        self.assertEqual(assemble.params["bg_color"],
-                         self._step(spec, "mask_splat_fringes").params["bg_color"])
-        self.assertEqual(assemble.outputs, {
-            "before_images": "scene.extended.before_phase.images",
-            "before_masks": "scene.extended.before_phase.masks",
-            "after_images": "scene.extended.after_phase.images",
-            "after_masks": "scene.extended.after_phase.masks",
-        })
-
-    def test_both_extension_passes_are_pass_2s_block_on_their_own_video(self):
-        spec = self._spec()
-        pass2 = self._step(spec, "denoise_pass2")
-        for name, phase in (("denoise_extension_before", "before_phase"),
-                            ("denoise_extension_after", "after_phase")):
-            with self.subTest(step=name):
-                extra = self._step(spec, name)
-                self.assertEqual(extra.params, pass2.params)
-                self.assertEqual((extra.dispatch, extra.env, extra.keep_loaded),
-                                 (pass2.dispatch, pass2.env, pass2.keep_loaded))
-                self.assertEqual(extra.inputs, {
-                    "control_video": f"scene.extended.{phase}.images",
-                    "control_masks": f"scene.extended.{phase}.masks",
-                    "reference_image": pass2.inputs["reference_image"],
-                    "subject_desc": pass2.inputs["subject_desc"],
-                })
-                self.assertEqual(extra.outputs, {"images": f"scene.extended.{phase}.denoised"})
-
-    def test_the_splice_reads_both_passes_and_the_path(self):
-        spec = self._spec()
-        splice = self._step(spec, "extend_splice")
-        self.assertEqual(splice.step, "splice_extension")
-        self.assertEqual(splice.inputs, {
-            "dataset": "dataset",
-            "before_denoised": "scene.extended.before_phase.denoised",
-            "after_denoised": "scene.extended.after_phase.denoised",
-            "cameras": "scene.extended.cameras",
-            "image_names": "scene.extended.image_names",
-            "before": "scene.extended.before",
-            "after": "scene.extended.after",
-            "overlap_before": "scene.extended.overlap_before",
-            "overlap_after": "scene.extended.overlap_after",
-            "anchor_frame_index": "dataset.extras.anchor_frame_index?",
-            "guide_images": "scene.extended.guide_images?",
-            "guide_masks": "scene.extended.guide_masks?",
-        })
-        # Off until the correction holds on every run (2026-09-24).
-        self.assertEqual(splice.params, {"colour_match": False})
-
-
-class TestDeclaredSettings(unittest.TestCase):
-    """The `settings:` and `outputs:` blocks, which are the whole UI.
-
-    The web UI holds no table of a workflow's knobs any more: it draws what
-    these declare. So a mistake here is a mistake on the form, and the point
-    of every check below is that it fires at load rather than at submit or
-    forty minutes into a pod run.
-    """
-
-    def _write(self, body: str) -> str:
-        import os
-        import tempfile
-
-        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as handle:
-            handle.write(body)
-            path = handle.name
-        self.addCleanup(os.unlink, path)
-        return path
-
-    def test_every_shipped_workflow_declares_its_form(self):
-        for path in _workflows():
-            spec = WorkflowSpec.from_yaml(str(path))
-            with self.subTest(workflow=path.name):
-                self.assertTrue(spec.settings, "no settings: block")
-                self.assertTrue(spec.outputs, "no outputs: block")
-                for param in spec.settings:
-                    self.assertTrue(param.help, f"{param.name} has no help")
-                for output in spec.outputs:
-                    self.assertTrue(output.label and output.help and output.directory)
-
-    def test_resolution_and_framing_are_pipeline_settings(self):
-        """The two knobs the pipeline exists to let somebody turn. Both were
-        bare globals the UI had to carry a hardcoded choice list for."""
-        for path in _workflows():
-            spec = WorkflowSpec.from_yaml(str(path))
-            by_name = {p.name: p for p in spec.settings}
-            with self.subTest(workflow=path.name):
-                self.assertEqual(by_name["resolution"].type, list)
-                self.assertIn([720, 1280], by_name["resolution"].choices)
-                self.assertEqual(
-                    tuple(by_name["framing"].choices),
-                    ("full", "torso", "bust", "head"),
-                )
-
-    def test_a_settings_choice_set_matches_the_step_param_it_feeds(self):
-        """`framing` reaches `render` as `${globals.framing}`, so the two
-        choice lists have to be the same list. They used to be two — one in
-        the step class, one in a GLOBAL_CHOICES dict in webui.py with a
-        comment asking the next person to keep them in step."""
-        from pipeline.registry import get_step_class
-
-        render_choices = get_step_class("render").declared_params()["framing"].choices
-        for path in _workflows():
-            spec = WorkflowSpec.from_yaml(str(path))
-            framing = next(p for p in spec.settings if p.name == "framing")
-            with self.subTest(workflow=path.name):
-                self.assertEqual(tuple(framing.choices), tuple(render_choices))
-
-    def test_the_outputs_dirs_are_the_ones_the_export_steps_write(self):
-        """`dir:` is what packages a finished run, so it has to be the
-        directory the step gated by that output actually writes under
-        output_root."""
-        for path in _workflows():
-            spec = WorkflowSpec.from_yaml(str(path))
-            written = resolve(
-                [step.params for step in spec.steps], {"globals": spec.globals}
-            )
-            blob = repr(written)
-            root = spec.globals["output_root"]
-            for output in spec.outputs:
-                with self.subTest(workflow=path.name, output=output.name):
-                    self.assertIn(f"{root}/{output.directory}", blob)
-
-    def test_a_setting_nothing_reads_is_refused(self):
-        path = self._write(
-            "name: orphan\n"
-            "settings:\n"
-            "  - name: unused\n    default: 3\n    help: nothing reads me\n"
-            "steps:\n"
-            "  - id: a\n    step: rmbg\n    dispatch: in_process\n"
-        )
-        with self.assertRaises(ValueError) as caught:
-            WorkflowSpec.from_yaml(path).validate()
-        self.assertIn("unused", str(caught.exception))
-
-    def test_a_name_declared_twice_is_refused(self):
-        path = self._write(
-            "name: clash\n"
-            "settings:\n"
-            "  - name: run_it\n    default: true\n    help: x\n"
-            "globals:\n  run_it: false\n"
-            "steps:\n"
-            "  - id: a\n    step: rmbg\n    dispatch: in_process\n"
-            "    when: ${globals.run_it}\n"
-        )
-        with self.assertRaises(ValueError) as caught:
-            WorkflowSpec.from_yaml(path)
-        self.assertIn("one home", str(caught.exception))
-
-    def test_a_default_outside_its_own_choices_is_refused(self):
-        path = self._write(
-            "name: badchoice\n"
-            "settings:\n"
-            "  - name: mode\n    default: sideways\n    help: x\n"
-            "    choices: [up, down]\n"
-            "steps:\n"
-            "  - id: a\n    step: rmbg\n    dispatch: in_process\n"
-            "    params:\n      device: ${globals.mode}\n"
-        )
-        with self.assertRaises(ValueError) as caught:
-            WorkflowSpec.from_yaml(path).validate()
-        self.assertIn("choices", str(caught.exception))
-
-    def test_a_default_that_does_not_fit_its_type_is_refused(self):
-        path = self._write(
-            "name: badtype\n"
-            "settings:\n"
-            "  - name: count\n    type: int\n    default: many\n    help: x\n"
-            "steps:\n"
-            "  - id: a\n    step: rmbg\n    dispatch: in_process\n"
-            "    params:\n      batch_size: ${globals.count}\n"
-        )
-        with self.assertRaises(ValueError) as caught:
-            WorkflowSpec.from_yaml(path).validate()
-        self.assertIn("count", str(caught.exception))
-
-    def test_an_output_requiring_something_undeclared_is_refused(self):
-        path = self._write(
-            "name: badreq\n"
-            "outputs:\n"
-            "  - name: export_thing\n    dir: thing\n    label: Thing\n"
-            "    requires: no_such_setting\n"
-            "steps:\n"
-            "  - id: a\n    step: rmbg\n    dispatch: in_process\n"
-            "    when: ${globals.export_thing}\n"
-        )
-        with self.assertRaises(ValueError) as caught:
-            WorkflowSpec.from_yaml(path).validate()
-        self.assertIn("no_such_setting", str(caught.exception))
-
-    def test_an_output_with_no_dir_is_refused(self):
-        path = self._write(
-            "name: nodir\n"
-            "outputs:\n  - name: export_thing\n    label: Thing\n"
-            "steps:\n  - id: a\n    step: rmbg\n    dispatch: in_process\n"
-        )
-        with self.assertRaises(ValueError) as caught:
-            WorkflowSpec.from_yaml(path)
-        self.assertIn("dir", str(caught.exception))
-
-    def test_a_settings_value_is_coerced_the_way_a_step_param_is(self):
-        """`--param run_upscale=no` and a text box both hand over strings,
-        and `bool("no")` is True."""
-        spec = WorkflowSpec.from_yaml(str(WORKFLOW_DIR / "helical.yaml"))
-        self.assertIs(spec.coerce_global("run_upscale", "no"), False)
-        self.assertEqual(spec.coerce_global("seed", "7"), 7)
-        # An undeclared global has no type to be brought to.
-        self.assertEqual(spec.coerce_global("output_root", 3), 3)
-
-    def test_one_seed_reaches_every_stochastic_step(self):
-        """It was three step params holding 0, 0 and 42 — one run drawing
-        three unrelated samples. Four readers since 2026-09-08: the gated
-        re-outline denoise draws the same seed as pass 1, so the silhouette
-        it cuts is of the sample pass 1 would have drawn at 480p."""
-        stochastic = {"wan22_vace_denoise", "seedvr2"}
-        for path in _workflows():
-            spec = WorkflowSpec.from_yaml(str(path))
-            readers = [step.id for step in spec.steps
-                       if step.params.get("seed") == "${globals.seed}"]
-            expected = [step.id for step in spec.steps if step.step in stochastic]
-            with self.subTest(workflow=path.name):
-                # Every denoise and the upscale, and nothing else: four.
-                self.assertEqual(readers, expected)
-                self.assertGreaterEqual(len(readers), 3)
-                self.assertTrue(any("upscale" in r for r in readers))
-
-if __name__ == "__main__":
-    unittest.main()
-
 
 class TestWeakSkeleton(unittest.TestCase):
     """The Weak skeleton setting: pass 1 sees the sticks on step 1 only.
@@ -3415,14 +2804,15 @@ class TestWeakSkeleton(unittest.TestCase):
         spec = WorkflowSpec.from_yaml(resolve_workflow(name))
         return spec, {s.id: s for s in spec.steps}
 
-    def test_it_is_a_plain_setting_that_defaults_off(self):
+    def test_it_is_an_advanced_setting_that_defaults_on(self):
+        """On by default since 2026-09-26: no side effect seen with it."""
         for name in ("helical", "helical_shell"):
             with self.subTest(workflow=name):
                 spec, _ = self._steps(name)
                 setting = next(s for s in spec.settings if s.name == "weak_skeleton")
-                self.assertIs(setting.default, False)
+                self.assertIs(setting.default, True)
                 self.assertEqual(setting.label, "Weak skeleton")
-                self.assertFalse(setting.advanced)
+                self.assertTrue(setting.advanced)
 
     def test_both_control_renders_publish_the_copy(self):
         for name in ("helical", "helical_shell"):
@@ -3460,3 +2850,7 @@ class TestWeakSkeleton(unittest.TestCase):
                 self.assertEqual(pass1.params["skeleton_steps"], [1])
                 for other in ("reoutline_denoise", "denoise_pass2"):
                     self.assertNotIn("control_video_alt", by_id[other].inputs)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -433,10 +433,10 @@
 #   colmap_intermediate/ debug: the dataset the FIRST brush training is fed
 #   colmap_preupscale/   debug: a COLMAP dataset from the pre-upscale frames
 #
-# export_colmap / export_ply switch the deliverables off; export_debug is
-# the switch for everything in the second list, and the pre-upscale export
-# additionally wants run_upscale on. The web UI's Outputs box drives all of
-# them plus the "Upscale dataset" toggle.
+# colmap/ is always written; export_ply switches the .ply off. The two
+# debug COLMAP datasets are behind extra_debug (the pre-upscale one also
+# wants run_upscale), and debug/ is packaged only when the Results tab
+# asks for it.
 #
 # The input is usually not a photo of the subject: it is the two-panel
 # sheet a diffusion model generates, subject facing front on the left and
@@ -555,7 +555,8 @@ settings:
   - name: weak_skeleton
     label: Weak skeleton
     type: bool
-    default: false
+    default: true
+    advanced: true
     help: >-
       Show pass 1's denoise the DWPose skeleton on its first step only; the
       five steps after it get the same drawing with the sticks left out
@@ -567,18 +568,34 @@ settings:
       it alone, the same seed gives the same picture without the ink, on
       that subject and on a clean one (e9eb3a). Costs one extra render
       composite per frame and one extra VAE encode of the control video.
+      On by default since 2026-09-26: no side effect seen on any run with it.
 
   - name: run_upscale
     label: Upscale dataset
     type: bool
     default: true
-    group: outputs
+    advanced: true
     help: >-
       Run the SeedVR2 upscale (720x1280 -> 1080x1920) before the export, which
       also rescales the dataset's camera intrinsics to match, in the same step
       (steps/seedvr2.py). Off is the shorter pipeline that used to be a
-      separate workflow. Drawn beside the deliverables because it is a
-      property of what you get back rather than of how the run is built.
+      separate workflow.
+
+  - name: extra_debug
+    label: Extra debug outputs
+    type: bool
+    default: false
+    advanced: true
+    help: >-
+      Write the two debug COLMAP datasets nothing else needs:
+      `colmap_intermediate/`, what the FIRST brush training is handed (the
+      denoised frames, their mattes and normal maps, and a pose for every
+      supporting view — the face cap), and `colmap_preupscale/`, the frames
+      as they were BEFORE the upscale (only with the upscale on; off, it
+      would be colmap/ under a second name), which costs an extra RMBG
+      pass. Everything else in `debug/` is written by every run. Either way
+      `debug/` only goes into the result .zip when the Results tab's
+      "Include debug/" is ticked.
 
   - name: face_splat
     label: Face splat
@@ -704,7 +721,7 @@ settings:
   - name: photo_priority
     label: The photograph wins over the surface it sees
     type: float
-    default: 0.5
+    default: 0.0
     minimum: 0.0
     maximum: 1.0
     advanced: true
@@ -724,6 +741,11 @@ settings:
       copies and no fade; the copies switch off with the step's `copies`.
       (The removed mesh path's photo_texture was the same rule for its
       atlas, measured there at +30 % subject sharpness.)
+      Off, and the copies with it, since 2026-09-25: the frame at the anchor
+      pose is the denoiser's repaint, not the photograph (17-20 dB from it on
+      08ac56 and 416580), so this pinned a repaint, and the copies left a
+      layer of opacity behind the front (+50 % see-through near the anchor
+      in 416580's final splat, rebuilt locally with and without them).
 
   - name: specular_suppress
     label: Highlight suppression
@@ -891,53 +913,50 @@ settings:
     help: >-
       After the second denoise, lengthen the helical orbit with two VACE
       video extensions (steps/extend_orbit.py), each an 81-frame pass like
-      pass 2 itself. The BEFORE pass ends on pass 2's first 40 frames as
-      INACTIVE frames — mask 0, real pixels, the flag the anchor frame has
-      always carried — and paints 41 new frames ahead of them; the AFTER
-      pass starts on pass 2's last 41 and paints 40 after (the overlaps
+      pass 2 itself. The BEFORE pass ends on 40 INACTIVE frames beside
+      pass 2's first 40 — mask 0, kept as given, the flag the anchor frame
+      has always carried — and paints 41 new frames ahead of them; the
+      AFTER pass starts on 41 beside pass 2's last and paints 40 after (the overlaps
       below, one apart so each pass's mask changes on a latent frame's
       edge). The new cameras continue render_subject's helix at its own
-      step: the lead-in's flat -30 deg elevation carried on ahead of it,
-      the lead-out's +30 deg after. What the passes see is a render of a
-      splat along the whole 162-frame path — which splat is
-      `extend_guide`'s choice; what they hand back for the overlap is
-      discarded, pass 2's frames stay. Everything downstream — the
+      step: the lead-in's -30 deg elevation carried on ahead of it and
+      the lead-out's +30 deg after, each ramped `extend_tilt_deg` further
+      out of the band by its far end. What the passes see, every frame of
+      them, is a render of a splat trained on pass 2's 81 frames, at the
+      passes' own cameras — for the inactive frames a continuation of that
+      ramp beside pass 2's cameras, so each pass is one uniform helix; what
+      they hand back for the overlap is discarded, pass 2's frames stay. Everything downstream — the
       upscale, the final camera solve, the face fits, the deliverable
       training — then runs on 162 views instead of 81. ON by default:
       two more denoises at pass 2's cost (the resident experts serve
-      them, no reload), a fourth splat training with `retrained`, and
+      them, no reload), a fourth splat training, and
       twice the frames through everything after. UNMEASURED on a pod as
       of 2026-09-21; `debug/extension_input/{before,after}/` in the
       result hold the two control videos and `debug/extension_splat.ply`
-      the retrained splat.
+      the guide splat.
 
-  - name: extend_guide
-    label: Extension guide
-    default: retrained
-    choices: [retrained, intermediate, none]
+  - name: extend_tilt_deg
+    label: Extension tilt (deg past the band)
+    type: float
+    default: 10.0
+    minimum: 0.0
+    maximum: 50.0
     advanced: true
     requires: extend_orbit
     help: >-
-      With `extend_orbit` on: which splat is rendered along the 162-frame
-      path as the two extension passes' control video, with pass 2's own
-      confidence gate, matte and grey composite. `intermediate`: the splat
-      already trained after pass 1 (debug/intermediate_splat.ply, the one
-      render_subject drew pass 2's control from), rendered on the longer
-      path and used directly — its middle 81 frames ARE pass 2's control.
-      `retrained`: a new splat trained on pass 2's 81 denoised frames
-      (pre-upscale, the intermediate training's silhouette knobs, no
-      alignment), rendered on the same path: 81 frames at the cameras it
-      was fitted on and 81 novel views, with the trainer having enforced
-      a consistency across views the denoised frames themselves lack —
-      the reason to run the comparison. Either way each pass conditions
-      on the render from end to end, inactive frames included
-      (`assemble_extension`'s `inactive_source`), so it sees one coherent
-      render with no seam at the overlap, and what it hands back for the
-      overlap is thrown away anyway. `none` is the baseline without a
-      render: the inactive frames are pass 2's own and the new frames are
-      flat 0.5 grey, zero in the reactive latent — VACE's plain extension,
-      the model continuing the orbit from the real frames and the prompt
-      alone.
+      With `extend_orbit` on: how far past the helix's -30 / +30 deg
+      elevation band the extension's outermost frames reach. The BEFORE
+      pass's new frames ramp from -30 beside pass 2's first frame down to
+      -30 minus this at its first; the AFTER pass's from +30 up to +30
+      plus this at its last. 0 is the flat lead-in and lead-out carried
+      on, which repeats views: each 41-frame ring laps its own first
+      frames 2.6 deg apart and runs over the helix's first and last
+      third-turn, 32 of the 81 new frames within 5 deg of a view the
+      orbit already has (e9eb3a's cameras, 2026-09-24). 10 (ends at -40 /
+      +40) leaves none within 5 deg, the nearest-view median 8.5 deg
+      against pass 2's 9.6. Larger is new views from further above and
+      below, which the model and the guide splat have less to go on for.
+      UNMEASURED on a pod.
 
   - name: extend_overlap_before
     label: Extension overlap, BEFORE pass (frames)
@@ -976,78 +995,40 @@ settings:
       a latent edge — 41, 45 (36 new), 49 (32 new).
 
 outputs:
-  # What stage 6 can produce, and the switch each one is. `name:` is the
-  # workflow global the `when:` on its export steps reads, so the switch is
-  # greppable from either end; `dir:` is where those steps land it under
+  # What stage 6 produces. `dir:` is where its steps land it under
   # output_root, which is how a finished run is packaged for download
-  # without pipeline/webui.py holding a list of subdirectory names.
+  # without pipeline/webui.py holding a list of subdirectory names. An
+  # output with a switch has a `name:` that is the workflow global the
+  # `when:` on its export steps reads, drawn as a checkbox (under More
+  # settings when `advanced:`); `--param export_ply=false` does the same
+  # from the CLI. `always:` has no switch — every run writes it.
   #
-  # The web UI's Outputs box is exactly this list. `--param export_ply=false`
-  # does the same from the CLI. Turning one off skips its steps entirely —
-  # which for export_ply means not starting a second 30,000-iteration brush
-  # training you were going to throw away. export_debug is the half
-  # exception: most of `debug/` is written by steps the run performs
-  # anyway and it only decides what is packaged, but the two COLMAP
-  # datasets in there are its own export steps and are skipped with it.
+  # `debug/` is not declared here: every run writes it, the Results tab
+  # decides whether it is packaged, and `extra_debug` (a setting) switches
+  # the two debug-only COLMAP datasets on.
 
   - name: export_colmap
     label: COLMAP dataset
     dir: colmap
-    default: true
+    always: true
     help: >-
       cameras.txt, images.txt and points3D.txt, plus images/, built from the
-      frames as they finally are. No normals/ since 2026-09-06 — the training
-      that read them stopped supervising on them.
+      frames as they finally are. No normals/: the final training computes
+      its own (final_normal_maps) but the export does not carry them. No switch since
+      2026-09-26: writing it is seconds, and the .ply is trained on the same
+      frames anyway.
 
   - name: export_ply
     label: Trained .ply (flow-aligned)
     dir: ply
     default: true
+    advanced: true
     help: >-
       A second brush training over that dataset, exported as scene.ply. A full
       30,000 iterations — roughly an hour of GPU — and then four alignment
       iterations, another ~5 minutes, which warp the frames onto the splat's
       own renders and refit so the fit stops blurring its own training data
       (docs/final-splat-alignment-guide.md).
-
-  - name: export_debug
-    label: Debug bundle
-    dir: debug
-    default: true
-    help: >-
-      The `debug/` directory: refine_cameras' given-vs-refined camera models
-      and their stats, the face splat's stats and depth visualisations, the
-      face .ply files, `denoise_pass1_input/` — the control video the first
-      denoise is handed, frames with their VACE mask in alpha beside the
-      reference, the anchor photo and the cameras — `intermediate_splat.ply`,
-      the splat the helical re-render is built from, and two COLMAP datasets
-      nothing else exports.
-      `colmap_intermediate/` is what the FIRST brush training is handed: the
-      denoised frames, the mattes and normal maps computed for them, and a
-      pose in images.txt for every supporting view (the face cap), before
-      that splat is re-rendered along the helical orbit and denoised a
-      second time — everything that training saw, for when the re-render
-      comes out wrong, including a supporting view that landed somewhere
-      other than where its content belongs.
-      `colmap_preupscale/` is the same export from the frames as they are
-      BEFORE the upscale (stage 4b), to measure what SeedVR2 does to
-      Gaussian-splatting quality; it is written only when the upscale is on,
-      because with it off it would be the ordinary colmap/ under a second
-      name.
-      This is what a misplaced face or a drifted camera is diagnosed from
-      after the pod is gone, and it is why the 2026-09-04 face-cap
-      offset had to be triangulated back out of exported renders instead of
-      read off the splat that caused it.
-      Most of what lands here is a side effect of steps the run needs
-      anyway — those dumps are written to the volume either way and this
-      decides only whether they are packaged. The two COLMAP datasets are
-      the exception: they exist for nothing else, so this switch skips them
-      outright rather than paying for a dataset copy (and, for the
-      pre-upscale one, an RMBG pass) nobody asked for.
-      Size is why the switch is worth having at all: the intermediate splat
-      is hundreds of MB against a few hundred KB for everything else in
-      there. Turn it off for a run whose output you are only going to look
-      at, on for one you may have to explain.
 
 globals:
   # What has no control of its own, and therefore no `settings:` entry.
@@ -2898,6 +2879,9 @@ steps:
       images: dataset.images
     params:
       strength: ${globals.photo_priority}
+      # No copies of the anchor frame (2026-09-25): see the `photo_priority`
+      # setting. Empty support lists train exactly as without this step.
+      copies: 0
       debug_dir: ${globals.output_root}/debug/photo_priority
     outputs:
       weights: scene.priority.weights
@@ -2934,10 +2918,9 @@ steps:
   # Debug deliverable: the COLMAP dataset of the frames `train_splat` below
   # is fitted to — the denoised frames, the RMBG mattes and the normal maps
   # that the FIRST brush training runs on. It lands in `colmap_intermediate/`
-  # and rides into the archive under `debug/`, so the debug bundle is its
-  # switch — the one output switch that skips work rather than deciding
-  # what gets packaged, because unlike the rest of `debug/` this dataset is
-  # not a side effect of a step the run performs anyway.
+  # and rides into the archive under `debug/`. `extra_debug` is its switch,
+  # because unlike the rest of `debug/` this dataset is not a side effect
+  # of a step the run performs anyway.
   #
   # It IS everything that training is handed: the supporting views — the
   # face cap — go in too, through the same `support_*` inputs and the same
@@ -2967,7 +2950,7 @@ steps:
   - id: export_colmap_intermediate
     step: colmap_export
     dispatch: in_process
-    when: ${globals.export_debug}
+    when: ${globals.extra_debug}
     inputs:
       cameras: dataset.cameras
       image_names: dataset.image_names
@@ -3619,12 +3602,11 @@ steps:
   # 81-frame passes, each sharing pass 2's first 40 / last 41 frames as
   # VACE inactive frames and painting 41 / 40 new ones along the same
   # helix continued — one ahead of pass 2's orbit, one after — and the
-  # dataset leaves this stage 162 frames long. Ten gated steps, five of
-  # them gated on `extend_guide` as well: the retrained splat's matte and
-  # training and its render (`retrained`), the intermediate splat's
-  # render (`intermediate`), and the render's matte (either). With the
-  # setting off nothing here runs and the dataset reaches stage 4b exactly
-  # as denoise_pass2 left it.
+  # dataset leaves this stage 162 frames long. Nine gated steps: the path,
+  # the guide splat (matte, training, render, the render's matte), the
+  # two control videos, the two denoises and the splice. With the setting
+  # off nothing here runs and the dataset reaches stage 4b exactly as
+  # denoise_pass2 left it.
   # Until extend_splice the dataset is pass 2's 81 frames untouched: the
   # passes' control videos live under scene.extended.
   #
@@ -3634,7 +3616,10 @@ steps:
   # reproduce (tests/test_workflows.py pins the two blocks agree). The
   # middle 81 cameras of what it publishes ARE dataset.cameras, verbatim,
   # and the new ones carry the same rigid motion render_subject carried
-  # from the refined anchor. `phase_frames` is pass 2's own length: each
+  # from the refined anchor. `pass_cameras` are the two passes' own
+  # paths, which the guide is rendered on: one constant-rate ramp each,
+  # inactive frames included (see extend_tilt_deg). `phase_frames` is
+  # pass 2's own length: each
   # extension pass is a video the model was calibrated for, and 4k+1 for
   # the temporal VAE.
   - id: extend_path
@@ -3648,6 +3633,7 @@ steps:
       phase_frames: 81
       overlap_before: ${globals.extend_overlap_before}
       overlap_after: ${globals.extend_overlap_after}
+      tilt_deg: ${globals.extend_tilt_deg}
       n_frames: 81
       n_loops: 2
       amplitude_deg: 30.0
@@ -3660,6 +3646,8 @@ steps:
       after: scene.extended.after
       overlap_before: scene.extended.overlap_before
       overlap_after: scene.extended.overlap_after
+      tilt_deg: scene.extended.tilt_deg
+      pass_cameras: scene.extended.pass_cameras
 
   # The retrained guide splat: pass 2's output, matted, fitted on the
   # cameras it was made on. The matte overwrites the all-1.0 VACE batch
@@ -3668,9 +3656,7 @@ steps:
   - id: extend_masks
     step: rmbg
     dispatch: in_process
-    when:
-      - ${globals.extend_orbit}
-      - {eq: ["${globals.extend_guide}", retrained]}
+    when: ${globals.extend_orbit}
     inputs:
       images: dataset.images
     params:
@@ -3691,9 +3677,7 @@ steps:
   - id: extend_train_splat
     step: brush
     dispatch: in_process
-    when:
-      - ${globals.extend_orbit}
-      - {eq: ["${globals.extend_guide}", retrained]}
+    when: ${globals.extend_orbit}
     inputs:
       cameras: dataset.cameras
       image_names: dataset.image_names
@@ -3717,50 +3701,19 @@ steps:
       splat_path: scene.extended.splat_path
 
   # render_subject's render — the same bands, gate, cull colour and
-  # confidence tuning — on the extended cameras rather than a pattern, of
-  # whichever splat `extend_guide` names: two steps, one per splat, one
-  # of which runs, both writing the same path. The `cameras` input is
-  # rendered verbatim; `dataset` is wired for the focal length only. All
-  # 162 are rendered: each pass's control video is cut from the whole,
-  # inactive frames included. tests/test_workflows.py pins the two blocks
-  # to each other and to render_subject's.
-  #
-  # `intermediate`: dataset.splat_path is still train_splat's export here
-  # (train_final_splat overwrites it in stage 6), the splat render_subject
-  # itself rendered — so the middle 81 frames of this render reproduce
-  # pass 2's control video, and the 81 outside it are that splat's novel
-  # views.
-  - id: extend_render_intermediate
+  # confidence tuning — of the splat fitted just above, at the two
+  # passes' own cameras (`pass_cameras`: 81 + 81, inactive frames
+  # included, each pass's control video is its whole render). The
+  # `cameras` input is rendered verbatim; `dataset` is wired for the focal
+  # length only. tests/test_workflows.py pins this block to
+  # render_subject's.
+  - id: extend_render_guide
     step: render_splat
     dispatch: in_process
-    when:
-      - ${globals.extend_orbit}
-      - {eq: ["${globals.extend_guide}", intermediate]}
-    inputs:
-      splat_path: dataset.splat_path
-      cameras: scene.extended.cameras
-      dataset: dataset
-    params:
-      width: ${globals.resolution.0}
-      height: ${globals.resolution.1}
-      sh_degree: 2
-      confidence: true
-      cull_color: [0.5, 0.5, 0.5]
-      conf_args: ["--conf-tau", "0.3", "--conf-angle-margin", "45"]
-      background: ""
-    outputs:
-      images: scene.extended.guide_images
-
-  # `retrained`: the splat fitted just above, on pass 2's own frames.
-  - id: extend_render_retrained
-    step: render_splat
-    dispatch: in_process
-    when:
-      - ${globals.extend_orbit}
-      - {eq: ["${globals.extend_guide}", retrained]}
+    when: ${globals.extend_orbit}
     inputs:
       splat_path: scene.extended.splat_path
-      cameras: scene.extended.cameras
+      cameras: scene.extended.pass_cameras
       dataset: dataset
     params:
       width: ${globals.resolution.0}
@@ -3774,13 +3727,11 @@ steps:
       images: scene.extended.guide_images
 
   # resplat_foreground_masks for the guide: the matte measured against the
-  # render, not the gate — see that step. Whichever render ran.
+  # render, not the gate — see that step.
   - id: extend_guide_masks
     step: rmbg
     dispatch: in_process
-    when:
-      - ${globals.extend_orbit}
-      - {not: {eq: ["${globals.extend_guide}", none]}}
+    when: ${globals.extend_orbit}
     inputs:
       images: scene.extended.guide_images
     params:
@@ -3788,32 +3739,27 @@ steps:
     outputs:
       masks: scene.extended.guide_masks
 
-  # The two control videos, cut from the extended path: BEFORE = 41 new
-  # frames (mask 1) then pass 2's first 40 (mask 0); AFTER = pass 2's last
-  # 41 (mask 0) then 40 new (mask 1). The new frames carry the matted
-  # guide over 0.5 grey (mask_splat's composite, the colour pass 2's
-  # control ends on) or the grey alone; with a guide the inactive frames
-  # carry the render too (`inactive_source`), so each pass sees one
-  # coherent render — see the setting. The guide reads are optional (`?`)
-  # because the guide steps are gated; `guide` says whether they were
-  # expected. Both videos are dumped as pass 1's control video is.
+  # The two control videos, one per pass, each the matted guide render at
+  # that pass's cameras over 0.5 grey (mask_splat's composite, the colour
+  # pass 2's control ends on), inactive frames included: BEFORE = 41 new
+  # frames (mask 1) then 40 beside pass 2's first (mask 0); AFTER = 41
+  # beside pass 2's last (mask 0) then 40 new (mask 1). Both videos are
+  # dumped as pass 1's control video is.
   - id: extend_assemble
     step: assemble_extension
     dispatch: in_process
     when: ${globals.extend_orbit}
     inputs:
       dataset: dataset
-      cameras: scene.extended.cameras
+      pass_cameras: scene.extended.pass_cameras
       image_names: scene.extended.image_names
       before: scene.extended.before
       after: scene.extended.after
       overlap_before: scene.extended.overlap_before
       overlap_after: scene.extended.overlap_after
-      guide_images: scene.extended.guide_images?
-      guide_masks: scene.extended.guide_masks?
+      guide_images: scene.extended.guide_images
+      guide_masks: scene.extended.guide_masks
     params:
-      guide: ${globals.extend_guide}
-      inactive_source: guide
       bg_color: [0.5, 0.5, 0.5]
       debug_dir: ${globals.output_root}/debug/extension_input
     outputs:
@@ -3988,8 +3934,8 @@ steps:
       overlap_before: scene.extended.overlap_before
       overlap_after: scene.extended.overlap_after
       anchor_frame_index: dataset.extras.anchor_frame_index?
-      guide_images: scene.extended.guide_images?
-      guide_masks: scene.extended.guide_masks?
+      guide_images: scene.extended.guide_images
+      guide_masks: scene.extended.guide_masks
     params:
       colour_match: false
     outputs:
@@ -4019,6 +3965,7 @@ steps:
       after: scene.extended.after?
       overlap_before: scene.extended.overlap_before?
       overlap_after: scene.extended.overlap_after?
+      tilt_deg: scene.extended.tilt_deg?
       front_image: scene.front_image?
     params:
       n_frames: 81
@@ -4035,9 +3982,9 @@ steps:
 
   # --------------------------------------------------------------- stage 4b
   # Debug deliverable: a COLMAP dataset from the pre-upscale frames, for
-  # comparing splat quality with and without SeedVR2. Part of the debug
-  # bundle — it lands in `colmap_preupscale/` and is archived under
-  # `debug/` — and AND-ed with run_upscale, because with the upscale off
+  # comparing splat quality with and without SeedVR2. Behind `extra_debug`
+  # — it lands in `colmap_preupscale/` and is archived under `debug/` —
+  # and AND-ed with run_upscale, because with the upscale off
   # stage 6 already exports these same frames and this would be colmap/
   # under a second name. rmbg is recomputed here rather than reused from
   # stage 6: that one runs after the upscale, on 1080x1920 frames.
@@ -4050,7 +3997,7 @@ steps:
     step: rmbg
     dispatch: in_process
     when:
-      - ${globals.export_debug}
+      - ${globals.extra_debug}
       - ${globals.run_upscale}
     inputs:
       images: dataset.images
@@ -4063,7 +4010,7 @@ steps:
     step: colmap_export
     dispatch: in_process
     when:
-      - ${globals.export_debug}
+      - ${globals.extra_debug}
       - ${globals.run_upscale}
     inputs:
       cameras: dataset.cameras
@@ -4348,7 +4295,6 @@ steps:
   - id: export_colmap
     step: colmap_export
     dispatch: in_process
-    when: ${globals.export_colmap}
     inputs:
       cameras: dataset.cameras
       image_names: dataset.image_names
@@ -4399,6 +4345,9 @@ steps:
       mesh_world: scene.mesh_world?
     params:
       strength: ${globals.photo_priority}
+      # No copies of the anchor frame (2026-09-25): see the `photo_priority`
+      # setting. Empty support lists train exactly as without this step.
+      copies: 0
       debug_dir: ${globals.output_root}/debug/photo_priority_final
     outputs:
       weights: scene.priority_final.weights
