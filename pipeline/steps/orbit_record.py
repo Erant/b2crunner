@@ -32,7 +32,7 @@ class SnapshotOrbitStep(Step):
               on, extras, prompt, reference and anchor images),
               "before"?, "after"?, "overlap_before"?, "overlap_after"?:
               extend_helical_path's counts, present only if the orbit was
-              extended, "front_image"?: the photograph's front panel}
+              extended, "tilt_deg"?: its tilt, likewise, "front_image"?: the photograph's front panel}
     outputs: {"record": the orbit record without its final cameras (see
               pipeline/orbit_record.py), with the images under `_images`}
 
@@ -69,6 +69,7 @@ class SnapshotOrbitStep(Step):
             raise ValueError("snapshot_orbit: `before` and `after` come as a pair, from "
                              "extend_helical_path")
         extension = {key: int(value or 0) for key, value in counts.items()}
+        extension["tilt_deg"] = float(inputs.get("tilt_deg") or 0.0)
         helix = (extended_helix_params(source, extension["before"], extension["after"])
                  if extended else dict(source))
         if len(cameras) != int(helix["n_frames"]):

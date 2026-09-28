@@ -36,37 +36,30 @@ are the dataset's own, verbatim, with the rigid motion `render_subject`
 carried from the refined anchor (`_carry_anchor_refinement`) recovered
 from them and applied to the new frames. 41 frames is 425 deg, not 360:
 at 10.37 deg a frame a turn is 34.7 frames, and what fixes the count is
-the pass length (81) minus the overlap.
+the pass length (81) minus the overlap. On a flat lead that lap and the
+helix's own slow climb put 32 of the 81 new frames within 5 deg of a view
+the orbit already had, so `tilt_deg` ramps them out of the band: with 10
+deg the ends are at -40 / +40 and no new frame repeats one. Each pass is
+rendered on a path of its own (`pass_elevation_offsets`): the ramp runs
+through its inactive frames too, so the pass is one uniform helix rather
+than pass 2's cameras with their flat lead-in and lead-out in the middle
+of the video. That is free because the inactive frames carry the guide
+render, never pass 2's pixels, and what the pass returns for them is
+dropped.
 
 **The control videos.** `assemble_extension` builds the two 81-frame
-videos, cut from a render of one splat along the whole 162-frame path
-(`render_splat` on the extended cameras, matted by rmbg and laid over 0.5
-grey exactly as pass 2's control is — mask_splat's composite). Which
-splat is the experiment, the `extend_guide` setting:
-
-  * `intermediate` — the splat already trained after pass 1, the one
-    render_subject rendered pass 2's control from, on the longer path and
-    used directly: its middle 81 frames are pass 2's control again, the
-    81 outside are its novel views;
-  * `retrained` — a new `brush` fit on pass 2's 81 denoised frames (pre-
-    upscale), rendered on the same path: 81 frames at the cameras it was
-    fitted on, 81 novel views, with the trainer having enforced across
-    views a consistency the denoised frames themselves lack;
-  * `none` — the baseline: the inactive frames are pass 2's own and the
-    reactive ones 0.5 grey, which the pipeline's [-1, 1] normalisation
-    turns into zeros in the reactive latent (diffusers
-    pipeline_wan_vace.py, `prepare_video_latents`: `reactive = video *
-    mask`, so a grey pixel and a masked-out one are the same value) —
-    VACE's plain extension, the model continuing the orbit from the real
-    frames and the prompt alone.
-
-With a render, it fills the INACTIVE frames too (`inactive_source:
-guide`, the request's "the inactive frames are the output of a brush
-training"): the pass then sees one coherent render from end to end, with
-no texture seam at the overlap between real frames and a render, and the
-overlap it hands back is thrown away anyway. `inactive_source: frames` is
-the hybrid — real frames inactive, render reactive, pass 2's own
-arrangement at its anchor frame.
+videos from a render of one splat along the two passes' own paths
+(`render_splat` on `pass_cameras`, matted by rmbg and laid over 0.5 grey
+exactly as pass 2's control is — mask_splat's composite), every frame of
+each pass, inactive ones included: the pass sees one coherent render from
+end to end, with no texture seam between real frames and a render, and the
+overlap it hands back is thrown away anyway. The splat is a new `brush`
+fit on pass 2's 81 denoised frames (pre-upscale), the trainer having
+enforced across views a consistency the denoised frames themselves lack.
+Two alternatives ran against it and were dropped on 2026-09-24 as poorer
+output (the user's call): the intermediate splat (pass 1's) rendered
+directly, and no guide at all (pass 2's real frames inactive, flat grey
+new frames — VACE's plain extension).
 
 **The splice.** `splice_extension` takes the new frames off each pass
 (41 and 40) and puts pass 2's 81 between them, on the extended cameras,
@@ -89,7 +82,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -136,6 +129,60 @@ def extended_helix_params(params: Dict[str, Any], before: int, after: int) -> Di
         lead_in_deg=float(params["lead_in_deg"]) + before * step,
         lead_out_deg=float(params["lead_out_deg"]) + after * step,
     )
+
+
+def pass_elevation_offsets(before: int, overlap_before: int, overlap_after: int,
+                           after: int, tilt_deg: float) -> Tuple[List[float], List[float]]:
+    """Each extension pass's elevation, frame by frame, as an offset from the
+    lead it continues: the BEFORE pass from the lead-in's elevation, the AFTER
+    pass from the lead-out's. Each pass is one ramp at a constant rate,
+    tilt/before (tilt/after) a frame, end to end: the BEFORE pass climbs
+    from -tilt at its first frame through 0 at its first inactive frame
+    (pass 2's first camera) and on; the AFTER pass reaches 0 at its last
+    inactive frame (pass 2's last camera) and climbs to +tilt.
+
+    Why a tilt: the flat leads alone put every new frame back on pass 2's
+    band. At the defaults 32 of the 81 new frames sat within 5 deg of a view
+    the orbit already had (measured on e9eb3a's cameras, 2026-09-24): each
+    425 deg ring lapped its own first frames 2.6 deg apart, and ran over the
+    helix's first and last third-turn, which climbs only 30 deg a turn. 10
+    deg of tilt takes that to none (nearest-view median 8.5 deg, pass 2's
+    own is 9.6).
+
+    Why the inactive frames follow the ramp rather than pass 2's cameras:
+    they carry the guide render, not pass 2's pixels, and what the pass
+    returns for them is dropped — so they can sit anywhere, and on the ramp
+    the pass is one uniform helix with no bend. On pass 2's cameras it
+    would climb, stop on the lead-in or lead-out, and climb again."""
+    tilt = float(tilt_deg)
+    return ([tilt * (i - before) / before for i in range(before + overlap_before)],
+            [tilt * (m - (overlap_after - 1)) / after for m in range(overlap_after + after)])
+
+
+def _at_elevation(camera: Any, target: np.ndarray, elevation_deg: float):
+    """`camera` moved to `elevation_deg` about `target`, at the same radius
+    and azimuth, and turned back onto the target — the helix's own
+    construction (OrbitPath.helical), at an elevation it does not make."""
+    from body2colmap import coordinates
+    from body2colmap.camera import Camera
+
+    radius, azimuth, _ = coordinates.cartesian_to_spherical(
+        np.asarray(camera.position, dtype=np.float64) - target)
+    moved = Camera(
+        focal_length=(camera.fx, camera.fy),
+        image_size=(camera.width, camera.height),
+        principal_point=(camera.cx, camera.cy),
+        position=target + coordinates.spherical_to_cartesian(radius, azimuth, elevation_deg),
+    )
+    moved.look_at(target, coordinates.WorldCoordinates.UP_AXIS)
+    return moved
+
+
+def _elevation_deg(camera: Any, target: np.ndarray) -> float:
+    from body2colmap import coordinates
+
+    return coordinates.cartesian_to_spherical(
+        np.asarray(camera.position, dtype=np.float64) - target)[2]
 
 
 def new_frames(phase_frames: int, overlap: int) -> int:
@@ -214,7 +261,12 @@ class ExtendHelicalPathStep(Step):
               the new frames each side (phase_frames less that side's
               overlap); "overlap_before", "overlap_after": as given — the
               four counts assemble_extension and splice_extension cut the
-              passes by}
+              passes by; "tilt_deg": as given, for the orbit record;
+              "pass_cameras": the two passes' own paths, the BEFORE pass's
+              phase_frames then the AFTER pass's — what the guide is
+              rendered at (pass_elevation_offsets). Their new frames are
+              `cameras`' new frames; their inactive frames sit on the ramp,
+              beside pass 2's cameras rather than on them}
 
     The helix params here MUST be render_subject's: the source path is
     rebuilt from them and compared against the live cameras, and a mismatch
@@ -237,6 +289,12 @@ class ExtendHelicalPathStep(Step):
               "defaults). Latent-aligned when this is 4k+1 — one more than the "
               "BEFORE pass's, because here the inactive block starts the video "
               "rather than ends it", minimum=1),
+        Param("tilt_deg", float, 0.0,
+              "How far past the helix's elevation band the outermost new frame "
+              "reaches: the BEFORE pass ramps up from -amplitude - this, the AFTER "
+              "pass up to +amplitude + this, each at one constant rate "
+              "(pass_elevation_offsets). 0 = the flat leads continued, which repeats "
+              "views the orbit already has"),
         Param("n_frames", int, 81, "render_subject's frame count", minimum=1),
         Param("n_loops", int, 2, "render_subject's turns", minimum=1),
         Param("amplitude_deg", float, 30.0, "render_subject's elevation swing"),
@@ -279,6 +337,14 @@ class ExtendHelicalPathStep(Step):
                     boundary - (boundary - 1) % _VAE_TEMPORAL + _VAE_TEMPORAL,
                 )
 
+        tilt = float(params["tilt_deg"])
+        if tilt < 0.0 or float(params["amplitude_deg"]) + tilt >= 85.0:
+            raise ValueError(
+                f"extend_helical_path: tilt_deg={tilt} must be >= 0 and keep the outermost "
+                f"frames under 85 deg of elevation (amplitude {params['amplitude_deg']}); "
+                f"past that look_at's up vector degenerates"
+            )
+
         effective_mm = float(extras.get("focal_length_mm", 0.0) or 0.0)
         template = _camera_template(live[0])
         source = {key: params[key] for key in
@@ -305,6 +371,18 @@ class ExtendHelicalPathStep(Step):
         # frame and checked on every frame, then applied to the new ones.
         rotation, translation = refined_photo_pose(live[anchor], as_built[anchor])
         carried = [_transform_camera(camera, rotation, translation) for camera in as_built]
+        # Each pass's path, in the solver's frame (about the orbit target,
+        # the world's up) before the carry moves it with the rest: the
+        # solver's azimuths, pass_elevation_offsets' ramp from the leads.
+        target = np.asarray(extras["orbit_target"], dtype=np.float64)
+        lead_in, lead_out = _elevation_deg(extended[0], target), _elevation_deg(extended[-1], target)
+        ramp_before, ramp_after = pass_elevation_offsets(
+            before, overlap_before, overlap_after, after, tilt)
+        after_start = before + n - overlap_after
+        before_pass = [_at_elevation(extended[i], target, lead_in + d)
+                       for i, d in enumerate(ramp_before)]
+        after_pass = [_at_elevation(extended[after_start + m], target, lead_out + d)
+                      for m, d in enumerate(ramp_after)]
         drift = _worst_gap_m(carried, live)
         if drift > _SAME_PATH_TOLERANCE_M:
             raise ValueError(
@@ -313,25 +391,25 @@ class ExtendHelicalPathStep(Step):
                 f"motion. Has something refined or replaced dataset.cameras since the "
                 f"re-render? The extension has to hang on the path the frames were made on"
             )
-        cameras = (
-            [_transform_camera(camera, rotation, translation) for camera in extended[:before]]
-            + live
-            + [_transform_camera(camera, rotation, translation) for camera in extended[before + n:]]
-        )
+        before_pass = [_transform_camera(c, rotation, translation) for c in before_pass]
+        after_pass = [_transform_camera(c, rotation, translation) for c in after_pass]
+        cameras = before_pass[:before] + live + after_pass[overlap_after:]
         image_names = [f"frame_{i + 1:05d}_.png" for i in range(len(cameras))]
 
         step = helix_step_deg(n, params["n_loops"], params["lead_in_deg"], params["lead_out_deg"])
         logger.info(
             "extend_helical_path: %d + %d + %d = %d cameras at %.3f deg a frame — %.1f deg "
-            "on the lead-in elevation ahead, %.1f deg on the lead-out after (two %d-frame "
+            "ahead, %.1f deg after, tilting %.1f deg past the lead-in and lead-out "
+            "elevations at the ends (two %d-frame "
             "passes sharing pass 2's first %d and last %d frames); the anchor moves from "
             "frame %d to %d; the source path carried %.3f deg / %.1f mm off the solver's",
-            before, n, after, len(cameras), step, before * step, after * step,
+            before, n, after, len(cameras), step, before * step, after * step, tilt,
             phase, overlap_before, overlap_after, anchor, anchor + before,
             rotation_angle_deg(rotation), float(np.linalg.norm(translation)) * 1000.0,
         )
         return {"cameras": cameras, "image_names": image_names, "before": before,
-                "after": after, "overlap_before": overlap_before, "overlap_after": overlap_after}
+                "after": after, "overlap_before": overlap_before, "overlap_after": overlap_after,
+                "tilt_deg": tilt, "pass_cameras": before_pass + after_pass}
 
 
 def _phase_dataset(source, images, masks, cameras, image_names):
@@ -351,45 +429,31 @@ def _phase_dataset(source, images, masks, cameras, image_names):
 class AssembleExtensionStep(Step):
     """The two control videos the extension passes are handed.
 
-    inputs:  {"dataset": Dataset — pass 2's 81 frames as it left them,
-              "cameras", "image_names", "before", "after",
+    inputs:  {"dataset": Dataset — pass 2's 81 frames as it left them (its
+              resolution and metadata, for the checks and the dump),
+              "pass_cameras", "image_names", "before", "after",
               "overlap_before", "overlap_after": extend_helical_path's,
-              "guide_images"?, "guide_masks"?: a render of the extended
-              path and rmbg's matte of it, both over the WHOLE path —
-              required unless `guide` is `none`, ignored then}
+              "guide_images", "guide_masks": the guide splat's render at
+              `pass_cameras` and rmbg's matte of it — the BEFORE pass's
+              frames then the AFTER pass's}
     outputs: {"before_images", "before_masks": the BEFORE pass — `before`
-              reactive frames then `overlap_before` inactive ones (pass 2's
-              first); "after_images", "after_masks": the AFTER pass —
-              `overlap_after` inactive frames (pass 2's last) then `after`
-              reactive ones. Masks are the VACE per-frame flag, 0.0
+              reactive frames then `overlap_before` inactive ones (beside
+              pass 2's first); "after_images", "after_masks": the AFTER pass
+              — `overlap_after` inactive frames (beside pass 2's last) then
+              `after` reactive ones. Masks are the VACE per-frame flag, 0.0
               inactive / 1.0 reactive}
 
-    Both passes are phase_frames long by construction (before +
+    Every frame is the matted render over `bg_color`, inactive ones
+    included. Both passes are phase_frames long by construction (before +
     overlap_before = overlap_after + after). The dataset itself is not
     touched.
     """
 
     PARAMS = (
-        Param("guide", str, "none",
-              "Which splat's render fills the reactive frames (`guide_images`, matted "
-              "by `guide_masks` over `bg_color`, as pass 2's control is): the "
-              "`intermediate` splat's or a `retrained` one's — the step only needs to "
-              "know that one is expected; the workflow's gates decide which was "
-              "rendered. `none`: flat `bg_color`, VACE's plain extension, the model "
-              "continuing the orbit from the inactive frames alone",
-              choices=("none", "intermediate", "retrained")),
-        Param("inactive_source", str, "guide",
-              "What the inactive frames carry with a guide (`none`: always the frames). "
-              "`guide`: the render there too, so each pass sees one coherent render "
-              "with no texture seam at the overlap — the inactive frames ARE the brush "
-              "output, and what the pass hands back for them is discarded anyway. "
-              "`frames`: pass 2's real frames inactive beside the rendered reactive "
-              "ones, pass 2's own arrangement at its anchor frame",
-              choices=("guide", "frames")),
         Param("bg_color", list, [0.5, 0.5, 0.5],
-              "RGB in [0,1] behind the matted guide and filling an unguided "
-              "extension. 0.5 is the grey every control frame in this pipeline ends "
-              "on, and is zero after the [-1, 1] normalisation"),
+              "RGB in [0,1] behind the matted guide. 0.5 is the grey every control "
+              "frame in this pipeline ends on, and is zero after the [-1, 1] "
+              "normalisation"),
         Param("debug_dir", str, None,
               "Where to dump the two control videos as datasets (before/ and after/, "
               "the VACE flag in the alpha), like pass 1's denoise_pass1_input/. None "
@@ -401,19 +465,14 @@ class AssembleExtensionStep(Step):
 
         dataset = inputs["dataset"]
         source: List[np.ndarray] = list(dataset.images)
-        cameras = list(inputs["cameras"])
+        pass_cameras = list(inputs["pass_cameras"])
         image_names = list(inputs["image_names"])
         before, after = int(inputs["before"]), int(inputs["after"])
         overlap_before, overlap_after = int(inputs["overlap_before"]), int(inputs["overlap_after"])
         n = len(source)
         total = before + n + after
-        if len(cameras) != total or len(image_names) != total:
-            raise ValueError(
-                f"assemble_extension: {len(cameras)} cameras / {len(image_names)} names for "
-                f"{before} + {n} + {after} = {total} frames — extend_helical_path was run on "
-                f"a different batch than the one arriving here"
-            )
-        if (before + overlap_before != overlap_after + after
+        phase = before + overlap_before
+        if (phase != overlap_after + after
                 or not 1 <= min(overlap_before, overlap_after)
                 or max(overlap_before, overlap_after) > n):
             raise ValueError(
@@ -421,40 +480,26 @@ class AssembleExtensionStep(Step):
                 f"{overlap_before}, overlap_after={overlap_after} on {n} frames is not what "
                 f"extend_helical_path publishes (the two passes would differ in length)"
             )
-
-        mode = str(params["guide"]).strip()
-        guide = mode != "none"
-        inactive_source = params["inactive_source"] if guide else "frames"
+        if len(pass_cameras) != 2 * phase or len(image_names) != total:
+            raise ValueError(
+                f"assemble_extension: {len(pass_cameras)} pass cameras / {len(image_names)} "
+                f"names against two {phase}-frame passes around {n} frames — "
+                f"extend_helical_path was run on a different batch than the one arriving here"
+            )
+        guide_images, guide_masks = inputs["guide_images"], inputs["guide_masks"]
+        if len(guide_images) != 2 * phase or len(guide_masks) != 2 * phase:
+            raise ValueError(
+                f"assemble_extension: the guide render has {len(guide_images)} frames / "
+                f"{len(guide_masks)} mattes against the two passes' {2 * phase} cameras"
+            )
 
         height, width = source[0].shape[:2]
-        bg = tuple(float(c) for c in params["bg_color"])
-        grey = np.empty((height, width, 3), dtype=np.uint8)
-        # cv2 order, and int() as the renderers round it (0.5 -> 127).
-        grey[:] = [int(bg[2] * 255), int(bg[1] * 255), int(bg[0] * 255)]
-
-        if guide:
-            guide_images = inputs.get("guide_images")
-            guide_masks = inputs.get("guide_masks")
-            if guide_images is None or guide_masks is None:
-                raise ValueError(
-                    f"assemble_extension: guide is {mode!r} but no guide_images / "
-                    f"guide_masks arrived. The splat render and its matte are gated on "
-                    f"the same setting — check extend_render_{mode} / extend_guide_masks "
-                    f"ran"
-                )
-            if len(guide_images) != total or len(guide_masks) != total:
-                raise ValueError(
-                    f"assemble_extension: the guide render has {len(guide_images)} frames / "
-                    f"{len(guide_masks)} mattes against the {total}-camera path"
-                )
-            fill = [_composite_one(img, mask, bg) for img, mask in zip(guide_images, guide_masks)]
-        else:
-            fill = [grey] * total
-
         for frame in source:
             if tuple(frame.shape[:2]) != (height, width):
                 raise ValueError("assemble_extension: the source frames are not all one size")
-        for frame in fill:
+        bg = tuple(float(c) for c in params["bg_color"])
+        video = [_composite_one(img, mask, bg) for img, mask in zip(guide_images, guide_masks)]
+        for frame in video:
             if tuple(frame.shape[:2]) != (height, width):
                 raise ValueError(
                     f"assemble_extension: a guide frame is {frame.shape[1]}x{frame.shape[0]} "
@@ -462,37 +507,30 @@ class AssembleExtensionStep(Step):
                     f"dataset's resolution"
                 )
 
-        # The whole extended video as each pass would see it, then cut: new
-        # frames reactive, pass 2's frames inactive (their pixels, or the
-        # render's in `guide` mode).
-        middle = source if inactive_source == "frames" else fill[before:before + n]
-        video = fill[:before] + list(middle) + fill[before + n:]
         one = np.ones((height, width), dtype=np.float32)
         zero = np.zeros((height, width), dtype=np.float32)
-        flags = [one] * before + [zero] * n + [one] * after
-
-        before_cut = slice(0, before + overlap_before)
-        after_cut = slice(total - (overlap_after + after), total)
+        before_flags = [one] * before + [zero] * overlap_before
+        after_flags = [zero] * overlap_after + [one] * after
         result: Dict[str, Any] = {
-            "before_images": video[before_cut], "before_masks": flags[before_cut],
-            "after_images": video[after_cut], "after_masks": flags[after_cut],
+            "before_images": video[:phase], "before_masks": before_flags,
+            "after_images": video[phase:], "after_masks": after_flags,
         }
 
         debug_dir = params["debug_dir"]
         if debug_dir:
-            for name, cut in (("before", before_cut), ("after", after_cut)):
-                _phase_dataset(dataset, video[cut], flags[cut], cameras[cut], image_names[cut]) \
+            # Named as the extended dataset names the views they sit beside.
+            names = {"before": image_names[:phase], "after": image_names[total - phase:]}
+            for name, cut, flags in (("before", slice(0, phase), before_flags),
+                                     ("after", slice(phase, 2 * phase), after_flags)):
+                _phase_dataset(dataset, video[cut], flags, pass_cameras[cut], names[name]) \
                     .to_disk(Path(debug_dir) / name)
             logger.info("assemble_extension: both control videos written under %s", debug_dir)
 
         logger.info(
-            "assemble_extension: two %d-frame passes — BEFORE: %d reactive then %d inactive "
-            "(pass 2's first %d); AFTER: %d inactive (pass 2's last %d) then %d reactive. The "
-            "reactive frames are %s; the inactive ones are %s",
-            before + overlap_before, before, overlap_before, overlap_before,
-            overlap_after, overlap_after, after,
-            f"the {mode} splat's matted render over grey" if guide else "flat grey",
-            "pass 2's frames" if inactive_source == "frames" else "the render as well",
+            "assemble_extension: two %d-frame passes of the guide's matted render over grey — "
+            "BEFORE: %d reactive then %d inactive (beside pass 2's first %d); AFTER: %d "
+            "inactive (beside pass 2's last %d) then %d reactive",
+            phase, before, overlap_before, overlap_before, overlap_after, overlap_after, after,
         )
         return result
 
@@ -607,9 +645,9 @@ class SpliceExtensionStep(Step):
               "image_names", "before", "after", "overlap_before",
               "overlap_after": extend_helical_path's,
               "anchor_frame_index"?: pass 2's,
-              "guide_images"?, "guide_masks"?: the guide render of the
-              whole extended path and its matte (assemble_extension's),
-              which the colour match measures against}
+              "guide_images"?, "guide_masks"?: the guide render at the two
+              passes' cameras and its matte (assemble_extension's), which
+              the colour match measures against — required with it}
     outputs: {"images": before + n + after frames, "masks": the all-1.0
               VACE batch of that length (what mask_splat leaves; the next
               rmbg replaces it), "cameras", "image_names",
@@ -618,8 +656,7 @@ class SpliceExtensionStep(Step):
     The overlap frames each pass returned — its version of pass 2's frames
     — are dropped: pass 2's stay, byte for byte. With `colour_match` and a
     guide, each pass's new frames are brought to pass 2's contrast and
-    saturation first (`fit_colour_match`); with no guide (`extend_guide:
-    none`) there is nothing to measure against and they go in as returned.
+    saturation first (`fit_colour_match`).
     """
 
     PARAMS = (
@@ -627,8 +664,7 @@ class SpliceExtensionStep(Step):
               "Bring each pass's new frames to pass 2's contrast and saturation, "
               "measured against the guide render at both sets' cameras. The passes "
               "come back more saturated and contrasty than pass 2 (e9eb3a: chroma "
-              "+15-20 %, L spread +16-27 %), the same across all their new frames. "
-              "Needs a guide; without one the frames go in as returned"),
+              "+15-20 %, L spread +16-27 %), the same across all their new frames"),
         Param("colour_grow_px", int, 12,
               "How far past the guide's matte the correction reaches, feathered over "
               "as many pixels; beyond it the pass's grey stays untouched",
@@ -689,30 +725,35 @@ class SpliceExtensionStep(Step):
     def _colour_match(inputs, params, source, new_before, new_after, overlap_before, overlap_after):
         guides, guide_masks = inputs.get("guide_images"), inputs.get("guide_masks")
         before, n, after = len(new_before), len(source), len(new_after)
-        total = before + n + after
+        phase = before + overlap_before
         if guides is None or guide_masks is None:
-            logger.info("splice_extension: no guide render arrived (extend_guide none) — the "
-                        "colour match has nothing to measure against; the new frames go in as "
-                        "returned")
-            return new_before, new_after
-        if len(guides) != total or len(guide_masks) != total:
+            raise ValueError(
+                "splice_extension: colour_match needs the guide render and its matte "
+                "(assemble_extension's guide_images / guide_masks)"
+            )
+        if len(guides) != 2 * phase or len(guide_masks) != 2 * phase:
             raise ValueError(
                 f"splice_extension: the guide render has {len(guides)} frames / "
-                f"{len(guide_masks)} mattes against the {total}-camera path"
+                f"{len(guide_masks)} mattes against the two passes' {2 * phase} cameras"
             )
-        # Global index ranges: the pass's new frames, and pass 2's frames it
-        # shared with that pass.
+        # Indices into the guide render (the BEFORE pass's frames then the
+        # AFTER pass's): each pass's new frames, and its inactive frames
+        # paired with the pass 2 frames they sit beside. Those sit on the
+        # pass's ramp, not on pass 2's cameras — within tilt_deg of them,
+        # 0 at the seam — so the calibration compares moments over views a
+        # few degrees apart, not the same view.
         phases = (
-            ("BEFORE", new_before, range(0, before), range(before, before + overlap_before)),
-            ("AFTER", new_after, range(before + n, total),
-             range(before + n - overlap_after, before + n)),
+            ("BEFORE", new_before, range(0, before),
+             list(zip(range(before, phase), range(0, overlap_before)))),
+            ("AFTER", new_after, range(phase + overlap_after, 2 * phase),
+             list(zip(range(phase, phase + overlap_after), range(n - overlap_after, n)))),
         )
         corrected = []
-        for name, frames, new_idx, ref_idx in phases:
+        for name, frames, new_idx, ref_pairs in phases:
             match = fit_colour_match(
                 frames, [guides[i] for i in new_idx], [guide_masks[i] for i in new_idx],
-                [source[i - before] for i in ref_idx], [guides[i] for i in ref_idx],
-                [guide_masks[i] for i in ref_idx],
+                [source[j] for _, j in ref_pairs], [guides[i] for i, _ in ref_pairs],
+                [guide_masks[i] for i, _ in ref_pairs],
             )
             low, high = _COLOUR_FACTOR_RANGE
             if match is None or not all(

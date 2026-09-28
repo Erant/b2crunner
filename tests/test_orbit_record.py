@@ -84,7 +84,7 @@ class TestARecordExtendsAfterTheFact(_Cyber6f):
         with tempfile.TemporaryDirectory() as tmp:
             back = self._roundtrip(record, tmp)
         self.assertEqual(back["extension"], {"before": 0, "after": 0, "overlap_before": 0,
-                                             "overlap_after": 0})
+                                             "overlap_after": 0, "tilt_deg": 0.0})
         cameras = cameras_from_arrays(back["orbit_cameras"])
         live = run_step("extend_helical_path", {"cameras": self.source, "extras": self.extras},
                         dict(back["helix"]))
@@ -108,6 +108,7 @@ class TestARecordExtendsAfterTheFact(_Cyber6f):
         self.assertEqual(back["helix"]["n_frames"], 162)
         self.assertAlmostEqual(back["helix"]["lead_in_deg"], 30.0 + 41 * 840.0 / 81, places=6)
         self.assertEqual(back["extension"]["before"], 41)
+        self.assertEqual(back["extension"]["tilt_deg"], 0.0)
         self.assertEqual(back["anchor_frame_index"], self.extras["anchor_frame_index"] + 41)
         # extend_helical_path rebuilds the 162-frame path from the record's
         # params and refuses one it cannot reproduce: this is the check.

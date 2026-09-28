@@ -20,7 +20,10 @@ What the record holds, one comment line per key:
     orbit, these are the EXTENDED helix (`extended_helix_params`), so that
     `extend_helical_path` can rebuild the path the frames sit on and
     continue it again. `extension.*` says what was added (0 and 0 if
-    nothing was) and `pass_frames` gives one denoise pass's length.
+    nothing was), `extension.tilt_deg` how far the new frames were ramped
+    out of the elevation band (extend_orbit's `pass_elevation_offsets`; the
+    helix params alone do not give a tilted path), and `pass_frames` gives
+    one denoise pass's length.
   * `anchor_frame_index`: the photograph's frame on that path.
   * `orbit_cameras.*`: every camera of that path verbatim, as the frames
     were denoised on it: before `refine_cameras_final`, at the render
@@ -116,6 +119,8 @@ def orbit_comments(record: Dict[str, Any]) -> List[str]:
         lines.append(_fmt(f"helix.{key}", _typed(f"helix.{key}", record["helix"][key])))
     for key in EXTENSION_KEYS:
         lines.append(_fmt(f"extension.{key}", np.int64(record["extension"][key])))
+    lines.append(_fmt("extension.tilt_deg",
+                      np.float64(record["extension"].get("tilt_deg", 0.0))))
     lines.append(_fmt("pass_frames", np.int64(record["pass_frames"])))
     if record.get("anchor_frame_index") is not None:
         lines.append(_fmt("anchor_frame_index", np.int64(record["anchor_frame_index"])))
