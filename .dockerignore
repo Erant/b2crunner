@@ -17,13 +17,16 @@ pipeline/envs/*/vendor/
 .git/
 .gitignore
 
-__pycache__/
-*.py[cod]
-*$py.class
+# `**/`: a bare pattern matches at the context root only, so `__pycache__/`
+# alone let every tests/ and pipeline/ bytecode cache from a local pytest run
+# into `COPY . /opt/b2c_runner` (~5 MB that changed with every local run).
+**/__pycache__/
+**/*.py[cod]
+**/*$py.class
 
 build/
 dist/
-*.egg-info/
+**/*.egg-info/
 .eggs/
 
 .pytest_cache/
@@ -43,3 +46,9 @@ temp/
 
 # Local fp8 checkpoint experiments
 .fp8-scratch/
+
+# Figures in the research notes (docs/vace-leak-sweep alone is 16 MB of
+# PNGs): nothing in the image reads them, and the code copy is re-pushed with
+# every code change. The markdown stays.
+docs/**/*.png
+docs/**/*.jpg

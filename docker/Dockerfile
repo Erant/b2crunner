@@ -887,6 +887,52 @@ RUN /opt/venv_base/bin/pip install --no-deps \
         "b2cgltf @ git+https://github.com/Erant/b2cgltf.git@${B2CGLTF_REF}" \
     && /opt/venv_base/bin/python -c "import b2cgltf.b2crunner.subject"
 
+# COLMAP's runtime dependencies, in a layer of their OWN and deliberately
+# not in the big apt layer at the top of this stage. That is where they
+# started, and it cost a 15-minute push to learn why it was wrong: layer
+# invalidation cascades forward within a stage, so adding one package up
+# there re-ran all six `COPY --from=python-builder /opt/venv_*` lines, the
+# body2colmap layer and the application copy behind it. The COPYs dedupe at
+# the registry (unchanged bytes, same blob digest — the note below says so
+# for the trainer), but the re-executed RUN layers do not: their output is not
+# byte-reproducible, so the 1.25 GB apt layer went up the wire as a new
+# blob. Here, changing this list costs this layer and the application layers
+# below it, nothing else.
+#
+# ABOVE the application copy and the b2ctrain COPYs, which is the other half
+# of the same reasoning: neither a code change nor a bumped B2CTRAIN_REF may
+# invalidate an apt RUN, or every one of them pushes these ~380 MB again.
+# (It sat below `COPY . /opt/b2c_runner` until 2026-09-30, and every
+# code-only image re-pushed it.)
+#
+# The list is COLMAP's own docker/Dockerfile runtime stage, minus the qt6
+# entries the GUI would want (GUI_ENABLED=OFF) — same ubuntu24.04 as the
+# colmap-builder stage, so these are the same package versions it linked
+# against. Everything CUDA the ONNX provider needs (libcudart.so.13,
+# libcublas*.so.13, libcufft, libcurand, libnvrtc, libcudnn.so.9) is
+# already in this base image, which is the whole reason the builder
+# overrides ONNX to the CUDA 13 tarball.
+#
+# libglew2.2 IS needed despite GUI_ENABLED=OFF, and leaving it out was the
+# second thing that broke this stage: `colmap` links libGLEW regardless of
+# the GUI, so the binary dies with exit 127 and `error while loading shared
+# libraries: libGLEW.so.2.2` on every invocation. It cost a full image
+# build to find because the colmap-builder stage cannot show it — that
+# stage has libglew-dev installed, so the binary runs fine right up until
+# it is copied somewhere that does not. `doctor`'s colmap check is what
+# caught it; that is the check earning its place on the first build it
+# existed for.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libboost-program-options1.83.0 libmetis5 libceres4t64 \
+        libopenimageio2.4t64 libgoogle-glog0v6t64 libcurl4 libssl3t64 \
+        libomp5 libopengl0 libglew2.2 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Above the application copy too, and a COPY --chmod rather than COPY + RUN
+# chmod: a RUN re-executed below `COPY . /opt/b2c_runner` makes a new blob on
+# every code change, however small.
+COPY --chmod=755 docker/entrypoint.sh /usr/local/bin/b2c-entrypoint
+
 # NOT /workspace/b2c_runner, which is where this used to live. RunPod's
 # pod template defaults its network volume's mount path to /workspace, and a
 # volume mounted there shadows everything under it — including, in the old
@@ -910,9 +956,14 @@ COPY . /opt/b2c_runner
 COPY docker/envs.docker.yaml /opt/b2c_runner/pipeline/envs/envs.yaml
 
 # --no-deps: everything is already in venv_base, and there is no compiler
-# here to build anything that isn't.
-RUN for v in main wan22 seedvr2 sam3dbody; do \
-        /opt/venv_${v}/bin/pip install --no-deps -e . || exit 1; \
+# here to build anything that isn't. The one RUN below the application copy,
+# so it is re-pushed with every code change: PYTHONDONTWRITEBYTECODE and
+# --no-compile keep it to the editable-install files (~0.1 MB). Without them
+# pip's own modules and the smoke import's left ~22 MB of .pyc in the venvs
+# (python-builder prunes __pycache__, so nothing was already there).
+RUN export PYTHONDONTWRITEBYTECODE=1; \
+    for v in main wan22 seedvr2 sam3dbody; do \
+        /opt/venv_${v}/bin/pip install --no-deps --no-compile -e . || exit 1; \
     done \
     && /opt/venv_main/bin/python -c "\
 import pipeline.steps; from pipeline.registry import STEP_REGISTRY; \
@@ -935,9 +986,6 @@ EXPOSE 7860 22
 # request imports torch.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=180s --retries=3 \
     CMD curl -fsS "http://127.0.0.1:${B2C_PORT}/" >/dev/null || exit 1
-
-COPY docker/entrypoint.sh /usr/local/bin/b2c-entrypoint
-RUN chmod +x /usr/local/bin/b2c-entrypoint
 
 # ---------------------------------------------------------------------------
 # The trainer binary. LAST OF THE FILESYSTEM LAYERS ON PURPOSE — same
@@ -964,43 +1012,6 @@ RUN chmod +x /usr/local/bin/b2c-entrypoint
 # Nothing earlier in the build needs the binaries — the step-registry smoke
 # test above imports Python modules, and `pipeline/doctor.py` checks the
 # binaries at container start, not at build time.
-# COLMAP's runtime dependencies, in a layer of their OWN and deliberately
-# not in the big apt layer at the top of this stage. That is where they
-# started, and it cost a 15-minute push to learn why it was wrong: layer
-# invalidation cascades forward within a stage, so adding one package up
-# there re-ran all six `COPY --from=python-builder /opt/venv_*` lines, the
-# body2colmap layer and the application copy behind it. The COPYs dedupe at
-# the registry (unchanged bytes, same blob digest — the note below says so
-# for the trainer), but the re-executed RUN layers do not: their output is not
-# byte-reproducible, so the 1.25 GB apt layer went up the wire as a new
-# blob. Down here, changing this list costs this layer and nothing else.
-#
-# ABOVE the b2ctrain COPYs rather than below them, which is the other half
-# of the same reasoning: a bumped B2CTRAIN_REF must not invalidate an
-# apt RUN, or every trainer bump would push these ~450 MB again.
-#
-# The list is COLMAP's own docker/Dockerfile runtime stage, minus the qt6
-# entries the GUI would want (GUI_ENABLED=OFF) — same ubuntu24.04 as the
-# colmap-builder stage, so these are the same package versions it linked
-# against. Everything CUDA the ONNX provider needs (libcudart.so.13,
-# libcublas*.so.13, libcufft, libcurand, libnvrtc, libcudnn.so.9) is
-# already in this base image, which is the whole reason the builder
-# overrides ONNX to the CUDA 13 tarball.
-#
-# libglew2.2 IS needed despite GUI_ENABLED=OFF, and leaving it out was the
-# second thing that broke this stage: `colmap` links libGLEW regardless of
-# the GUI, so the binary dies with exit 127 and `error while loading shared
-# libraries: libGLEW.so.2.2` on every invocation. It cost a full image
-# build to find because the colmap-builder stage cannot show it — that
-# stage has libglew-dev installed, so the binary runs fine right up until
-# it is copied somewhere that does not. `doctor`'s colmap check is what
-# caught it; that is the check earning its place on the first build it
-# existed for.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        libboost-program-options1.83.0 libmetis5 libceres4t64 \
-        libopenimageio2.4t64 libgoogle-glog0v6t64 libcurl4 libssl3t64 \
-        libomp5 libopengl0 libglew2.2 \
-    && rm -rf /var/lib/apt/lists/*
 
 # b2ctrain (see its stage above): the trainer steps/brush.py runs, and —
 # via the one-line shim installed under the name every renderer in this

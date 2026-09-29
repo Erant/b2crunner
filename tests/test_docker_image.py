@@ -77,7 +77,7 @@ class TestDockerfile(unittest.TestCase):
         """A pod whose container exits is a dead pod with nothing to attach to."""
         self.assertIn('ENTRYPOINT ["/usr/local/bin/b2c-entrypoint"]', self.text)
         self.assertIn('CMD ["ui"]', self.text)
-        self.assertIn("COPY docker/entrypoint.sh /usr/local/bin/b2c-entrypoint", self.text)
+        self.assertIn("COPY --chmod=755 docker/entrypoint.sh /usr/local/bin/b2c-entrypoint", self.text)
 
     def test_the_ui_port_is_exposed(self):
         port = re.search(r"^ENV B2C_PORT=(\d+)", self.text, re.MULTILINE)
@@ -165,6 +165,29 @@ class TestDockerfile(unittest.TestCase):
             "B2CTRAIN_REF bump would now invalidate them and re-push ~450 MB",
         )
 
+    def test_a_code_change_re_runs_no_heavy_run_layer(self):
+        """A RUN re-executed below `COPY . /opt/b2c_runner` is a new blob on
+        every code-only image (its output is not byte-reproducible), so only
+        two may sit there: the editable install, kept to its own files by
+        PYTHONDONTWRITEBYTECODE and --no-compile, and b2ctrain's --help check,
+        which writes nothing. COLMAP's apt layer sat there until 2026-09-30
+        and re-pushed ~380 MB with every code change."""
+        tail = self.text[re.search(r"(?m)^COPY \. /opt/b2c_runner$", self.text).start():]
+        runs = re.findall(r"(?m)^RUN (.*)$", tail)
+        self.assertEqual(len(runs), 2, runs)
+        self.assertIn("PYTHONDONTWRITEBYTECODE=1", runs[0])
+        self.assertIn("--no-compile -e .", tail)
+        self.assertTrue(runs[1].startswith("b2ctrain --help"), runs[1])
+        self.assertNotIn("apt-get", tail)
+
+    def test_bytecode_and_doc_figures_stay_out_of_the_code_copy(self):
+        """.dockerignore patterns without `**/` match at the context root
+        only; `__pycache__/` alone let every local pytest run's bytecode into
+        the code copy."""
+        ignore = (REPO_ROOT / ".dockerignore").read_text().split()
+        for pattern in ("**/__pycache__/", "**/*.py[cod]", "docs/**/*.png"):
+            self.assertIn(pattern, ignore)
+
     def test_the_viewer_is_pinned_below_the_application_copy(self):
         """b2cviewer is a late layer, for the trainer's reason: bumping its
         pin must not invalidate the venvs, the apt layers or the application
@@ -177,8 +200,8 @@ class TestDockerfile(unittest.TestCase):
         self.assertIsNotNone(add, "no b2cviewer ADD")
         self.assertEqual(add.group(1), DEFAULT_VIEWER_DIR)
         self.assertRegex(self.text, r"ARG B2CVIEWER_REF=[0-9a-f]{40}\n")
-        for earlier in ("COPY . /opt/b2c_runner", "COPY --from=colmap-builder /opt/colmap /opt/colmap"):
-            self.assertLess(self.text.index(earlier), add.start(), earlier)
+        for earlier in (r"^COPY \. /opt/b2c_runner$", r"^COPY --from=colmap-builder /opt/colmap /opt/colmap$"):
+            self.assertLess(re.search(earlier, self.text, re.M).start(), add.start(), earlier)
         tail = self.text[add.end():]
         self.assertNotRegex(tail, r"(?m)^(RUN|COPY|ADD) ",
                             "a filesystem layer below the viewer re-runs on every viewer bump")
