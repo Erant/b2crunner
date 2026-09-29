@@ -32,6 +32,7 @@ TOOLS = {
     "video_fit": "sam3dbody",
     "export_mhr_subject": "sam3dbody",
     "recover_body": "sam3dbody",
+    "export_glb": "sam3dbody",
 }
 
 

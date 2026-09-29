@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import torch
@@ -32,41 +33,37 @@ from pipeline.steps.head_fit import FLIP, build_mhr_head, rig_binding_data  # no
 REPO = "facebook/sam-3d-body-dinov3"
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("ply")
-    ap.add_argument("out")
-    ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
-    args = ap.parse_args()
+def replay(ply: str | Path, device: str) -> SimpleNamespace:
+    """Replay a delivered splat's `b2c.mhr.*` record through MHR (the head alone), in the splat's world.
 
-    body = ply_meta.parse_body_comments(ply_meta.read_comments(args.ply))
+    Refuses when the replay misses the header's joints by 1 mm or more (wrong model or frame). Also used by
+    tools/export_glb.py."""
+    body = ply_meta.parse_body_comments(ply_meta.read_comments(ply))
     if not body:
-        raise SystemExit(f"{args.ply} carries no b2c.mhr.* body record")
+        raise SystemExit(f"{ply} carries no b2c.mhr.* body record")
     pose = body["pose_params"]
     wfr = body["world_from_raw"]
     scale = float(np.asarray(wfr["scale"]).reshape(-1)[0])
     rot = np.asarray(wfr["rotation"], np.float64).reshape(3, 3)
     trans = np.asarray(wfr["translation"], np.float64).reshape(3)
 
-    head = build_mhr_head(REPO, None, None, args.device)
-    dev = args.device
+    head = build_mhr_head(REPO, None, None, device)
 
     def t(key, default_len=None):
         v = pose.get(key)
         if v is None:
-            return torch.zeros(1, default_len, device=dev)
-        out = torch.as_tensor(np.asarray(v, np.float32), device=dev)
+            return torch.zeros(1, default_len, device=device)
+        out = torch.as_tensor(np.asarray(v, np.float32), device=device)
         return out[None] if out.ndim == 1 else out
 
     n_scales = int(head.scale_mean.shape[0])
+    inputs = dict(global_trans=t("global_trans", 3), global_rot=t("global_rot"),
+                  body_pose_params=t("body_pose_params"), hand_pose_params=t("hand_pose_params"),
+                  scale_params=t("scale_params"), shape_params=t("shape_params"),
+                  expr_params=t("expr_params"), scale_offsets=t("scale_offsets", n_scales))
     with torch.no_grad():
         verts, joints, model_params, rots = head.mhr_forward(
-            global_trans=t("global_trans", 3), global_rot=t("global_rot"),
-            body_pose_params=t("body_pose_params"), hand_pose_params=t("hand_pose_params"),
-            scale_params=t("scale_params"), shape_params=t("shape_params"),
-            expr_params=t("expr_params"), scale_offsets=t("scale_offsets", n_scales),
-            return_joint_coords=True, return_model_params=True, return_joint_rotations=True,
-        )
+            **inputs, return_joint_coords=True, return_model_params=True, return_joint_rotations=True)
     flip = np.asarray(FLIP, np.float64)
 
     def to_world(raw):  # raw: mhr_forward output (metres, before FLIP)
@@ -78,24 +75,41 @@ def main() -> None:
     print(f"replay vs header joints: max {err * 1000:.3f} mm")
     if err > 1e-3:
         raise SystemExit("replay does not reproduce the header's joints; wrong model or frame")
-
-    rig = rig_binding_data(head.mhr)
-    np.savez(
-        args.out,
-        model_params=model_params[0].cpu().numpy().astype(np.float32),
-        shape_params=t("shape_params")[0].cpu().numpy(),
-        expr_params=t("expr_params")[0].cpu().numpy(),
+    return SimpleNamespace(
+        body=body, head=head, scale=scale, rot=rot, trans=trans, flip=flip,
+        pose_params={k: v[0].cpu().numpy() for k, v in inputs.items()},
+        verts_w=verts_w, joints_w=joints_w, model_params=model_params[0].cpu().numpy().astype(np.float32),
+        global_rots_raw=rots[0].cpu().numpy(),
         hand_idx=np.concatenate([head.hand_joint_idxs_left.cpu().numpy(),
                                  head.hand_joint_idxs_right.cpu().numpy()]).astype(np.int64),
-        wfr_scale=np.float64(scale), wfr_rotation=rot, wfr_translation=trans, flip=flip,
-        verts_world=verts_w.astype(np.float32), joints_world=joints_w.astype(np.float32),
-        global_rots_raw=rots[0].cpu().numpy(),
+        rig=rig_binding_data(head.mhr),
+    )
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("ply")
+    ap.add_argument("out")
+    ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    args = ap.parse_args()
+
+    r = replay(args.ply, args.device)
+    rig = r.rig
+    np.savez(
+        args.out,
+        model_params=r.model_params,
+        shape_params=r.pose_params["shape_params"],
+        expr_params=r.pose_params["expr_params"],
+        hand_idx=r.hand_idx,
+        wfr_scale=np.float64(r.scale), wfr_rotation=r.rot, wfr_translation=r.trans, flip=r.flip,
+        verts_world=r.verts_w.astype(np.float32), joints_world=r.joints_w.astype(np.float32),
+        global_rots_raw=r.global_rots_raw,
         faces=rig["faces"].astype(np.int32), joint_parents=rig["joint_parents"].astype(np.int32),
         skin_vertex=rig["skin_vertex"], skin_joint=rig["skin_joint"], skin_weight=rig["skin_weight"],
-        mhr_model=str(Path(head.model_data_dir).resolve()),
+        mhr_model=str(Path(r.head.model_data_dir).resolve()),
     )
-    print(f"wrote {args.out}: {len(verts_w)} verts, {len(joints_w)} joints, "
-          f"model_params {tuple(model_params.shape)}")
+    print(f"wrote {args.out}: {len(r.verts_w)} verts, {len(r.joints_w)} joints, "
+          f"model_params {tuple(r.model_params.shape)}")
 
 
 if __name__ == "__main__":
