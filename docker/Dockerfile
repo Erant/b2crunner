@@ -421,17 +421,6 @@ RUN /opt/venv_base/bin/pip install \
         requests \
         'body2colmap @ git+https://github.com/Erant/body2colmap.git'
 
-# b2cgltf: the subject file (ply/scene.glb) the export_subject step writes, and
-# tools/export_glb.py's writer (b2cgltf SPEC.md; Erant/b2cgltf, shared with
-# b2crig). In venv_base so venv_main (the in_process step) and venv_sam3dbody
-# (the tool) both see it. Pinned by commit, as b2ctrain is: the file format is
-# a contract with b2crig, and a floating install would change it under a
-# rebuild. numpy is its only dependency, already installed above.
-ARG B2CGLTF_REF=ad878fcb2b47a23bb49b070b9373accde3d2de34
-RUN /opt/venv_base/bin/pip install --no-deps \
-        "b2cgltf @ git+https://github.com/Erant/b2cgltf.git@${B2CGLTF_REF}" \
-    && /opt/venv_base/bin/python -c "import b2cgltf.b2crunner.subject"
-
 # Every child venv gets this: a plain venv plus a .pth naming venv_base's
 # site-packages. See the header for why --system-site-packages is not it.
 COPY docker/make-child-venv.sh /usr/local/bin/make-child-venv
@@ -883,6 +872,20 @@ assert 'relief' in inspect.signature(Renderer.render_outline).parameters \
     'bump the body2colmap pin: steps/render.py needs render_outline(relief=...) and ' \
     'render_skeleton(occlusion_tolerance=...) for outline_relief / skeleton_occlusion_m'; \
 print('body2colmap eye_style default:', f.DEFAULT_EYE_STYLE)"
+
+# b2cgltf: the subject file (ply/scene.glb) the export_subject step writes, and
+# tools/export_glb.py's writer (b2cgltf SPEC.md; Erant/b2cgltf, shared with
+# b2crig). Into venv_base, so venv_main (the in_process step) and
+# venv_sam3dbody (the tool) both see it through their .pth. A late layer here,
+# not in python-builder, for the body2colmap layer's reason above: a pin bump
+# then re-runs this one small layer instead of every venv after it (and the
+# multi-GB re-push that follows). Pinned by commit, as b2ctrain is: the file
+# format is a contract with b2crig. numpy is its only dependency, already in
+# venv_base.
+ARG B2CGLTF_REF=ad878fcb2b47a23bb49b070b9373accde3d2de34
+RUN /opt/venv_base/bin/pip install --no-deps \
+        "b2cgltf @ git+https://github.com/Erant/b2cgltf.git@${B2CGLTF_REF}" \
+    && /opt/venv_base/bin/python -c "import b2cgltf.b2crunner.subject"
 
 # NOT /workspace/b2c_runner, which is where this used to live. RunPod's
 # pod template defaults its network volume's mount path to /workspace, and a
