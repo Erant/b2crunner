@@ -14,10 +14,12 @@ they still just return outputs.
 
 from __future__ import annotations
 
+import ctypes
+import gc
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from .context import Context
 from .dispatch import Dispatcher, build_dispatcher
@@ -92,6 +94,66 @@ def gpu_memory_summary() -> str:
         return ""
 
 
+def host_memory_summary() -> str:
+    """'RAM x.xx GB (peak y.yy)' for this process, or '' off Linux.
+
+    The host-side twin of `gpu_memory_summary`. On 2026-09-29 two local
+    runs were OOM-killed at the final training with the run worker itself
+    at 23.8 GB resident, and nothing in the log said so.
+    """
+    try:
+        with open("/proc/self/status") as status:
+            fields = dict(line.split(":", 1) for line in status if ":" in line)
+        rss = int(fields["VmRSS"].split()[0]) * 1024
+        peak = int(fields["VmHWM"].split()[0]) * 1024
+    except (OSError, KeyError, ValueError):
+        return ""
+    return f"RAM {rss / 1e9:.2f} GB (peak {peak / 1e9:.2f})"
+
+
+def _payload_bytes(value: Any, depth: int = 0) -> int:
+    """Array bytes held by a context entry: ndarrays and tensors, through
+    lists, tuples, dicts and plain objects. An estimate for the log, not
+    an accounting — shared buffers count once per reference."""
+    if depth > 6:
+        return 0
+    nbytes = getattr(value, "nbytes", None)
+    if isinstance(nbytes, int):
+        return nbytes
+    if hasattr(value, "element_size") and hasattr(value, "nelement"):
+        try:
+            return int(value.element_size() * value.nelement())
+        except Exception:
+            return 0
+    if isinstance(value, dict):
+        return sum(_payload_bytes(v, depth + 1) for v in value.values())
+    if isinstance(value, (list, tuple)):
+        return sum(_payload_bytes(v, depth + 1) for v in value)
+    if hasattr(value, "__dict__") and not isinstance(value, type):
+        return sum(_payload_bytes(v, depth + 1) for v in vars(value).values())
+    return 0
+
+
+def _trim_heap() -> None:
+    """Hand freed heap back to the OS.
+
+    Frames of a few MB sit under glibc's dynamic mmap threshold once it has
+    risen, so they are carved out of the heap, and freeing them leaves the
+    pages resident until something trims them. Harmless where there is no
+    glibc.
+    """
+    try:
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except (OSError, AttributeError):
+        pass
+
+
+def _related(a: str, b: str) -> bool:
+    """Whether reading one context path sees the other: the same path, or
+    one inside the other (`mesh_output: scene` reads every `scene.*`)."""
+    return a == b or a.startswith(b + ".") or b.startswith(a + ".")
+
+
 class WorkflowRunner:
     def __init__(
         self,
@@ -114,7 +176,19 @@ class WorkflowRunner:
         except Exception:  # a broken observer must not fail the run
             logger.exception("on_event callback raised; continuing")
 
-    def run(self, initial_context: Dict[str, Any]) -> Context:
+    def run(
+        self, initial_context: Dict[str, Any], keep: Optional[Iterable[str]] = None,
+    ) -> Context:
+        """Run every enabled step in order and return the context.
+
+        `keep` names the context paths the caller reads once the run is
+        over. Given, the runner releases everything else as soon as no
+        later enabled step reads it — without it, every intermediate a
+        workflow writes stays in the worker's RAM to the end, and helical's
+        run worker was OOM-killed at 23.8 GB resident when the final
+        training started. None keeps the whole context, for callers (and
+        tests) that inspect a step's outputs afterwards.
+        """
         ctx = Context(initial_context)
         template_scope = {"globals": self.spec.globals}
         total = len(self.spec.steps)
@@ -153,6 +227,18 @@ class WorkflowRunner:
             if enabled[index - 1]
         }
 
+        # Every input path of every enabled step, with the step's index, for
+        # the release below. Optional reads count: the value is there to be
+        # read when the branch that writes it ran.
+        reads: List[Tuple[int, str]] = [
+            (index, path.rstrip("?"))
+            for index, step_spec in enumerate(self.spec.steps, start=1)
+            if enabled[index - 1]
+            for path in step_spec.inputs.values()
+        ]
+        keep_paths = None if keep is None else list(keep)
+        written: List[str] = []
+
         try:
             for index, step_spec in enumerate(self.spec.steps, start=1):
                 if not enabled[index - 1]:
@@ -168,6 +254,11 @@ class WorkflowRunner:
                     )
                     continue
                 self._run_one(step_spec, index, total, ctx, template_scope)
+                if keep_paths is not None:
+                    for path in step_spec.outputs.values():
+                        if path not in written:
+                            written.append(path)
+                    self._release(ctx, index, written, reads, keep_paths)
                 key = self._dispatcher_key(step_spec)
                 if last_use[key] == index:
                     self._close_dispatcher(key)
@@ -181,6 +272,48 @@ class WorkflowRunner:
             RunEvent(kind="workflow_end", workflow=self.spec.name, total=total, elapsed=elapsed)
         )
         return ctx
+
+    @staticmethod
+    def _release(
+        ctx: Context,
+        index: int,
+        written: List[str],
+        reads: List[Tuple[int, str]],
+        keep: List[str],
+    ) -> None:
+        """Drop every path a step wrote that no step after `index` reads.
+
+        Only step outputs are candidates, and never one inside a `keep`
+        path (`dataset.splat_path` is the caller's). A path read later —
+        itself, a namespace holding it, or something inside it — stays.
+        """
+        released = []
+        for path in list(written):
+            if any(_related(path, kept) for kept in keep):
+                continue
+            if any(later > index and _related(path, read) for later, read in reads):
+                continue
+            written.remove(path)
+            try:
+                value = ctx.get(path)
+            except (KeyError, AttributeError, IndexError, TypeError):
+                continue
+            size = _payload_bytes(value)
+            del value
+            if ctx.delete(path):
+                released.append((size, path))
+        if not released:
+            return
+        gc.collect()
+        _trim_heap()
+        released.sort(reverse=True)
+        total = sum(size for size, _ in released)
+        largest = ", ".join(f"{path} {size / 1e9:.2f}" for size, path in released[:4] if size)
+        logger.info(
+            "released %d context entr%s no later step reads, %.2f GB of arrays%s | %s",
+            len(released), "y" if len(released) == 1 else "ies", total / 1e9,
+            f" (largest: {largest})" if largest else "", host_memory_summary(),
+        )
 
     def _run_one(
         self,
@@ -220,7 +353,7 @@ class WorkflowRunner:
             raise
 
         elapsed = time.time() - started
-        memory = gpu_memory_summary()
+        memory = " | ".join(part for part in (gpu_memory_summary(), host_memory_summary()) if part)
         logger.info(
             "[%d/%d] %s done in %s%s",
             index, total, step_spec.id, _duration(elapsed), f" | {memory}" if memory else "",

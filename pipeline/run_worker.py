@@ -248,7 +248,7 @@ def _run(job: RunJob, status_path: Path) -> int:
 
         envs = load_envs(job.envs_path)
         runner = WorkflowRunner(spec, envs=envs, on_event=writer)
-        ctx = runner.run({"dataset": dataset})
+        ctx = runner.run({"dataset": dataset}, keep=("dataset",))
 
         final: Dataset = ctx.get("dataset")
         saved = final.to_disk(Path(job.output_dir))

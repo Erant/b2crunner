@@ -52,5 +52,22 @@ class Context:
         else:
             obj[last] = value
 
+    def delete(self, path: str) -> bool:
+        """Drop the entry at `path`; whether there was one to drop.
+
+        Dict entries only — the runner releases what steps wrote into
+        scratch namespaces, never an attribute of an object like `dataset`.
+        """
+        parts = path.split(".")
+        obj: Any = self._data
+        for part in parts[:-1]:
+            if not isinstance(obj, dict) or part not in obj:
+                return False
+            obj = obj[part]
+        if not isinstance(obj, dict) or parts[-1] not in obj:
+            return False
+        del obj[parts[-1]]
+        return True
+
     def as_dict(self) -> Dict[str, Any]:
         return dict(self._data)

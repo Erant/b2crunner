@@ -254,7 +254,7 @@ def run_workflow(args: argparse.Namespace) -> int:
     runner = WorkflowRunner(spec, envs=envs)
 
     try:
-        ctx = runner.run({"dataset": dataset})
+        ctx = runner.run({"dataset": dataset}, keep=("dataset",))
     except Exception:
         logger.exception("run '%s' failed", run_name)
         if log_path:
