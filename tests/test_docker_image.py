@@ -165,6 +165,24 @@ class TestDockerfile(unittest.TestCase):
             "B2CTRAIN_REF bump would now invalidate them and re-push ~450 MB",
         )
 
+    def test_the_viewer_is_pinned_below_the_application_copy(self):
+        """b2cviewer is a late layer, for the trainer's reason: bumping its
+        pin must not invalidate the venvs, the apt layers or the application
+        copy. At the path `pipeline/viewer.py` looks in by default, from a
+        commit rather than a branch (a branch bakes whatever it was at the
+        first build into the cache)."""
+        from pipeline.viewer import DEFAULT_VIEWER_DIR
+
+        add = re.search(r"^ADD .*b2cviewer\.git#\$\{B2CVIEWER_REF\} (\S+)$", self.text, re.M)
+        self.assertIsNotNone(add, "no b2cviewer ADD")
+        self.assertEqual(add.group(1), DEFAULT_VIEWER_DIR)
+        self.assertRegex(self.text, r"ARG B2CVIEWER_REF=[0-9a-f]{40}\n")
+        for earlier in ("COPY . /opt/b2c_runner", "COPY --from=colmap-builder /opt/colmap /opt/colmap"):
+            self.assertLess(self.text.index(earlier), add.start(), earlier)
+        tail = self.text[add.end():]
+        self.assertNotRegex(tail, r"(?m)^(RUN|COPY|ADD) ",
+                            "a filesystem layer below the viewer re-runs on every viewer bump")
+
     def test_the_onnx_runtime_colmap_gets_matches_the_image_s_cuda(self):
         """COLMAP's own FETCH_ONNX takes the gpu_cuda12 build when CUDA is
         on. This image is CUDA 13, and the CUDA 12 libraries are in neither

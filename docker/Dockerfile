@@ -1034,6 +1034,18 @@ RUN b2ctrain --help > /dev/null && brush-splat-render --help > /dev/null
 # not to add.
 COPY --from=colmap-builder /opt/colmap /opt/colmap
 
+# b2cviewer (Erant/b2cviewer): the 3D viewer the web UI serves at /viewer/
+# (pipeline/viewer.py; B2C_VIEWER_DIR defaults to this path). Static files
+# plus a stdlib serve.py whose index() the UI imports — nothing to install.
+# Down here with the trainer and COLMAP, for their reason: a B2CVIEWER_REF
+# bump invalidates this ~0.1 MB layer and the metadata below, nothing else.
+# An ADD of a git source rather than a RUN git clone: no git needed in this
+# stage, and BuildKit caches it by the commit, so no RUN layer lands between
+# these COPYs and the end of the stage. Pinned by commit, as b2cgltf is: the
+# page reads b2cgltf's files, so the two move together.
+ARG B2CVIEWER_REF=e55bd9de76be6602a30b7a679fa921947d44f4e6
+ADD --keep-git-dir=false https://github.com/Erant/b2cviewer.git#${B2CVIEWER_REF} /opt/b2cviewer
+
 # Build provenance. Deliberately the LAST thing in the file: a LABEL makes a
 # layer, and every layer after it would be invalidated by a new SHA. Here, a
 # rebuild at a different commit redoes this metadata layer and nothing else.
