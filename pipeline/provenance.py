@@ -79,9 +79,14 @@ def b2crunner_revision() -> str:
 
 def body2colmap_revision() -> str:
     """The installed body2colmap's commit, from pip's PEP 610 record."""
+    return pip_revision("body2colmap")
+
+
+def pip_revision(name: str) -> str:
+    """An installed distribution's commit, from pip's PEP 610 record (body2colmap, b2cgltf)."""
     try:
         from importlib import metadata
-        dist = metadata.distribution("body2colmap")
+        dist = metadata.distribution(name)
     except Exception:  # noqa: BLE001 — not installed, or no metadata at all
         return "unknown (not installed)"
     version = dist.version
@@ -126,11 +131,14 @@ def b2ctrain_revision(binary: str = "b2ctrain") -> str:
 
 
 def versions() -> Dict[str, str]:
-    """{"b2crunner": ..., "body2colmap": ..., "b2ctrain": ...}, each a sha or `unknown (...)`."""
+    """{"b2crunner": ..., "body2colmap": ..., "b2ctrain": ..., "b2cgltf": ...}, each a sha or `unknown (...)`.
+
+    b2cgltf writes the deliverable (ply/scene.glb), so its commit is the file format's."""
     return {
         "b2crunner": b2crunner_revision(),
         "body2colmap": body2colmap_revision(),
         "b2ctrain": b2ctrain_revision(),
+        "b2cgltf": pip_revision("b2cgltf"),
     }
 
 

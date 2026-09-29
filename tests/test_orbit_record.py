@@ -208,7 +208,7 @@ class TestTheHeader(_AnchoredHelix):
 
 
 class TestTheWiring(unittest.TestCase):
-    def test_snapshot_after_the_splice_embed_after_the_training_both_behind_export_ply(self):
+    def test_snapshot_after_the_splice_subject_file_after_the_training(self):
         from pipeline.workflow import WorkflowSpec
         from tests.test_workflows import WORKFLOW_DIR
 
@@ -220,16 +220,20 @@ class TestTheWiring(unittest.TestCase):
                 self.assertEqual(order.index("snapshot_orbit"), order.index("extend_splice") + 1)
                 self.assertLess(order.index("snapshot_orbit"), order.index("upscale"))
                 self.assertLess(order.index("snapshot_orbit"), order.index("refine_cameras_final"))
-                self.assertEqual(order[-1], "embed_orbit_record")
+                self.assertEqual(order[-1], "export_subject")
                 self.assertEqual(order[-2], "train_final_splat")
-                for step_id in ("snapshot_orbit", "embed_orbit_record"):
-                    self.assertEqual(steps[step_id].when, "${globals.export_ply}")
+                self.assertNotIn("embed_orbit_record", order)   # no header records any more
+                self.assertEqual(steps["snapshot_orbit"].when, "${globals.export_ply}")
+                self.assertEqual(steps["export_subject"].when,
+                                 ["${globals.export_ply}", "${globals.refit_body}"])
+                self.assertEqual(steps["export_subject"].inputs["record"], "scene.orbit_record?")
+                self.assertNotIn("body_params", steps["train_final_splat"].inputs)   # the .ply stays bare
                 snapshot, subject = steps["snapshot_orbit"], steps["render_subject"]
                 for key in HELIX:
                     self.assertEqual(snapshot.params[key], subject.params[key])
                 self.assertEqual(snapshot.params["pass_frames"], subject.params["n_frames"])
                 self.assertEqual(snapshot.params["run_seed"], "${globals.seed}")
-                self.assertEqual(steps["embed_orbit_record"].inputs["splat_path"],
+                self.assertEqual(steps["export_subject"].inputs["splat_path"],
                                  steps["train_final_splat"].outputs["splat_path"])
 
 

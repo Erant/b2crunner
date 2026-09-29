@@ -1,5 +1,10 @@
 # PLY header records: `b2c.mhr.*` and `b2c.orbit.*`
 
+**Legacy since 2026-09-29.** Runs now deliver `ply/scene.glb` (b2cgltf SPEC.md) with everything these records held,
+beside a bare `scene.ply`, and the Results tab strips these lines from an older `scene.ply` it packages. This page
+stays the contract for reading deliverables made before that date; `tools/export_glb.py` converts one into a subject
+file.
+
 The delivered splat (`ply/scene.ply`) carries two records as PLY header `comment` lines: the refitted MHR body and the
 orbit the frames were made on. This page is the contract for readers outside b2crunner (b2crig reads both), so they
 parse the header themselves instead of importing `pipeline.ply_meta` / `pipeline.orbit_record`. Those two modules are

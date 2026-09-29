@@ -27,7 +27,10 @@ the run's output directory:
 
 ```
 <run>/colmap/                cameras.txt, images.txt, points3D.txt, images/, normals/
-<run>/ply/                   scene.ply — brush, normal-supervised
+<run>/ply/                   scene.glb — the subject file (b2cgltf SPEC.md: splat,
+                             refitted body + skeleton, cameras, images) — and
+                             scene.ply, the bare splat; the Results tab packages
+                             one of the two (glTF by default), nothing beside it
 <run>/debug/                 camera dumps, face splat stats,
                              denoise_pass1_input/ — the control video the
                              first denoise is handed — and

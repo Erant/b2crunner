@@ -392,7 +392,38 @@ def build_mhr_head(checkpoint_repo: str, checkpoint_dir, mhr_path, device: str):
             f"from its config (missing {missing}, unexpected {list(unexpected)}). "
             f"Is {checkpoint_dir} a facebook/sam-3d-body snapshot?"
         )
-    return head.to(device).eval()
+    head = head.to(device).eval()
+    head.mhr_model_path = str(mhr_path)   # what the subject file names and hashes (b2cgltf SPEC 4.3)
+    return head
+
+
+def mhr_model_row(head: Any, pose_params: Dict[str, Any], device: str) -> Dict[str, np.ndarray]:
+    """The TorchScript model's full input row for `pose_params` (SAM-3D-Body's raw frame), and the hand joints'
+    slots in it: what a consumer that drives `mhr_model.pt` directly edits (body slots) and leaves alone
+    (`hand_idx`). As tools/export_mhr_subject.py and b2cgltf's `B2C_mhr` hold them."""
+    import torch
+
+    def t(key, default_len=None):
+        v = pose_params.get(key)
+        if v is None:
+            return torch.zeros(1, default_len, device=device)
+        out = torch.as_tensor(np.asarray(v, np.float32), device=device)
+        return out[None] if out.ndim == 1 else out
+
+    with torch.no_grad():
+        _, row = head.mhr_forward(
+            global_trans=t("global_trans", 3), global_rot=t("global_rot"),
+            body_pose_params=t("body_pose_params"), hand_pose_params=t("hand_pose_params"),
+            scale_params=t("scale_params"), shape_params=t("shape_params"), expr_params=t("expr_params"),
+            scale_offsets=t("scale_offsets", int(head.scale_mean.shape[0])), return_model_params=True)
+    return {"model_params": row[0].cpu().numpy().astype(np.float32),
+            "hand_idx": np.concatenate([head.hand_joint_idxs_left.cpu().numpy(),
+                                        head.hand_joint_idxs_right.cpu().numpy()]).astype(np.int64)}
+
+
+def mhr_joint_names(mhr: Any) -> List[str]:
+    """The MHR skeleton's joint names, in joint order (the TorchScript model carries them)."""
+    return [str(n) for n in mhr.character_torch.skeleton.joint_names]
 
 
 def rig_binding_data(mhr: Any) -> Dict[str, np.ndarray]:

@@ -226,6 +226,7 @@ from __future__ import annotations
 
 import json
 import logging
+import shutil
 import subprocess
 import tempfile
 import time
@@ -788,6 +789,20 @@ def _link_init_ply(colmap_dir: Path, ply_path: Path) -> None:
     init.symlink_to(ply_path.absolute())
 
 
+#: What b2ctrain writes into its export directory besides the .ply.
+TRAINER_FILES = ("body_rig_omega.json",)
+
+
+def _move_trainer_files(ply_path: Path, target: Path) -> None:
+    """The trainer's other exports out of the .ply's directory (brush's `trainer_files_dir`)."""
+    for name in TRAINER_FILES:
+        src = ply_path.parent / name
+        if src.exists():
+            target.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(src), str(target / name))
+            logger.info("brush: moved the trainer's %s from %s to %s", name, src.parent, target)
+
+
 def _sidecar_name(filename: str) -> str:
     """The `masks/` (or `normals/`) name brush will match to `filename`.
 
@@ -1109,6 +1124,10 @@ class BrushStep(Step):
               "Export straight into this directory instead, for a training whose .ply "
               "is a deliverable and needs a predictable path. Wins over output_dir"),
         Param("export_name", str, "export.ply", "Filename of the exported .ply"),
+        Param("trainer_files_dir", str, None,
+              "Move what the trainer writes beside its export besides the .ply (b2ctrain's "
+              "body_rig_omega.json) into this directory, so a deliverable export directory holds "
+              "only the splat. Empty leaves them where the trainer put them", advanced=True),
         Param("brush_path", str, "b2ctrain",
               "The trainer binary, on PATH or as an absolute path. `b2ctrain` is "
               "what the image ships and this default names; any binary with "
@@ -1664,6 +1683,9 @@ class BrushStep(Step):
             raise RuntimeError(
                 f"Expected output PLY file not found: {ply_path}\nBrush may not have exported successfully."
             )
+
+        if params["trainer_files_dir"]:
+            _move_trainer_files(ply_path, Path(params["trainer_files_dir"]))
 
         # The body record rides in the header of whatever the last invocation
         # exported, so it is written once, after the polish and the alignment

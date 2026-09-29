@@ -742,7 +742,9 @@ outputs:
     default: true
     advanced: true
     help: >-
-      A second brush training over that dataset, exported as scene.ply. A full
+      A second brush training over that dataset, exported as scene.ply (the
+      bare splat) and, with the body refit on, scene.glb (the splat with its
+      body, skeleton and cameras; b2cgltf SPEC.md). A full
       30,000 iterations — roughly an hour of GPU — and then four alignment
       iterations, another ~5 minutes, which warp the frames onto the splat's
       own renders and refit so the fit stops blurring its own training data
@@ -3823,8 +3825,8 @@ steps:
   # extend_orbit ran), and next come the upscale, which rescales the
   # intrinsics, and refine_cameras_final, which moves the cameras. The helix
   # params are render_subject's, copied as extend_path's are. The record
-  # waits in scene.orbit_record until embed_orbit_record writes it into
-  # scene.ply's header.
+  # waits in scene.orbit_record until export_subject writes it into the
+  # subject file (scene.glb).
   - id: snapshot_orbit
     step: snapshot_orbit
     dispatch: in_process
@@ -4238,10 +4240,8 @@ steps:
       masks: dataset.masks
       # The body mesh, for the hollow loss (see hollow_weight below).
       mesh: scene.mesh_world?
-      # The refitted MHR body (parameters, frame, posed skeleton), written
-      # into scene.ply's header as b2c.mhr.* comments — the deliverable
-      # carries its own skeleton for whoever binds and animates it.
-      body_params: scene.body_params?
+      # No body_params (2026-09-29): the .ply is the bare splat, and the
+      # refitted body goes into the subject file (export_subject below).
       # The per-view deformation rig (build_body_rig): --body-rig on the
       # trainer, per-view joint rotations, canonical export. With
       # face_rig on it also carries build_face_rig's per-view face
@@ -4341,6 +4341,9 @@ steps:
       align_debug_dir: ${globals.output_root}/debug/alignment
       export_dir: ${globals.output_root}/ply
       export_name: scene.ply
+      # b2ctrain writes body_rig_omega.json beside its export; ply/ holds
+      # only the deliverables (scene.ply, scene.glb), so it goes to debug/.
+      trainer_files_dir: ${globals.output_root}/debug/final_splat
       # No polish here either — the step's default, spelled out because
       # this training used to carry the note that a polish had never been
       # measured on a deliverable splat. It has now (2026-09-07, on
@@ -4375,18 +4378,26 @@ steps:
       # and the CLI's closing "splat:" line both name the final one.
       splat_path: dataset.splat_path
 
-  # The orbit record into scene.ply's header as b2c.orbit.* comments, beside
-  # the b2c.mhr.* body, and the images a later extension conditions on
-  # (reference.png, anchor.png, front.png) written into ply/ beside it, so
-  # the result .zip carries them. After the training, because every brush
-  # export rewrites the file. The final cameras join the record here.
-  - id: embed_orbit_record
-    step: embed_orbit_record
+  # The deliverable as one glTF file beside the bare scene.ply (b2cgltf
+  # SPEC.md, steps/subject_glb.py): the splat, the refitted MHR body skinned
+  # to its named skeleton, the orbit record with the orbit and final cameras,
+  # and the reference / anchor / front images. Replaces the b2c.* header
+  # records and the PNGs that used to sit beside the .ply (2026-09-29); the
+  # Results tab hands out either file. Needs the refit body: without it
+  # there is no skeleton to write, and the run delivers the .ply alone.
+  - id: export_subject
+    step: export_subject
     dispatch: in_process
-    when: ${globals.export_ply}
+    when:
+      - ${globals.export_ply}
+      - ${globals.refit_body}
     inputs:
       splat_path: dataset.splat_path
-      record: scene.orbit_record
       cameras: dataset.cameras
+      image_names: dataset.image_names
+      body_params: scene.body_params
+      mesh_world: scene.mesh_world
+      rig_binding: scene.rig_binding
+      record: scene.orbit_record?
     outputs:
-      files: scene.orbit_record_files
+      subject_path: scene.subject_path

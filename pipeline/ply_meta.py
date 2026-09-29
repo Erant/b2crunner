@@ -31,7 +31,7 @@ import os
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -156,13 +156,26 @@ def body_comments(pose_params: Dict[str, Any], world_from_raw: Dict[str, Any], *
         lines.append(_fmt("pose_params." + key, np.asarray(pose_params[key], np.float32)))
     if joint_parents is not None:
         lines.append(_fmt("joint_parents", np.asarray(joint_parents, np.int64)))
-    if joints is not None:
-        j = np.asarray(joints, np.float64).reshape(-1, 3)
-        lines.append(_fmt("joints", scale * j @ rot.T + trans))
-    if global_rots is not None:
-        r = np.asarray(global_rots, np.float64).reshape(-1, 3, 3)
-        lines.append(_fmt("global_rots", np.einsum("ij,njk->nik", rot @ FLIP, r)))
+    joints_w, rots_w = body_world(world_from_raw, joints, global_rots)
+    if joints_w is not None:
+        lines.append(_fmt("joints", joints_w))
+    if rots_w is not None:
+        lines.append(_fmt("global_rots", rots_w))
     return lines
+
+
+def body_world(world_from_raw: Dict[str, Any], joints: Optional[Any] = None,
+               global_rots: Optional[Any] = None) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+    """`refit_body_to_splat`'s joints (raw frame) and rotations (MHR's frame) in the splat's world frame, where a
+    joint's rotation and position agree (record version 2; b2cgltf's joint nodes): `scale * j @ R.T + t` and
+    `R @ FLIP @ rots`. Either may be None."""
+    scale = float(world_from_raw["scale"])
+    rot = np.asarray(world_from_raw["rotation"], np.float64).reshape(3, 3)
+    trans = np.asarray(world_from_raw["translation"], np.float64).reshape(3)
+    joints_w = None if joints is None else scale * np.asarray(joints, np.float64).reshape(-1, 3) @ rot.T + trans
+    rots_w = None if global_rots is None else np.einsum(
+        "ij,njk->nik", rot @ FLIP, np.asarray(global_rots, np.float64).reshape(-1, 3, 3))
+    return joints_w, rots_w
 
 
 def parse_body_comments(comments: Iterable[str]) -> Dict[str, Any]:

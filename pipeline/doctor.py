@@ -96,6 +96,19 @@ def check_environment() -> Check:
     return Check("environment", OK, f"{platform.python_version()} on {platform.node()}", lines)
 
 
+def check_b2cgltf() -> Check:
+    """The subject file writer the run's last step (export_subject) imports. Missing, a run trains for an hour and
+    fails at the end, so this is a FAIL."""
+    try:
+        import b2cgltf.b2crunner.subject  # noqa: F401
+    except Exception as exc:  # noqa: BLE001 — any import failure is the answer
+        return Check("b2cgltf", FAIL, f"not importable: {exc}",
+                     ["docker/Dockerfile installs Erant/b2cgltf at B2CGLTF_REF into venv_base"])
+    from .provenance import pip_revision
+
+    return Check("b2cgltf", OK, f"importable ({pip_revision('b2cgltf')})")
+
+
 def check_disk() -> Check:
     from .paths import data_dir, log_dir, models_dir, output_dir
 
@@ -823,6 +836,7 @@ def run_checks(envs: Optional[Dict[str, Dict[str, Any]]] = None) -> List[Check]:
         ("model caches", check_model_caches),
         ("ephemeral caches", check_ephemeral_caches),
         ("step registry", check_step_registry),
+        ("b2cgltf", check_b2cgltf),
         ("ffmpeg", check_ffmpeg),
     ]
     results = []

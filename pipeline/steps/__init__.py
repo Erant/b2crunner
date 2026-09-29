@@ -18,6 +18,7 @@ from . import elevation_views  # noqa: F401
 from . import extend_orbit  # noqa: F401
 from . import face_priority  # noqa: F401
 from . import orbit_record  # noqa: F401
+from . import subject_glb  # noqa: F401
 from . import photo_priority  # noqa: F401
 from . import face_views  # noqa: F401
 from . import face_landmarks  # noqa: F401

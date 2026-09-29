@@ -68,8 +68,9 @@ header's joints by 1 mm or more.
 `export_glb RUN OUT.glb [--ply PLY] [--device cuda] [--no-view-cameras]` (sam3dbody, needs `b2cgltf` importable,
 e.g. `B2CRUNNER_PATH_SAM3DBODY=...:~/Projects/b2cgltf`): the run as a b2cgltf **subject file** (`b2cgltf/SPEC.md`
 section 4). It holds the splat, the replayed MHR body skinned to its skeleton with `B2C_mhr`, and `B2C_orbit`
-(cameras, record, embedded images), and replaces `scene.ply` + sidecars + `mhr.npz` as the hand-off. It is the
-migration path of SPEC 4.6:
+(cameras, record, embedded images), and replaces `scene.ply` + sidecars + `mhr.npz` as the hand-off. Runs since
+2026-09-29 write `ply/scene.glb` themselves (`export_subject`); this tool is the migration path of SPEC 4.6 for
+the ones before:
 - a version-1 body record has its rotations converted (`sourceRecordVersion: 1`);
 - a run without an orbit record gets `"migrated": true` and only the final cameras, from `colmap/`;
 - final cameras are named from `colmap/images.txt`, which must hold the same cameras in the same order.

@@ -101,10 +101,17 @@ restored, so the refit frame carries through. A second refit after stage 5,
 against the final splat, is where the splat-to-body binding will be
 written.
 
-## The body in the delivered .ply
+## The body in the deliverable
+
+Since 2026-09-29 the refitted body goes into the subject file, `ply/scene.glb`
+(`export_subject`, b2cgltf SPEC.md section 4.3): the replayed mesh skinned to
+the named MHR skeleton, with `B2C_mhr` holding the pose parameters, the model
+row and the model's hash. `scene.ply` is the bare splat. The rest of this
+section describes the header record runs before that date carry (still read by
+`tools/export_glb.py`, `export_mhr_subject` and `recover_body`).
 
 `refit_body_to_splat` also publishes `scene.body_params`, and
-`train_final_splat` takes it as `body_params` and writes it into
+`train_final_splat` took it as `body_params` and wrote it into
 `ply/scene.ply`'s header after its last export (`pipeline/ply_meta.py`).
 Header comments are the one place a record survives every reader —
 b2ctrain refuses non-vertex elements and viewers parse every element they

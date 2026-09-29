@@ -81,7 +81,7 @@ import numpy as np
 
 from ..registry import register_step
 from ..step import Param, Step
-from .head_fit import FLIP, build_mhr_head, rig_binding_data
+from .head_fit import FLIP, build_mhr_head, mhr_joint_names, mhr_model_row, rig_binding_data
 
 logger = logging.getLogger(__name__)
 
@@ -232,6 +232,16 @@ def write_points_ply(path: Path, points: np.ndarray, normals: np.ndarray) -> Non
 
 
 # -- splat_surface -------------------------------------------------------------
+
+def _sha256(path: str) -> str:
+    import hashlib
+
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
 
 @register_step("splat_surface")
 class SplatSurfaceStep(Step):
@@ -759,5 +769,10 @@ class RefitBodyToSplatStep(Step):
                 "global_rots": rots.cpu().numpy(),
                 "joint_parents": rig_binding_data(head.mhr)["joint_parents"],
                 "model": f"{params['checkpoint_repo']} {params['mhr_path'] or 'assets/mhr_model.pt'}",
+                # What the subject file's B2C_mhr adds (b2cgltf SPEC 4.3, steps/subject_glb.py): the model's
+                # input row and hand slots, the joint names, and the model file by hash.
+                **mhr_model_row(head, new_pose, device),
+                "joint_names": mhr_joint_names(head.mhr),
+                "model_sha256": _sha256(head.mhr_model_path),
             },
         }
