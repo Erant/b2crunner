@@ -116,6 +116,7 @@ from .runs import (
     workflow_param_panel,
 )
 from .step import Param
+from .viewer import has_subject_file, mount_viewer, viewer_dir, viewer_link
 from .workflow import WorkflowSpec, load_envs, truthy
 
 logger = logging.getLogger(__name__)
@@ -539,6 +540,9 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
         work_dir=run_jobs_dir(),
     )
     default_workflow = WORKFLOW_DEFAULT
+    # `build_server` mounts it from the same checkout; `build_app` alone
+    # (tests) shows the button without the route behind it, harmlessly.
+    viewer_on = viewer_dir() is not None
 
     with gr.Blocks(title="b2c_runner", analytics_enabled=False) as app:
         gr.Markdown("# b2c_runner\nBody2COLMAP pipeline — submit a run, watch it, collect the output.")
@@ -795,6 +799,11 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
                          "outputs on, two more COLMAP datasets.",
                 )
                 results_zip = gr.File(label="Result (.zip)", scale=3)
+            # b2cviewer on this run's subject file, in a browser tab of its
+            # own (`pipeline/viewer.py`); shown when both exist.
+            results_viewer = gr.Button(
+                "Open in 3D viewer ↗", link_target="_blank", visible=False,
+            )
             results_gallery = gr.Gallery(label="Final frames", columns=6, height=400)
 
             gr.Markdown(
@@ -912,7 +921,7 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
         memo = gr.State({})
         view_outputs = [
             fleet_out, status_out, progress_out, steps_out, log_out, log_file,
-            results_info, results_gallery, results_zip,
+            results_info, results_gallery, results_zip, results_viewer,
             preview_step_in, preview_gallery_out, memo,
         ]
 
@@ -966,17 +975,21 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
 
             if stale:
                 info_upd, frames_upd, zip_upd = _result_summary(state, bool(debug), fmt)
+                viewable = viewer_on and has_subject_file(state.output_dir)
+                viewer_upd = gr.update(
+                    link=viewer_link(state.name) if viewable else None, visible=viewable,
+                )
                 path = run_log_path(state.output_dir, state.log_path)
                 log_file_upd = gr.update(
                     value=str(path) if path else None, visible=path is not None,
                 )
             else:
-                info_upd = frames_upd = zip_upd = log_file_upd = keep
+                info_upd = frames_upd = zip_upd = viewer_upd = log_file_upd = keep
             memo["sig"] = sig
 
             return (
                 fleet_upd, status_upd, progress_upd, steps_upd, log_upd, log_file_upd,
-                info_upd, frames_upd, zip_upd, filter_upd, previews_upd, memo,
+                info_upd, frames_upd, zip_upd, viewer_upd, filter_upd, previews_upd, memo,
             )
 
         def on_tick(run_name, memo, step_filter, debug=False, fmt=DEFAULT_SPLAT_FORMAT):
@@ -1325,6 +1338,9 @@ def build_server(
     # workers before uvicorn starts waiting on connections.
     server.state.gpu_scheduler = scheduler
     server.state.shutdown = shutdown
+
+    # Also before the Gradio mount, and like the API outside its login.
+    mount_viewer(server, lambda: merged_runs(scheduler))
 
     return gr.mount_gradio_app(
         server, blocks, "/",

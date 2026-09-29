@@ -46,6 +46,12 @@ it at packaging time (Results tab "Include debug/", `/result?debug=true`).
 The two COLMAP datasets are written only with the "Extra debug outputs"
 setting (`extra_debug`, off by default).
 
+The Results tab's **Open in 3D viewer ↗** opens a run's `scene.glb` in
+[b2cviewer](https://github.com/Erant/b2cviewer) in a browser tab of its own,
+served by the same server at `/viewer/` (`pipeline/viewer.py`). It needs a
+b2cviewer checkout at `B2C_VIEWER_DIR` (default `/opt/b2cviewer`); without
+one there is no button. **`/viewer/` is not behind the UI's login.**
+
 ## Install
 
 ```bash
