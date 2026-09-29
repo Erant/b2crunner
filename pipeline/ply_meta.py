@@ -20,6 +20,10 @@ Line format, one per key::
 
 `<shape>` is the array's shape as `d0xd1x...` (`1` for a scalar), values are
 `%.9g` floats (float32 round-trips exactly) or `%d` integers; string keys (`model`, `frame`) carry text.
+docs/ply-header-records.md is the format's contract for readers outside b2crunner.
+
+Version 2 (2026-09-29) writes `global_rots` in the same world frame as `joints`; version 1 headers wrote
+`rotation @ rots` without the raw frame's flip (docs/ply-header-global-rots-flip-2026-09-25.md).
 """
 from __future__ import annotations
 
@@ -32,6 +36,10 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence
 import numpy as np
 
 PREFIX = "b2c.mhr."
+VERSION = 2
+
+# SAM-3D-Body's raw (OpenCV) frame from MHR's own: positions come out of the model with y and z negated.
+FLIP = np.diag([1.0, -1.0, -1.0])
 
 #: pose_params entries a replay must pass to the MHR forward, in this order.
 POSE_KEYS = ("global_rot", "body_pose_params", "hand_pose_params", "scale_params",
@@ -124,9 +132,13 @@ def body_comments(pose_params: Dict[str, Any], world_from_raw: Dict[str, Any], *
                   joint_parents: Optional[Any] = None, model: str = "") -> List[str]:
     """The comment lines for a refitted body (see the module docstring).
 
-    `joints` (J,3) and `global_rots` (J,3,3) are in SAM-3D-Body's raw frame
-    as `refit_body_to_splat` publishes them and are written in the WORLD
-    frame; `world_from_raw` is {"scale", "rotation" (3,3), "translation" (3,)}.
+    `joints` (J,3) and `global_rots` (J,3,3) are as `refit_body_to_splat`
+    publishes them, SAM-3D-Body's convention: the joints are in the raw
+    (OpenCV) frame, the rotations in MHR's own frame, because SAM-3D-Body
+    (and the refit after it) flips the positions but not the rotations. Both
+    are written in the WORLD frame: `rotation @ FLIP @ global_rots`, so a
+    joint's rotation and position agree. `world_from_raw` is {"scale",
+    "rotation" (3,3), "translation" (3,)}.
     """
     missing = [k for k in POSE_KEYS if pose_params.get(k) is None]
     if missing:
@@ -134,7 +146,7 @@ def body_comments(pose_params: Dict[str, Any], world_from_raw: Dict[str, Any], *
     scale = float(world_from_raw["scale"])
     rot = np.asarray(world_from_raw["rotation"], np.float64).reshape(3, 3)
     trans = np.asarray(world_from_raw["translation"], np.float64).reshape(3)
-    lines = [f"{PREFIX}version 1", f"{PREFIX}frame {_FRAME_NOTE}"]
+    lines = [f"{PREFIX}version {VERSION}", f"{PREFIX}frame {_FRAME_NOTE}"]
     if model:
         lines.append(f"{PREFIX}model {model}")
     lines.append(_fmt("world_from_raw.scale", np.float64(scale)))
@@ -149,7 +161,7 @@ def body_comments(pose_params: Dict[str, Any], world_from_raw: Dict[str, Any], *
         lines.append(_fmt("joints", scale * j @ rot.T + trans))
     if global_rots is not None:
         r = np.asarray(global_rots, np.float64).reshape(-1, 3, 3)
-        lines.append(_fmt("global_rots", np.einsum("ij,njk->nik", rot, r)))
+        lines.append(_fmt("global_rots", np.einsum("ij,njk->nik", rot @ FLIP, r)))
     return lines
 
 

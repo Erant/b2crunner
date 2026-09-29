@@ -1,7 +1,15 @@
 # `b2c.mhr.global_rots` in the PLY header misses the FLIP
 
-Found 2026-09-25 while building b2crig (animating the delivered splats). Not
-yet fixed; pick up on the next b2crunner session.
+Found 2026-09-25 while building b2crig (animating the delivered splats).
+
+**Fixed 2026-09-29** in the header writer (`ply_meta.body_comments` writes
+`rotation @ FLIP @ rots`, record `version` 2; test
+`test_header_rotations_agree_with_the_header_joints`). Not in `body_refit`'s
+`forward()`: SAM-3D-Body itself flips positions but not
+`joint_global_rots`, and `sam3d_body`, `fit_head_to_face` and
+`refit_body_to_splat` all publish `scene.global_rots` in that convention;
+the header is the one place the two frames were mixed. Headers written
+before the fix say `version 1`. The write-up below is kept as found.
 
 ## What is wrong
 

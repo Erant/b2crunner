@@ -45,7 +45,7 @@ class TestEmbed(unittest.TestCase):
             np.testing.assert_array_equal(ply["vertex"]["y"], data["y"])
             self.assertEqual(ply.comments[:2], ["Exported from Brush", "Vertical axis: y"])
             rec = ply_meta.parse_body_comments(ply_meta.read_comments(path))
-            self.assertEqual(rec["version"], "1")
+            self.assertEqual(rec["version"], str(ply_meta.VERSION))
             self.assertEqual(rec["model"], "facebook/sam-3d-body-dinov3 assets/mhr_model.pt")
             for k in ply_meta.POSE_KEYS:
                 np.testing.assert_array_equal(rec["pose_params"][k], pose[k])
@@ -55,7 +55,30 @@ class TestEmbed(unittest.TestCase):
             # joints and rotations land in the world frame
             expect = 0.9864 * joints.astype(np.float64) @ wfr["rotation"].T + wfr["translation"]
             np.testing.assert_allclose(rec["joints"], expect, rtol=1e-6, atol=1e-6)
-            np.testing.assert_allclose(rec["global_rots"], np.tile(wfr["rotation"], (127, 1, 1)), atol=1e-7)
+            np.testing.assert_allclose(rec["global_rots"], np.tile(wfr["rotation"] @ ply_meta.FLIP, (127, 1, 1)),
+                                       atol=1e-7)
+
+    def test_header_rotations_agree_with_the_header_joints(self):
+        """A posed skeleton as SAM-3D-Body / refit_body_to_splat publish it (positions flipped into the raw frame,
+        rotations left in MHR's): in the header, each bone must be its parent's world rotation applied to the bone's
+        local offset (the version 1 header wrote rotation @ rots and missed the flip)."""
+        rng = np.random.RandomState(1)
+        pose, wfr, _, _, _ = _body()
+        J = 6
+        parents = np.array([-1, 0, 1, 2, 1, 4])
+        rots_mhr = np.stack([np.linalg.qr(rng.randn(3, 3))[0] for _ in range(J)])
+        rots_mhr *= np.sign(np.linalg.det(rots_mhr))[:, None, None]       # proper rotations
+        local = rng.randn(J, 3) * 0.2                                     # each bone in its parent's frame
+        joints_mhr = np.zeros((J, 3))
+        for j in range(1, J):
+            joints_mhr[j] = joints_mhr[parents[j]] + rots_mhr[parents[j]] @ local[j]
+        joints_raw = joints_mhr @ ply_meta.FLIP                           # what the model publishes
+        rec = ply_meta.parse_body_comments(ply_meta.body_comments(
+            pose, wfr, joints=joints_raw, global_rots=rots_mhr, joint_parents=parents))
+        for j in range(1, J):
+            p = parents[j]
+            bone = rec["joints"][j] - rec["joints"][p]
+            np.testing.assert_allclose(bone, wfr["scale"] * rec["global_rots"][p] @ local[j], atol=1e-6)
 
     def test_embedding_twice_replaces_the_record(self):
         pose, wfr, *_ = _body()
