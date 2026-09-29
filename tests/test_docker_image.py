@@ -165,20 +165,19 @@ class TestDockerfile(unittest.TestCase):
             "B2CTRAIN_REF bump would now invalidate them and re-push ~450 MB",
         )
 
-    def test_a_code_change_re_runs_no_heavy_run_layer(self):
-        """A RUN re-executed below `COPY . /opt/b2c_runner` is a new blob on
-        every code-only image (its output is not byte-reproducible), so only
-        two may sit there: the editable install, kept to its own files by
-        PYTHONDONTWRITEBYTECODE and --no-compile, and b2ctrain's --help check,
-        which writes nothing. COLMAP's apt layer sat there until 2026-09-30
-        and re-pushed ~380 MB with every code change."""
+    def test_a_code_change_re_runs_only_the_application_layers(self):
+        """Every layer below `COPY . /opt/b2c_runner` re-executes with each
+        code change and, measured 2026-09-30, comes out a new blob — `COPY
+        --from` included (the COLMAP copy re-pushed 263 MB compressed). So
+        below the code copy there is only its envs.yaml and the editable
+        install, kept to its own files by PYTHONDONTWRITEBYTECODE and
+        --no-compile; then metadata."""
         tail = self.text[re.search(r"(?m)^COPY \. /opt/b2c_runner$", self.text).start():]
-        runs = re.findall(r"(?m)^RUN (.*)$", tail)
-        self.assertEqual(len(runs), 2, runs)
-        self.assertIn("PYTHONDONTWRITEBYTECODE=1", runs[0])
+        layers = re.findall(r"(?m)^(?:RUN|COPY|ADD) .*$", tail)
+        self.assertEqual(len(layers), 3, layers)
+        self.assertTrue(layers[1].startswith("COPY docker/envs.docker.yaml "), layers[1])
+        self.assertIn("PYTHONDONTWRITEBYTECODE=1", layers[2])
         self.assertIn("--no-compile -e .", tail)
-        self.assertTrue(runs[1].startswith("b2ctrain --help"), runs[1])
-        self.assertNotIn("apt-get", tail)
 
     def test_bytecode_and_doc_figures_stay_out_of_the_code_copy(self):
         """.dockerignore patterns without `**/` match at the context root
@@ -188,23 +187,32 @@ class TestDockerfile(unittest.TestCase):
         for pattern in ("**/__pycache__/", "**/*.py[cod]", "docs/**/*.png"):
             self.assertIn(pattern, ignore)
 
-    def test_the_viewer_is_pinned_below_the_application_copy(self):
-        """b2cviewer is a late layer, for the trainer's reason: bumping its
-        pin must not invalidate the venvs, the apt layers or the application
-        copy. At the path `pipeline/viewer.py` looks in by default, from a
-        commit rather than a branch (a branch bakes whatever it was at the
-        first build into the cache)."""
+    def test_the_prebuilt_pieces_sit_between_the_runs_and_the_code(self):
+        """COLMAP, the trainer, the viewer: below the stage's apt and pip RUNs
+        (a pin bump re-runs no RUN that writes), above the code (a code change
+        re-runs none of them), rarest-bumped first. The viewer at the path
+        `pipeline/viewer.py` looks in by default, from a commit rather than a
+        branch (a branch bakes whatever it was at the first build into the
+        cache)."""
         from pipeline.viewer import DEFAULT_VIEWER_DIR
 
         add = re.search(r"^ADD .*b2cviewer\.git#\$\{B2CVIEWER_REF\} (\S+)$", self.text, re.M)
         self.assertIsNotNone(add, "no b2cviewer ADD")
         self.assertEqual(add.group(1), DEFAULT_VIEWER_DIR)
         self.assertRegex(self.text, r"ARG B2CVIEWER_REF=[0-9a-f]{40}\n")
-        for earlier in (r"^COPY \. /opt/b2c_runner$", r"^COPY --from=colmap-builder /opt/colmap /opt/colmap$"):
-            self.assertLess(re.search(earlier, self.text, re.M).start(), add.start(), earlier)
-        tail = self.text[add.end():]
-        self.assertNotRegex(tail, r"(?m)^(RUN|COPY|ADD) ",
-                            "a filesystem layer below the viewer re-runs on every viewer bump")
+        at = lambda pattern: re.search(pattern, self.text, re.M).start()
+        order = [
+            self.text.rindex("RUN apt-get update", 0, self.text.index("libceres4t64")),
+            at(r"^COPY --from=colmap-builder /opt/colmap /opt/colmap$"),
+            at(r"^COPY --from=b2ctrain-builder /out-b2ctrain "),
+            add.start(),
+            at(r"^COPY \. /opt/b2c_runner$"),
+        ]
+        self.assertEqual(order, sorted(order))
+        between = self.text[order[0]:order[-1]]
+        runs = re.findall(r"(?m)^RUN (.*)$", between)[1:]   # past the COLMAP apt RUN itself
+        self.assertEqual(runs, ["b2ctrain --help > /dev/null && brush-splat-render --help > /dev/null"],
+                         "a writing RUN among the prebuilt pieces is a new blob on every pin bump above it")
 
     def test_the_onnx_runtime_colmap_gets_matches_the_image_s_cuda(self):
         """COLMAP's own FETCH_ONNX takes the gpu_cuda12 build when CUDA is

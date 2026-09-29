@@ -892,12 +892,10 @@ RUN /opt/venv_base/bin/pip install --no-deps \
 # started, and it cost a 15-minute push to learn why it was wrong: layer
 # invalidation cascades forward within a stage, so adding one package up
 # there re-ran all six `COPY --from=python-builder /opt/venv_*` lines, the
-# body2colmap layer and the application copy behind it. The COPYs dedupe at
-# the registry (unchanged bytes, same blob digest — the note below says so
-# for the trainer), but the re-executed RUN layers do not: their output is not
-# byte-reproducible, so the 1.25 GB apt layer went up the wire as a new
-# blob. Here, changing this list costs this layer and the application layers
-# below it, nothing else.
+# body2colmap layer and the application copy behind it, and the re-executed
+# RUN layers' output is not byte-reproducible, so the 1.25 GB apt layer went
+# up the wire as a new blob. Here, changing this list costs this layer, the
+# prebuilt pieces and the application layers below it, nothing else.
 #
 # ABOVE the application copy and the b2ctrain COPYs, which is the other half
 # of the same reasoning: neither a code change nor a bumped B2CTRAIN_REF may
@@ -932,6 +930,70 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # chmod: a RUN re-executed below `COPY . /opt/b2c_runner` makes a new blob on
 # every code change, however small.
 COPY --chmod=755 docker/entrypoint.sh /usr/local/bin/b2c-entrypoint
+
+# ---------------------------------------------------------------------------
+# The prebuilt pieces: COLMAP, the trainer binary, the viewer. BELOW every RUN
+# of this stage and ABOVE the application copy — both halves measured.
+# ---------------------------------------------------------------------------
+# Invalidation cascades forward within a stage, and a re-executed layer is
+# not a free one. That goes for RUNs (their output is not byte-reproducible,
+# which is why the 2026-08-25 `--no-cache-filter brush-builder,runtime` build
+# pushed 7 GB) AND, measured 2026-09-30, for `COPY --from` too: with these
+# below `COPY . /opt/b2c_runner`, a one-line code change re-executed them and
+# the COLMAP layer came out a new 263 MB (compressed) blob, the trainer a new
+# 6 MB one. The registry dedup these comments used to count on does not hold.
+#
+# So: below the RUNs, so bumping any of these re-runs no apt or pip layer.
+# Above the code, so a code-only image re-pushes the code copy, the envs.yaml
+# and the editable install (~2 MB) and nothing else. Among themselves, the
+# rarest-bumped first: a B2CTRAIN_REF bump re-pushes the trainer, the viewer
+# and the code; a B2CVIEWER_REF bump the viewer and the code; COLMAP, which
+# never moves, nothing.
+#
+# Nothing in the build needs the binaries — the step-registry smoke test
+# imports Python modules, and `pipeline/doctor.py` checks the binaries at
+# container start, not at build time.
+
+# COLMAP, whole prefix (~440 MB).
+#
+# The prefix moves as a unit rather than the binary alone — /opt/colmap/bin/
+# colmap finds its bundled ONNX Runtime through an $ORIGIN/../lib RPATH (see
+# the colmap-builder stage), so splitting the two apart is exactly the
+# failure that RPATH exists to prevent. It is reached through PATH, set in
+# the ENV block below; a symlink would be a RUN layer here, and a RUN
+# below the COLMAP apt layer is what the note above says not to add.
+COPY --from=colmap-builder /opt/colmap /opt/colmap
+
+# b2ctrain (see its stage above): the trainer steps/brush.py runs, and —
+# via the one-line shim installed under the name every renderer in this
+# pipeline resolves (steps/splat.py's _RENDER_BINARY, body2colmap's
+# BINARY_NAME, `pipeline.cli doctor`) — the rasteriser.
+# `brush-splat-render` execs `b2ctrain render "$@"`: same argv, same
+# cameras.json, same frame naming, same --confidence gate, output matching
+# the Rust renderer it replaced to 1/255. Two names, one binary, and
+# nothing left in the image that needs Vulkan.
+#
+# `--help` on both here is the cheapest possible smoke test: no GPU is
+# needed for it, and it proves the binary loads in THIS stage's userspace
+# (it links only libstdc++/libm/libc — the CUDA runtime is static) and
+# that the shim finds b2ctrain on PATH. It is a RUN below the apt layers,
+# which the note above warns about — harmless here only because it writes
+# nothing: the layer it makes is empty, so a re-execution has no bytes to
+# push.
+COPY --from=b2ctrain-builder /out-b2ctrain /usr/local/bin/b2ctrain
+COPY --from=b2ctrain-builder /out-brush-splat-render-shim /usr/local/bin/brush-splat-render
+RUN b2ctrain --help > /dev/null && brush-splat-render --help > /dev/null
+
+# b2cviewer (Erant/b2cviewer): the 3D viewer the web UI serves at /viewer/
+# (pipeline/viewer.py; B2C_VIEWER_DIR defaults to this path). Static files
+# plus a stdlib serve.py whose index() the UI imports — nothing to install.
+# Last of the prebuilt pieces (the note above): a B2CVIEWER_REF bump re-runs
+# this ~0.1 MB layer and the application layers, nothing else. An ADD of a git
+# source rather than a RUN git clone: no git needed in this stage, and
+# BuildKit caches it by the commit. Pinned by commit, as b2cgltf is: the
+# page reads b2cgltf's files, so the two move together.
+ARG B2CVIEWER_REF=e55bd9de76be6602a30b7a679fa921947d44f4e6
+ADD --keep-git-dir=false https://github.com/Erant/b2cviewer.git#${B2CVIEWER_REF} /opt/b2cviewer
 
 # NOT /workspace/b2c_runner, which is where this used to live. RunPod's
 # pod template defaults its network volume's mount path to /workspace, and a
@@ -986,76 +1048,6 @@ EXPOSE 7860 22
 # request imports torch.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=180s --retries=3 \
     CMD curl -fsS "http://127.0.0.1:${B2C_PORT}/" >/dev/null || exit 1
-
-# ---------------------------------------------------------------------------
-# The trainer binary. LAST OF THE FILESYSTEM LAYERS ON PURPOSE — same
-# reasoning as the ENV block below, and measured on the same kind of build.
-# ---------------------------------------------------------------------------
-# These used to sit at the top of the stage, immediately above the five
-# `COPY --from=python-builder /opt/venv_*` lines. Invalidation cascades
-# forward within a stage, so bumping the trainer's pin — then 321 MB of
-# Rust binaries — re-ran
-# every venv copy, the body2colmap pull-forward, and the application copy
-# behind it. What saved that build was the registry rather than the
-# Dockerfile: a re-executed COPY of unchanged bytes produces the same blob
-# digest, so the venvs all came back "Layer already exists" and only the
-# binaries went up the wire. A re-executed RUN has no such property — its
-# output is not byte-reproducible — which is exactly why the 2026-08-25
-# `--no-cache-filter brush-builder,runtime` build pushed 7 GB while a pin
-# bump pushed ~321 MB.
-#
-# So the dedup was luck of the layer types, and it runs out the moment a RUN
-# lands between this COPY and the end of the stage. Down here nothing
-# does: a B2CTRAIN_REF bump now invalidates these layers, the ENV/LABEL
-# metadata below (no filesystem layers at all), and nothing else.
-#
-# Nothing earlier in the build needs the binaries — the step-registry smoke
-# test above imports Python modules, and `pipeline/doctor.py` checks the
-# binaries at container start, not at build time.
-
-# b2ctrain (see its stage above): the trainer steps/brush.py runs, and —
-# via the one-line shim installed under the name every renderer in this
-# pipeline resolves (steps/splat.py's _RENDER_BINARY, body2colmap's
-# BINARY_NAME, `pipeline.cli doctor`) — the rasteriser.
-# `brush-splat-render` execs `b2ctrain render "$@"`: same argv, same
-# cameras.json, same frame naming, same --confidence gate, output matching
-# the Rust renderer it replaced to 1/255. Two names, one binary, and
-# nothing left in the image that needs Vulkan.
-#
-# `--help` on both here is the cheapest possible smoke test: no GPU is
-# needed for it, and it proves the binary loads in THIS stage's userspace
-# (it links only libstdc++/libm/libc — the CUDA runtime is static) and
-# that the shim finds b2ctrain on PATH. It is a RUN below a COPY, which
-# the note above warns about — harmless here only because it writes
-# nothing: the layer it makes is empty, so a re-execution has no bytes to
-# push.
-COPY --from=b2ctrain-builder /out-b2ctrain /usr/local/bin/b2ctrain
-COPY --from=b2ctrain-builder /out-brush-splat-render-shim /usr/local/bin/brush-splat-render
-RUN b2ctrain --help > /dev/null && brush-splat-render --help > /dev/null
-
-# COLMAP, whole prefix, for the same reasons and in the same place: it is
-# ~400 MB of filesystem layer that has nothing behind it to invalidate.
-#
-# The prefix moves as a unit rather than the binary alone — /opt/colmap/bin/
-# colmap finds its bundled ONNX Runtime through an $ORIGIN/../lib RPATH (see
-# the colmap-builder stage), so splitting the two apart is exactly the
-# failure that RPATH exists to prevent. It is reached through PATH, set in
-# the ENV block below; a symlink would be a RUN layer here, and a RUN
-# between these COPYs and the end of the stage is what the note above says
-# not to add.
-COPY --from=colmap-builder /opt/colmap /opt/colmap
-
-# b2cviewer (Erant/b2cviewer): the 3D viewer the web UI serves at /viewer/
-# (pipeline/viewer.py; B2C_VIEWER_DIR defaults to this path). Static files
-# plus a stdlib serve.py whose index() the UI imports — nothing to install.
-# Down here with the trainer and COLMAP, for their reason: a B2CVIEWER_REF
-# bump invalidates this ~0.1 MB layer and the metadata below, nothing else.
-# An ADD of a git source rather than a RUN git clone: no git needed in this
-# stage, and BuildKit caches it by the commit, so no RUN layer lands between
-# these COPYs and the end of the stage. Pinned by commit, as b2cgltf is: the
-# page reads b2cgltf's files, so the two move together.
-ARG B2CVIEWER_REF=e55bd9de76be6602a30b7a679fa921947d44f4e6
-ADD --keep-git-dir=false https://github.com/Erant/b2cviewer.git#${B2CVIEWER_REF} /opt/b2cviewer
 
 # Build provenance. Deliberately the LAST thing in the file: a LABEL makes a
 # layer, and every layer after it would be invalidated by a new SHA. Here, a
