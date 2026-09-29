@@ -4423,6 +4423,20 @@ steps:
       # off this margin applies to SAM-3D-Body's own mesh, where 5 cm was the safe
       # setting (docs/body-refit.md).
       hollow_margin: 0.03
+      # The visibility cull (b2ctrain docs/unsupported-splats-2026-09-28.md).
+      # The hollow loss seals the front (weight from behind the body 3x
+      # lower than without it) but does not empty what it seals off: 47k
+      # opaque splats no training view renders, bred by densification and
+      # the post-growth relocation, sat inside the body and behind the
+      # surface, and b2crig's animation exposes them as specks and haze.
+      # Pruning by rendered mass at every refine (5 pixel-weights per pass
+      # over the views) and dropping what the evidence pass finds unseen
+      # takes them to 0 with 46% fewer splats at PSNR -0.03 dB and
+      # sharpness -1% (2bccb7); 1 instead of 5 keeps the sharpness and
+      # leaves the poorly supported ones. The two go together with the
+      # hollow loss, not instead of it.
+      cull_weight: 5
+      evidence_prune_wall: 5
       # Normal supervision, back on 2026-09-28 (off since 2026-09-06, guide
       # §1): 0.05 from step 5000, the stage-2 training's values. It is the
       # geometry that is bought — arm splats more than 2 cm off the refit

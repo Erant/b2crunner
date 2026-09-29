@@ -1040,6 +1040,22 @@ class BrushStep(Step):
               "nothing, because this has not been looked at on a real run yet and a "
               "splat dropped here is gone from the deliverable .ply, not merely "
               "hidden in one render", advanced=True),
+        Param("evidence_prune_wall", float, None,
+              "Drop splats whose total rendered mass over the training views "
+              "(evidence w_all, pixel-weights) is below this, before the export: "
+              "they cannot affect any training view. Implies the evidence pass. "
+              "Empty (the default) prunes nothing; 5 on the deliverable training "
+              "(b2ctrain docs/unsupported-splats-2026-09-28.md)", advanced=True),
+        Param("cull_weight", float, 0.0,
+              "b2ctrain's visibility cull: at every refine, prune the splats whose "
+              "rendered mass since the last refine is below this many pixel-weights "
+              "per pass over the training views; the alignment refits prune by it "
+              "too. 0 disables. What it removes is what the capture never sees "
+              "(behind the front surface, inside the body), which an animated splat "
+              "exposes as specks and haze. Measured on the deliverable training "
+              "(b2ctrain docs/unsupported-splats-2026-09-28.md): 5 -> never-seen "
+              "opaque splats 47k -> 0, 46% fewer splats, PSNR -0.03 dB, sharpness "
+              "-1%; 1 keeps sharpness and removes the never-seen only", minimum=0.0),
         Param("hollow_weight", float, 0.0,
               "Weight of b2ctrain's hollow loss, which needs the `mesh` input: per "
               "training pixel, the splat weight arriving from more than "
@@ -1172,6 +1188,8 @@ class BrushStep(Step):
         export_evidence = params["export_evidence"]
         evidence_prune_inmask = params["evidence_prune_inmask"]
         evidence_normal_weight = params["evidence_normal_weight"]
+        evidence_prune_wall = params["evidence_prune_wall"]
+        cull_weight = params["cull_weight"]
         hollow_weight = params["hollow_weight"]
         hollow_margin = params["hollow_margin"]
         hollow_dilate = params["hollow_dilate"]
@@ -1424,6 +1442,13 @@ class BrushStep(Step):
                     cmd.extend(["--evidence-prune-inmask", str(evidence_prune_inmask)])
                 if evidence_normal_weight > 0:
                     cmd.extend(["--evidence-normal-weight", str(evidence_normal_weight)])
+                if evidence_prune_wall is not None:
+                    cmd.extend(["--evidence-prune-wall", str(evidence_prune_wall)])
+                # The visibility cull (b2ctrain): prunes by rendered mass at every
+                # refine, the in-trainer alignment refits included. On every
+                # invocation; a polish with no refines never reaches it.
+                if cull_weight > 0:
+                    cmd.extend(["--cull-weight", str(cull_weight)])
                 # The in-trainer alignment loop (b2ctrain): the same
                 # iterations, steps and flow schedule the loop below would
                 # run, carried on the cold run's own argv.

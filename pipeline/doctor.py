@@ -275,6 +275,8 @@ def check_trainer_binaries() -> Check:
         "--export-evidence", "--normalize-masked-loss",
         "--alpha-mode", "--export-name", "--total-train-iters",
         "--hollow-weight", "--body-rig",
+        # The visibility cull and the final-export evidence cull (b2ctrain, 2026-09-28).
+        "--cull-weight", "--evidence-prune-wall",
         # --body-rig's help names the v3 rig magic (per-view face deltas, b2ctrain e8f43ac).
         "B2CRIG3",
         # The per-splat label vote (seg_label/seg_conf in the .ply, b2ctrain 2977f0e).

@@ -4293,6 +4293,9 @@ steps:
       # off this margin applies to SAM-3D-Body's own mesh, where 5 cm was the safe
       # setting (docs/body-refit.md).
       hollow_margin: 0.03
+      # The visibility cull, mirrored from helical.yaml (see the note there).
+      cull_weight: 5
+      evidence_prune_wall: 5
       # Normal supervision, back on 2026-09-28 (off since 2026-09-06, guide
       # §1): 0.05 from step 5000, the stage-2 training's values. It is the
       # geometry that is bought — arm splats more than 2 cm off the refit
