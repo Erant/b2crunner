@@ -1,26 +1,17 @@
-"""Face-landmark geometry and real MediaPipe detection.
+"""Face-landmark geometry, the crop MediaPipe runs on, and the face mask.
 
-Detection is verified against cyber_6f's real anchor photo. It runs in a
-*subprocess*: mediapipe 1.0.1 on macOS aborted the process once (SIGABRT
-via DrishtiMetalHelper) on the first invocation after downloading its
-models, and an abort cannot be caught in-process — it would take the whole
-test run down. Out-of-process, a recurrence degrades to a skip. On Linux
-this should simply pass.
-
-Everything that is not MediaPipe is tested directly, and that is the part
-most likely to be wrong: the crop -> full-image coordinate mapping (easy to
-get subtly wrong and impossible to notice by eye) and the crop itself,
-which since 2026-09-11 is the body mesh's head projected onto the
-photograph rather than a face detector's box.
+MediaPipe itself is stood in for (`_FakeLandmarker`): what is tested is
+everything around it, and that is the part most likely to be wrong: the
+crop -> full-image coordinate mapping (easy to get subtly wrong and
+impossible to notice by eye) and the crop itself, which since 2026-09-11 is
+the body mesh's head projected onto the photograph rather than a face
+detector's box. Real detection needs a real face photograph, which this
+suite no longer keeps.
 """
 
 from __future__ import annotations
 
-import subprocess
-import sys
-import textwrap
 import unittest
-from pathlib import Path
 
 import numpy as np
 
@@ -30,9 +21,7 @@ from pipeline.steps.face_landmarks import (
     _face_to_array_from_crop,
     mesh_head_box,
 )
-from tests.helpers import require_stage, run_step
-
-REPO_ROOT = Path(__file__).resolve().parent.parent
+from tests.helpers import run_step
 
 
 class _LM:
@@ -222,91 +211,6 @@ class TestCoordinateMapping(unittest.TestCase):
         self.assertEqual(out.dtype, np.float32)
 
 
-
-
-DETECTION_SCRIPT = textwrap.dedent(
-    """
-    import json, sys
-    sys.path.insert(0, {repo!r})
-    import numpy as np
-    from pipeline.dataset import Dataset
-    from pipeline.registry import get_step_class
-    import pipeline.steps
-    from tests.test_face_landmarks import _mesh_with_head_at
-
-    ds = Dataset.from_disk({stage!r})
-    step_class = get_step_class("detect_face_landmarks")
-    step, params = step_class(), step_class.resolve_params()
-    image = ds.anchor_image
-    h, w = image.shape[:2]
-    mesh = _mesh_with_head_at(*{head!r}, w, h)
-    res = step.run({{"image": image, "mesh_output": mesh}}, params)["face_landmarks"]
-    lm = res["landmarks"]
-    print(json.dumps({{
-        "n_points": int(lm.shape[0]),
-        "image_size": list(res["image_size"]),
-        "source": res["source"],
-        "x_min": float(lm[:, 0].min()), "x_max": float(lm[:, 0].max()),
-        "y_min": float(lm[:, 1].min()), "y_max": float(lm[:, 1].max()),
-    }}))
-    """
-)
-
-#: Where the face is on cyber_6f/initial/anchor.png (720x1280), in pixels:
-#: the extent of the landmarks the retired blaze detector's crop produced,
-#: measured 2026-09-11. The end-to-end test builds a mesh whose head
-#: keypoints project to roughly this — deliberately roughly, 10 px off and
-#: a little small, the way a raw SAM-3D-Body fit is.
-ANCHOR_FACE_PX = (303, 173, 393, 274)
-
-
-class TestDetectionEndToEnd(unittest.TestCase):
-    """Real MediaPipe detection, run out-of-process so an abort can't kill
-    the suite. Skips on any failure to start, with the reason attached —
-    on macOS that is expected (see this module's docstring)."""
-
-    def test_detects_the_face_in_the_mesh_crop(self):
-        stage = require_stage("initial")
-        try:
-            import mediapipe  # noqa: F401
-        except ImportError:
-            self.skipTest("mediapipe not installed")
-
-        x0, y0, x1, y1 = ANCHOR_FACE_PX
-        # Eyes a third of the way down the face, ears at its middle, the
-        # whole thing 10 px right and 5% narrow of the truth.
-        head = (x0 + 12, y0 + (y1 - y0) // 3, x1 + 6, y0 + (y1 - y0) // 2)
-        script = DETECTION_SCRIPT.format(repo=str(REPO_ROOT), stage=str(stage), head=head)
-        proc = subprocess.run(
-            [sys.executable, "-c", script],
-            capture_output=True, text=True, timeout=600,
-        )
-        if proc.returncode != 0:
-            self.skipTest(
-                "mediapipe detection could not run in this environment "
-                f"(exit {proc.returncode}). On macOS this is the known "
-                "DrishtiMetalHelper abort; run this test on Linux. "
-                f"stderr tail: {proc.stderr.strip()[-300:]}"
-            )
-
-        import json
-
-        anchor = json.loads(proc.stdout.strip().splitlines()[-1])
-        self.assertEqual(anchor["source"], "mediapipe")
-        self.assertIn(anchor["n_points"], (468, 478))
-        self.assertEqual(anchor["image_size"], [720, 1280])
-        # The landmarks land on the face, not on the crop or the frame:
-        # within a few pixels of where the detector-cropped ones did.
-        found = (anchor["x_min"] * 720, anchor["y_min"] * 1280,
-                 anchor["x_max"] * 720, anchor["y_max"] * 1280)
-        for got, want in zip(found, ANCHOR_FACE_PX):
-            self.assertLess(abs(got - want), 6.0, (found, ANCHOR_FACE_PX))
-
-
-if __name__ == "__main__":
-    unittest.main()
-
-
 # ---------------------------------------------------------------------------
 class TestFaceLandmarkMask(unittest.TestCase):
     """The face-only region, and the crop mapping it depends on.
@@ -436,3 +340,7 @@ class TestFaceLandmarkMask(unittest.TestCase):
         with self.assertRaises(ValueError) as caught:
             self._run({"face_landmarks": lm, "mask": full})
         self.assertIn("N >= 3", str(caught.exception))
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,9 +1,9 @@
 """The orbit extension's three steps (pipeline/steps/extend_orbit.py).
 
-The path is checked against cyber_6f's real recorded metadata: rebuilt
-from render_subject's own helix params, the extended path has to contain
-the dataset's cameras verbatim in the middle, continue at the same angular
-step either side (41 frames ahead and 40 after: an 81-frame pass less a
+The path is checked on the anchored orbit `orbit_dataset` describes (a
+real render's target and lens): rebuilt from render_subject's own helix
+params, the extended path has to contain the dataset's cameras verbatim in
+the middle, continue at the same angular step either side (41 frames ahead and 40 after: an 81-frame pass less a
 40- and a 41-frame overlap, each pass's mask changing on a latent edge),
 and carry whatever rigid motion the source path was carried by.
 The two control videos and the splice are checked on small synthetic
@@ -22,7 +22,7 @@ from pipeline.steps.extend_orbit import (
     extended_helix_params, helix_step_deg, latent_aligned, new_frames, pass_elevation_offsets,
 )
 from pipeline.steps.splat import _resolve_cameras, _transform_camera
-from tests.helpers import require_stage, run_step
+from tests.helpers import orbit_dataset, run_step
 
 import pipeline.steps  # noqa: F401
 
@@ -105,7 +105,7 @@ class TestTheTilt(unittest.TestCase):
 class TestExtendHelicalPath(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.ds = Dataset.from_disk(require_stage("initial"))
+        cls.ds = orbit_dataset()
         params = get_step_class("render_splat").resolve_params(
             dict(HELIX, pattern="helical", override_cam_from_mesh=True))
         cls.source, _, _, cls.anchor = _resolve_cameras(

@@ -1,10 +1,11 @@
-"""View-manipulation steps, exercised against cyber_6f's real helical orbit.
+"""View-manipulation steps, exercised on an orbit body2colmap built.
 
-cyber_6f/initial/ is 81 real cameras with real orbit_target /
-forward_azimuth_deg in b2c_extras, which is what makes these tests worth
-more than synthetic ones: the azimuth convention (module docstring of
-pipeline/steps/views.py) can only be got wrong silently, and a synthetic
-orbit built with the same arctan2 assumption the code under test uses would
+`orbit_dataset` is 81 cameras from body2colmap's own `OrbitPath` — the
+solver `render` uses — with the orbit_target / forward_azimuth_deg that
+`render` publishes beside them. That is what makes these tests worth more
+than an orbit written out by hand: the azimuth convention (module docstring
+of pipeline/steps/views.py) can only be got wrong silently, and an orbit
+built with the same arctan2 assumption the code under test uses would
 agree with itself either way.
 """
 
@@ -15,10 +16,9 @@ import unittest
 
 import numpy as np
 
-from pipeline.dataset import Dataset
 from pipeline.registry import get_step_class
 from pipeline.steps.views import _relative_azimuths, parse_view_indices
-from tests.helpers import require_stage, run_step
+from tests.helpers import orbit_dataset, run_step
 
 import pipeline.steps  # noqa: F401  (populates the registry)
 
@@ -30,8 +30,16 @@ def _run(step_name: str, inputs, params=None):
 class ViewsTestBase(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        stage = require_stage("initial")
-        cls.ds = Dataset.from_disk(stage)
+        cls.ds = orbit_dataset()
+
+
+def _later_stage(ds):
+    """The same orbit a stage further on: every camera where it was, every
+    frame repainted, and a point cloud of its own size — what a denoise
+    pass hands back for the batch it was given."""
+    later = orbit_dataset(n_points=len(ds.points_3d[0]) + 50, seed=1)
+    later.images = [255 - img for img in ds.images]
+    return later
 
 
 class TestParseViewIndices(unittest.TestCase):
@@ -206,9 +214,9 @@ class TestRotateViews(ViewsTestBase):
 
 class TestReplaceViews(ViewsTestBase):
     def test_replaces_all_when_camera_sets_match(self):
-        """cyber_6f/circular is a later stage of the same orbit, so every
-        camera should match its counterpart and every image get swapped."""
-        circular = Dataset.from_disk(require_stage("circular"))
+        """A later stage of the same orbit: every camera should match its
+        counterpart and every image get swapped."""
+        circular = _later_stage(self.ds)
         out = _run(
             "replace_views",
             {"dataset": self.ds, "replacement": circular},
@@ -248,7 +256,7 @@ class TestReplaceViews(ViewsTestBase):
 
 class TestMergeDatasets(ViewsTestBase):
     def test_concatenates_and_renumbers(self):
-        circular = Dataset.from_disk(require_stage("circular"))
+        circular = _later_stage(self.ds)
         out = _run(
             "merge_datasets",
             {"datasets": [self.ds, circular]},
@@ -259,7 +267,7 @@ class TestMergeDatasets(ViewsTestBase):
         self.assertEqual(out.image_names[-1], f"frame_{len(out.images):05d}_.png")
 
     def test_numbered_inputs_form(self):
-        circular = Dataset.from_disk(require_stage("circular"))
+        circular = _later_stage(self.ds)
         out = _run(
             "merge_datasets",
             {"dataset_1": self.ds, "dataset_2": circular},
@@ -268,7 +276,7 @@ class TestMergeDatasets(ViewsTestBase):
         self.assertEqual(len(out.cameras), 162)
 
     def test_pointcloud_modes(self):
-        circular = Dataset.from_disk(require_stage("circular"))
+        circular = _later_stage(self.ds)
         n_first = len(self.ds.points_3d[0])
         n_second = len(circular.points_3d[0])
 
@@ -294,7 +302,7 @@ class TestMergeDatasets(ViewsTestBase):
     def test_drops_orbit_metadata_so_filter_refuses(self):
         """A merged dataset has no single orbit center, so the azimuth-based
         steps must refuse rather than compute nonsense."""
-        circular = Dataset.from_disk(require_stage("circular"))
+        circular = _later_stage(self.ds)
         merged = _run("merge_datasets", {"datasets": [self.ds, circular]}, {})["dataset"]
         self.assertNotIn("orbit_target", merged.extras)
         with self.assertRaises(ValueError):

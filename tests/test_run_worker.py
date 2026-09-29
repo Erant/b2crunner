@@ -24,9 +24,8 @@ import unittest
 from pathlib import Path
 
 from pipeline.run_state import RunJob
+from tests.helpers import REPO_ROOT, orbit_dataset
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-DATASET = REPO_ROOT / "cyber_6f" / "initial"
 # `RunJob.envs_path` defaults to "" only as a dataclass placeholder — every
 # real caller (webui.py's on_start, cli.py's --envs default) always supplies
 # a real path, same as here. `save_dataset` reads no env config itself
@@ -51,11 +50,14 @@ def _write_workflow(path: Path, checkpoint_dir: Path) -> None:
     )
 
 
-@unittest.skipUnless(DATASET.exists(), "cyber_6f/initial fixture not present")
 class TestRunWorkerSubprocess(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
+        # A few frames are all `save_dataset` needs: what is under test is
+        # the worker around it, not the data.
+        self.dataset = self.root / "initial"
+        orbit_dataset(n_frames=5, n_points=20).to_disk(self.dataset)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -68,7 +70,7 @@ class TestRunWorkerSubprocess(unittest.TestCase):
         job = RunJob(
             run_name=run_name, workflow_name=run_name,
             workflow_path=str(workflow_path), output_dir=str(out_dir),
-            envs_path=ENVS_PATH, dataset_dir=str(DATASET), **overrides,
+            envs_path=ENVS_PATH, dataset_dir=str(self.dataset), **overrides,
         )
         job_path = self.root / f"{run_name}.job.json"
         status_path = self.root / f"{run_name}.status.json"
@@ -139,7 +141,7 @@ class TestRunWorkerSubprocess(unittest.TestCase):
         job = RunJob(
             run_name="run-bad", workflow_name="run-bad",
             workflow_path=str(workflow_path), output_dir=str(out_dir),
-            envs_path=ENVS_PATH, dataset_dir=str(DATASET),
+            envs_path=ENVS_PATH, dataset_dir=str(self.dataset),
             step_overrides={"checkpoint": {"not_a_real_param": 1}},
         )
         job_path = self.root / "run-bad.job.json"

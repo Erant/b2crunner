@@ -3,10 +3,9 @@
 The bug this closes is silent by construction: seedvr2 resamples frames but
 runs in its own venv, so the IPC boundary carries plain arrays, not Camera
 objects. Without a rescale, the dataset ends up self-inconsistent with
-nothing raising. The recorded ComfyUI-era export has it too — cyber_6f/
-colmap's cameras.txt says 720x1280 next to 1080x1920 frames — so the golden
-test in test_colmap_export.py can't catch it either; it compares against
-output that has the same mistake.
+nothing raising. The ComfyUI-era export had it too — its cameras.txt said
+720x1280 next to 1080x1920 frames — so a comparison against that output
+could never have caught it; it has the same mistake.
 
 `_fit_cameras_to_images` (pipeline/steps/seedvr2.py) is what steps/seedvr2.py
 calls internally after upscaling, folding the repair into the same step
@@ -60,8 +59,8 @@ class TestFitCamerasToImages(unittest.TestCase):
         self.assertEqual(resolution, (1440, 2560))
 
     def test_the_recorded_mismatch_is_what_it_repairs(self):
-        """cyber_6f/colmap's exact numbers: 720x1280 intrinsics, 1080x1920
-        frames — a 1.5x upscale whose cameras never moved."""
+        """The ComfyUI-era export's exact numbers: 720x1280 intrinsics,
+        1080x1920 frames — a 1.5x upscale whose cameras never moved."""
         cameras, _ = _fit_cameras_to_images(_cameras((720, 1280)), _images((1080, 1920)))
 
         self.assertEqual((cameras[0].width, cameras[0].height), (1080, 1920))

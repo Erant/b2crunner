@@ -1,44 +1,34 @@
-"""inject_anchor against the real anchor recorded in cyber_6f.
+"""inject_anchor on an anchored, closed orbit.
 
-cyber_6f/initial carries a real anchor: extras["anchor_position"] is the
-world origin (override_cam_from_mesh puts the original SAM-3D camera
-there), and anchor.png is the image that was injected. Crucially, frames
-1 and 81 of that dataset are both byte-identical to anchor.png — the
-`overlap=1` case the module docstring describes, where the orbit closes on
-itself and two cameras occupy the same position.
+`orbit_dataset` is an anchored circular render as body2colmap builds it:
+extras["anchor_position"] is the world origin (override_cam_from_mesh puts
+the original SAM-3D camera there), and anchor.png is the image to inject.
+Crucially, frames 1 and 81 both sit on that position and both carry the
+anchor image — the `overlap=1` case the module docstring describes, where
+the orbit closes on itself and two cameras occupy the same position. The
+port has to find both from the camera positions alone.
 
-That makes this a golden test of the position-matching logic rather than a
-synthetic one: the recorded data independently says which frames the
-ComfyUI flow injected into, and the port has to find the same ones from
-the camera positions alone.
-
-**generate_firstlast is not covered here.** Its input is the single photo
-SAM-3D-Body was run on, and that image is not preserved in the dataset —
-reference.png is a two-panel front/back sheet used for Wan-VACE
-conditioning, a different image with a different framing (the subject's
-bounding box scales by 0.59 horizontally against 0.84 vertically, so no
-uniform warp maps one to the other). So the warp itself stays verified
-only against synthetic data until a real render runs on a GPU pod.
+**generate_firstlast's warp is not covered here.** Its input is the single
+photo SAM-3D-Body was run on, and what the warp does to it is verified on
+synthetic data only (TestAnchorBorderColour below pins its border).
 """
 
 from __future__ import annotations
 
-import json
 import unittest
 
 import numpy as np
 
-from pipeline.dataset import Dataset
 from pipeline.registry import get_step_class
-from tests.helpers import require_stage, require_stage2, run_step
+from tests.helpers import orbit_dataset, run_step
 
 import pipeline.steps  # noqa: F401
 
 
-class TestInjectAnchorAgainstRecordedData(unittest.TestCase):
+class TestInjectAnchorOnAClosedOrbit(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.ds = Dataset.from_disk(require_stage("initial"))
+        cls.ds = orbit_dataset()
         cls.anchor_position = np.asarray(cls.ds.extras["anchor_position"], dtype=np.float32)
 
     def _run(self, **overrides):
@@ -51,7 +41,7 @@ class TestInjectAnchorAgainstRecordedData(unittest.TestCase):
         inputs.update(overrides)
         return run_step("inject_anchor", inputs, {})
 
-    def test_recorded_dataset_really_has_a_duplicated_anchor_frame(self):
+    def test_the_orbit_really_has_a_duplicated_anchor_frame(self):
         """The premise of the test below: two cameras at the anchor, and both
         of those frames already carry the anchor image."""
         positions = np.stack([c.position for c in self.ds.cameras])
@@ -190,148 +180,107 @@ class TestInjectAnchorAgainstRecordedData(unittest.TestCase):
                     self.assertEqual(float(out["masks"][i].max()), 0.0)
 
 
-class TestMaskThenInjectAgainstCyber2(unittest.TestCase):
-    """The stage-2 -> stage-3 chain against the newer recorded run.
+class TestMaskThenInject(unittest.TestCase):
+    """The stage-2 -> stage-3 chain: mask_splat, then inject_anchor.
 
-    cyber2_6f is the run with anchor injection live. Its masked_splatted is
-    80 frames masked, composited over black and bilateral-filtered at a
-    uniform alpha of 255, plus frame_00038_ which is that stage's
-    anchor.png byte for byte at a uniform alpha of 0 — not composited, not
-    filtered.
+    What the chain has to produce: every re-rendered frame masked
+    (composited over black and bilateral-filtered) at a uniform VACE alpha
+    of 1.0, and the anchor frames the photograph verbatim at a uniform 0.0
+    — not composited, not filtered.
 
-    Reproducing that requires mask_splat to run BEFORE inject_anchor. The
-    other order was shipped, and it put inject_anchor where dataset.masks
-    is carrying the splat render's per-pixel alpha, so the alpha mask_splat
-    exists to threshold was overwritten with all-1.0 and the stage silently
-    became a bilateral filter. `test_the_shipped_order_does_not_reproduce_it`
-    puts a number on that; the YAML-level guard is in test_workflows.py.
+    That requires mask_splat to run BEFORE inject_anchor. The other order
+    was shipped, and it put inject_anchor where dataset.masks is carrying
+    the splat render's per-pixel alpha, so the alpha mask_splat exists to
+    threshold was overwritten with all-1.0 and the stage silently became a
+    bilateral filter. `test_the_other_order_masks_nothing_and_blacks_out_the_photo`
+    shows what that does; the YAML-level guard is in test_workflows.py.
     """
 
-    @classmethod
-    def setUpClass(cls):
-        cls.splatted, cls.expected = require_stage2("splatted", "masked_splatted")
-
     def _dataset(self):
-        import cv2
+        """A splatted stage: every frame a render of a textured subject on a
+        textured background, its alpha the splat's (1 on the subject, 0 off
+        it) — including the two frames at the anchor, which the re-render
+        drew like any other and inject_anchor has to replace."""
+        ds = orbit_dataset()
+        h, w = ds.images[0].shape[:2]
+        rng = np.random.default_rng(3)
+        alpha = np.zeros((h, w), dtype=np.float32)
+        alpha[h // 4: 3 * h // 4, w // 4: 3 * w // 4] = 1.0
+        ds.images = [rng.integers(40, 216, size=(h, w, 3), dtype=np.uint8)
+                     for _ in ds.images]
+        ds.masks = [alpha.copy() for _ in ds.images]
+        return ds, alpha
 
-        md = json.loads((self.splatted / "metadata.json").read_text())
-        frames = sorted(self.splatted.glob("frame_*.png"))
-        imgs = [cv2.imread(str(f), cv2.IMREAD_UNCHANGED) for f in frames]
+    def _anchor_frames(self, ds):
+        positions = np.stack([c.position for c in ds.cameras])
+        return np.flatnonzero(np.linalg.norm(
+            positions - np.asarray(ds.extras["anchor_position"]), axis=1) < 1e-6).tolist()
 
-        class _Cam:
-            def __init__(self, position):
-                self.position = np.asarray(position, dtype=np.float32)
+    def _inject(self, ds, masks=None):
+        inputs = {
+            "images": ds.images,
+            "cameras": ds.cameras,
+            "anchor_position": ds.extras["anchor_position"],
+            "anchor_image": ds.anchor_image,
+        }
+        if masks is not None:
+            inputs["masks"] = masks
+        return run_step("inject_anchor", inputs, {"tolerance_pct": 0.1})
 
-        return Dataset(
-            images=[im[:, :, :3].copy() for im in imgs],
-            image_names=[f.name for f in frames],
-            cameras=[_Cam(c["extrinsics"]["position"]) for c in md["cameras"]],
-            points_3d=None,
-            resolution=tuple(md["resolution"]),
-            masks=[im[:, :, 3].astype(np.float32) / 255.0 for im in imgs],
-            anchor_image=cv2.imread(str(self.splatted / "anchor.png"), cv2.IMREAD_UNCHANGED),
-            extras=md["b2c_extras"],
-        )
-
-    def _run_chain(self):
-        ds = self._dataset()
-        ds = run_step("mask_splat", 
-            {"dataset": ds}, {"filter_size": 6, "dilation": 2}
-        )["dataset"]
-        out = run_step("inject_anchor", 
-            {
-                "images": ds.images,
-                "cameras": ds.cameras,
-                "masks": ds.masks,
-                "anchor_position": ds.extras["anchor_position"],
-                "anchor_image": ds.anchor_image,
-            },
-            {"tolerance_pct": 0.1},
-        )
-        return out["images"], out["masks"]
-
-    def test_reproduces_the_recorded_stage(self):
-        import cv2
-
-        images, masks = self._run_chain()
-        expected = sorted(self.expected.glob("frame_*.png"))
-        self.assertEqual(len(images), len(expected))
-
-        anchor_index = int(json.loads(
-            (self.splatted / "metadata.json").read_text())["b2c_extras"]["anchor_frame_index"])
-
-        for i, path in enumerate(expected):
-            exp = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
-            with self.subTest(frame=i + 1):
-                mae = float(np.abs(images[i].astype(int) - exp[:, :, :3].astype(int)).mean())
-                # The residual is the bilateral filter's border handling,
-                # documented in steps/mask_splat.py; it never reaches 1/255.
-                self.assertLess(mae, 1.0)
-                # Uniform VACE mask, matching the recorded alpha exactly.
-                self.assertEqual(float(masks[i].min()), float(masks[i].max()))
-                self.assertEqual(round(float(masks[i].max()) * 255), int(exp[0, 0, 3]))
-
-        self.assertEqual(anchor_index, 37, "premise: cyber2_6f anchors frame 38")
-
-    def test_the_shipped_order_does_not_reproduce_it(self):
-        """The same two steps the wrong way round, to put a number on it.
-
-        inject_anchor first overwrites the splat alpha with an all-1.0
-        batch, so mask_splat's keep-test passes on every pixel and nothing
-        is ever blacked out. Asserted as a floor rather than an exact
-        value: the point is the size of the gap, not its digits.
-        """
-        import cv2
-
-        ds = self._dataset()
-        out = run_step("inject_anchor", 
-            {
-                "images": ds.images,
-                "cameras": ds.cameras,
-                "anchor_position": ds.extras["anchor_position"],
-                "anchor_image": ds.anchor_image,
-            },
-            {"tolerance_pct": 0.1},
-        )
-        ds.images, ds.masks = out["images"], out["masks"]
-        ds = run_step("mask_splat", 
-            {"dataset": ds}, {"filter_size": 6, "dilation": 2}
-        )["dataset"]
-
-        expected = sorted(self.expected.glob("frame_*.png"))
-        errs, kept = [], []
-        for i, path in enumerate(expected):
-            exp = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)[:, :, :3]
-            errs.append(float(np.abs(ds.images[i].astype(int) - exp.astype(int)).mean()))
-            kept.append(float((ds.images[i].max(axis=2) > 8).mean()))
-
-        # The correct order lands under 1/255 on every frame (above).
-        self.assertGreater(max(errs), 50.0, "wrong order should diverge grossly")
-        # Nothing masked: essentially the whole frame survives, against the
-        # ~22% the recorded stage keeps.
-        self.assertGreater(min(k for i, k in enumerate(kept) if i != 37), 0.9)
-
-        # And the anchor frame, injected first, gets blacked out entirely:
-        # its mask is uniform 0.0, so mask_splat's keep-test fails everywhere.
-        self.assertEqual(int(ds.images[37].max()), 0)
+    def _mask(self, ds):
+        return run_step("mask_splat", {"dataset": ds},
+                        {"filter_size": 6, "dilation": 2})["dataset"]
 
     def test_the_anchor_frame_is_the_photo_verbatim(self):
         """Byte-exact, at alpha 0 — the single check that pins both the
         ordering and the mask convention at once. Composite it over black
         or bilateral-filter it and the bytes stop matching; mark it 1.0 and
         denoise_pass2 regenerates the only real frame in the batch."""
-        import cv2
+        ds, _alpha = self._dataset()
+        anchors = self._anchor_frames(ds)
+        self.assertEqual(anchors, [0, 80], "premise: two frames sit at the anchor")
 
-        images, masks = self._run_chain()
-        anchor = cv2.imread(str(self.splatted / "anchor.png"), cv2.IMREAD_UNCHANGED)
-        expected = cv2.imread(
-            str(self.expected / "frame_00038_.png"), cv2.IMREAD_UNCHANGED
-        )
+        masked = self._mask(ds)
+        out = self._inject(masked, masks=masked.masks)
+        for i, (image, mask) in enumerate(zip(out["images"], out["masks"])):
+            with self.subTest(frame=i + 1):
+                # Uniform per frame: a VACE flag, not a matte.
+                self.assertEqual(float(mask.min()), float(mask.max()))
+                if i in anchors:
+                    np.testing.assert_array_equal(image, ds.anchor_image)
+                    self.assertEqual(float(mask.max()), 0.0)
+                else:
+                    self.assertEqual(float(mask.max()), 1.0)
+                    # ...and masked: the background around the subject is gone.
+                    self.assertEqual(int(image[0, 0].max()), 0)
 
-        np.testing.assert_array_equal(expected[:, :, :3], anchor[:, :, :3])
-        np.testing.assert_array_equal(images[37], anchor[:, :, :3])
-        self.assertEqual(float(masks[37].max()), 0.0)
-        self.assertEqual(int(expected[0, 0, 3]), 0)
+    def test_the_other_order_masks_nothing_and_blacks_out_the_photo(self):
+        """The same two steps the wrong way round.
+
+        inject_anchor first overwrites the splat alpha with an all-1.0
+        batch, so mask_splat's keep-test passes on every pixel and nothing
+        is ever blacked out — and the anchor frame, injected first with a
+        uniform 0.0, fails the keep-test everywhere and comes out black.
+        """
+        ds, alpha = self._dataset()
+        anchors = self._anchor_frames(ds)
+
+        right = self._mask(ds)
+        out = self._inject(ds)
+        ds.images, ds.masks = out["images"], out["masks"]
+        wrong = self._mask(ds)
+
+        for i in range(len(wrong.images)):
+            if i in anchors:
+                continue
+            with self.subTest(frame=i + 1):
+                kept_right = float((right.images[i].max(axis=2) > 8).mean())
+                kept_wrong = float((wrong.images[i].max(axis=2) > 8).mean())
+                # Right: roughly the subject survives. Wrong: the whole frame.
+                self.assertLess(kept_right, float(alpha.mean()) + 0.35)
+                self.assertGreater(kept_wrong, 0.9)
+        for i in anchors:
+            self.assertEqual(int(wrong.images[i].max()), 0)
 
 
 class TestAnchorBorderColour(unittest.TestCase):
@@ -344,10 +293,10 @@ class TestAnchorBorderColour(unittest.TestCase):
     helical.yaml, is the largest possible disagreement with
     its neighbours.
 
-    0.5 is pinned rather than a literal 127 or 128 because the recorded run
-    shows BOTH numbers and 0.5 is what produces them: the renderer
-    truncates (`int(bg*255)` = 127) and this step rounds (`round(bg*255)`
-    = 128). cyber2_6f/initial has its mesh frames at 127 and its
+    0.5 is pinned rather than a literal 127 or 128 because the reference
+    ComfyUI run showed BOTH numbers and 0.5 is what produces them: the
+    renderer truncates (`int(bg*255)` = 127) and this step rounds
+    (`round(bg*255)` = 128). That run had its mesh frames at 127 and its
     anchor.png at 128, which is the evidence that 0.5 is the value the
     reference pipeline used.
     """
@@ -375,15 +324,6 @@ class TestAnchorBorderColour(unittest.TestCase):
 
     def test_half_grey_paints_the_recorded_anchor_border(self):
         self.assertEqual(self._border((0.5, 0.5, 0.5)), [128, 128, 128])
-
-    def test_the_recorded_anchor_really_is_that_colour(self):
-        """The premise, read off the recorded run rather than asserted."""
-        import cv2
-
-        initial = require_stage2("initial")
-        anchor = cv2.imread(str(initial / "anchor.png"), cv2.IMREAD_UNCHANGED)
-        for corner in (anchor[0, 0, :3], anchor[0, -1, :3], anchor[-1, -1, :3]):
-            self.assertEqual([int(v) for v in corner], [128, 128, 128])
 
     def test_the_step_still_defaults_to_white(self):
         """Unchanged: the default belongs to callers that render on white.

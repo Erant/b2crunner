@@ -4,26 +4,22 @@ layout an upload is.
 Synthetic for the arithmetic (a sheet whose two panels are distinguishable
 by construction, cut under `layout: sheet` because a uniform panel holds no
 figure for `auto` to count), synthetic boxes for `classify_layout`, an
-injected detector for the `auto` routing, plus real detections over
-cyber_6f's recorded reference.png (a real generated sheet, even though its
-*use* there is the older convention — whole sheet into VACE, see
-steps/reference_sheet.py) and its anchor.png (a single photo). Those last
-two need the 14 MB detector file and skip without it: the module never
-downloads in a test.
+injected detector for the `auto` routing. The detector itself is not
+run: it needs a real photograph and its 14 MB model file, and this suite
+keeps neither.
 """
 
 from __future__ import annotations
 
 import unittest
 
-import cv2
 import numpy as np
 
 from pipeline.registry import get_step_class
 from pipeline.steps.reference_sheet import (
-    DETECTOR_MODEL_NAME, MIN_FIGURE_HEIGHT, classify_layout, count_figures,
+    DETECTOR_MODEL_NAME, MIN_FIGURE_HEIGHT, classify_layout,
 )
-from tests.helpers import require_stage, run_step
+from tests.helpers import run_step
 
 import pipeline.steps  # noqa: F401
 
@@ -149,7 +145,7 @@ class TestClassifyLayout(unittest.TestCase):
     def test_slivers_and_weak_boxes_do_not_count(self):
         """girl_9_16's pattern: one real figure and four low-scoring
         slivers in the background. Both tests reject them — score alone
-        would too, but the cyber_6f anchor's 0.38 sliver shows a border can
+        would too, but a recorded anchor photo's 0.38 sliver showed a border can
         score, and height is the cheaper certainty."""
         boxes = [
             _figure(20, 110, 0.91),
@@ -223,62 +219,21 @@ class TestAutoLayoutRoutes(unittest.TestCase):
             _run_auto(_panel(40), [_figure(4, 28, 0.7)], min_score=0.8)
 
 
-def _detector_model():
-    """The cached detector file, or a skip: tests do not download."""
-    from pipeline.steps.face_landmarks import _model_path
-
-    path = _model_path(DETECTOR_MODEL_NAME)
-    if not path.exists():
-        raise unittest.SkipTest(f"detector model missing: {path}")
-    return str(path)
-
-
-class TestRealDetectionsOnRecordedImages(unittest.TestCase):
-    """The detector itself, on the two recorded images the evaluation used.
-    The numbers in steps/reference_sheet.py's docstring came from these."""
-
-    def test_the_recorded_sheet_is_two_figures(self):
-        stage = require_stage("initial")
-        model = _detector_model()
-        sheet = cv2.imread(str(stage / "reference.png"), cv2.IMREAD_COLOR)
-        boxes = count_figures(sheet, model, 0.2)
-        self.assertEqual(classify_layout(boxes, sheet.shape[1], sheet.shape[0], 0.6), "sheet")
-        strong = [b for b in boxes if b[0] >= 0.6]
-        self.assertEqual(len(strong), 2, boxes)
-
-    def test_the_recorded_anchor_is_one_figure(self):
-        stage = require_stage("initial")
-        model = _detector_model()
-        photo = cv2.imread(str(stage / "anchor.png"), cv2.IMREAD_COLOR)
-        boxes = count_figures(photo, model, 0.2)
-        self.assertEqual(classify_layout(boxes, photo.shape[1], photo.shape[0], 0.6), "single")
-
-    def test_auto_on_the_recorded_sheet_cuts_it(self):
-        stage = require_stage("initial")
-        _detector_model()
-        sheet = cv2.imread(str(stage / "reference.png"), cv2.IMREAD_COLOR)
-        out = run_step("split_reference_sheet", {"sheet": sheet}, {"layout": "auto"})
-        self.assertEqual(out["layout"], "sheet")
-        self.assertEqual(out["front"].shape, (1280, 720, 3))
-
-
-class TestSplitAgainstARecordedSheet(unittest.TestCase):
-    def test_the_recorded_sheet_halves_into_two_frame_sized_panels(self):
-        """cyber_6f/initial/reference.png is a real generated sheet: 1440x1280,
-        two 720x1280 panels, front on the left. What it was *used* for there
-        is the older convention (the whole sheet went to VACE), so this
-        checks the cut, not the wiring."""
-        stage = require_stage("initial")
-        sheet = cv2.imread(str(stage / "reference.png"), cv2.IMREAD_COLOR)
-        self.assertIsNotNone(sheet)
+class TestSplitAFrameSizedSheet(unittest.TestCase):
+    def test_a_frame_sized_sheet_halves_into_two_frame_sized_panels(self):
+        """The shape a generated sheet really has: 1440x1280, two 720x1280
+        panels, front on the left. Noise rather than a flat fill so that any
+        off-by-one in the cut, a swapped half or a flip fails the exact
+        reassembly below instead of comparing equal by accident."""
+        rng = np.random.default_rng(0)
+        sheet = rng.integers(0, 256, size=(1280, 1440, 3), dtype=np.uint8)
 
         out = _run(sheet)
         for key in ("front", "back"):
             with self.subTest(half=key):
                 self.assertEqual(out[key].shape, (1280, 720, 3))
-        np.testing.assert_array_equal(
-            np.concatenate([out["front"], out["back"]], axis=1), sheet
-        )
+        np.testing.assert_array_equal(out["front"], sheet[:, :720])
+        np.testing.assert_array_equal(out["back"], sheet[:, 720:])
 
 
 if __name__ == "__main__":

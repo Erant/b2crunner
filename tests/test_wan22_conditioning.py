@@ -1112,7 +1112,7 @@ class TestReferenceFit(_RunsTheStep, unittest.TestCase):
     crop to the target aspect about the centre (Python `round`), then
     resize to fill. The numbers below are that formula evaluated for the
     two reference shapes this pipeline has actually seen — the 768x1536
-    back panel of a split sheet, and cyber_6f's 1440x1280 whole sheet.
+    back panel of a split sheet, and an older run's 1440x1280 whole sheet.
     """
 
     def _indexed(self, width, height, axis):

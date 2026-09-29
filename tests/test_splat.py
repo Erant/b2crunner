@@ -7,10 +7,11 @@ inherited metadata. That is where all of this step's subtlety lives —
 `SplatRenderer.render()` is one unmodified body2colmap call that needs a
 CUDA device, and stays unverified until a pod run.
 
-The anchored-override case is checked against cyber_6f's real recorded
-metadata: rebuilding the path from the dataset's own orbit_target and
+The anchored-override case is checked on `orbit_dataset`, a render-shaped
+dataset whose cameras body2colmap built from a real render's target and
+lens: rebuilding the path from the dataset's own orbit_target and
 focal_length_mm has to reproduce the camera intrinsics and the anchor
-position that dataset already records.
+position that dataset records.
 """
 
 from __future__ import annotations
@@ -30,8 +31,8 @@ from pipeline.steps.splat import (
 )
 from pipeline.steps.splat import _confidence_options
 from tests.helpers import (
+    orbit_dataset,
     redirect_crash_dir,
-    require_stage,
     run_step,
     stub_render_binary,
 )
@@ -143,7 +144,7 @@ class TestSplatIO(unittest.TestCase):
 class TestRenderSplatCameras(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.ds = Dataset.from_disk(require_stage("initial"))
+        cls.ds = orbit_dataset()
         cls.scene = _synthetic_scene()
 
     def _resolve(self, params, dataset=None, **inputs):
@@ -250,7 +251,7 @@ class TestRenderSplatCameras(unittest.TestCase):
         side of the splat and the disc must go with it."""
         from body2colmap.camera import Camera
 
-        moved = Dataset.from_disk(require_stage("initial"))
+        moved = orbit_dataset()
         recorded = np.asarray(moved.extras["anchor_position"], dtype=np.float64)
         index = int(np.argmin([np.linalg.norm(np.asarray(c.position, dtype=np.float64)
                                               - recorded) for c in moved.cameras]))
@@ -293,7 +294,7 @@ class TestRenderSplatCameras(unittest.TestCase):
         keys go: the live camera at `anchor_frame_index` is what the cap
         reads first (see `_cap_axis`), and `_ANCHOR_KEYS` treats the pair as
         one fact anyway — a render that drops one drops the other."""
-        stripped = Dataset.from_disk(require_stage("initial"))
+        stripped = orbit_dataset()
         stripped.extras = {k: v for k, v in stripped.extras.items()
                            if k not in ("anchor_position", "anchor_frame_index")}
         params = {"pattern": "cap", "n_frames": 8, "cap_radius_deg": 20.0,
@@ -730,7 +731,7 @@ class TestRenderSplatBoundsSource(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.ds = Dataset.from_disk(require_stage("initial"))
+        cls.ds = orbit_dataset()
         # A body-sized box at chest height, and a head-sized one well above it.
         cls.body = (np.array([-0.4, -0.9, -2.4], np.float32),
                     np.array([0.4, 0.9, -1.7], np.float32))
@@ -852,7 +853,7 @@ class TestRenderSplatBoundsSource(unittest.TestCase):
 class TestRenderSplatPointcloud(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.ds = Dataset.from_disk(require_stage("initial"))
+        cls.ds = orbit_dataset()
         cls.scene = _synthetic_scene()
 
     def test_preserves_dataset_pointcloud_by_default(self):

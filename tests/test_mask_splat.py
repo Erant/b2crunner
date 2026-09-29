@@ -1,98 +1,106 @@
-"""mask_splat against the recorded ComfyUI output of the same stage.
+"""mask_splat's three modes, on synthetic splat renders.
 
-cyber_6f/splatted -> cyber_6f/masked_splatted is a real run of
-workflows/api/mask_splat.json at the `fast helical` settings
-(filter_size=6, dilation=2), which makes this a golden-output test rather
-than a self-consistency one: the ported step is compared against frames
-produced by the ComfyUI graph it replaces.
-
-The port is not bit-exact (see pipeline/steps/mask_splat.py's docstring):
-the surviving *mask* matches exactly, while the filtered pixel values differ
-by a mean of ~0.25/255 with a max around 15, concentrated at mask edges.
-The tolerances below are set just above the measured values so a real
-regression — a wrong threshold comparison or dilation kernel, both of which
-moved the max error into the hundreds while fitting this — fails loudly.
+`mode: threshold` is the port of workflows/api/mask_splat.json at the
+`fast helical` settings (filter_size=6, dilation=2): keep only the
+near-opaque part of the splat render's alpha, grow it back out a little,
+composite over black and bilateral-filter. What is checked here is the
+decision that stage exists to make — which pixels survive — on a frame
+whose alpha has a fully opaque core, a just-opaque-enough band, a
+translucent fringe and a transparent background, all over a texture that
+is nowhere black. A wrong threshold comparison or dilation kernel moves
+whole bands of that texture across the boundary, which is what fails.
 """
 
 from __future__ import annotations
 
 import unittest
 
-import cv2
 import numpy as np
 
 from pipeline.dataset import Dataset
-from pipeline.registry import get_step_class
-from tests.helpers import require_stage, run_step
+from tests.helpers import run_step
 
 import pipeline.steps  # noqa: F401
 
+SIZE = 80
+CORE = (30, 50)      # opaque core, rows and columns
+FRINGE = (6, 74)     # translucent fringe, reaching well past the dilation
 
-class TestMaskSplatGolden(unittest.TestCase):
-    FRAMES = (1, 20, 41, 60, 81)
+
+def _splat_render(seed=0):
+    """A textured frame (40-216 everywhere, so black only ever means
+    'masked') and a splat alpha: 1.0 on the left of the core, 0.95 on its
+    right — above the default threshold's 1 - 16/255 = 0.937, so still
+    kept — 0.9 on the fringe around it, just under, and 0 outside."""
+    rng = np.random.default_rng(seed)
+    image = rng.integers(40, 216, size=(SIZE, SIZE, 3), dtype=np.uint8)
+    alpha = np.zeros((SIZE, SIZE), dtype=np.float32)
+    lo, hi = FRINGE
+    alpha[lo:hi, lo:hi] = 0.9
+    lo, hi = CORE
+    mid = (lo + hi) // 2
+    alpha[lo:hi, lo:mid] = 1.0
+    alpha[lo:hi, mid:hi] = 0.95
+    return image, alpha
+
+
+def _splatted(frames=3):
+    renders = [_splat_render(seed) for seed in range(frames)]
+    return Dataset(
+        images=[image for image, _ in renders],
+        image_names=[f"frame_{i + 1:05d}_.png" for i in range(frames)],
+        cameras=[None] * frames, points_3d=None, resolution=(SIZE, SIZE),
+        masks=[alpha for _, alpha in renders],
+    )
+
+
+def _core_region(grow):
+    """The core, grown (positive) or shrunk (negative) by `grow` pixels."""
+    region = np.zeros((SIZE, SIZE), dtype=bool)
+    lo, hi = CORE
+    region[max(lo - grow, 0):hi + grow, max(lo - grow, 0):hi + grow] = True
+    return region
+
+
+class TestMaskSplatThreshold(unittest.TestCase):
+    PARAMS = {"filter_size": 6, "dilation": 2}
 
     @classmethod
     def setUpClass(cls):
-        cls.src, cls.gold_dir = require_stage("splatted", "masked_splatted")
-        cls.ds = Dataset.from_disk(cls.src)
-        cls.out = run_step("mask_splat", 
-            {"dataset": cls.ds}, {"filter_size": 6, "dilation": 2}
-        )["dataset"]
+        cls.ds = _splatted()
+        cls.out = run_step("mask_splat", {"dataset": cls.ds}, dict(cls.PARAMS))["dataset"]
 
-    def _gold(self, n):
-        img = cv2.imread(str(self.gold_dir / f"frame_{n:05d}_.png"), cv2.IMREAD_UNCHANGED)
-        self.assertIsNotNone(img, f"missing golden frame {n}")
-        return img
-
-    def test_matches_recorded_output(self):
-        for n in self.FRAMES:
-            with self.subTest(frame=n):
-                gold = self._gold(n)[:, :, :3].astype(np.int32)
-                ours = self.out.images[n - 1].astype(np.int32)
-                err = np.abs(ours - gold)
-                self.assertLess(err.mean(), 0.5, "mean absolute error too high")
-                self.assertLess(err.max(), 30, "max absolute error too high")
-
-    def test_surviving_region_matches(self):
+    def test_the_near_opaque_core_survives_and_nothing_else_does(self):
         """Which pixels survive is the decision this stage exists to make.
 
-        Compared as "is this pixel black", the two agree on ~99.85% of
-        pixels. Every disagreement is a near-black pixel: values of 1-3 the
-        bilateral filter left just above or below zero, either hugging the
-        mask boundary or sitting inside genuinely black image content. So
-        the assertion is not an exact match but that no disagreement is
-        anything but sub-perceptually dark — a wrong threshold comparison
-        or dilation kernel breaks it immediately, since those move bands of
-        real image content across the boundary (max error went to 140 and
-        200 respectively while fitting this).
+        Inside the core, clear of the filter's reach, every pixel keeps
+        its texture — the 0.95 half included, since the keep-test is
+        `alpha >= 1 - threshold/255`. Beyond the dilation and the filter's
+        reach every pixel is black — the 0.9 fringe included, which a test
+        against 0.5 or a rounded threshold would have kept.
         """
-        for n in self.FRAMES:
-            with self.subTest(frame=n):
-                gold = self._gold(n)[:, :, :3]
-                ours = self.out.images[n - 1]
-                gold_black = gold.max(axis=2) == 0
-                ours_black = ours.max(axis=2) == 0
-                disagree = np.logical_xor(gold_black, ours_black)
+        reach = self.PARAMS["dilation"] + self.PARAMS["filter_size"]
+        inside = _core_region(-self.PARAMS["filter_size"])
+        outside = ~_core_region(reach)
+        for i, image in enumerate(self.out.images):
+            with self.subTest(frame=i + 1):
+                self.assertTrue(np.all(image[inside].max(axis=1) > 0),
+                                "part of the kept core came out black")
+                self.assertEqual(int(image[outside].max()), 0,
+                                 "something beyond the core survived")
 
-                self.assertLess(disagree.mean(), 0.005)
-                self.assertLessEqual(int(ours[disagree & gold_black].max(initial=0)), 8)
-                self.assertLessEqual(int(gold[disagree & ours_black].max(initial=0)), 8)
-
-                # Away from the boundary, disagreements are pure rounding.
-                kept = (~ours_black).astype(np.uint8) * 255
-                near_edge = cv2.morphologyEx(
-                    kept, cv2.MORPH_GRADIENT, np.ones((7, 7), np.uint8)
-                ) > 0
-                far = disagree & ~near_edge
-                self.assertLessEqual(int(ours[far].max(initial=0)), 2)
-                self.assertLessEqual(int(gold[far].max(initial=0)), 2)
+    def test_the_kept_texture_is_only_filtered_not_replaced(self):
+        """The bilateral filter smooths; it does not repaint. Deep inside
+        the core the output stays close to the frame it was given."""
+        inside = _core_region(-self.PARAMS["filter_size"])
+        for before, after in zip(self.ds.images, self.out.images):
+            err = np.abs(after[inside].astype(int) - before[inside].astype(int))
+            self.assertLess(float(err.mean()), 40.0)
 
     def test_output_is_fully_opaque(self):
-        """The ComfyUI graph saves an all-zero MASK, i.e. alpha 255 — the
-        recorded frames confirm it, and the port must match or the next
-        denoise pass reads the blacked-out region as reference material."""
-        for n in self.FRAMES:
-            self.assertEqual(self._gold(n)[:, :, 3].min(), 255)
+        """The ComfyUI graph saves an all-zero MASK, i.e. alpha 255, and the
+        port must match or the next denoise pass reads the blacked-out
+        region as reference material."""
         for mask in self.out.masks:
             self.assertTrue(np.all(mask == 1.0))
 
@@ -112,14 +120,6 @@ class TestMaskSplatGolden(unittest.TestCase):
         with self.assertRaises(ValueError):
             run_step("mask_splat", {"dataset": no_masks}, {})
 
-    def test_threshold_is_the_declared_default(self):
-        """The golden comparison above runs at the step's default, so it is
-        only a golden test while that default is `threshold`. Every shipped
-        workflow overrides it to passthrough, which is exactly the way a
-        default gets changed to match without anyone noticing."""
-        default = get_step_class("mask_splat").declared_params()["mode"].default
-        self.assertEqual(default, "threshold")
-
 
 class TestMaskSplatPassthrough(unittest.TestCase):
     """`mode: passthrough` — the shipped mode, behind a confidence render.
@@ -135,7 +135,7 @@ class TestMaskSplatPassthrough(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.ds = Dataset.from_disk(require_stage("splatted"))
+        cls.ds = _splatted()
 
     def _run(self, dataset):
         return run_step("mask_splat", {"dataset": dataset}, {"mode": "passthrough"})["dataset"]
@@ -172,8 +172,9 @@ class TestMaskSplatPassthrough(unittest.TestCase):
 
     def test_it_differs_from_the_threshold_path(self):
         """Guards against a passthrough that quietly still filters — the two
-        modes have to disagree on a real splat render, or the frames
-        denoise_pass2 sees are not the ones the gate produced."""
+        modes have to disagree on a splat render with a transparent
+        background, or the frames denoise_pass2 sees are not the ones the
+        gate produced."""
         thresholded = run_step(
             "mask_splat", {"dataset": self.ds}, {"filter_size": 6, "dilation": 2}
         )["dataset"]
@@ -194,9 +195,6 @@ class TestMaskSplatComposite(unittest.TestCase):
     repaints) and this decides what is SUBJECT, laying it over the mid grey
     the rest of the batch — the warped anchor photo's border included —
     grounds on.
-
-    Synthetic rather than golden: there is no recorded ComfyUI run of a
-    stage that did not exist there.
     """
 
     def _dataset(self, mask):

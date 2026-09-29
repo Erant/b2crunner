@@ -9,7 +9,7 @@ via HTTP range request: 1827 tensor names with dtypes and shapes, 5 KB.
 Meta tensors reconstructed from it exercise the whole mapping for free.
 
 Skips where diffusers/torchao aren't installed, which is everywhere except
-venv_wan22 — same convention as the cyber_6f golden-data tests.
+venv_wan22.
 """
 
 from __future__ import annotations

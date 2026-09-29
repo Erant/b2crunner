@@ -2,9 +2,10 @@
 pipeline/steps/orbit_record.py).
 
 What matters is that a record read back from scene.ply is enough to extend
-the orbit after the fact. So the path is checked against cyber_6f's real
-cameras: the record of an extended run, read back, has to be a path that
-extend_helical_path accepts and continues again. The format itself is
+the orbit after the fact. So the path is checked on render_subject's own
+anchored helix, rebuilt from `orbit_dataset`'s metadata (a real render's
+target and lens): the record of an extended run, read back, has to be a
+path that extend_helical_path accepts and continues again. The format itself is
 checked on a small synthetic .ply: it round-trips, it leaves the b2c.mhr.*
 body alone, and it pins the images beside it by checksum.
 """
@@ -24,7 +25,7 @@ from pipeline.orbit_record import (
 )
 from pipeline.registry import get_step_class
 from pipeline.steps.splat import _resolve_cameras, _transform_camera
-from tests.helpers import require_stage, run_step
+from tests.helpers import orbit_dataset, run_step
 
 import pipeline.steps  # noqa: F401
 
@@ -54,10 +55,10 @@ def _dataset(cameras, extras):
     )
 
 
-class _Cyber6f(unittest.TestCase):
+class _AnchoredHelix(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.ds = Dataset.from_disk(require_stage("initial"))
+        cls.ds = orbit_dataset()
         params = get_step_class("render_splat").resolve_params(
             dict(HELIX, pattern="helical", override_cam_from_mesh=True))
         source, _, _, anchor = _resolve_cameras(
@@ -77,7 +78,7 @@ class _Cyber6f(unittest.TestCase):
         return read_orbit_record(ply)
 
 
-class TestARecordExtendsAfterTheFact(_Cyber6f):
+class TestARecordExtendsAfterTheFact(_AnchoredHelix):
     def test_an_unextended_run_s_record_is_extended_as_the_run_would_have_been(self):
         record = run_step("snapshot_orbit", {"dataset": _dataset(self.source, self.extras)},
                           dict(HELIX))["record"]
@@ -127,7 +128,7 @@ class TestARecordExtendsAfterTheFact(_Cyber6f):
                                         "before": 41}, dict(HELIX))
 
 
-class TestTheHeader(_Cyber6f):
+class TestTheHeader(_AnchoredHelix):
     def _record(self):
         record = run_step("snapshot_orbit",
                           {"dataset": _dataset(self.source, self.extras),

@@ -610,13 +610,13 @@ class TestWorkflowFiles(unittest.TestCase):
                     )
 
     def test_the_anchor_is_reinjected_after_masking(self):
-        """Ordering, stated directly, because the pixel-level guard for it
-        (tests/test_anchor.py) skips when the recorded run is absent.
+        """Ordering, stated at the workflow level; the pixel-level guard
+        for it is tests/test_anchor.py's TestMaskThenInject.
 
-        cyber2_6f/masked_splatted/frame_00038_.png is that stage's
-        anchor.png byte for byte — the injected photo is not composited
-        over black and not bilateral-filtered, which only happens if the
-        stage-3 inject_anchor runs *after* mask_splat.
+        The anchor frame leaving that stage has to be the anchor photo
+        byte for byte — not composited over black and not
+        bilateral-filtered — which only happens if the stage-3
+        inject_anchor runs *after* mask_splat.
 
         Two distinct checks, because helical legitimately has a
         SECOND inject_anchor: the pre-denoise one in its bootstrap, which
@@ -666,7 +666,7 @@ class TestWorkflowFiles(unittest.TestCase):
         The step matches the anchor by camera POSITION, so it is only ever
         as good as the path the batch was rendered along. A `render_splat`
         that builds a fresh orbit without anchoring it puts no camera on the
-        anchor at all — measured on cyber_6f with helical's own
+        anchor at all — measured on a recorded ComfyUI run with helical's own
         params, the nearest unanchored helical camera is 0.1408 from it
         against a 0.00593 tolerance, 24x — so the injection matches zero
         frames, returns the batch untouched and the run carries on. That was

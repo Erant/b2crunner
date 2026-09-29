@@ -1,30 +1,10 @@
 """Shared test helpers.
 
-The golden-data tests below run against real completed runs of the original
-ComfyUI pipeline (stage directories initial/ -> circular/ -> splatted/ ->
-masked_splatted/ -> helical/ -> upscaled/ -> colmap/). These are gitignored
-local reference data, so every test that needs one skips cleanly when it
-isn't present rather than failing.
-
-**There are two runs, and which one answers a question matters.**
-
-  * `cyber_6f/` (repo root) is the older one, recorded before anchor
-    injection was wired into the ComfyUI graphs. Its `masked_splatted` has
-    a uniform alpha of 255 on every frame and no injected anchor anywhere
-    in the helical orbit. Fine for the mask/composite arithmetic, and
-    actively misleading about the anchor.
-  * `cyber2_6f/` (~/Documents by default, `B2C_CYBER2_6F` to override) is
-    the newer one, with anchor injection live. Its `splatted` records
-    `anchor_frame_index: 37`, and `masked_splatted/frame_00038_.png` is
-    byte-identical to that stage's `anchor.png` at a uniform alpha of 0
-    while all 80 other frames sit at 255. That is the run to check anything
-    involving the anchor or the VACE mask convention against.
-
-The alpha channel in these PNGs is the VACE mask, not a foreground
-silhouette: 255 = "synthetic, denoise this frame", 0 = "a real photograph,
-keep it". `splatted` is the one exception, and only because that stage is
-never fed to VACE — it parks the splat render's per-pixel alpha in the same
-channel for `mask_splat` to threshold.
+Nothing in this suite reads recorded data. Where a test needs a dataset
+shaped like a real run, `orbit_dataset` builds one: the cameras come from
+body2colmap's own `OrbitPath`, the same solver `render` uses, so the orbit
+conventions under test are checked against the renderer's rather than
+against a second copy of the arithmetic they implement.
 """
 
 from __future__ import annotations
@@ -34,39 +14,98 @@ import unittest
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+import numpy as np
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
-CYBER_6F = REPO_ROOT / "cyber_6f"
-CYBER2_6F = Path(
-    os.environ.get("B2C_CYBER2_6F", Path.home() / "Documents" / "cyber2_6f")
-).expanduser()
+
+#: The orbit an `override_cam_from_mesh` render of a standing subject builds
+#: at 720x1280: the photograph's camera at the world origin, the subject's
+#: centre two metres in front of it, and the framed lens. The numbers are a
+#: real render's (an early ComfyUI-era run), so the orbit geometry —
+#: radius, the anchor's near-zero elevation, the lens — is a realistic one
+#: rather than a round-number special case.
+ORBIT_TARGET = (0.006704419851303101, 0.003536224365234375, -2.0372064113616943)
+ORBIT_RESOLUTION = (720, 1280)
+ORBIT_FOCAL_PX = 1213.9169918936154
+ORBIT_FOCAL_MM = 60.69584959468077
+ORBIT_ORIGINAL_FOCAL_PX = 1717.3001708984375
 
 
-def require_stage(*names: str) -> Path | tuple[Path, ...]:
-    """Skip the calling test unless every named cyber_6f stage dir exists."""
-    paths = []
-    for name in names:
-        p = CYBER_6F / name
-        if not (p / "metadata.json").exists() and not p.is_dir():
-            raise unittest.SkipTest(f"reference data missing: {p}")
-        if not p.is_dir():
-            raise unittest.SkipTest(f"reference data missing: {p}")
-        paths.append(p)
-    return paths[0] if len(paths) == 1 else tuple(paths)
+def orbit_extras(**overrides) -> Dict[str, Any]:
+    """The `b2c_extras` that render publishes for the orbit above."""
+    from body2colmap.path import compute_original_camera_orbit_params
+
+    target = np.asarray(ORBIT_TARGET, dtype=np.float32)
+    extras: Dict[str, Any] = {
+        "focal_length_mm": ORBIT_FOCAL_MM,
+        "initial_rotation": 0.0,
+        "orbit_target": target,
+        "forward_azimuth_deg": float(
+            compute_original_camera_orbit_params(target)["start_azimuth_deg"]),
+        "anchor_frame_index": 0,
+        "anchor_position": np.zeros(3, dtype=np.float32),
+        "original_focal_length": ORBIT_ORIGINAL_FOCAL_PX,
+    }
+    extras.update(overrides)
+    return extras
 
 
-def require_stage2(*names: str) -> Path | tuple[Path, ...]:
-    """Skip the calling test unless every named cyber2_6f stage dir exists.
+def orbit_dataset(
+    *, n_frames: int = 81, frame_size=(18, 32), n_points: int = 1000, seed: int = 0,
+):
+    """A render-shaped Dataset on the anchored circular orbit above.
 
-    The newer recorded run — see the module docstring for why the anchor
-    and VACE-mask questions have to be asked of this one and not cyber_6f.
+    `n_frames` cameras from `OrbitPath.circular` with `overlap=1`, the way
+    `render` builds an anchored circular path: frame 0 on the photograph's
+    camera at the world origin, and the orbit closing on itself, so the last
+    camera is the first one's twin. Both of those frames carry the anchor
+    image, as a render's do; every other frame is a distinct flat grey
+    (`frame_size` is (width, height): small stand-ins, the cameras keep
+    their 720x1280 intrinsics). Masks are all 1.0, the points a small cloud
+    around the target.
     """
-    paths = []
-    for name in names:
-        p = CYBER2_6F / name
-        if not p.is_dir():
-            raise unittest.SkipTest(f"reference data missing: {p}")
-        paths.append(p)
-    return paths[0] if len(paths) == 1 else tuple(paths)
+    from body2colmap.camera import Camera
+    from body2colmap.path import OrbitPath, compute_original_camera_orbit_params
+
+    from pipeline.dataset import Dataset
+
+    extras = orbit_extras()
+    target = extras["orbit_target"]
+    solved = compute_original_camera_orbit_params(target)
+    width, height = ORBIT_RESOLUTION
+    cameras = OrbitPath(target=target, radius=float(solved["radius"])).circular(
+        n_frames=n_frames,
+        elevation_deg=solved["elevation_deg"],
+        start_azimuth_deg=solved["start_azimuth_deg"],
+        overlap=1,
+        camera_template=Camera(
+            focal_length=(ORBIT_FOCAL_PX, ORBIT_FOCAL_PX), image_size=(width, height)),
+    )
+
+    fw, fh = frame_size
+    anchor = np.zeros((fh, fw, 3), dtype=np.uint8)
+    anchor[:] = (30, 90, 200)
+    anchor[: fh // 4, : fw // 4] = 255
+    images = [np.full((fh, fw, 3), 20 + (i * 2) % 200, dtype=np.uint8) for i in range(n_frames)]
+    images[0] = anchor.copy()
+    images[-1] = anchor.copy()
+
+    rng = np.random.default_rng(seed)
+    points = (target + rng.normal(scale=0.3, size=(n_points, 3))).astype(np.float32)
+    colors = rng.integers(0, 256, size=(n_points, 3)).astype(np.uint8)
+
+    return Dataset(
+        images=images,
+        image_names=[f"frame_{i + 1:05d}_.png" for i in range(n_frames)],
+        cameras=list(cameras),
+        points_3d=(points, colors),
+        resolution=(width, height),
+        masks=[np.ones((fh, fw), dtype=np.float32) for _ in range(n_frames)],
+        reference_image=np.full((fh, 2 * fw, 3), 60, dtype=np.uint8),
+        anchor_image=anchor,
+        prompt="a figure in a jacket",
+        extras=extras,
+    )
 
 
 def run_step(name: str, inputs: Dict[str, Any], params: Optional[Dict[str, Any]] = None):
