@@ -337,7 +337,8 @@ class TestEveryRunOnTheVolume(_BundleCase):
         contents, size = runs.run_contents(state)
 
         self.assertIn("colmap/ (5)", contents)
-        self.assertIn("ply/ (1)", contents)
+        # No scene.glb in this run: the default (glTF) request falls back to the PLY, named as a file.
+        self.assertIn("ply/scene.ply", contents)
         self.assertIn("debug/", contents)
         self.assertIn("log.txt", contents)
         self.assertGreater(size, 0)
@@ -515,6 +516,87 @@ class TestEveryRunOnTheVolume(_BundleCase):
         self.assertEqual(
             [p.name for p in (self.root / "archives").glob("*.part")], []
         )
+
+
+def _ply(path: Path, comments=(), body: bytes = b"\x00\x00\x80?" * 3) -> bytes:
+    """A one-vertex binary PLY with these header comments; returns its body bytes."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    header = ["ply", "format binary_little_endian 1.0", "comment SH degree: 0", *(f"comment {c}" for c in comments),
+              "element vertex 1", "property float x", "property float y", "property float z", "end_header"]
+    path.write_bytes(("\n".join(header) + "\n").encode() + body)
+    return body
+
+
+class TestSplatFormat(_BundleCase):
+    """ply/ holds the splat in the picked format and nothing beside it (2026-09-29)."""
+
+    def _names(self, archive):
+        with zipfile.ZipFile(archive) as bundle:
+            return bundle.namelist()
+
+    def _new_run(self):
+        run = _run_dir(self.root, colmap=True, ply=False, name="new")
+        _ply(run / "ply" / "scene.ply")
+        _touch(run / "ply" / "scene.glb", 64)
+        return run
+
+    def test_gltf_is_the_default_and_carries_the_subject_file_alone(self):
+        run = self._new_run()
+        _touch(run / "ply" / "front.png")                 # what older runs left beside the .ply
+        _touch(run / "ply" / "body_rig_omega.json")
+        archive = runs.build_result_zip(run)
+        self.assertEqual(Path(archive).name, "new-result.zip")
+        names = self._names(archive)
+        self.assertIn("ply/scene.glb", names)
+        self.assertEqual([n for n in names if n.startswith("ply/")], ["ply/scene.glb"])
+        self.assertEqual(runs.splat_formats(run), ["gltf", "ply"])
+
+    def test_ply_carries_the_bare_ply_alone_in_its_own_archive(self):
+        run = self._new_run()
+        _touch(run / "ply" / "anchor.png")
+        archive = runs.build_result_zip(run, fmt="ply")
+        self.assertEqual(Path(archive).name, "new-result-ply.zip")
+        self.assertEqual([n for n in self._names(archive) if n.startswith("ply/")], ["ply/scene.ply"])
+        # the two formats are cached side by side, each current on its own
+        gltf = runs.build_result_zip(run)
+        self.assertEqual(runs.existing_result_zip(run, fmt="ply"), archive)
+        self.assertEqual(runs.existing_result_zip(run, fmt="gltf"), gltf)
+
+    def test_an_older_plys_b2c_records_are_stripped_and_its_body_kept(self):
+        run = _run_dir(self.root, colmap=True, ply=False, name="old")
+        body = _ply(run / "ply" / "scene.ply", comments=["b2c.mhr.version 1", "b2c.orbit.version 1",
+                                                        "Exported from b2ctrain"])
+        _touch(run / "ply" / "reference.png")
+        archive = runs.build_result_zip(run, fmt="ply")
+        with zipfile.ZipFile(archive) as bundle:
+            data = bundle.read("ply/scene.ply")
+        header, _, rest = data.partition(b"end_header\n")
+        self.assertNotIn(b"b2c.", header)
+        self.assertIn(b"comment Exported from b2ctrain", header)
+        self.assertEqual(rest, body)
+        self.assertEqual(runs.existing_result_zip(run, fmt="ply"), archive)   # current, although rewritten
+
+    def test_a_run_without_a_subject_file_packages_the_ply_for_gltf(self):
+        run = _run_dir(self.root, colmap=True, ply=False, name="old")
+        _ply(run / "ply" / "scene.ply")
+        self.assertEqual(runs.splat_formats(run), ["ply"])
+        self.assertEqual(runs.packaged_format(run, fmt="gltf"), "ply")
+        names = self._names(runs.build_result_zip(run))
+        self.assertIn("ply/scene.ply", names)
+
+    def test_the_bundle_follows_the_format(self):
+        run = self._new_run()
+        state = RunState(name="new", status="done", output_dir=str(run))
+        self.assertEqual(runs.bundle_path().name, runs.BUNDLE_NAME)
+        ply_bundle = runs.build_bundle_zip([state], fmt="ply")
+        self.assertEqual(Path(ply_bundle).name, "all-results-ply.zip")
+        self.assertIn("new/ply/scene.ply", self._names(ply_bundle))
+        self.assertIn("new/ply/scene.glb", self._names(runs.build_bundle_zip([state])))
+
+    def test_an_unknown_format_is_refused(self):
+        run = self._new_run()
+        with self.assertRaises(ValueError):
+            runs.build_result_zip(run, fmt="usd")
 
 
 class TestOutputSelection(unittest.TestCase):

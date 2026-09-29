@@ -108,8 +108,9 @@ from .paths import data_dir, output_dir, run_jobs_dir, upload_dir
 from .run_state import PREVIEW_FRAMES, RunState, tail_lines
 from .cli import available_workflows
 from .runs import (
-    BUNDLE_NAME, IMAGE_SUFFIXES, WORKFLOW_DEFAULT, SubmitError,
-    build_bundle_zip, build_result_zip, clear_finished_runs, completed_runs, existing_result_zip,
+    DEFAULT_SPLAT_FORMAT, IMAGE_SUFFIXES, WORKFLOW_DEFAULT, SubmitError,
+    build_bundle_zip, build_result_zip, bundle_path, clear_finished_runs, completed_runs, existing_result_zip,
+    packaged_format,
     find_run, merged_runs, resolve_upload, result_dirs, result_subdirs,
     run_contents, run_log_path, run_recency, submit_runs,
     workflow_param_panel,
@@ -427,13 +428,25 @@ def _log_tail(state: RunState) -> str:
     return tail_lines(path, max_lines=_LOG_TAIL_LINES, max_bytes=_LOG_TAIL_BYTES)
 
 
+# The Results tabs' splat format dropdown (runs.SPLAT_FORMATS), glTF first and the default.
+SPLAT_FORMAT_CHOICES = [
+    ("glTF (.glb): splat, body, skeleton, cameras in one file", "gltf"),
+    ("PLY (.ply): the bare splat", "ply"),
+]
+_SPLAT_FORMAT_INFO = (
+    "What ply/ holds in the .zip. The glTF subject file carries everything the "
+    "splat comes with (b2cgltf SPEC.md); the PLY is the trained splat alone. "
+    "Nothing else is packaged beside either."
+)
+
+
 def _result_summary(
-    state: RunState, debug: bool = False,
+    state: RunState, debug: bool = False, fmt: str = DEFAULT_SPLAT_FORMAT,
 ) -> tuple[str, List[str], Optional[str]]:
     """What the Results tab says about a run: (markdown, final frames, archive).
 
-    `debug` is the tab's "Include debug/" checkbox: the archive reported is
-    the one packaged that way.
+    `debug` is the tab's "Include debug/" checkbox and `fmt` its splat format:
+    the archive reported is the one packaged that way.
 
     Read-only. The archive is only reported when one is already built and
     current (`existing_result_zip`); building one is the Package button's
@@ -464,15 +477,29 @@ def _result_summary(
         )
 
     lines = []
+    packaged = packaged_format(Path(directory), state.workflow, fmt)
+    suffix = {"gltf": ".glb", "ply": ".ply"}.get(packaged or "")
     for name, path in sorted(directories.items()):
+        if name == "ply":
+            files = sorted(f for f in path.glob(f"*{suffix}") if f.is_file()) if suffix else []
+            for f in files:
+                what = ("the subject file: splat, body, skeleton, cameras" if suffix == ".glb"
+                        else "the bare splat")
+                lines.append(f"- **`ply/{f.name}`** — {what}, {f.stat().st_size / 1e9:.2f} GB")
+            continue
         files = [f for f in path.rglob("*") if f.is_file()]
         size = sum(f.stat().st_size for f in files)
         lines.append(f"- **`{name}/`** — {len(files)} files, {size / 1e9:.2f} GB")
     if run_log_path(Path(directory), state.log_path):
         lines.append("- **`log.txt`** — the log this run wrote")
+    if packaged and packaged != fmt:
+        lines.append(
+            "\n_This run has no glTF subject file (it predates 2026-09-29, or ran "
+            "without the body refit), so the .zip carries the bare PLY._"
+        )
 
     archive = existing_result_zip(
-        Path(directory), state.workflow, state.log_path, debug=debug,
+        Path(directory), state.workflow, state.log_path, debug=debug, fmt=fmt,
     )
     verb = "contains" if archive else "will contain"
     if archive:
@@ -757,6 +784,10 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
             results_info = gr.Markdown()
             with gr.Row():
                 package_btn = gr.Button("Package .zip", variant="primary", scale=1)
+                results_format_in = gr.Dropdown(
+                    choices=SPLAT_FORMAT_CHOICES, value=DEFAULT_SPLAT_FORMAT,
+                    label="Splat format", info=_SPLAT_FORMAT_INFO, scale=1,
+                )
                 results_debug_in = gr.Checkbox(
                     value=False, label="Include debug/", scale=1,
                     info="Camera dumps, face splats, the intermediate splat "
@@ -796,6 +827,10 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
             with gr.Row():
                 all_refresh = gr.Button(
                     "Scan and package everything", variant="primary", scale=2)
+                all_format_in = gr.Dropdown(
+                    choices=SPLAT_FORMAT_CHOICES, value=DEFAULT_SPLAT_FORMAT,
+                    label="Splat format", info=_SPLAT_FORMAT_INFO, scale=1,
+                )
                 bundle_in = gr.Checkbox(
                     value=False, label="Also build one combined .zip", scale=1,
                     info="Every run under its own directory in a single "
@@ -882,7 +917,7 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
         ]
 
         def view(run_name: Optional[str], memo: Optional[dict], step_filter: str,
-                 debug: bool, force: bool) -> tuple:
+                 debug: bool, force: bool, fmt: str = DEFAULT_SPLAT_FORMAT) -> tuple:
             """Everything about `run_name`, or `gr.update()` where nothing moved.
 
             `force` repaints regardless — the page load and a picker change,
@@ -895,8 +930,9 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
             run_name = run_name or ""
             state = (find_run(scheduler, run_name) if run_name else None) or RunState()
             live = state.status in ("queued", "running")
+            fmt = fmt or DEFAULT_SPLAT_FORMAT
             sig = [run_name, state.status, state.current, state.total, int(state.finished),
-                   bool(debug)]
+                   bool(debug), fmt]
             stale = force or sig != memo.get("sig")
 
             fleet = _fleet_status(scheduler)
@@ -929,7 +965,7 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
                 filter_upd = previews_upd = keep
 
             if stale:
-                info_upd, frames_upd, zip_upd = _result_summary(state, bool(debug))
+                info_upd, frames_upd, zip_upd = _result_summary(state, bool(debug), fmt)
                 path = run_log_path(state.output_dir, state.log_path)
                 log_file_upd = gr.update(
                     value=str(path) if path else None, visible=path is not None,
@@ -943,8 +979,8 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
                 info_upd, frames_upd, zip_upd, filter_upd, previews_upd, memo,
             )
 
-        def on_tick(run_name, memo, step_filter, debug=False):
-            *painted, memo = view(run_name, memo, step_filter, debug, force=False)
+        def on_tick(run_name, memo, step_filter, debug=False, fmt=DEFAULT_SPLAT_FORMAT):
+            *painted, memo = view(run_name, memo, step_filter, debug, force=False, fmt=fmt)
             # The picker's rows carry each run's status icon, so they move
             # as runs start and finish; resent only then, so an open
             # dropdown is not redrawn under the pointer every two seconds.
@@ -953,39 +989,43 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
             memo["choices"] = choices
             return (picker, *painted, memo)
 
-        def on_load(run_name, memo, step_filter, debug=False):
+        def on_load(run_name, memo, step_filter, debug=False, fmt=DEFAULT_SPLAT_FORMAT):
             """A fresh page: every run on the volume, the most recent selected."""
             choices = _run_choices(scheduler)
             names = [value for _, value in choices]
             selected = run_name if run_name in names else (names[0] if names else None)
-            *painted, memo = view(selected, memo, step_filter, debug, force=True)
+            *painted, memo = view(selected, memo, step_filter, debug, force=True, fmt=fmt)
             memo["choices"] = choices
             return (gr.update(choices=choices, value=selected), *painted, memo)
 
-        def on_change(run_name, memo, step_filter, debug=False):
-            return view(run_name, memo, step_filter, debug, force=True)
+        def on_change(run_name, memo, step_filter, debug=False, fmt=DEFAULT_SPLAT_FORMAT):
+            return view(run_name, memo, step_filter, debug, force=True, fmt=fmt)
 
         timer = gr.Timer(2.0)
         timer.tick(
-            on_tick, inputs=[run_picker, memo, preview_step_in, results_debug_in],
+            on_tick, inputs=[run_picker, memo, preview_step_in, results_debug_in, results_format_in],
             outputs=[run_picker, *view_outputs],
         )
         app.load(
-            on_load, inputs=[run_picker, memo, preview_step_in, results_debug_in],
+            on_load, inputs=[run_picker, memo, preview_step_in, results_debug_in, results_format_in],
             outputs=[run_picker, *view_outputs], show_progress="hidden",
         )
         # `.change`, not `.input`: a run submitted below selects itself
         # programmatically, and that has to repaint too.
         run_picker.change(
-            on_change, inputs=[run_picker, memo, preview_step_in, results_debug_in],
+            on_change, inputs=[run_picker, memo, preview_step_in, results_debug_in, results_format_in],
             outputs=view_outputs, show_progress="hidden",
         )
         preview_step_in.change(
-            on_change, inputs=[run_picker, memo, preview_step_in, results_debug_in],
+            on_change, inputs=[run_picker, memo, preview_step_in, results_debug_in, results_format_in],
             outputs=view_outputs, show_progress="hidden",
         )
         results_debug_in.change(
-            on_change, inputs=[run_picker, memo, preview_step_in, results_debug_in],
+            on_change, inputs=[run_picker, memo, preview_step_in, results_debug_in, results_format_in],
+            outputs=view_outputs, show_progress="hidden",
+        )
+        results_format_in.change(
+            on_change, inputs=[run_picker, memo, preview_step_in, results_debug_in, results_format_in],
             outputs=view_outputs, show_progress="hidden",
         )
 
@@ -1064,7 +1104,7 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
 
         clear_btn.click(on_clear, inputs=[run_picker], outputs=[run_picker])
 
-        def on_package(run_name: Optional[str], debug: bool = False):
+        def on_package(run_name: Optional[str], debug: bool = False, fmt: str = DEFAULT_SPLAT_FORMAT):
             """Build (or reuse) the selected run's archive — the one slow press.
 
             Separate from looking at a run on purpose: the first archive of
@@ -1085,19 +1125,19 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
                 )
             archive = build_result_zip(
                 Path(state.output_dir), state.workflow, state.log_path, reuse=True,
-                debug=bool(debug),
+                debug=bool(debug), fmt=fmt or DEFAULT_SPLAT_FORMAT,
             )
             if not archive:
                 raise gr.Error("This run produced no deliverables to package.")
-            info, _frames, _archive = _result_summary(state, bool(debug))
+            info, _frames, _archive = _result_summary(state, bool(debug), fmt or DEFAULT_SPLAT_FORMAT)
             return info, archive
 
         package_btn.click(
-            on_package, inputs=[run_picker, results_debug_in],
+            on_package, inputs=[run_picker, results_debug_in, results_format_in],
             outputs=[results_info, results_zip],
         )
 
-        def on_all_results(bundle: bool, debug: bool):
+        def on_all_results(bundle: bool, debug: bool, fmt: str = DEFAULT_SPLAT_FORMAT):
             """Package every finished run on the volume, streaming as it goes.
 
             A generator, unlike everything else on the page: the first press
@@ -1108,6 +1148,7 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
             """
             icons = {"done": "✅", "failed": "❌", "cancelled": "⛔",
                      "unknown": "•"}
+            fmt = fmt or DEFAULT_SPLAT_FORMAT
             runs = completed_runs()
             if not runs:
                 yield ("No finished run on this volume has produced "
@@ -1123,10 +1164,10 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
                     f"Packaging **{index} of {len(runs)}** — `{state.name}`…",
                     rows, archives, gr.update(), thumbs,
                 )
-                contents, size = run_contents(state, bool(debug))
+                contents, size = run_contents(state, bool(debug), fmt)
                 archive = build_result_zip(
                     Path(state.output_dir), state.workflow, state.log_path,
-                    reuse=True, debug=bool(debug),
+                    reuse=True, debug=bool(debug), fmt=fmt,
                 )
                 if archive:
                     archives.append(archive)
@@ -1151,16 +1192,16 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
             if bundle:
                 yield ("Building the combined .zip…", rows, archives,
                        gr.update(), thumbs)
-                path = build_bundle_zip(runs, reuse=True, debug=bool(debug))
+                path = build_bundle_zip(runs, reuse=True, debug=bool(debug), fmt=fmt)
                 if path:
                     combined = gr.update(visible=True, value=path)
                     info.append(
-                        f"`{BUNDLE_NAME}` holds all {len(archives)} under "
+                        f"`{bundle_path(fmt).name}` holds all {len(archives)} under "
                         "`<run name>/`.")
             yield "\n\n".join(info), rows, archives, combined, thumbs
 
         all_refresh.click(
-            on_all_results, inputs=[bundle_in, all_debug_in],
+            on_all_results, inputs=[bundle_in, all_debug_in, all_format_in],
             outputs=[all_info, all_table, all_files, bundle_out, all_gallery],
         )
 

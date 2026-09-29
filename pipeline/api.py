@@ -53,7 +53,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from .gpu_scheduler import GpuScheduler
 from .run_state import tail_lines
 from .runs import (
-    WORKFLOW_DEFAULT, SubmitError, build_result_zip, check_submission,
+    DEFAULT_SPLAT_FORMAT, SPLAT_FORMATS, WORKFLOW_DEFAULT, SubmitError, build_result_zip, check_submission,
     discover_runs, find_run, merged_runs,
     resolve_upload, run_log_path, submit_runs, workflow_param_panel,
 )
@@ -546,14 +546,24 @@ def build_router(
         return {"name": name, "path": str(path), "log": tail_lines(path, max_lines=tail)}
 
     @router.get("/runs/{name}/result")
-    def get_result(name: str, debug: bool = Query(False)) -> FileResponse:
+    def get_result(name: str, debug: bool = Query(False),
+                   format: str = Query(DEFAULT_SPLAT_FORMAT)) -> FileResponse:  # noqa: A002 (the query name)
         """The run's deliverables as one .zip — `colmap/`, `ply/`, `log.txt`,
         and `debug/` with `?debug=true`.
+
+        `?format=gltf` (the default) or `?format=ply` picks what `ply/` holds:
+        the subject file `scene.glb` or the bare `scene.ply`. A run without a
+        subject file (older, or without the body refit) packages the PLY either
+        way.
 
         Refused while the run is still going: the exports are its last
         steps, so packaging one mid-flight hands back half a dataset that
         looks like a whole one.
         """
+        if format not in SPLAT_FORMATS:
+            raise HTTPException(
+                status_code=422, detail=f"format must be one of {sorted(SPLAT_FORMATS)}, not {format!r}.",
+            )
         state = _lookup(name)
         # `state.status` alone is not enough: a container that died mid-run
         # leaves its status file at `running` for good, so a run whose
@@ -567,7 +577,7 @@ def build_router(
             )
         archive = build_result_zip(
             state.output_dir, state.workflow, state.log_path, reuse=True,
-            debug=debug,
+            debug=debug, fmt=format,
         )
         if archive is None:
             raise HTTPException(

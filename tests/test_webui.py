@@ -19,6 +19,7 @@ import os
 import time
 import unittest
 import unittest.mock
+import zipfile
 from functools import partial
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -214,6 +215,36 @@ class TestWiring(unittest.TestCase):
         _touch(run / "colmap" / "new.txt")
         out = self._dep("change", self.picker).fn("done", {}, webui.PREVIEW_ALL)
         self.assertIsNone(out[8])
+
+    def test_both_results_tabs_pick_the_splat_format_gltf_first(self):
+        dropdowns = [b for b in self.app.blocks.values()
+                     if isinstance(b, gr.Dropdown) and getattr(b, "label", None) == "Splat format"]
+        self.assertEqual(len(dropdowns), 2)   # Results and All results
+        for dropdown in dropdowns:
+            self.assertEqual(dropdown.value, "gltf")
+            self.assertEqual([value for _label, value in dropdown.choices], ["gltf", "ply"])
+        package_btn = next(b for b in self.app.blocks.values()
+                           if isinstance(b, gr.Button) and b.value == "Package .zip")
+        results_format = next(d for d in dropdowns if d in self._dep("click", package_btn).inputs)
+        # a format change repaints the Results view, like the debug checkbox
+        self.assertIs(self._dep("change", results_format).fn.__name__, "on_change")
+        all_results = next(fn for fn in self.app.fns.values()
+                           if fn.fn is not None and fn.fn.__name__ == "on_all_results")
+        self.assertIn(next(d for d in dropdowns if d is not results_format), all_results.inputs)
+
+    def test_the_package_press_packages_the_picked_format(self):
+        run = self._finished_run("splat")
+        _touch(run / "ply" / "scene.glb", 64)
+        _touch(run / "ply" / "scene.ply", 64)
+        _touch(run / "ply" / "front.png")
+        package = next(fn for fn in self.app.fns.values()
+                       if fn.fn is not None and fn.fn.__name__ == "on_package")
+        for fmt, member in (("gltf", "ply/scene.glb"), ("ply", "ply/scene.ply")):
+            with self.subTest(fmt=fmt):
+                info, archive = package.fn("splat", False, fmt)
+                with zipfile.ZipFile(archive) as bundle:
+                    self.assertEqual([n for n in bundle.namelist() if n.startswith("ply/")], [member])
+                self.assertIn(f"`{member}`", info)
 
     def test_packaging_a_run_this_server_is_still_running_is_refused(self):
         self._live_run("live")

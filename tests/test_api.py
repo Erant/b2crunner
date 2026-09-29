@@ -639,6 +639,26 @@ class TestCollectingTheResult(ApiTestCase):
                 with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
                     self.assertEqual("debug/stats.json" in archive.namelist(), wanted)
 
+    def test_format_picks_the_splat_and_nothing_rides_beside_it(self):
+        run_dir = self.finished_run(name="splat-run")
+        (run_dir / "ply").mkdir()
+        (run_dir / "ply" / "scene.glb").write_bytes(b"glTF")
+        (run_dir / "ply" / "scene.ply").write_bytes(
+            b"ply\nformat binary_little_endian 1.0\ncomment b2c.mhr.version 1\nelement vertex 0\n"
+            b"property float x\nend_header\n")
+        (run_dir / "ply" / "front.png").write_bytes(b"png")
+        for query, wanted in (("", "ply/scene.glb"), ("?format=gltf", "ply/scene.glb"),
+                              ("?format=ply", "ply/scene.ply")):
+            with self.subTest(query=query):
+                response = self.client.get(f"{API_PREFIX}/runs/splat-run/result{query}", headers=AUTH)
+                self.assertEqual(response.status_code, 200)
+                with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+                    self.assertEqual([n for n in archive.namelist() if n.startswith("ply/")], [wanted])
+                    if wanted.endswith(".ply"):
+                        self.assertNotIn(b"b2c.", archive.read(wanted))
+        response = self.client.get(f"{API_PREFIX}/runs/splat-run/result?format=usd", headers=AUTH)
+        self.assertEqual(response.status_code, 422)
+
     def test_it_is_refused_while_the_run_is_still_going(self):
         # Its exports are the last steps: packaging one now hands back half
         # a dataset that looks like a whole one.

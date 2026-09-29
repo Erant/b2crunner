@@ -901,13 +901,75 @@ def run_log_path(run_dir: Optional[Path], log_path: Optional[Path] = None) -> Op
     return None
 
 
+# The splat deliverable comes in one of two formats, picked on the Results
+# tabs (and `?format=` on the API): the subject file (`scene.glb`, b2cgltf
+# SPEC.md: splat, body, skeleton, cameras, images in one file) or the bare
+# trained `scene.ply`. Either way nothing rides beside it: the PNGs and the
+# trainer's JSON that older runs left in `ply/` are not packaged, and an
+# older `scene.ply` whose header carries `b2c.*` records is packaged with
+# those lines stripped.
+SPLAT_DIR = "ply"
+SPLAT_FORMATS: Dict[str, str] = {"gltf": ".glb", "ply": ".ply"}
+DEFAULT_SPLAT_FORMAT = "gltf"
+
+
+def _check_format(fmt: str) -> str:
+    if fmt not in SPLAT_FORMATS:
+        raise ValueError(f"unknown splat format {fmt!r}; one of {sorted(SPLAT_FORMATS)}")
+    return fmt
+
+
+def splat_formats(run_dir: Optional[Path], workflow: str = "") -> List[str]:
+    """The formats this run's splat can be downloaded in (`SPLAT_FORMATS` order). A run from before 2026-09-29, or
+    one that ran without the body refit, has no subject file and offers the PLY alone."""
+    directory = result_dirs(run_dir, workflow).get(SPLAT_DIR)
+    if directory is None:
+        return []
+    return [fmt for fmt, suffix in SPLAT_FORMATS.items() if any(directory.glob(f"*{suffix}"))]
+
+
+def packaged_format(run_dir: Optional[Path], workflow: str = "", fmt: str = DEFAULT_SPLAT_FORMAT) -> Optional[str]:
+    """The format a request for `fmt` actually packages: `fmt` if the run has it, else the PLY (every run with a
+    splat has one). None for a run without a splat."""
+    available = splat_formats(run_dir, workflow)
+    if _check_format(fmt) in available:
+        return fmt
+    return "ply" if "ply" in available else None
+
+
+def _has_b2c_records(path: Path) -> bool:
+    from . import ply_meta
+
+    try:
+        return any(c.startswith("b2c.") for c in ply_meta.read_comments(path))
+    except (OSError, ValueError):
+        return False
+
+
+def _write_bare_ply(bundle: zipfile.ZipFile, path: Path, arcname: str) -> None:
+    """`path` into the archive without its `b2c.*` header comments (the records a run before 2026-09-29 embedded),
+    streamed: the body is copied as it is."""
+    with open(path, "rb") as src, bundle.open(zipfile.ZipInfo.from_file(path, arcname), "w",
+                                              force_zip64=True) as dst:
+        while True:
+            line = src.readline()
+            if not line:
+                raise ValueError(f"{path}: header has no end_header")
+            if not line.startswith(b"comment b2c."):
+                dst.write(line)
+            if line.rstrip(b"\r\n") == b"end_header":
+                break
+        shutil.copyfileobj(src, dst, 1 << 20)
+
+
 def _run_members(
     run_dir: Path,
     workflow: str = "",
     log_path: Optional[Path] = None,
     prefix: str = "",
     debug: bool = True,
-) -> List["tuple[str, Path, int]"]:
+    fmt: str = DEFAULT_SPLAT_FORMAT,
+) -> List["tuple[str, Path, int, bool]"]:
     """Every (arcname, source, compression) one run contributes, in order.
 
     One list, two readers: `_write_run_members` writes it, and
@@ -918,20 +980,31 @@ def _run_members(
 
     Empty for a run with no deliverables, which is what makes "a log alone
     does not make an archive" true of every caller.
+
+    `ply/` contributes the splat in the format `packaged_format` settles on
+    and nothing else. The fourth field says the member is a .ply to write
+    without its `b2c.*` header records (`_write_bare_ply`).
     """
     directories = result_dirs(run_dir, workflow)
     if not directories:
         return []
 
     base = Path(prefix)
-    members: List["tuple[str, Path, int]"] = []
+    splat_suffix = SPLAT_FORMATS.get(packaged_format(run_dir, workflow, fmt) or "", None)
+    members: List["tuple[str, Path, int, bool]"] = []
     for name, directory in sorted(directories.items()):
         for path in sorted(directory.rglob("*")):
-            if path.is_file():
-                members.append((
-                    str(base / name / path.relative_to(directory)),
-                    path, zipfile.ZIP_STORED,
-                ))
+            if not path.is_file():
+                continue
+            strip = False
+            if name == SPLAT_DIR:
+                if path.parent != directory or path.suffix != splat_suffix:
+                    continue
+                strip = path.suffix == ".ply" and _has_b2c_records(path)
+            members.append((
+                str(base / name / path.relative_to(directory)),
+                path, zipfile.ZIP_STORED, strip,
+            ))
     for name, directory in sorted(debug_dirs(run_dir).items() if debug else {}.items()):
         for path in sorted(directory.rglob("*")):
             if path.is_file():
@@ -940,13 +1013,13 @@ def _run_members(
                 text = path.suffix in _DEBUG_TEXT_SUFFIXES
                 members.append((
                     str(base / name / path.relative_to(directory)), path,
-                    zipfile.ZIP_DEFLATED if text else zipfile.ZIP_STORED,
+                    zipfile.ZIP_DEFLATED if text else zipfile.ZIP_STORED, False,
                 ))
     log = run_log_path(run_dir, log_path)
     if log:
         # DEFLATE for this member alone: a log is text, it shrinks by
         # ~10x, and it is small enough for the CPU cost to be nothing.
-        members.append((str(base / "log.txt"), log, zipfile.ZIP_DEFLATED))
+        members.append((str(base / "log.txt"), log, zipfile.ZIP_DEFLATED, False))
     return members
 
 
@@ -957,6 +1030,7 @@ def _write_run_members(
     log_path: Optional[Path] = None,
     prefix: str = "",
     debug: bool = True,
+    fmt: str = DEFAULT_SPLAT_FORMAT,
 ) -> bool:
     """Write one run's deliverables into an already-open archive.
 
@@ -964,9 +1038,12 @@ def _write_run_members(
     can never drift into carrying different things. Returns False, having
     written nothing at all, for a run with no deliverables.
     """
-    members = _run_members(run_dir, workflow, log_path, prefix, debug)
-    for arcname, path, compression in members:
-        bundle.write(path, arcname=arcname, compress_type=compression)
+    members = _run_members(run_dir, workflow, log_path, prefix, debug, fmt)
+    for arcname, path, compression, strip in members:
+        if strip:
+            _write_bare_ply(bundle, path, arcname)
+        else:
+            bundle.write(path, arcname=arcname, compress_type=compression)
     return bool(members)
 
 
@@ -977,14 +1054,14 @@ def _write_run_members(
 # run packaged before `debug/` was carried keeps handing back its old
 # contents forever, while the docs say `debug/` is in there. **Bump this
 # whenever `_write_run_members` changes what it writes.**
-ARCHIVE_FORMAT = b"b2c-result-1: outputs + debug/ + log.txt"
+ARCHIVE_FORMAT = b"b2c-result-2: outputs (ply/: scene.glb or a bare scene.ply) + debug/ + log.txt"
 
 
 # One run's share of an archive, as `_write_run_members` takes it:
-# (run_dir, workflow, log_path, prefix, debug). A per-run archive is one
+# (run_dir, workflow, log_path, prefix, debug, fmt). A per-run archive is one
 # of these with an empty prefix; the combined bundle is one per run under
 # its run name.
-_ArchivePart = Tuple[Path, str, Optional[Path], str, bool]
+_ArchivePart = Tuple[Path, str, Optional[Path], str, bool, str]
 
 
 def archive_is_current(
@@ -993,6 +1070,7 @@ def archive_is_current(
     workflow: str = "",
     log_path: Optional[Path] = None,
     debug: bool = True,
+    fmt: str = DEFAULT_SPLAT_FORMAT,
 ) -> bool:
     """True when `archive` already holds this run exactly as it stands.
 
@@ -1009,10 +1087,11 @@ def archive_is_current(
     are hundreds of megabytes of PNG, and the only writer is a run that
     has already finished.
     """
-    return _archive_holds(archive, [(Path(run_dir), workflow, log_path, "", debug)])
+    return _archive_holds(archive, [(Path(run_dir), workflow, log_path, "", debug, fmt)])
 
 
-def bundle_is_current(archive: Path, states: List[RunState], debug: bool = True) -> bool:
+def bundle_is_current(archive: Path, states: List[RunState], debug: bool = True,
+                      fmt: str = DEFAULT_SPLAT_FORMAT) -> bool:
     """True when the combined bundle already holds these runs as they stand.
 
     The same three checks as `archive_is_current`, over every run at
@@ -1020,13 +1099,14 @@ def bundle_is_current(archive: Path, states: List[RunState], debug: bool = True)
     cannot see: a run that finished since the last press, or one pruned
     off the volume, is a different list of names.
     """
-    return _archive_holds(archive, _bundle_parts(states, debug))
+    return _archive_holds(archive, _bundle_parts(states, debug, fmt))
 
 
-def _bundle_parts(states: List[RunState], debug: bool = True) -> List[_ArchivePart]:
+def _bundle_parts(states: List[RunState], debug: bool = True,
+                  fmt: str = DEFAULT_SPLAT_FORMAT) -> List[_ArchivePart]:
     """What `build_bundle_zip` writes for `states`, run by run."""
     return [
-        (Path(state.output_dir), state.workflow, state.log_path, state.name, debug)
+        (Path(state.output_dir), state.workflow, state.log_path, state.name, debug, fmt)
         for state in states if state.output_dir
     ]
 
@@ -1037,8 +1117,8 @@ def _archive_holds(archive: Path, parts: List[_ArchivePart]) -> bool:
         return False
     expected = [
         name
-        for run_dir, workflow, log_path, prefix, debug in parts
-        for name, _path, _c in _run_members(run_dir, workflow, log_path, prefix, debug)
+        for run_dir, workflow, log_path, prefix, debug, fmt in parts
+        for name, _path, _c, _s in _run_members(run_dir, workflow, log_path, prefix, debug, fmt)
     ]
     try:
         with zipfile.ZipFile(archive) as bundle:
@@ -1057,7 +1137,7 @@ def _archive_holds(archive: Path, parts: List[_ArchivePart]) -> bool:
         return False  # truncated, or not an archive this module wrote
     stamp = archive.stat().st_mtime
     sources: List[Path] = []
-    for run_dir, workflow, log_path, _prefix, debug in parts:
+    for run_dir, workflow, log_path, _prefix, debug, _fmt in parts:
         sources += list(result_dirs(run_dir, workflow).values())
         if debug:
             sources += list(debug_dirs(run_dir).values())
@@ -1093,9 +1173,11 @@ def _archive_lock(archive: Path) -> threading.Lock:
         return _ARCHIVE_LOCKS.setdefault(str(archive), threading.Lock())
 
 
-def result_archive_path(run_dir: Path) -> Path:
-    """Where `build_result_zip` puts this run's archive: one fixed path per run."""
-    return output_dir() / f"{Path(run_dir).name}-result.zip"
+def result_archive_path(run_dir: Path, fmt: str = DEFAULT_SPLAT_FORMAT) -> Path:
+    """Where `build_result_zip` puts this run's archive: one fixed path per run and format (the default format's
+    keeps the old name)."""
+    tag = "" if _check_format(fmt) == DEFAULT_SPLAT_FORMAT else f"-{fmt}"
+    return output_dir() / f"{Path(run_dir).name}-result{tag}.zip"
 
 
 def existing_result_zip(
@@ -1103,6 +1185,7 @@ def existing_result_zip(
     workflow: str = "",
     log_path: Optional[Path] = None,
     debug: bool = True,
+    fmt: str = DEFAULT_SPLAT_FORMAT,
 ) -> Optional[str]:
     """The run's archive if one is already built and still current, else None.
 
@@ -1114,9 +1197,9 @@ def existing_result_zip(
     """
     if not run_dir:
         return None
-    archive = result_archive_path(run_dir)
+    archive = result_archive_path(run_dir, fmt)
     if archive.is_file() and archive_is_current(
-        archive, Path(run_dir), workflow, log_path, debug
+        archive, Path(run_dir), workflow, log_path, debug, fmt
     ):
         return str(archive)
     return None
@@ -1128,8 +1211,11 @@ def build_result_zip(
     log_path: Optional[Path] = None,
     reuse: bool = False,
     debug: bool = True,
+    fmt: str = DEFAULT_SPLAT_FORMAT,
 ) -> Optional[str]:
     """One archive holding only the deliverables: colmap/ and/or ply/.
+
+    `fmt` picks the splat's format (`SPLAT_FORMATS`); see `_run_members`.
 
     Not `shutil.make_archive` over the whole run directory, which is what
     this used to be. A run directory also holds the final Dataset's 81
@@ -1168,9 +1254,9 @@ def build_result_zip(
     if not result_dirs(run_dir, workflow):
         return None
 
-    archive = result_archive_path(run_dir)
+    archive = result_archive_path(run_dir, fmt)
     with _archive_lock(archive):
-        if reuse and archive_is_current(archive, Path(run_dir), workflow, log_path, debug):
+        if reuse and archive_is_current(archive, Path(run_dir), workflow, log_path, debug, fmt):
             return str(archive)
         # Beside the destination, not in TMPDIR: os.replace is only atomic
         # within one filesystem, and on a pod those are different mounts.
@@ -1182,7 +1268,7 @@ def build_result_zip(
             # wall clock.
             with zipfile.ZipFile(staging, "w", compression=zipfile.ZIP_STORED) as bundle:
                 bundle.comment = ARCHIVE_FORMAT
-                _write_run_members(bundle, Path(run_dir), workflow, log_path, debug=debug)
+                _write_run_members(bundle, Path(run_dir), workflow, log_path, debug=debug, fmt=fmt)
             os.replace(staging, archive)
         finally:
             staging.unlink(missing_ok=True)
@@ -1195,8 +1281,15 @@ def build_result_zip(
 BUNDLE_NAME = "all-results.zip"
 
 
+def bundle_path(fmt: str = DEFAULT_SPLAT_FORMAT) -> Path:
+    """The combined download for `fmt`; the default format's keeps `BUNDLE_NAME`."""
+    tag = "" if _check_format(fmt) == DEFAULT_SPLAT_FORMAT else f"-{fmt}"
+    return output_dir() / BUNDLE_NAME.replace(".zip", f"{tag}.zip")
+
+
 def build_bundle_zip(
     states: List[RunState], reuse: bool = False, debug: bool = True,
+    fmt: str = DEFAULT_SPLAT_FORMAT,
 ) -> Optional[str]:
     """Every run's deliverables in one archive, each under its own run name.
 
@@ -1210,21 +1303,21 @@ def build_bundle_zip(
     until 2026-09-10 it was made on every press of the button whether or
     not a run had finished since the last one.
     """
-    archive = output_dir() / BUNDLE_NAME
+    archive = bundle_path(fmt)
     written = 0
     # Staged and moved into place under the same lock as a per-run archive,
     # and for the same reason — this path is fixed, so two presses of the
     # button write the same file. See `build_result_zip`.
     with _archive_lock(archive):
-        if reuse and bundle_is_current(archive, states, debug):
+        if reuse and bundle_is_current(archive, states, debug, fmt):
             return str(archive)
         staging = archive.with_suffix(f".zip.{secrets.token_hex(4)}.part")
         try:
             with zipfile.ZipFile(staging, "w", compression=zipfile.ZIP_STORED) as bundle:
                 bundle.comment = ARCHIVE_FORMAT
-                for run_dir, workflow, log_path, prefix, debug in _bundle_parts(states, debug):
+                for run_dir, workflow, log_path, prefix, debug, fmt in _bundle_parts(states, debug, fmt):
                     if _write_run_members(
-                        bundle, run_dir, workflow, log_path, prefix=prefix, debug=debug,
+                        bundle, run_dir, workflow, log_path, prefix=prefix, debug=debug, fmt=fmt,
                     ):
                         written += 1
             if not written:
@@ -1296,21 +1389,24 @@ def completed_runs() -> List[RunState]:
     ]
 
 
-def run_contents(state: RunState, debug: bool = True) -> "tuple[str, int]":
-    """One run's deliverables as a summary line and a total size in bytes."""
-    parts, total = [], 0
-    for name, path in sorted(result_dirs(state.output_dir, state.workflow).items()):
-        files = [f for f in path.rglob("*") if f.is_file()]
-        for f in files:
+def run_contents(state: RunState, debug: bool = True,
+                 fmt: str = DEFAULT_SPLAT_FORMAT) -> "tuple[str, int]":
+    """One run's archive as a summary line and a total size in bytes: what `_run_members` packages for `fmt`
+    (the splat by its file name, so a run that falls back from glTF to the PLY says so)."""
+    groups: Dict[str, List[Path]] = {}
+    for arcname, path, _c, _s in _run_members(Path(state.output_dir), state.workflow, state.log_path,
+                                              debug=debug, fmt=fmt) if state.output_dir else []:
+        top = Path(arcname).parts[0]
+        groups.setdefault(arcname if top in (SPLAT_DIR, "log.txt") else top, []).append(path)
+    total = 0
+    for paths in groups.values():
+        for f in paths:
             try:
                 total += f.stat().st_size
             except OSError:  # pruned between the walk and the stat
                 continue
-        parts.append(f"{name}/ ({len(files)})")
-    if debug and debug_dirs(state.output_dir):
-        parts.append("debug/")
-    if run_log_path(state.output_dir, state.log_path):
-        parts.append("log.txt")
+    parts = [name if name.startswith(f"{SPLAT_DIR}/") or name == "log.txt" else f"{name}/ ({len(paths)})"
+             for name, paths in groups.items()]
     return ", ".join(parts), total
 
 
@@ -1373,9 +1469,10 @@ def clear_finished_runs(scheduler: GpuScheduler) -> List[str]:
         run_dir = Path(state.output_dir) if state.output_dir else output_dir() / state.name
         if _inside(run_dir, output_dir()):
             shutil.rmtree(run_dir, ignore_errors=True)
-            archive = result_archive_path(run_dir)
-            with _archive_lock(archive):
-                archive.unlink(missing_ok=True)
+            for fmt in SPLAT_FORMATS:
+                archive = result_archive_path(run_dir, fmt)
+                with _archive_lock(archive):
+                    archive.unlink(missing_ok=True)
         log = run_log_path(run_dir, state.log_path)
         if log is not None and _inside(log, log_dir()):
             log.unlink(missing_ok=True)
@@ -1385,9 +1482,10 @@ def clear_finished_runs(scheduler: GpuScheduler) -> List[str]:
     if cleared:
         # Holds a copy of the cleared runs' deliverables; the next press of
         # All results builds it again from what is left.
-        bundle = output_dir() / BUNDLE_NAME
-        with _archive_lock(bundle):
-            bundle.unlink(missing_ok=True)
+        for fmt in SPLAT_FORMATS:
+            bundle = bundle_path(fmt)
+            with _archive_lock(bundle):
+                bundle.unlink(missing_ok=True)
     scheduler.forget(cleared)
     return cleared
 
