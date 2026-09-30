@@ -1742,41 +1742,33 @@ steps:
       sampler_low: euler
       sampler_shift: 5
       strength: [1, 1, 0.5, 0.5]
-      prompt: "人工光、柔光、低对比度、环绕运镜。时间静止，人物完全静止。身体\
-        如雕塑般僵硬，胸口没有起伏，头部保持固定角度，面部肌肉完全不动，维持单\
-        一的中性表情。双眼一眨不眨，眼睑保持张开且稳定，目光空洞而固定，锁定远\
-        处墙面上的一个点，对镜头毫无察觉、毫无反应。人物站在一间空房间里：灰色\
-        墙面上有均匀的网格线，深色地板，浅色天花板，墙面相交处有清晰的墙角。房\
-        间本身固定不动，镜头以匀速、固定焦距围绕主体平滑移动，墙角依次从画面中\
-        掠过。灯光属于房间本身，位置固定：主光始终来自人物自身的左前方，右侧是\
-        柔和的补光。人物身上的明暗、阴影与高光始终停留在同一片皮肤和衣物上，每\
-        一帧完全相同——左侧始终是受光面，右侧始终是柔和的暗面；镜头绕到人物右侧\
-        时，看到的正是那一侧的暗面。房间里的阴影同样固定：墙面上的明暗、以及人\
-        物投在地面上的影子，始终落在房间中的同一位置，不随镜头移动。 Time is \
-        frozen and only the camera moves. The gaze stays anchored to that \
-        point on the wall as the camera passes, so the eyes slide across the \
-        frame, always aimed past the lens at the wall behind it. Eyelids stay \
-        open and steady, the expression holds without a single \
-        micro-movement, and the head keeps its exact angle throughout. The \
-        frozen subject is $SUBJECT_DESC$, standing in an empty room: grey \
-        walls ruled with an even grid, a dark floor and a lighter ceiling, \
-        meeting at clear corners. The camera pans slowly around the subject \
-        in a 360 degree orbit, moving smoothly around the subject in a \
-        continuous arc. The room is fixed in place and the camera \
-        travels through it, so the walls and their corners sweep past the \
-        frame while the room itself never turns. Soft, low-contrast studio \
-        light: the key sits high on the subject's own left, a soft fill on \
-        their right, both fixed to the room and holding still while the \
-        camera arcs around. Every highlight and shadow stays welded to the \
-        same patch of skin and cloth from the first frame to the last, so \
-        their left remains the lit side and their right remains the \
-        soft-shadowed side for the whole circle; as the camera arcs round to \
-        their right it sees that shadowed side. The room's shadows are just \
-        as fixed: the shading on the walls and the shadow the subject casts \
-        on the floor stay in the same place in the room in every frame, and \
-        do not swing round with the camera. Matte skin, matte cloth, \
-        photorealistic, sharp focus, identical face, clothing and lighting in \
-        every frame."
+      prompt: "人工光、柔光、低对比度、均匀照明、环绕运镜。时间静止，人物完全静止。身体如雕塑般僵硬，胸口没有起伏，头部保持固定角度，面部肌\
+        肉完全不动，维持单一的中性表情。双眼一眨不眨，眼睑保持张开且稳定，目光空洞而固定，锁定远处墙面上的一个点，对镜头毫无察觉、毫无反应。人物站\
+        在一间空房间里：灰色墙面上有均匀的网格线，深色地板，浅色天花板，墙面相交处有清晰的墙角。房间本身固定不动，镜头以匀速、固定焦距围绕主体平滑\
+        移动，墙角依次从画面中掠过。灯光属于房间本身，位置固定：大面积柔光从四周和上方均匀地包围人物，像一个固定在房间里的大型柔光罩，四面八方的光\
+        线同样柔和。人物全身的亮度均匀一致，每一帧完全相同；镜头环绕时，从任何角度看到的皮肤和衣物都同样明亮，身体两侧受光相同。房间里的明暗同样固\
+        定：墙面上柔和的明暗过渡、以及人物脚下淡淡的影子，始终落在房间中的同一位置，不随镜头移动。 Time is frozen and \
+        only the camera moves. The gaze stays anchored to that point on the \
+        wall as the camera passes, so the eyes slide across the frame, \
+        always aimed past the lens at the wall behind it. Eyelids stay open \
+        and steady, the expression holds without a single micro-movement, \
+        and the head keeps its exact angle throughout. The frozen subject is \
+        $SUBJECT_DESC$, standing in an empty room: grey walls ruled with an \
+        even grid, a dark floor and a lighter ceiling, meeting at clear \
+        corners. The camera pans slowly around the subject in a 360 degree \
+        orbit, moving smoothly around the subject in a continuous arc. The \
+        room is fixed in place and the camera travels through it, so the \
+        walls and their corners sweep past the frame while the room itself \
+        never turns. Soft, even, low-contrast light fills the room from \
+        every side and from above, like a large softbox dome fixed in place, \
+        wrapping the subject in the same gentle brightness all the way \
+        round. Skin and cloth hold one even brightness from every angle and \
+        in every frame while the camera arcs around, and both sides of the \
+        body are equally lit. The room's shading is just as fixed: the soft \
+        gradients on the walls and the faint shadow at the subject's feet \
+        stay in the same place in the room in every frame, and do not swing \
+        round with the camera. Matte skin, matte cloth, photorealistic, \
+        sharp focus, identical face, clothing and lighting in every frame."
       negative_prompt: "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静\
         止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的\
         手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体\
@@ -2254,6 +2246,19 @@ steps:
       # summons it, and cfg 1.0 means there is no negative channel to put
       # it in (the negative below is encoded and then ignored entirely).
       #
+      # 2026-09-29: the key/fill pair gave way to room-fixed, all-round soft
+      # light (均匀照明 joined the tags; both languages now describe a large
+      # softbox dome fixed in the room, both sides of the body equally lit,
+      # the same brightness from every angle). b2crig animates the splat and
+      # has to undo every shade baked into it: a directional key is baked
+      # shading that moves wrongly once a limb turns (b24be4's lowered arms
+      # and low-angle legs came out dark). A light with no direction has
+      # nothing to drift between views, and nothing to bake. The risk is the one
+      # this block records: an unplaced "even soft light" became the
+      # turntable, so the new text keeps the light fixed to the room and
+      # states it affirmatively (no "no key light"). Watch for view-dependent
+      # shading on the first runs.
+      #
       # Double-quoted with `\`-escaped line breaks, NOT YAML's folded `>-`:
       # a folded scalar turns every line break into a space, which inside
       # the Chinese runs silently corrupts the string. A continuation line
@@ -2329,41 +2334,33 @@ steps:
       # NOT name the sides or describe the rear view, which is what the
       # reverted text above did. tests/test_workflows.py pins both
       # strings (DRAWING_PROMPT here, DENOISE_PROMPT on pass 2).
-      prompt: "人工光、柔光、低对比度、环绕运镜。时间静止，人物完全静止。身体\
-        如雕塑般僵硬，胸口没有起伏，头部保持固定角度，面部肌肉完全不动，维持单\
-        一的中性表情。双眼一眨不眨，眼睑保持张开且稳定，目光空洞而固定，锁定远\
-        处墙面上的一个点，对镜头毫无察觉、毫无反应。人物站在一间空房间里：灰色\
-        墙面上有均匀的网格线，深色地板，浅色天花板，墙面相交处有清晰的墙角。房\
-        间本身固定不动，镜头以匀速、固定焦距围绕主体平滑移动，墙角依次从画面中\
-        掠过。灯光属于房间本身，位置固定：主光始终来自人物自身的左前方，右侧是\
-        柔和的补光。人物身上的明暗、阴影与高光始终停留在同一片皮肤和衣物上，每\
-        一帧完全相同——左侧始终是受光面，右侧始终是柔和的暗面；镜头绕到人物右侧\
-        时，看到的正是那一侧的暗面。房间里的阴影同样固定：墙面上的明暗、以及人\
-        物投在地面上的影子，始终落在房间中的同一位置，不随镜头移动。 Time is \
-        frozen and only the camera moves. The gaze stays anchored to that \
-        point on the wall as the camera passes, so the eyes slide across the \
-        frame, always aimed past the lens at the wall behind it. Eyelids stay \
-        open and steady, the expression holds without a single \
-        micro-movement, and the head keeps its exact angle throughout. The \
-        frozen subject is $SUBJECT_DESC$, standing in an empty room: grey \
-        walls ruled with an even grid, a dark floor and a lighter ceiling, \
-        meeting at clear corners. The camera pans slowly around the subject \
-        in a 360 degree orbit, moving smoothly around the subject in a \
-        continuous arc. The room is fixed in place and the camera \
-        travels through it, so the walls and their corners sweep past the \
-        frame while the room itself never turns. Soft, low-contrast studio \
-        light: the key sits high on the subject's own left, a soft fill on \
-        their right, both fixed to the room and holding still while the \
-        camera arcs around. Every highlight and shadow stays welded to the \
-        same patch of skin and cloth from the first frame to the last, so \
-        their left remains the lit side and their right remains the \
-        soft-shadowed side for the whole circle; as the camera arcs round to \
-        their right it sees that shadowed side. The room's shadows are just \
-        as fixed: the shading on the walls and the shadow the subject casts \
-        on the floor stay in the same place in the room in every frame, and \
-        do not swing round with the camera. Matte skin, matte cloth, \
-        photorealistic, sharp focus, identical face, clothing and lighting in \
-        every frame."
+      prompt: "人工光、柔光、低对比度、均匀照明、环绕运镜。时间静止，人物完全静止。身体如雕塑般僵硬，胸口没有起伏，头部保持固定角度，面部肌\
+        肉完全不动，维持单一的中性表情。双眼一眨不眨，眼睑保持张开且稳定，目光空洞而固定，锁定远处墙面上的一个点，对镜头毫无察觉、毫无反应。人物站\
+        在一间空房间里：灰色墙面上有均匀的网格线，深色地板，浅色天花板，墙面相交处有清晰的墙角。房间本身固定不动，镜头以匀速、固定焦距围绕主体平滑\
+        移动，墙角依次从画面中掠过。灯光属于房间本身，位置固定：大面积柔光从四周和上方均匀地包围人物，像一个固定在房间里的大型柔光罩，四面八方的光\
+        线同样柔和。人物全身的亮度均匀一致，每一帧完全相同；镜头环绕时，从任何角度看到的皮肤和衣物都同样明亮，身体两侧受光相同。房间里的明暗同样固\
+        定：墙面上柔和的明暗过渡、以及人物脚下淡淡的影子，始终落在房间中的同一位置，不随镜头移动。 Time is frozen and \
+        only the camera moves. The gaze stays anchored to that point on the \
+        wall as the camera passes, so the eyes slide across the frame, \
+        always aimed past the lens at the wall behind it. Eyelids stay open \
+        and steady, the expression holds without a single micro-movement, \
+        and the head keeps its exact angle throughout. The frozen subject is \
+        $SUBJECT_DESC$, standing in an empty room: grey walls ruled with an \
+        even grid, a dark floor and a lighter ceiling, meeting at clear \
+        corners. The camera pans slowly around the subject in a 360 degree \
+        orbit, moving smoothly around the subject in a continuous arc. The \
+        room is fixed in place and the camera travels through it, so the \
+        walls and their corners sweep past the frame while the room itself \
+        never turns. Soft, even, low-contrast light fills the room from \
+        every side and from above, like a large softbox dome fixed in place, \
+        wrapping the subject in the same gentle brightness all the way \
+        round. Skin and cloth hold one even brightness from every angle and \
+        in every frame while the camera arcs around, and both sides of the \
+        body are equally lit. The room's shading is just as fixed: the soft \
+        gradients on the walls and the faint shadow at the subject's feet \
+        stay in the same place in the room in every frame, and do not swing \
+        round with the camera. Matte skin, matte cloth, photorealistic, \
+        sharp focus, identical face, clothing and lighting in every frame."
       negative_prompt: "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静\
         止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的\
         手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体\
@@ -3559,39 +3556,32 @@ steps:
       sampler_low: euler
       sampler_shift: 2.5
       strength: [0.8, 0.8, 0.8, 0.8, 0.8, 0.8]
-      prompt: "人工光、柔光、低对比度、环绕运镜。时间静止，人物完全静止。身体\
-        如雕塑般僵硬，胸口没有起伏，头部保持固定角度，面部肌肉完全不动，维持单\
-        一的中性表情。双眼一眨不眨，眼睑保持张开且稳定，目光空洞而固定，锁定远\
-        处墙面上的一个点，对镜头毫无察觉、毫无反应。人物站在一间空房间里：灰色\
-        墙面上有均匀的网格线，深色地板，浅色天花板，墙面相交处有清晰的墙角。房\
-        间本身固定不动，镜头以匀速、固定焦距围绕主体平滑移动，墙角依次从画面中\
-        掠过。灯光属于房间本身，位置固定：主光始终来自人物自身的左前方，右侧是\
-        柔和的补光。人物身上的明暗、阴影与高光始终停留在同一片皮肤和衣物上，每\
-        一帧完全相同——左侧始终是受光面，右侧始终是柔和的暗面；镜头绕到人物右侧\
-        时，看到的正是那一侧的暗面。房间里的阴影同样固定：墙面上的明暗、以及人\
-        物投在地面上的影子，始终落在房间中的同一位置，不随镜头移动。 Time is \
-        frozen and only the camera moves. The gaze stays anchored to that \
-        point on the wall as the camera passes, so the eyes slide across the \
-        frame, always aimed past the lens at the wall behind it. Eyelids stay \
-        open and steady, the expression holds without a single \
-        micro-movement, and the head keeps its exact angle throughout. The \
-        frozen subject is $SUBJECT_DESC$, standing in an empty room: grey \
-        walls ruled with an even grid, a dark floor and a lighter ceiling, \
-        meeting at clear corners. The room is fixed in place and the camera \
-        travels through it, so the walls and their corners sweep past the \
-        frame while the room itself never turns. Soft, low-contrast studio \
-        light: the key sits high on the subject's own left, a soft fill on \
-        their right, both fixed to the room and holding still while the \
-        camera arcs around. Every highlight and shadow stays welded to the \
-        same patch of skin and cloth from the first frame to the last, so \
-        their left remains the lit side and their right remains the \
-        soft-shadowed side for the whole circle; as the camera arcs round to \
-        their right it sees that shadowed side. The room's shadows are just \
-        as fixed: the shading on the walls and the shadow the subject casts \
-        on the floor stay in the same place in the room in every frame, and \
-        do not swing round with the camera. Matte skin, matte cloth, \
-        photorealistic, sharp focus, identical face, clothing and lighting in \
-        every frame."
+      prompt: "人工光、柔光、低对比度、均匀照明、环绕运镜。时间静止，人物完全静止。身体如雕塑般僵硬，胸口没有起伏，头部保持固定角度，面部肌\
+        肉完全不动，维持单一的中性表情。双眼一眨不眨，眼睑保持张开且稳定，目光空洞而固定，锁定远处墙面上的一个点，对镜头毫无察觉、毫无反应。人物站\
+        在一间空房间里：灰色墙面上有均匀的网格线，深色地板，浅色天花板，墙面相交处有清晰的墙角。房间本身固定不动，镜头以匀速、固定焦距围绕主体平滑\
+        移动，墙角依次从画面中掠过。灯光属于房间本身，位置固定：大面积柔光从四周和上方均匀地包围人物，像一个固定在房间里的大型柔光罩，四面八方的光\
+        线同样柔和。人物全身的亮度均匀一致，每一帧完全相同；镜头环绕时，从任何角度看到的皮肤和衣物都同样明亮，身体两侧受光相同。房间里的明暗同样固\
+        定：墙面上柔和的明暗过渡、以及人物脚下淡淡的影子，始终落在房间中的同一位置，不随镜头移动。 Time is frozen and \
+        only the camera moves. The gaze stays anchored to that point on the \
+        wall as the camera passes, so the eyes slide across the frame, \
+        always aimed past the lens at the wall behind it. Eyelids stay open \
+        and steady, the expression holds without a single micro-movement, \
+        and the head keeps its exact angle throughout. The frozen subject is \
+        $SUBJECT_DESC$, standing in an empty room: grey walls ruled with an \
+        even grid, a dark floor and a lighter ceiling, meeting at clear \
+        corners. The room is fixed in place and the camera travels through \
+        it, so the walls and their corners sweep past the frame while the \
+        room itself never turns. Soft, even, low-contrast light fills the \
+        room from every side and from above, like a large softbox dome fixed \
+        in place, wrapping the subject in the same gentle brightness all the \
+        way round. Skin and cloth hold one even brightness from every angle \
+        and in every frame while the camera arcs around, and both sides of \
+        the body are equally lit. The room's shading is just as fixed: the \
+        soft gradients on the walls and the faint shadow at the subject's \
+        feet stay in the same place in the room in every frame, and do not \
+        swing round with the camera. Matte skin, matte cloth, \
+        photorealistic, sharp focus, identical face, clothing and lighting \
+        in every frame."
       negative_prompt: "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静\
         止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的\
         手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体\
@@ -3803,39 +3793,32 @@ steps:
       sampler_low: euler
       sampler_shift: 2.5
       strength: [0.8, 0.8, 0.8, 0.8, 0.8, 0.8]
-      prompt: "人工光、柔光、低对比度、环绕运镜。时间静止，人物完全静止。身体\
-        如雕塑般僵硬，胸口没有起伏，头部保持固定角度，面部肌肉完全不动，维持单\
-        一的中性表情。双眼一眨不眨，眼睑保持张开且稳定，目光空洞而固定，锁定远\
-        处墙面上的一个点，对镜头毫无察觉、毫无反应。人物站在一间空房间里：灰色\
-        墙面上有均匀的网格线，深色地板，浅色天花板，墙面相交处有清晰的墙角。房\
-        间本身固定不动，镜头以匀速、固定焦距围绕主体平滑移动，墙角依次从画面中\
-        掠过。灯光属于房间本身，位置固定：主光始终来自人物自身的左前方，右侧是\
-        柔和的补光。人物身上的明暗、阴影与高光始终停留在同一片皮肤和衣物上，每\
-        一帧完全相同——左侧始终是受光面，右侧始终是柔和的暗面；镜头绕到人物右侧\
-        时，看到的正是那一侧的暗面。房间里的阴影同样固定：墙面上的明暗、以及人\
-        物投在地面上的影子，始终落在房间中的同一位置，不随镜头移动。 Time is \
-        frozen and only the camera moves. The gaze stays anchored to that \
-        point on the wall as the camera passes, so the eyes slide across the \
-        frame, always aimed past the lens at the wall behind it. Eyelids stay \
-        open and steady, the expression holds without a single \
-        micro-movement, and the head keeps its exact angle throughout. The \
-        frozen subject is $SUBJECT_DESC$, standing in an empty room: grey \
-        walls ruled with an even grid, a dark floor and a lighter ceiling, \
-        meeting at clear corners. The room is fixed in place and the camera \
-        travels through it, so the walls and their corners sweep past the \
-        frame while the room itself never turns. Soft, low-contrast studio \
-        light: the key sits high on the subject's own left, a soft fill on \
-        their right, both fixed to the room and holding still while the \
-        camera arcs around. Every highlight and shadow stays welded to the \
-        same patch of skin and cloth from the first frame to the last, so \
-        their left remains the lit side and their right remains the \
-        soft-shadowed side for the whole circle; as the camera arcs round to \
-        their right it sees that shadowed side. The room's shadows are just \
-        as fixed: the shading on the walls and the shadow the subject casts \
-        on the floor stay in the same place in the room in every frame, and \
-        do not swing round with the camera. Matte skin, matte cloth, \
-        photorealistic, sharp focus, identical face, clothing and lighting in \
-        every frame."
+      prompt: "人工光、柔光、低对比度、均匀照明、环绕运镜。时间静止，人物完全静止。身体如雕塑般僵硬，胸口没有起伏，头部保持固定角度，面部肌\
+        肉完全不动，维持单一的中性表情。双眼一眨不眨，眼睑保持张开且稳定，目光空洞而固定，锁定远处墙面上的一个点，对镜头毫无察觉、毫无反应。人物站\
+        在一间空房间里：灰色墙面上有均匀的网格线，深色地板，浅色天花板，墙面相交处有清晰的墙角。房间本身固定不动，镜头以匀速、固定焦距围绕主体平滑\
+        移动，墙角依次从画面中掠过。灯光属于房间本身，位置固定：大面积柔光从四周和上方均匀地包围人物，像一个固定在房间里的大型柔光罩，四面八方的光\
+        线同样柔和。人物全身的亮度均匀一致，每一帧完全相同；镜头环绕时，从任何角度看到的皮肤和衣物都同样明亮，身体两侧受光相同。房间里的明暗同样固\
+        定：墙面上柔和的明暗过渡、以及人物脚下淡淡的影子，始终落在房间中的同一位置，不随镜头移动。 Time is frozen and \
+        only the camera moves. The gaze stays anchored to that point on the \
+        wall as the camera passes, so the eyes slide across the frame, \
+        always aimed past the lens at the wall behind it. Eyelids stay open \
+        and steady, the expression holds without a single micro-movement, \
+        and the head keeps its exact angle throughout. The frozen subject is \
+        $SUBJECT_DESC$, standing in an empty room: grey walls ruled with an \
+        even grid, a dark floor and a lighter ceiling, meeting at clear \
+        corners. The room is fixed in place and the camera travels through \
+        it, so the walls and their corners sweep past the frame while the \
+        room itself never turns. Soft, even, low-contrast light fills the \
+        room from every side and from above, like a large softbox dome fixed \
+        in place, wrapping the subject in the same gentle brightness all the \
+        way round. Skin and cloth hold one even brightness from every angle \
+        and in every frame while the camera arcs around, and both sides of \
+        the body are equally lit. The room's shading is just as fixed: the \
+        soft gradients on the walls and the faint shadow at the subject's \
+        feet stay in the same place in the room in every frame, and do not \
+        swing round with the camera. Matte skin, matte cloth, \
+        photorealistic, sharp focus, identical face, clothing and lighting \
+        in every frame."
       negative_prompt: "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静\
         止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的\
         手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体\
@@ -3868,39 +3851,32 @@ steps:
       sampler_low: euler
       sampler_shift: 2.5
       strength: [0.8, 0.8, 0.8, 0.8, 0.8, 0.8]
-      prompt: "人工光、柔光、低对比度、环绕运镜。时间静止，人物完全静止。身体\
-        如雕塑般僵硬，胸口没有起伏，头部保持固定角度，面部肌肉完全不动，维持单\
-        一的中性表情。双眼一眨不眨，眼睑保持张开且稳定，目光空洞而固定，锁定远\
-        处墙面上的一个点，对镜头毫无察觉、毫无反应。人物站在一间空房间里：灰色\
-        墙面上有均匀的网格线，深色地板，浅色天花板，墙面相交处有清晰的墙角。房\
-        间本身固定不动，镜头以匀速、固定焦距围绕主体平滑移动，墙角依次从画面中\
-        掠过。灯光属于房间本身，位置固定：主光始终来自人物自身的左前方，右侧是\
-        柔和的补光。人物身上的明暗、阴影与高光始终停留在同一片皮肤和衣物上，每\
-        一帧完全相同——左侧始终是受光面，右侧始终是柔和的暗面；镜头绕到人物右侧\
-        时，看到的正是那一侧的暗面。房间里的阴影同样固定：墙面上的明暗、以及人\
-        物投在地面上的影子，始终落在房间中的同一位置，不随镜头移动。 Time is \
-        frozen and only the camera moves. The gaze stays anchored to that \
-        point on the wall as the camera passes, so the eyes slide across the \
-        frame, always aimed past the lens at the wall behind it. Eyelids stay \
-        open and steady, the expression holds without a single \
-        micro-movement, and the head keeps its exact angle throughout. The \
-        frozen subject is $SUBJECT_DESC$, standing in an empty room: grey \
-        walls ruled with an even grid, a dark floor and a lighter ceiling, \
-        meeting at clear corners. The room is fixed in place and the camera \
-        travels through it, so the walls and their corners sweep past the \
-        frame while the room itself never turns. Soft, low-contrast studio \
-        light: the key sits high on the subject's own left, a soft fill on \
-        their right, both fixed to the room and holding still while the \
-        camera arcs around. Every highlight and shadow stays welded to the \
-        same patch of skin and cloth from the first frame to the last, so \
-        their left remains the lit side and their right remains the \
-        soft-shadowed side for the whole circle; as the camera arcs round to \
-        their right it sees that shadowed side. The room's shadows are just \
-        as fixed: the shading on the walls and the shadow the subject casts \
-        on the floor stay in the same place in the room in every frame, and \
-        do not swing round with the camera. Matte skin, matte cloth, \
-        photorealistic, sharp focus, identical face, clothing and lighting in \
-        every frame."
+      prompt: "人工光、柔光、低对比度、均匀照明、环绕运镜。时间静止，人物完全静止。身体如雕塑般僵硬，胸口没有起伏，头部保持固定角度，面部肌\
+        肉完全不动，维持单一的中性表情。双眼一眨不眨，眼睑保持张开且稳定，目光空洞而固定，锁定远处墙面上的一个点，对镜头毫无察觉、毫无反应。人物站\
+        在一间空房间里：灰色墙面上有均匀的网格线，深色地板，浅色天花板，墙面相交处有清晰的墙角。房间本身固定不动，镜头以匀速、固定焦距围绕主体平滑\
+        移动，墙角依次从画面中掠过。灯光属于房间本身，位置固定：大面积柔光从四周和上方均匀地包围人物，像一个固定在房间里的大型柔光罩，四面八方的光\
+        线同样柔和。人物全身的亮度均匀一致，每一帧完全相同；镜头环绕时，从任何角度看到的皮肤和衣物都同样明亮，身体两侧受光相同。房间里的明暗同样固\
+        定：墙面上柔和的明暗过渡、以及人物脚下淡淡的影子，始终落在房间中的同一位置，不随镜头移动。 Time is frozen and \
+        only the camera moves. The gaze stays anchored to that point on the \
+        wall as the camera passes, so the eyes slide across the frame, \
+        always aimed past the lens at the wall behind it. Eyelids stay open \
+        and steady, the expression holds without a single micro-movement, \
+        and the head keeps its exact angle throughout. The frozen subject is \
+        $SUBJECT_DESC$, standing in an empty room: grey walls ruled with an \
+        even grid, a dark floor and a lighter ceiling, meeting at clear \
+        corners. The room is fixed in place and the camera travels through \
+        it, so the walls and their corners sweep past the frame while the \
+        room itself never turns. Soft, even, low-contrast light fills the \
+        room from every side and from above, like a large softbox dome fixed \
+        in place, wrapping the subject in the same gentle brightness all the \
+        way round. Skin and cloth hold one even brightness from every angle \
+        and in every frame while the camera arcs around, and both sides of \
+        the body are equally lit. The room's shading is just as fixed: the \
+        soft gradients on the walls and the faint shadow at the subject's \
+        feet stay in the same place in the room in every frame, and do not \
+        swing round with the camera. Matte skin, matte cloth, \
+        photorealistic, sharp focus, identical face, clothing and lighting \
+        in every frame."
       negative_prompt: "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静\
         止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的\
         手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体\

@@ -34,7 +34,9 @@ VALID_DISPATCH = {"in_process", "subprocess", "service", "docker"}
 # $SUBJECT_DESC$) and deliberately diverged twice: on 2026-08-31 its
 # lighting was anchored to the room instead of to the camera, and on
 # 2026-09-01 the room itself replaced the seamless backdrop, to match the
-# `background` render setting. See the comment on denoise_pass1 in
+# `background` render setting; on 2026-09-29 the room-fixed key/fill gave way
+# to room-fixed all-round soft light (for b2crig's animation, which has to
+# undo baked shading). See the comment on denoise_pass1 in
 # helical.yaml for why.
 #
 # Pinned here because the failure mode is silent: YAML's folded `>-`
@@ -42,38 +44,37 @@ VALID_DISPATCH = {"in_process", "subprocess", "service", "docker"}
 # starting with a space loses it to indentation stripping — either way
 # the prompt still loads, still runs, and is not the one intended.
 DENOISE_PROMPT = (
-    "人工光、柔光、低对比度、环绕运镜。时间静止，人物完全静止。身体如雕塑般"
-    "僵硬，胸口没有起伏，头部保持固定角度，面部肌肉完全不动，维持单一的中性"
-    "表情。双眼一眨不眨，眼睑保持张开且稳定，目光空洞而固定，锁定远处墙面上"
-    "的一个点，对镜头毫无察觉、毫无反应。人物站在一间空房间里：灰色墙面上有"
-    "均匀的网格线，深色地板，浅色天花板，墙面相交处有清晰的墙角。房间本身固"
-    "定不动，镜头以匀速、固定焦距围绕主体平滑移动，墙角依次从画面中掠过。灯"
-    "光属于房间本身，位置固定：主光始终来自人物自身的左前方，右侧是柔和的补"
-    "光。人物身上的明暗、阴影与高光始终停留在同一片皮肤和衣物上，每一帧完全"
-    "相同——左侧始终是受光面，右侧始终是柔和的暗面；镜头绕到人物右侧时，看到"
-    "的正是那一侧的暗面。房间里的阴影同样固定：墙面上的明暗、以及人物投在地"
-    "面上的影子，始终落在房间中的同一位置，不随镜头移动。 Time is frozen "
-    "and only the camera moves. The gaze stays anchored to that point on "
-    "the wall as the camera passes, so the eyes slide across the frame, "
-    "always aimed past the lens at the wall behind it. Eyelids stay open "
-    "and steady, the expression holds without a single micro-movement, and "
-    "the head keeps its exact angle throughout. The frozen subject is "
-    "$SUBJECT_DESC$, standing in an empty room: grey walls ruled with an "
-    "even grid, a dark floor and a lighter ceiling, meeting at clear "
-    "corners. The room is fixed in place and the camera travels through "
-    "it, so the walls and their corners sweep past the frame while the "
-    "room itself never turns. Soft, low-contrast studio light: the key "
-    "sits high on the subject's own left, a soft fill on their right, both "
-    "fixed to the room and holding still while the camera arcs around. "
-    "Every highlight and shadow stays welded to the same patch of skin and "
-    "cloth from the first frame to the last, so their left remains the lit "
-    "side and their right remains the soft-shadowed side for the whole "
-    "circle; as the camera arcs round to their right it sees that shadowed "
-    "side. The room's shadows are just as fixed: the shading on the walls "
-    "and the shadow the subject casts on the floor stay in the same place "
-    "in the room in every frame, and do not swing round with the camera. "
-    "Matte skin, matte cloth, photorealistic, sharp focus, identical face, "
-    "clothing and lighting in every frame."
+    "人工光、柔光、低对比度、均匀照明、环绕运镜。时间静止，人物完全静止。身体"
+    "如雕塑般僵硬，胸口没有起伏，头部保持固定角度，面部肌肉完全不动，维持单一"
+    "的中性表情。双眼一眨不眨，眼睑保持张开且稳定，目光空洞而固定，锁定远处墙"
+    "面上的一个点，对镜头毫无察觉、毫无反应。人物站在一间空房间里：灰色墙面上"
+    "有均匀的网格线，深色地板，浅色天花板，墙面相交处有清晰的墙角。房间本身固"
+    "定不动，镜头以匀速、固定焦距围绕主体平滑移动，墙角依次从画面中掠过。灯光"
+    "属于房间本身，位置固定：大面积柔光从四周和上方均匀地包围人物，像一个固定"
+    "在房间里的大型柔光罩，四面八方的光线同样柔和。人物全身的亮度均匀一致，每"
+    "一帧完全相同；镜头环绕时，从任何角度看到的皮肤和衣物都同样明亮，身体两侧"
+    "受光相同。房间里的明暗同样固定：墙面上柔和的明暗过渡、以及人物脚下淡淡的"
+    "影子，始终落在房间中的同一位置，不随镜头移动。 Time is "
+    "frozen and only the camera moves. The gaze stays anchored to that "
+    "point on the wall as the camera passes, so the eyes slide across the "
+    "frame, always aimed past the lens at the wall behind it. Eyelids stay "
+    "open and steady, the expression holds without a single "
+    "micro-movement, and the head keeps its exact angle throughout. The "
+    "frozen subject is $SUBJECT_DESC$, standing in an empty room: grey "
+    "walls ruled with an even grid, a dark floor and a lighter ceiling, "
+    "meeting at clear corners. The room is fixed in place and the camera "
+    "travels through it, so the walls and their corners sweep past the "
+    "frame while the room itself never turns. Soft, even, low-contrast "
+    "light fills the room from every side and from above, like a large "
+    "softbox dome fixed in place, wrapping the subject in the same gentle "
+    "brightness all the way round. Skin and cloth hold one even brightness "
+    "from every angle and in every frame while the camera arcs around, and "
+    "both sides of the body are equally lit. The room's shading is just as "
+    "fixed: the soft gradients on the walls and the faint shadow at the "
+    "subject's feet stay in the same place in the room in every frame, and "
+    "do not swing round with the camera. Matte skin, matte cloth, "
+    "photorealistic, sharp focus, identical face, clothing and lighting in "
+    "every frame."
 )
 
 DENOISE_NEGATIVE_PROMPT = (
