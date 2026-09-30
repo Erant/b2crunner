@@ -116,7 +116,7 @@ from .runs import (
     workflow_param_panel,
 )
 from .step import Param
-from .viewer import has_subject_file, mount_viewer, viewer_dir, viewer_link
+from .viewer import VIEWER_PATH, has_subject_file, mount_viewer, viewer_dir, viewer_link
 from .workflow import WorkflowSpec, load_envs, truthy
 
 logger = logging.getLogger(__name__)
@@ -546,6 +546,13 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
 
     with gr.Blocks(title="b2c_runner", analytics_enabled=False) as app:
         gr.Markdown("# b2c_runner\nBody2COLMAP pipeline — submit a run, watch it, collect the output.")
+        # A standing way into the viewer's own subject picker, beside the
+        # Results tab's per-run button (which needs a run with a subject file).
+        if viewer_on:
+            gr.HTML(
+                f'<div style="text-align:right;font-size:0.9em">'
+                f'<a href="{VIEWER_PATH.lstrip("/")}/" target="_blank" rel="noopener">3D viewer ↗</a></div>'
+            )
 
         # Shared across every tab: which run the Progress/Results controls
         # below are currently looking at. A run submitted on the Run tab
