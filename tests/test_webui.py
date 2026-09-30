@@ -119,7 +119,7 @@ class TestWiring(unittest.TestCase):
             if fn.fn is not None and inspect.isgeneratorfunction(fn.fn)
         ]
         self.assertEqual(generators, ["on_all_results"])
-        self.assertEqual(len(self._dep("tick").outputs), 13)
+        self.assertEqual(len(self._dep("tick").outputs), 14)
         labels = [b.value for b in self.app.blocks.values() if isinstance(b, gr.Button)]
         for gone in ("Refresh run list", "Attach / refresh", "Load latest results"):
             self.assertNotIn(gone, labels)
