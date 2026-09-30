@@ -195,13 +195,16 @@ class SeedVR2Step(Step):
               advanced=True),
         Param("compile_dynamo_recompile_limit", int, 128, "Dynamo recompile limit",
               advanced=True),
-        # Caching on by default: this Step's load()/run() split is meant to
-        # keep the runner alive across run() calls, mirroring main()'s
-        # --cache_dit/--cache_vae batch-processing flags.
-        Param("cache_dit", bool, True, "Keep the DiT runner alive between run() calls",
-              advanced=True),
-        Param("cache_vae", bool, True, "Keep the VAE alive between run() calls",
-              advanced=True),
+        # Caching OFF by default. It exists for main()'s batch mode, many
+        # videos through one process; a run here calls run() once. With it on
+        # and the offload devices at "none", inference_cli parks both models
+        # in host RAM (its _parse_offload_device turns "none" into "cpu" when
+        # caching) — ~3.9 GB of the worker that went on to be OOM-killed on the
+        # 29 GB box on 2026-09-29, holding models nothing would use again.
+        Param("cache_dit", bool, False, "Keep the DiT runner alive between run() calls "
+              "(parks it in host RAM)", advanced=True),
+        Param("cache_vae", bool, False, "Keep the VAE alive between run() calls "
+              "(parks it in host RAM)", advanced=True),
         Param("device_id", str, "0", "CUDA device index", advanced=True),
         Param("debug", bool, False, "Upstream's verbose debug output", advanced=True),
         Param("dit_model", str, None, "DiT checkpoint name; empty means upstream's default",
@@ -315,25 +318,50 @@ class SeedVR2Step(Step):
             compile_dynamic=params["compile_dynamic"],
             compile_dynamo_cache_size_limit=params["compile_dynamo_cache_size_limit"],
             compile_dynamo_recompile_limit=params["compile_dynamo_recompile_limit"],
-            # Caching on by default: this Step's load()/run() split is meant
-            # to keep the runner alive across run() calls, mirroring
-            # main()'s --cache_dit/--cache_vae batch-processing flags.
+            # Off by default — see the cache_dit Param for why.
             cache_dit=params["cache_dit"],
             cache_vae=params["cache_vae"],
         )
 
-        result = inference_cli._process_frames_core(
-            frames_tensor=frames_tensor,
-            args=args,
-            device_id=params["device_id"],
-            debug=self._debug,
-            runner_cache=self._cache,
-        )
+        # _process_frames_core ends by converting its bf16 final_video to
+        # float32 in one piece: a 4 GB copy of 162 1080x1920 frames next to
+        # the 2 GB original, which is where the worker was OOM-killed on
+        # 2026-09-29. Swapping final_video for uint8 right after
+        # post-processing skips that conversion (uint8 is not one of the
+        # dtypes it converts) and frees the bf16 array. The rounding is the
+        # one this step always did — float32 * 255, clip, truncate — so the
+        # frames are the same bytes.
+        original_postprocess = inference_cli.postprocess_all_batches
 
-        result = result.cpu().numpy() if hasattr(result, "cpu") else np.asarray(result)
-        images = [
-            cv2.cvtColor(np.clip(frame * 255.0, 0, 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
-            for frame in result
-        ]
+        def postprocess_to_uint8(*a, **kw):
+            ctx = original_postprocess(*a, **kw)
+            video = ctx["final_video"]
+            out = torch.empty(video.shape, dtype=torch.uint8)
+            for start in range(0, video.shape[0], 8):
+                chunk = video[start:start + 8].to(torch.float32) * 255.0
+                out[start:start + 8] = chunk.clamp_(0, 255).to(torch.uint8).cpu()
+            ctx["final_video"] = out
+            return ctx
+
+        inference_cli.postprocess_all_batches = postprocess_to_uint8
+        try:
+            result = inference_cli._process_frames_core(
+                frames_tensor=frames_tensor,
+                args=args,
+                device_id=params["device_id"],
+                debug=self._debug,
+                runner_cache=self._cache,
+            )
+        finally:
+            inference_cli.postprocess_all_batches = original_postprocess
+        # The cached ctx keeps final_video and input_images alive past this
+        # call otherwise; nothing reads them again.
+        for key in ("final_video", "input_images"):
+            self._cache.get("ctx", {}).pop(key, None)
+        del frames_tensor, rgb
+
+        result = result.numpy()
+        images = [cv2.cvtColor(frame, cv2.COLOR_RGB2BGR) for frame in result]
+        del result
         cameras, resolution = _fit_cameras_to_images(inputs["cameras"], images)
         return {"images": images, "cameras": cameras, "resolution": resolution}
