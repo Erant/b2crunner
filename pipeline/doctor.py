@@ -142,7 +142,7 @@ def check_b2crig() -> Check:
         missing = [f for f in ("--cage ", "--pose-contain-weight", "--export-binding") if f not in helps]
         if missing:
             lines.append(f"b2ctrain lacks {', '.join(m.strip() for m in missing)}: it predates cage posing "
-                         "(b2ctrain d061a4a); bump B2CTRAIN_REF")
+                         "(b2ctrain 0d7e5a9); bump B2CTRAIN_REF")
             status = WARN
     else:
         lines.append("b2ctrain: not on PATH (the trainer check reports it)")

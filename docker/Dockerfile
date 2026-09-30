@@ -61,9 +61,10 @@
 # an ENV for a run's log to fall back on (see "Build provenance" at the
 # bottom). A global ARG has no value inside a stage until the stage says
 # `ARG B2CTRAIN_REF` again, which both do. Bump it here, once.
-# d061a4a (2026-09-30): cage posing, the binding export and the pose containment
-# loss, which the Rig splat output (b2crig) drives; additive for everything else.
-ARG B2CTRAIN_REF=d061a4ada7a08f913791bf3910d002b1344522e3
+# 0d7e5a9 (2026-09-30): cage posing, the binding export and the pose containment
+# loss, which the Rig splat output (b2crig) drives, on top of e0fbc38's visibility
+# cull (the cage commit rebased onto it); additive for everything else.
+ARG B2CTRAIN_REF=0d7e5a9db734e62b25f70317e6c14735a8485f61
 
 # =============================================================================
 # Stage 1: b2ctrain
