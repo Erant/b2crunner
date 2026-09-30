@@ -426,7 +426,9 @@
 #   colmap/              cameras.txt + images.txt + points3D.txt, images/
 #   ply/                 scene.glb — the subject file (export_subject) — and
 #                        scene.ply, the bare splat — a second brush training,
-#                        flow-aligned
+#                        flow-aligned; with rig_splat, scene.glb is the RIGGED
+#                        subject file (b2crig, rig_subject) and
+#                        rom_tour.clip.glb a clip to pose it with
 #
 # plus what is written on the way through and archived under `debug/`:
 #
@@ -1033,6 +1035,22 @@ outputs:
       iterations, another ~5 minutes, which warp the frames onto the splat's
       own renders and refit so the fit stops blurring its own training data
       (docs/final-splat-alignment-guide.md).
+
+  - name: rig_splat
+    label: Rig splat
+    dir: ply
+    default: false
+    requires: export_ply
+    help: >-
+      Rig the trained splat with b2crig so it can be posed: scene.glb gains
+      b2crig's cage (the refit MHR body plus garment, hair and face layers)
+      and the splat's binding to it (b2cgltf SPEC 5), and rom_tour.clip.glb
+      beside it is a clip through the range-of-motion poses to pose it with
+      in the viewer. On the way the splat is split at the finger joints and
+      fine-tuned for a minute so that posed limbs do not throw splats outside
+      the figure (pose containment), so the rigged splat is not byte-for-byte
+      the delivered one; the unrigged file stays in debug/rig/. Needs the
+      body refit. About a minute of GPU.
 
 globals:
   # What has no control of its own, and therefore no `settings:` entry.
@@ -4520,3 +4538,25 @@ steps:
       record: scene.orbit_record?
     outputs:
       subject_path: scene.subject_path
+
+  # "Rig splat" (an output switch): b2crig rigs the subject file in place so
+  # the splat can be posed — cage, binding, a pose containment fine-tune of
+  # the knuckle-split splat against the capture views (colmap/, with its
+  # labels/), and one clip (steps/rig_subject.py; the rig decisions are all
+  # b2crig's, BOUNDARY.md there). ~1 minute on a 4070 Ti. The unrigged file
+  # moves to debug/rig/, and comes back if the rig fails.
+  - id: rig_subject
+    step: rig_subject
+    dispatch: in_process
+    when:
+      - ${globals.export_ply}
+      - ${globals.refit_body}
+      - ${globals.rig_splat}
+    inputs:
+      subject_path: scene.subject_path
+    params:
+      capture_dir: ${globals.output_root}/colmap
+      debug_dir: ${globals.output_root}/debug/rig
+    outputs:
+      subject_path: scene.subject_path
+      clip_path: scene.clip_path

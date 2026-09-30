@@ -220,8 +220,10 @@ class TestTheWiring(unittest.TestCase):
                 self.assertEqual(order.index("snapshot_orbit"), order.index("extend_splice") + 1)
                 self.assertLess(order.index("snapshot_orbit"), order.index("upscale"))
                 self.assertLess(order.index("snapshot_orbit"), order.index("refine_cameras_final"))
-                self.assertEqual(order[-1], "export_subject")
-                self.assertEqual(order[-2], "train_final_splat")
+                # rig_subject (the Rig splat switch) rigs the subject file in place.
+                self.assertEqual(order[-1], "rig_subject")
+                self.assertEqual(order[-2], "export_subject")
+                self.assertEqual(order[-3], "train_final_splat")
                 self.assertNotIn("embed_orbit_record", order)   # no header records any more
                 self.assertEqual(steps["snapshot_orbit"].when, "${globals.export_ply}")
                 self.assertEqual(steps["export_subject"].when,

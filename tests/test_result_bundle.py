@@ -609,7 +609,9 @@ class TestOutputSelection(unittest.TestCase):
         self.assertEqual(
             [(o.name, o.directory, o.always) for o in outputs],
             [("export_colmap", "colmap", True),
-             ("export_ply", "ply", False)],
+             ("export_ply", "ply", False),
+             # 2026-09-30: the rigged subject file and its clip, in ply/ too.
+             ("rig_splat", "ply", False)],
             # 2026-09-16 to 2026-09-19 the textured mesh (steps/meshify.py) had a
             # fourth checkbox; the mesh path was parked, then removed (2026-09-20).
         )

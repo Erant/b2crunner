@@ -109,6 +109,47 @@ def check_b2cgltf() -> Check:
     return Check("b2cgltf", OK, f"importable ({pip_revision('b2cgltf')})")
 
 
+def check_b2crig() -> Check:
+    """What the "Rig splat" output (steps/rig_subject.py) runs: a b2crig checkout, its imports in the interpreter the
+    step would use, and a b2ctrain that poses by a cage (the flags b2crig's tools pass). A WARN, not a FAIL: the
+    switch is off by default and nothing else needs any of it."""
+    from .steps.rig_subject import B2CRIG_ENV, IMAGE_B2CRIG_DIR, b2crig_dir, b2crig_python
+
+    root = b2crig_dir()
+    if root is None:
+        return Check("b2crig", WARN, "no checkout: Rig splat will fail",
+                     [f"docker/Dockerfile adds Erant/b2crig at B2CRIG_REF to {IMAGE_B2CRIG_DIR}; elsewhere set "
+                      f"{B2CRIG_ENV}"])
+    lines, status = [f"checkout: {root}"], OK
+    python = b2crig_python(root)
+    probe = ("import sys; sys.path.insert(0, sys.argv[1]); import numpy, scipy, torch, plyfile, cv2; "
+             "import b2cgltf.b2crig.rig, b2crig.subject, b2crig.export.gltf")
+    try:
+        result = _run([python, "-c", probe, str(root)], timeout=120)
+        ok = result.returncode == 0
+        tail = (result.stderr.strip().splitlines() or [""])[-1]
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        ok, tail = False, str(exc)
+    lines.append(f"python: {python}" + ("" if ok else f" — imports FAIL: {tail}"))
+    if not ok:
+        status = WARN
+    trainer = shutil.which("b2ctrain")
+    if trainer:
+        try:
+            helps = _run([trainer, "--help"], timeout=30).stdout + _run([trainer, "render", "--help"], timeout=30).stdout
+        except (subprocess.TimeoutExpired, OSError):
+            helps = ""
+        missing = [f for f in ("--cage ", "--pose-contain-weight", "--export-binding") if f not in helps]
+        if missing:
+            lines.append(f"b2ctrain lacks {', '.join(m.strip() for m in missing)}: it predates cage posing "
+                         "(b2ctrain d061a4a); bump B2CTRAIN_REF")
+            status = WARN
+    else:
+        lines.append("b2ctrain: not on PATH (the trainer check reports it)")
+        status = WARN
+    return Check("b2crig", status, "Rig splat can run" if status == OK else "Rig splat will fail", lines)
+
+
 def check_disk() -> Check:
     from .paths import data_dir, log_dir, models_dir, output_dir
 
@@ -837,6 +878,7 @@ def run_checks(envs: Optional[Dict[str, Dict[str, Any]]] = None) -> List[Check]:
         ("ephemeral caches", check_ephemeral_caches),
         ("step registry", check_step_registry),
         ("b2cgltf", check_b2cgltf),
+        ("b2crig", check_b2crig),
         ("ffmpeg", check_ffmpeg),
     ]
     results = []

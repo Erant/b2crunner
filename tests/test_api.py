@@ -547,7 +547,8 @@ class TestWhatAWorkflowDeclares(ApiTestCase):
         # 2026-09-21; the Settings box is what you set per run — which is
         # also where Low VRAM (the machine) belongs. Weak skeleton joined the
         # fold on 2026-09-26, on by default, and the upscale left the
-        # Outputs box (gone) for it.
+        # Outputs box (gone) for it. "Rig splat" (2026-09-30) is the one output
+        # in the open: it is a per-run choice, off by default.
         body = self.client.get(
             f"{API_PREFIX}/workflows/helical", headers=AUTH
         ).json()
@@ -555,7 +556,7 @@ class TestWhatAWorkflowDeclares(ApiTestCase):
         self.assertEqual(plain, ["resolution", "framing", "input_layout", "seed",
                                  "low_vram"])
         self.assertEqual([o["name"] for o in body["outputs"] if not o["advanced"]
-                          and not o["always"]], [])
+                          and not o["always"]], ["rig_splat"])
         by_name = {s["name"]: s for s in body["settings"]}
         self.assertIs(by_name["re_outline"]["default"], True)
         self.assertEqual(by_name["skeleton_occlusion_m"]["default"], 0.12)
@@ -578,12 +579,12 @@ class TestWhatAWorkflowDeclares(ApiTestCase):
         ).json()
         by_name = {o["name"]: o for o in body["outputs"]}
         self.assertEqual(by_name["export_colmap"]["dir"], "colmap")
-        # `requires:` is published whether or not anything declares one —
-        # nothing has since the pre-upscale export was folded into the
-        # debug bundle (2026-09-08) — because a client builds its own
-        # greyed-out checkbox out of this field.
+        # `requires:` is published for every output, because a client builds
+        # its own greyed-out checkbox out of this field. Rig splat (2026-09-30)
+        # is the one that declares it: there is nothing to rig without the .ply.
         self.assertEqual(
-            {o["requires"] for o in body["outputs"]}, {""},
+            {o["name"]: o["requires"] for o in body["outputs"]},
+            {"export_colmap": "", "export_ply": "", "rig_splat": "export_ply"},
         )
         # A setting carries the same field, for the same greyed-out control:
         # the re-outlined fill strength follows the re-outline switch.

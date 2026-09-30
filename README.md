@@ -30,7 +30,9 @@ the run's output directory:
 <run>/ply/                   scene.glb — the subject file (b2cgltf SPEC.md: splat,
                              refitted body + skeleton, cameras, images) — and
                              scene.ply, the bare splat; the Results tab packages
-                             one of the two (glTF by default), nothing beside it
+                             one of the two (glTF by default), nothing beside it;
+                             with "Rig splat" on, scene.glb is rigged by b2crig
+                             and rom_tour.clip.glb beside it poses it
 <run>/debug/                 camera dumps, face splat stats,
                              denoise_pass1_input/ — the control video the
                              first denoise is handed — and
@@ -51,6 +53,17 @@ The Results tab's **Open in 3D viewer ↗** opens a run's `scene.glb` in
 served by the same server at `/viewer/` (`pipeline/viewer.py`). It needs a
 b2cviewer checkout at `B2C_VIEWER_DIR` (default `/opt/b2cviewer`); without
 one there is no button. **`/viewer/` is not behind the UI's login.**
+
+**Rig splat** (an Outputs checkbox, off by default; `--param rig_splat=true`)
+hands the finished subject file to [b2crig](https://github.com/Erant/b2crig)
+(`steps/rig_subject.py` runs its `tools/rig_subject.py`): the cage layers, a
+knuckle split of the hand splats, a minute's pose containment fine-tune
+against `colmap/` (so posed limbs keep their splats inside the figure), the
+binding (b2cgltf SPEC 5), and a `rom_tour` clip through the range-of-motion
+poses so the viewer has something to play. The unrigged file stays in
+`debug/rig/`. It needs the body refit and a b2crig checkout (`/opt/b2crig` in
+the image, `B2CRIG_DIR` elsewhere); `pipeline.cli doctor`'s b2crig check says
+whether it can run.
 
 ## Install
 

@@ -65,6 +65,8 @@ header's joints by 1 mm or more.
 | `skin_vertex`, `skin_joint`, `skin_weight` | | the model's sparse skinning weights (`rig_binding_data`) |
 | `mhr_model` | str | the `mhr_model.pt` path the row drives |
 
+b2crig reads the same fields straight from a subject file's `B2C_mhr` (b2crig `subject.mhr_npz`, used by the Rig splat output), so for runs since 2026-09-29 this tool is only needed without one.
+
 `export_glb RUN OUT.glb [--ply PLY] [--device cuda] [--no-view-cameras]` (sam3dbody, needs `b2cgltf` importable,
 e.g. `B2CRUNNER_PATH_SAM3DBODY=...:~/Projects/b2cgltf`): the run as a b2cgltf **subject file** (`b2cgltf/SPEC.md`
 section 4). It holds the splat, the replayed MHR body skinned to its skeleton with `B2C_mhr`, and `B2C_orbit`

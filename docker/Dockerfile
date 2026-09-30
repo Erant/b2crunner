@@ -61,7 +61,9 @@
 # an ENV for a run's log to fall back on (see "Build provenance" at the
 # bottom). A global ARG has no value inside a stage until the stage says
 # `ARG B2CTRAIN_REF` again, which both do. Bump it here, once.
-ARG B2CTRAIN_REF=e0fbc3868d4fb6afa46bb1dea09cdbbcb4243048
+# d061a4a (2026-09-30): cage posing, the binding export and the pose containment
+# loss, which the Rig splat output (b2crig) drives; additive for everything else.
+ARG B2CTRAIN_REF=d061a4ada7a08f913791bf3910d002b1344522e3
 
 # =============================================================================
 # Stage 1: b2ctrain
@@ -946,9 +948,9 @@ COPY --chmod=755 docker/entrypoint.sh /usr/local/bin/b2c-entrypoint
 # So: below the RUNs, so bumping any of these re-runs no apt or pip layer.
 # Above the code, so a code-only image re-pushes the code copy, the envs.yaml
 # and the editable install (~2 MB) and nothing else. Among themselves, the
-# rarest-bumped first: a B2CTRAIN_REF bump re-pushes the trainer, the viewer
-# and the code; a B2CVIEWER_REF bump the viewer and the code; COLMAP, which
-# never moves, nothing.
+# rarest-bumped first: a B2CTRAIN_REF bump re-pushes the trainer, the viewer,
+# b2crig and the code; a B2CVIEWER_REF bump the viewer, b2crig and the code; a
+# B2CRIG_REF bump b2crig and the code; COLMAP, which never moves, nothing.
 #
 # Nothing in the build needs the binaries — the step-registry smoke test
 # imports Python modules, and `pipeline/doctor.py` checks the binaries at
@@ -994,6 +996,16 @@ RUN b2ctrain --help > /dev/null && brush-splat-render --help > /dev/null
 # page reads b2cgltf's files, so the two move together.
 ARG B2CVIEWER_REF=e55bd9de76be6602a30b7a679fa921947d44f4e6
 ADD --keep-git-dir=false https://github.com/Erant/b2cviewer.git#${B2CVIEWER_REF} /opt/b2cviewer
+
+# b2crig (Erant/b2crig): the rig behind the "Rig splat" output
+# (steps/rig_subject.py runs its tools/rig_subject.py; /opt/b2crig is the
+# step's default checkout). Nothing to install: its tools run under venv_main's
+# python, which already has what they import (torch through venv_base, scipy,
+# plyfile, opencv, b2cgltf), and they find b2ctrain on PATH. Pinned by commit,
+# as b2cgltf is, and bumped with it: b2crig writes its half of the subject file
+# through that package. The doctor's b2crig check proves the imports at start.
+ARG B2CRIG_REF=e548f14ae9e22144c35ca5c82b8da7c74f6dfbb9
+ADD --keep-git-dir=false https://github.com/Erant/b2crig.git#${B2CRIG_REF} /opt/b2crig
 
 # NOT /workspace/b2c_runner, which is where this used to live. RunPod's
 # pod template defaults its network volume's mount path to /workspace, and a

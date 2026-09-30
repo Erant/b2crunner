@@ -188,7 +188,7 @@ class TestDockerfile(unittest.TestCase):
             self.assertIn(pattern, ignore)
 
     def test_the_prebuilt_pieces_sit_between_the_runs_and_the_code(self):
-        """COLMAP, the trainer, the viewer: below the stage's apt and pip RUNs
+        """COLMAP, the trainer, the viewer, b2crig: below the stage's apt and pip RUNs
         (a pin bump re-runs no RUN that writes), above the code (a code change
         re-runs none of them), rarest-bumped first. The viewer at the path
         `pipeline/viewer.py` looks in by default, from a commit rather than a
@@ -200,12 +200,20 @@ class TestDockerfile(unittest.TestCase):
         self.assertIsNotNone(add, "no b2cviewer ADD")
         self.assertEqual(add.group(1), DEFAULT_VIEWER_DIR)
         self.assertRegex(self.text, r"ARG B2CVIEWER_REF=[0-9a-f]{40}\n")
+        # b2crig (the Rig splat output), at the step's default checkout, by commit.
+        from pipeline.steps.rig_subject import IMAGE_B2CRIG_DIR
+
+        rig = re.search(r"^ADD .*b2crig\.git#\$\{B2CRIG_REF\} (\S+)$", self.text, re.M)
+        self.assertIsNotNone(rig, "no b2crig ADD")
+        self.assertEqual(rig.group(1), IMAGE_B2CRIG_DIR)
+        self.assertRegex(self.text, r"ARG B2CRIG_REF=[0-9a-f]{40}\n")
         at = lambda pattern: re.search(pattern, self.text, re.M).start()
         order = [
             self.text.rindex("RUN apt-get update", 0, self.text.index("libceres4t64")),
             at(r"^COPY --from=colmap-builder /opt/colmap /opt/colmap$"),
             at(r"^COPY --from=b2ctrain-builder /out-b2ctrain "),
             add.start(),
+            rig.start(),
             at(r"^COPY \. /opt/b2c_runner$"),
         ]
         self.assertEqual(order, sorted(order))

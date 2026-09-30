@@ -396,13 +396,16 @@ class OutputSwitchTests(unittest.TestCase):
         spec.globals.update(globals_)
         return spec
 
-    def test_only_the_ply_is_a_switch(self):
+    def test_only_the_ply_and_its_rig_are_switches(self):
         """The COLMAP dataset is `always` since 2026-09-26 and the debug
-        bundle is chosen at packaging time, so the .ply is the one switch
-        left — and switching it off still leaves a run with a deliverable."""
-        self.assertEqual(runs.resolve_outputs(self.spec()), {"export_ply": True})
+        bundle is chosen at packaging time, so the .ply and (2026-09-30) its
+        rig are the switches left — switching the .ply off still leaves a run
+        with a deliverable, and takes the rig with it (`requires:`)."""
+        self.assertEqual(runs.resolve_outputs(self.spec()),
+                         {"export_ply": True, "rig_splat": False})
         self.assertEqual(
-            runs.resolve_outputs(self.spec(export_ply=False)), {"export_ply": False},
+            runs.resolve_outputs(self.spec(export_ply=False, rig_splat=True)),
+            {"export_ply": False, "rig_splat": False},
         )
         self.assertNotIn("export_colmap", self.spec().globals)
 
