@@ -85,6 +85,7 @@ from ..dataset import Dataset
 from ..masks import normalize_mask
 from ..registry import register_step
 from ..step import Param, Step
+from .backdrop import frozen_outside, matte_over
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +95,9 @@ class MaskSplatStep(Step):
     """Composite frames over black outside the confidently-covered region.
 
     inputs:  {"dataset": Dataset} — images plus the splat render's alpha
-             as dataset.masks (foreground = 1)
+             as dataset.masks (foreground = 1); optional "backdrops" — the
+             room per frame (render_backdrop), which composite mode lays the
+             subject over instead of `bg_color`
     outputs: {"dataset": Dataset} — masked/filtered images, and masks set
              uniformly to 1.0, i.e. VACE "denoise every one of these
              frames" (the next pass must not treat the blacked-out region
@@ -151,6 +154,14 @@ class MaskSplatStep(Step):
               "handed — the renders it sees elsewhere ground on #7F7F7F — and what "
               "the warped anchor photo's border is filled with, so the injected "
               "real frame does not arrive as the one bright thing in the batch"),
+        Param("inactive_margin_px", int, None,
+              "composite mode only: freeze everything this far OUTSIDE the matte "
+              "(0.5 and up, grown by a disc of this radius) as inactive in the VACE "
+              "masks, instead of the all-1.0 batch — so the denoise repaints the "
+              "subject and a band round it and keeps the backdrop it stands on "
+              "(the `backdrops` input) exactly as given. The same band `render`'s "
+              "outline_inactive_margin_px gives pass 1 (steps/backdrop.py "
+              "`reactive_band`). Empty: off, every pixel reactive"),
         Param("filter_size", int, 6, "Bilateral filter diameter", minimum=0),
         Param("dilation", int, 2, "Grow the kept region back out by this many pixels; "
               "0 is a valid no-dilate case", minimum=0),
@@ -181,14 +192,27 @@ class MaskSplatStep(Step):
                     "produces it (rmbg) above this one."
                 )
             bg_color = tuple(params["bg_color"])
-            images = [
-                _composite_one(img, mask, bg_color)
-                for img, mask in zip(dataset.images, dataset.masks)
-            ]
+            backdrops = inputs.get("backdrops")
+            if backdrops is not None:
+                if len(backdrops) != len(dataset.images):
+                    raise ValueError(
+                        f"mask_splat: {len(backdrops)} backdrops for "
+                        f"{len(dataset.images)} frames — render them at the "
+                        f"dataset's own cameras"
+                    )
+                images = [
+                    matte_over(img, mask, room)
+                    for img, mask, room in zip(dataset.images, dataset.masks, backdrops)
+                ]
+            else:
+                images = [
+                    _composite_one(img, mask, bg_color)
+                    for img, mask in zip(dataset.images, dataset.masks)
+                ]
             logger.info(
                 "mask_splat: %d frames composited over %s with the matte they "
-                "arrived with. Masks replaced by the all-1.0 VACE batch.",
-                len(images), bg_color,
+                "arrived with.", len(images),
+                "the backdrop" if backdrops is not None else bg_color,
             )
         elif mode == "threshold":
             if dataset.masks is None:
@@ -227,7 +251,21 @@ class MaskSplatStep(Step):
 
         # Fully opaque, matching the all-zero ComfyUI MASK the graph saves.
         h, w = images[0].shape[:2]
-        masks = [np.ones((h, w), dtype=np.float32) for _ in images]
+        margin = params["inactive_margin_px"]
+        if margin is not None:
+            if mode != "composite":
+                raise ValueError(
+                    "mask_splat: inactive_margin_px freezes the backdrop past the "
+                    "matte, which only composite mode lays the subject over"
+                )
+            masks = [frozen_outside(mask, margin) for mask in dataset.masks]
+            logger.info(
+                "mask_splat: everything %d px past the matte frozen (%.1f%% of a "
+                "frame on average)", margin,
+                100.0 * float(np.mean([(m < 0.5).mean() for m in masks])),
+            )
+        else:
+            masks = [np.ones((h, w), dtype=np.float32) for _ in images]
 
         out = Dataset(
             images=images,

@@ -179,7 +179,12 @@ class GenerateFirstLastStep(Step):
              "render_size": Tuple[int, int],
              "bg_color": Optional[Tuple[float, float, float]] RGB [0,1],
              defaults to white}
-    outputs: {"warped_image": np.ndarray BGR uint8}
+    outputs: {"warped_image": np.ndarray BGR uint8,
+              "warped_coverage": np.ndarray float32 [0,1] — how much of each
+              pixel the photograph covers, 0.0 in the border and fractional
+              along its resampled edge (the same warp applied to an all-ones
+              image), "border_color": the BGR uint8 border fill, so
+              inject_anchor can take it back out exactly}
 
     Takes no params: everything it needs (including the border colour) comes
     from the render step upstream, via `image_warp`.
@@ -217,6 +222,10 @@ class GenerateFirstLastStep(Step):
                 borderMode=cv2.BORDER_CONSTANT,
                 borderValue=border_color,
             )
+            coverage = cv2.warpAffine(
+                np.ones((h_img, w_img), dtype=np.float32), M, (render_w, render_h),
+                flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0.0,
+            )
         else:
             # Full homography: accounts for rotation + intrinsic change
             H = compute_warp_to_camera(
@@ -230,8 +239,13 @@ class GenerateFirstLastStep(Step):
                 borderMode=cv2.BORDER_CONSTANT,
                 borderValue=border_color,
             )
+            coverage = cv2.warpPerspective(
+                np.ones((h_img, w_img), dtype=np.float32), H, (render_w, render_h),
+                flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0.0,
+            )
 
-        return {"warped_image": warped}
+        return {"warped_image": warped, "warped_coverage": coverage,
+                "border_color": border_color}
 
 
 @register_step("inject_anchor")
@@ -246,7 +260,14 @@ class InjectAnchorStep(Step):
              inject into, passed through untouched except at the matched
              frames. Omit it and an all-1.0 batch is manufactured instead
              ("everything is synthetic, denoise it"), which is what the
-             pre-denoise callers want.}
+             pre-denoise callers want,
+             "backdrops": Optional[List[np.ndarray]] — the render's backdrop
+             alone, per frame (render's `backdrop_images`); with
+             "anchor_coverage" and "border_color" (generate_firstlast's
+             `warped_coverage` / `border_color`) the photograph's border is
+             filled with the room the other frames stand in instead of a
+             flat colour. Any of the three missing: the warped image goes in
+             whole, border and all.}
     outputs: {"images": List[np.ndarray], "masks": List[np.ndarray]}
              (masks: float32 [0,1] VACE masks — the supplied batch where
              there was one, all-1.0 otherwise, and 0.0 at the injected
@@ -324,9 +345,23 @@ class InjectAnchorStep(Step):
                 f"render_size from render.py's image_warp output)."
             )
 
+        backdrops = inputs.get("backdrops")
+        coverage = inputs.get("anchor_coverage")
+        border_color = inputs.get("border_color")
         out_images = list(images)
         for idx in matches:
-            out_images[idx] = anchor_image
+            if backdrops is not None and coverage is not None and border_color is not None:
+                # The border pixels and the photo's resampled edge are
+                # `photo*c + border*(1-c)`, so swapping the flat border for
+                # the room is one add — no division, nothing to guard.
+                fill = (np.asarray(backdrops[idx], dtype=np.float32)
+                        - np.asarray(border_color, dtype=np.float32))
+                out_images[idx] = np.clip(
+                    anchor_image.astype(np.float32)
+                    + fill * (1.0 - coverage)[..., None], 0, 255,
+                ).round().astype(np.uint8)
+            else:
+                out_images[idx] = anchor_image
             # 0.0 = "a real photograph, keep it" in VACE's control-mask
             # sense. Uniform over the frame: this is a per-frame flag, not a
             # silhouette. See the module docstring.

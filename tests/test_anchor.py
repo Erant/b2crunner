@@ -332,5 +332,68 @@ class TestAnchorBorderColour(unittest.TestCase):
         self.assertEqual(self._border((1.0, 1.0, 1.0)), [255, 255, 255])
 
 
+class TestAnchorBorderFromTheRoom(unittest.TestCase):
+    """2026-10-01: the warped photo's border filled with the studio the
+    re-outlined render drew, instead of the flat bg_color."""
+
+    def setUp(self):
+        from body2colmap.camera import Camera
+
+        self.camera = Camera(
+            focal_length=(400.0, 400.0), image_size=(60, 90),
+            principal_point=(30.0, 45.0),
+            position=np.zeros(3, dtype=np.float32),
+            rotation=np.eye(3, dtype=np.float32),
+        )
+        self.warp = run_step("generate_firstlast", {
+            "image": np.full((40, 40, 3), 200, np.uint8),
+            "camera": self.camera,
+            "original_focal_length": 800.0,
+            "render_size": (60, 90),
+            "bg_color": (0.5, 0.5, 0.5),
+        }, {})
+
+    def test_the_warp_reports_where_the_photo_reaches(self):
+        coverage = self.warp["warped_coverage"]
+        self.assertEqual(coverage.shape, (90, 60))
+        self.assertEqual(coverage[0, 0], 0.0)
+        self.assertEqual(coverage[45, 30], 1.0)
+        self.assertEqual(tuple(self.warp["border_color"]), (128, 128, 128))
+
+    def _inject(self, with_room=False, **extra):
+        room = np.zeros((90, 60, 3), np.uint8)
+        room[..., 1] = 230
+        if with_room:
+            extra.update(backdrops=[room, room],
+                         anchor_coverage=self.warp["warped_coverage"],
+                         border_color=self.warp["border_color"])
+        return run_step("inject_anchor", {
+            "images": [np.zeros((90, 60, 3), np.uint8)] * 2,
+            "cameras": [self.camera, self.camera],
+            "anchor_position": np.zeros(3, dtype=np.float32),
+            "anchor_image": self.warp["warped_image"],
+            **extra,
+        }, {}), room
+
+    def test_the_border_is_the_room_and_the_photo_is_untouched(self):
+        out, _ = self._inject(with_room=True)
+        frame = out["images"][0]
+        self.assertEqual(tuple(frame[0, 0]), (0, 230, 0))
+        self.assertEqual(tuple(frame[45, 30]), (200, 200, 200))
+        # The resampled edge is a blend of photo and room — no grey left in it.
+        edge = self.warp["warped_coverage"]
+        partial = (edge > 0.0) & (edge < 1.0)
+        if partial.any():
+            c = edge[partial][:, None]
+            np.testing.assert_allclose(
+                frame[partial].astype(float),
+                200 * c + np.array([0, 230, 0]) * (1 - c), atol=1.0)
+        self.assertTrue(np.all(out["masks"][0] == 0.0))
+
+    def test_without_the_room_the_photo_goes_in_whole(self):
+        out, _ = self._inject(anchor_coverage=self.warp["warped_coverage"])
+        self.assertIs(out["images"][0], self.warp["warped_image"])
+
+
 if __name__ == "__main__":
     unittest.main()

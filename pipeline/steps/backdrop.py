@@ -73,18 +73,51 @@ absence — and the second pass was left alone because that is what was asked
 for. It is a knowing exception, not the rule going soft: the note above each
 of those `background:` lines says which way it should be resolved, and the
 denoise prompt's 场景 slot still describes the ruled room either way.
+
+**2026-10-01: a room again, for a different job, in every pass but one.**
+`studio` is a photographed white cove (pipeline/backdrops/README.md), there
+for LIGHTING rather than rotation: the skeleton carries the turn now, and
+what the frames lacked was a room whose light the model could see. Every
+control that reaches a full-resolution denoise stands in it, with no fade,
+and everything more than a band past the subject is handed to VACE as
+INACTIVE, so the room arrives as fixed content and the model paints the
+subject into it:
+
+- pass 1: `render_reoutlined_views` draws it (`render`'s
+  `outline_inactive_margin_px`);
+- pass 2: `render_backdrop` draws it at render_subject's cameras and
+  `mask_splat` lays the rmbg cut-out over it (`inactive_margin_px`) —
+  NOT `render_splat`'s own backdrop, which would show through the
+  confidence gate's holes in the subject;
+- the extension passes: `render_backdrop` at their cameras, sized against
+  pass 2's orbit, under `assemble_extension` (`inactive_margin_px`).
+
+The band is `reactive_band`, one definition for all three. Each anchor frame
+gets the room in place of the warped photo's grey border (`inject_anchor`'s
+`backdrops`). The 480p re-outline pass draws none: its silhouette is the
+bare mesh's and needs the whole frame to grow into.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from ..step import Param
+from ..paths import REPO_ROOT
+from ..registry import register_step
+from ..step import Param, Step
 
 logger = logging.getLogger(__name__)
+
+
+#: Environments shipped with the pipeline, by the name `background` takes.
+#: pipeline/backdrops/README.md says where each came from and why.
+BUNDLED_BACKDROPS: Dict[str, str] = {
+    "studio": str(REPO_ROOT / "pipeline" / "backdrops" / "white_studio_06.jpg"),
+}
 
 
 #: The knobs a step splices into its own `PARAMS` to accept a backdrop. Shared
@@ -104,7 +137,13 @@ BACKGROUND_PARAMS: Tuple[Param, ...] = (
         "strongly (958fd3b); `checker` carries more raw azimuthal signal but "
         "its cells are self-similar, so it says the view turned without saying "
         "how far; `blender_sky` is symmetric about the vertical axis apart from "
-        "its sun; `gradient` is the control with no cue at all. A path to an "
+        "its sun; `gradient` is the control with no cue at all. `studio` is "
+        "a bundled photograph, not a generator: a white infinity cove under a "
+        "skylight (pipeline/backdrops/README.md), for LIGHTING rather than "
+        "rotation — the model paints the subject into a room whose soft, even "
+        "light it can see. It is an equirect, so it wants "
+        "`background_geometry: sphere` and `background_fade: \"\"` (the "
+        "fade's `plain` target cannot split a photograph). A path to an "
         "equirectangular image, a packed cubemap or a directory of six cube "
         "faces works instead of a generator. (none) is the flat grey every run "
         "before 2026-09-01 used, and is REQUIRED of any render feeding "
@@ -112,7 +151,7 @@ BACKGROUND_PARAMS: Tuple[Param, ...] = (
         "recover the room as the subject's own colour. Nothing exports it: "
         "`rmbg` re-derives the training matte from the denoised frames, so what "
         "brush fits is still the subject cut out of the room",
-        choices=("grid", "checker", "blender_sky", "gradient", ""),
+        choices=("grid", "checker", "blender_sky", "gradient", "studio", ""),
     ),
     Param(
         "background_geometry", str, "cube",
@@ -452,6 +491,7 @@ def build_background(
 
     from body2colmap.background import Background
 
+    texture = BUNDLED_BACKDROPS.get(texture, texture)
     radius = params["background_radius"]
     radius_scale = params["background_radius_scale"]
 
@@ -582,3 +622,94 @@ def composite_bgr(
             image.astype(np.float32) + (env_bgr - flat_bgr) * gap, 0, 255
         ).astype(np.uint8)
     return images
+
+
+def render_backdrops(background, cameras: Sequence[Any]) -> List[np.ndarray]:
+    """The backdrop alone at each camera, BGR uint8 — what a matted subject
+    is laid over, and what fills the anchor photo's border."""
+    return [
+        np.ascontiguousarray(background.render(camera)[..., 2::-1])
+        for camera in cameras
+    ]
+
+
+def reactive_band(reactive: np.ndarray, margin_px: int) -> np.ndarray:
+    """`reactive` (bool, the subject) grown by a `margin_px` disc.
+
+    The one definition of the band the denoise may repaint around a subject
+    over a frozen backdrop, shared by `render` (pass 1's drawings),
+    `mask_splat` (pass 2) and `assemble_extension` (the extension passes):
+    the subject's coverage plus this much room for hair and cloth the
+    coverage missed and for the contact shadow. Everything past it is the
+    room, handed to VACE as inactive — real, keep it.
+    """
+    import cv2
+
+    reactive = np.asarray(reactive, dtype=bool)
+    if margin_px <= 0:
+        return reactive
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * margin_px + 1,) * 2)
+    return cv2.dilate(reactive.astype(np.uint8), kernel).astype(bool)
+
+
+def frozen_outside(matte: np.ndarray, margin_px: int, threshold: float = 0.5) -> np.ndarray:
+    """A VACE control mask from a soft matte: 1.0 (reactive) over the matte
+    above `threshold` grown by `margin_px`, 0.0 (inactive) past it.
+
+    0.5 rather than any coverage at all because an rmbg matte carries a
+    faint floor across the whole frame; the margin is what reaches the
+    semi-transparent hair past the half-way line.
+    """
+    from ..masks import normalize_mask
+
+    band = reactive_band(normalize_mask(matte) > threshold, margin_px)
+    return band.astype(np.float32)
+
+
+def matte_over(image: np.ndarray, matte: np.ndarray, backdrop: np.ndarray) -> np.ndarray:
+    """`image` laid over `backdrop` (both BGR uint8) through a soft matte —
+    `mask_splat`'s `_composite_one` with a room where its flat grey was."""
+    from ..masks import normalize_mask
+
+    bgr = image[:, :, :3] if image.ndim == 3 and image.shape[2] == 4 else image
+    fg = normalize_mask(matte)[:, :, None]
+    blended = bgr.astype(np.float32) * fg + backdrop.astype(np.float32) * (1.0 - fg)
+    return np.clip(np.rint(blended), 0, 255).astype(np.uint8)
+
+
+#: `render_backdrop`'s knobs: the shared ones, defaulting to the studio on a
+#: sphere — the only room any workflow draws now.
+_RENDER_BACKDROP_DEFAULTS = {"background": "studio", "background_geometry": "sphere"}
+
+
+@register_step("render_backdrop")
+class RenderBackdropStep(Step):
+    """The room alone, at each of a list of cameras.
+
+    inputs:  {"cameras": the cameras to draw it at,
+              "orbit_cameras": optional — the cameras the room is centred on
+              and sized against (`orbit_frame`); the drawn ones when
+              omitted. Passing pass 2's orbit for the extension passes keeps
+              those passes in pass 2's room.}
+    outputs: {"images": List[np.ndarray] BGR uint8, one per camera}
+
+    For the frames `render` does not draw: pass 2's and the extension
+    passes' controls are a splat render cut out with an rmbg matte, and
+    `mask_splat` / `assemble_extension` lay that cut-out over these instead
+    of flat grey.
+    """
+
+    PARAMS = tuple(
+        dataclasses.replace(p, default=_RENDER_BACKDROP_DEFAULTS[p.name])
+        if p.name in _RENDER_BACKDROP_DEFAULTS else p
+        for p in BACKGROUND_PARAMS
+    )
+
+    def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+        cameras = list(inputs["cameras"])
+        background = build_background(params, inputs.get("orbit_cameras") or cameras)
+        if background is None:
+            raise ValueError("render_backdrop: `background` is empty — there is no room to draw")
+        images = render_backdrops(background, cameras)
+        logger.info("render_backdrop: %d frames of %s", len(images), background.describe())
+        return {"images": images}

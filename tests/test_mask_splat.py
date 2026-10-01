@@ -244,6 +244,35 @@ class TestMaskSplatComposite(unittest.TestCase):
         self.assertTrue(np.all(out.masks[0] == 1.0))
         self.assertEqual(out.masks[0].shape, (4, 4))
 
+    def test_over_a_backdrop_the_room_replaces_the_grey(self):
+        """2026-10-01: pass 2's control stands in the studio, frame by frame."""
+        mask = np.zeros((4, 4), dtype=np.float32)
+        mask[1:3, 1:3] = 1.0
+        room = np.full((4, 4, 3), (0, 230, 0), dtype=np.uint8)
+        out = run_step("mask_splat", {"dataset": self._dataset(mask), "backdrops": [room]},
+                       {"mode": "composite"})["dataset"]
+        np.testing.assert_array_equal(out.images[0][0, 0], (0, 230, 0))
+        np.testing.assert_array_equal(out.images[0][1, 1], (20, 60, 200))
+        with self.assertRaises(ValueError):
+            run_step("mask_splat", {"dataset": self._dataset(mask), "backdrops": [room, room]},
+                     {"mode": "composite"})
+
+    def test_the_margin_freezes_the_room_past_the_matte(self):
+        mask = np.zeros((12, 12), dtype=np.float32)
+        mask[5:7, 5:7] = 1.0
+        image = np.zeros((12, 12, 3), dtype=np.uint8)
+        dataset = Dataset(images=[image], image_names=["frame_00001_.png"], cameras=[None],
+                          points_3d=None, resolution=(12, 12), masks=[mask])
+        out = run_step("mask_splat", {"dataset": dataset},
+                       {"mode": "composite", "inactive_margin_px": 2})["dataset"]
+        vace = out.masks[0]
+        self.assertEqual(vace[5, 3], 1.0)    # 2 px out: the band
+        self.assertEqual(vace[5, 2], 0.0)    # 3 px out: the room
+        self.assertEqual(vace[0, 0], 0.0)
+        with self.assertRaises(ValueError):
+            run_step("mask_splat", {"dataset": dataset},
+                     {"mode": "passthrough", "inactive_margin_px": 2})
+
     def test_it_refuses_a_dataset_with_no_matte(self):
         """Unlike passthrough, this mode has nothing to do without one, and
         silently compositing over an implicit all-1.0 would emit the frames

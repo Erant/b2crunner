@@ -1657,6 +1657,10 @@ steps:
       bg_color: scene.image_warp.bg_color
     outputs:
       warped_image: dataset.anchor_image
+      # Where the photograph reaches in that frame, and what filled the
+      # rest — for reinject_anchor_reoutlined, which puts the studio there.
+      warped_coverage: scene.anchor_coverage
+      border_color: scene.anchor_border_color
 
   # The initial anchor injection — the pre-denoise one. This is what
   # cyber_6f/initial already has baked in: the warped photo overwrites
@@ -2034,40 +2038,34 @@ steps:
       # `render_mode: outline+splat` here. That is this exact frame with the
       # overlay and nothing else removed: same silhouette, same face
       # splat, same background, same masks.
-      # The room the drawings stand in — OFF as of 2026-09-04, and off
-      # ENTIRELY: an empty `background` makes build_background return before
-      # it reads a single fade param (steps/backdrop.py), so this one line
-      # takes the grid and the subject fade with it. What stood here was
-      # `background: grid` with `background_base_color: [0.5, 0.5, 0.5]` and
-      # the step's own fade defaults — smoothstep, margin 1, falloff 1,
-      # fading to `plain`.
+      # The room the drawings stand in, and the one render that draws one
+      # (2026-10-01). Not the grid that came off on 2026-09-04: that was a
+      # ROTATION cue, and the skeleton now carries the turn on its own.
+      # This is a LIGHTING cue — `studio` is a photographed white infinity
+      # cove under a skylight (pipeline/backdrops/README.md: the most even
+      # light of the white coves measured, 1.6x around a full turn, more
+      # from above than from the sides), i.e. the softbox dome this pass's
+      # prompt already asks the light to be. A sphere because it is an
+      # equirect; 3x the orbit radius, the step default, like the grid.
       #
-      # Why it goes: the room (2026-09-01), the fade (09-04) and the fade's
-      # margin (09-04) all landed in the three days before a run that came
-      # back not looking right, and nothing on this pipeline has been
-      # compared against a run without them. Off is the baseline that
-      # comparison needs, and one line is a cheaper ablation than three.
+      # No subject fade. The fade cleared a shell round a BARE MESH outline
+      # so the model had room to grow hair and clothing past it; the
+      # re-outline silhouette is already the dressed subject, and the fade's
+      # `plain` target cannot split a photograph into pattern and shading
+      # (body2colmap refuses the pair).
       #
-      # What it costs is the thing the backdrop was added for: over a blank
-      # backdrop a video diffusion model reads an orbit as the SUBJECT
-      # turning rather than the camera travelling — steps/backdrop.py's
-      # docstring is the long version. If the denoise comes back with a
-      # figure that spins in place, or a splat that will not converge
-      # because the frames disagree about which way it faced, this is the
-      # first line to put back. Putting it back is the two lines quoted
-      # at the top of this note; their colours were measured (0.5 walls render a flat 128, seventeen
-      # levels off the #6F6F6F silhouette fill, where grid's own blue-tinted
-      # default landed within four) and the margin was too (1 keeps 33% of
-      # the ruling in frame frontal / 66-72% three-quarter, against 22% / 44%
-      # at 2). This file at `542eb79` has both arguments in full.
-      #
-      # NOTE that `render_subject` below followed on 2026-09-05: neither
-      # render draws a room now, so the two denoise passes agree again. What
-      # they do NOT agree with is their own prompt, whose 场景 slot still
-      # describes the gridded room in both passes — see the note on that
-      # string below, and steps/backdrop.py's docstring for the argument
-      # that the room should come back rather than the prompt go.
-      background: ""
+      # And the room is FROZEN: everything more than 32 px outside the
+      # drawing (silhouette plus any skeleton ink past it) goes inactive in
+      # the VACE mask, so the denoise paints the subject into this studio
+      # instead of inventing one per frame. 32 px is four latent cells of
+      # Wan's 8x VAE — room for hair the splat's coverage missed, for the
+      # contact shadow, and for the feet the anchor raise leaves ~30 px
+      # short. Putting the 2026-09-04 behaviour back is these four lines as
+      # `background: ""` alone.
+      background: studio
+      background_geometry: sphere
+      background_fade: ""
+      outline_inactive_margin_px: 32
       # Every frame whose view of the head is within this of the
       # photograph's takes the layer; past it the 2.5-D shell's open rim is
       # what would appear, so it is dropped entirely. body2colmap measured
@@ -2106,9 +2104,13 @@ steps:
       masks: dataset.masks
       inactive_masks: scene.inactive_masks
       images_no_skeleton: scene.control_no_skeleton
+      backdrop_images: scene.reoutline_backdrops
 
   # And the anchor once more, over the fresh render — reinject_anchor_initial
-  # exactly, reading the warped photograph it already made.
+  # exactly, reading the warped photograph it already made, with one
+  # difference: the photo's flat grey border is swapped for the studio the
+  # render drew at that camera, so the anchor frame stands in the same room
+  # as the 80 after it (generate_firstlast's coverage, render's backdrops).
   - id: reinject_anchor_reoutlined
     step: inject_anchor
     dispatch: in_process
@@ -2119,6 +2121,9 @@ steps:
       anchor_position: dataset.extras.anchor_position
       anchor_image: dataset.anchor_image
       masks: scene.inactive_masks?
+      backdrops: scene.reoutline_backdrops
+      anchor_coverage: scene.anchor_coverage
+      border_color: scene.anchor_border_color
     outputs:
       images: dataset.images
       masks: dataset.masks
@@ -2138,6 +2143,9 @@ steps:
       anchor_position: dataset.extras.anchor_position
       anchor_image: dataset.anchor_image
       masks: scene.inactive_masks?
+      backdrops: scene.reoutline_backdrops
+      anchor_coverage: scene.anchor_coverage
+      border_color: scene.anchor_border_color
     outputs:
       images: scene.control_no_skeleton
 
@@ -2393,10 +2401,28 @@ steps:
       # NOT name the sides or describe the rear view, which is what the
       # reverted text above did. tests/test_workflows.py pins both
       # strings (DRAWING_PROMPT here, DENOISE_PROMPT on pass 2).
+      # 2026-10-01: the 场景 slot is the STUDIO, here and in pass 2 and
+      # both extension passes — every pass whose control now stands in a
+      # photographed white cove under a frosted skylight, frozen as inactive
+      # past the subject (render_reoutlined_views here; mask_splat_fringes
+      # and extend_assemble over render_backdrop's room for the others). So
+      # the room clause says that instead of the gridded room — in both
+      # languages, the description only: "empty
+      # room: grey walls ruled with an even grid, a dark floor and a lighter
+      # ceiling, meeting at clear corners" -> "spacious white photo studio:
+      # seamless white walls curving into a white floor, under a high
+      # frosted skylight", and "the walls and their corners sweep past" ->
+      # "the walls sweep past" (a cove has none). Every later 房间 / "the
+      # room" is kept, and the lighting text already WAS this studio's: soft
+      # light from every side and above, a softbox dome. The 480p
+      # re-outline pass keeps the old text — its frames show no room. With re_outline OFF this pass's control is bare #7F7F7F again
+      # and this clause is the stale one instead. tests/test_workflows.py
+      # pins it as STUDIO_DRAWING_PROMPT (STUDIO_DENOISE_PROMPT for the
+      # passes without the orbit sentence).
       prompt: "人工光、柔光、低对比度、均匀照明、环绕运镜。时间静止，人物完全静止。身体如雕塑般僵硬，胸口没有起伏，头部保持固定角度，面部肌\
         肉完全不动，维持单一的中性表情。双眼一眨不眨，眼睑保持张开且稳定，目光空洞而固定，锁定远处墙面上的一个点，对镜头毫无察觉、毫无反应。人物站\
-        在一间空房间里：灰色墙面上有均匀的网格线，深色地板，浅色天花板，墙面相交处有清晰的墙角。房间本身固定不动，镜头以匀速、固定焦距围绕主体平滑\
-        移动，墙角依次从画面中掠过。灯光属于房间本身，位置固定：大面积柔光从四周和上方均匀地包围人物，像一个固定在房间里的大型柔光罩，四面八方的光\
+        在一间宽敞的白色摄影棚里：白色无缝墙面以圆弧过渡到白色地面，高处是磨砂天窗。房间本身固定不动，镜头以匀速、固定焦距围绕主体平滑\
+        移动，墙面依次从画面中掠过。灯光属于房间本身，位置固定：大面积柔光从四周和上方均匀地包围人物，像一个固定在房间里的大型柔光罩，四面八方的光\
         线同样柔和。人物全身的亮度均匀一致，每一帧完全相同；镜头环绕时，从任何角度看到的皮肤和衣物都同样明亮，身体两侧受光相同。房间里的明暗同样固\
         定：墙面上柔和的明暗过渡、以及人物脚下淡淡的影子，始终落在房间中的同一位置，不随镜头移动。 Time is frozen and \
         only the camera moves. The gaze stays anchored to that point on the \
@@ -2404,12 +2430,12 @@ steps:
         always aimed past the lens at the wall behind it. Eyelids stay open \
         and steady, the expression holds without a single micro-movement, \
         and the head keeps its exact angle throughout. The frozen subject is \
-        $SUBJECT_DESC$, standing in an empty room: grey walls ruled with an \
-        even grid, a dark floor and a lighter ceiling, meeting at clear \
-        corners. The camera pans slowly around the subject in a 360 degree \
+        $SUBJECT_DESC$, standing in a spacious white photo studio: seamless \
+        white walls curving into a white floor, under a high frosted \
+        skylight. The camera pans slowly around the subject in a 360 degree \
         orbit, moving smoothly around the subject in a continuous arc. The \
         room is fixed in place and the camera travels through it, so the \
-        walls and their corners sweep past the frame while the room itself \
+        walls sweep past the frame while the room itself \
         never turns. Soft, even, low-contrast light fills the room from \
         every side and from above, like a large softbox dome fixed in place, \
         wrapping the subject in the same gentle brightness all the way \
@@ -3456,6 +3482,19 @@ steps:
       anchor_position: dataset.extras.anchor_position
       anchor_frame_index: dataset.extras.anchor_frame_index
 
+  # The studio pass 2 stands in (2026-10-01): the room render_reoutlined_views
+  # drew pass 1 into, at render_subject's cameras and sized against them.
+  # Drawn on its own, not by render_subject: that render is confidence-gated,
+  # and a room composited under it would show through the subject's own
+  # culled holes. mask_splat_fringes lays the rmbg cut-out over it instead.
+  - id: render_pass2_backdrop
+    step: render_backdrop
+    dispatch: in_process
+    inputs:
+      cameras: dataset.cameras
+    outputs:
+      images: scene.pass2_backdrops
+
   # ---------------------------------------------------------------- stage 3
   # The matte the frames below are cut with. It REPLACES the splat render's
   # own alpha in dataset.masks, which is the one place in this file a step
@@ -3494,9 +3533,13 @@ steps:
     dispatch: in_process
     inputs:
       dataset: dataset
+      # The studio instead of `bg_color`, and the VACE masks frozen 32 px
+      # past the matte — pass 1's split (render_reoutlined_views).
+      backdrops: scene.pass2_backdrops
     params:
       mode: composite
       bg_color: [0.5, 0.5, 0.5]
+      inactive_margin_px: 32
     outputs:
       dataset: dataset
 
@@ -3527,11 +3570,14 @@ steps:
       cameras: dataset.cameras
       anchor_position: dataset.extras.anchor_position
       anchor_image: dataset.anchor_image
-      # mask_splat's all-1.0 batch, passed through with 0.0 written at the
-      # anchor frame. Manufacturing it here instead would give the same
-      # values today; wiring it keeps the step from silently destroying a
-      # mask that matters if anything is ever inserted above it.
+      # mask_splat's batch — reactive over the subject and its band, frozen
+      # past it since 2026-10-01 — passed through with 0.0 written at the
+      # anchor frame. Manufacturing it here instead would lose the freeze.
       masks: dataset.masks
+      # The photo's border filled with pass 2's studio, as pass 1's is.
+      backdrops: scene.pass2_backdrops
+      anchor_coverage: scene.anchor_coverage
+      border_color: scene.anchor_border_color
     outputs:
       images: dataset.images
       masks: dataset.masks
@@ -3617,8 +3663,8 @@ steps:
       strength: [0.8, 0.8, 0.8, 0.8, 0.8, 0.8]
       prompt: "人工光、柔光、低对比度、均匀照明、环绕运镜。时间静止，人物完全静止。身体如雕塑般僵硬，胸口没有起伏，头部保持固定角度，面部肌\
         肉完全不动，维持单一的中性表情。双眼一眨不眨，眼睑保持张开且稳定，目光空洞而固定，锁定远处墙面上的一个点，对镜头毫无察觉、毫无反应。人物站\
-        在一间空房间里：灰色墙面上有均匀的网格线，深色地板，浅色天花板，墙面相交处有清晰的墙角。房间本身固定不动，镜头以匀速、固定焦距围绕主体平滑\
-        移动，墙角依次从画面中掠过。灯光属于房间本身，位置固定：大面积柔光从四周和上方均匀地包围人物，像一个固定在房间里的大型柔光罩，四面八方的光\
+        在一间宽敞的白色摄影棚里：白色无缝墙面以圆弧过渡到白色地面，高处是磨砂天窗。房间本身固定不动，镜头以匀速、固定焦距围绕主体平滑\
+        移动，墙面依次从画面中掠过。灯光属于房间本身，位置固定：大面积柔光从四周和上方均匀地包围人物，像一个固定在房间里的大型柔光罩，四面八方的光\
         线同样柔和。人物全身的亮度均匀一致，每一帧完全相同；镜头环绕时，从任何角度看到的皮肤和衣物都同样明亮，身体两侧受光相同。房间里的明暗同样固\
         定：墙面上柔和的明暗过渡、以及人物脚下淡淡的影子，始终落在房间中的同一位置，不随镜头移动。 Time is frozen and \
         only the camera moves. The gaze stays anchored to that point on the \
@@ -3626,10 +3672,10 @@ steps:
         always aimed past the lens at the wall behind it. Eyelids stay open \
         and steady, the expression holds without a single micro-movement, \
         and the head keeps its exact angle throughout. The frozen subject is \
-        $SUBJECT_DESC$, standing in an empty room: grey walls ruled with an \
-        even grid, a dark floor and a lighter ceiling, meeting at clear \
-        corners. The room is fixed in place and the camera travels through \
-        it, so the walls and their corners sweep past the frame while the \
+        $SUBJECT_DESC$, standing in a spacious white photo studio: seamless \
+        white walls curving into a white floor, under a high frosted \
+        skylight. The room is fixed in place and the camera travels through \
+        it, so the walls sweep past the frame while the \
         room itself never turns. Soft, even, low-contrast light fills the \
         room from every side and from above, like a large softbox dome fixed \
         in place, wrapping the subject in the same gentle brightness all the \
@@ -3829,6 +3875,20 @@ steps:
     outputs:
       masks: scene.extended.novel_masks
 
+  # The studio at both extension passes' cameras, centred on and sized
+  # against pass 2's orbit (dataset.cameras here) so the extension frames
+  # stand in pass 2's room. The panorama is a full sphere, so the tilted
+  # views find ceiling and floor rather than a seam.
+  - id: extend_render_backdrop
+    step: render_backdrop
+    dispatch: in_process
+    when: ${globals.extend_orbit}
+    inputs:
+      cameras: scene.extended.pass_cameras
+      orbit_cameras: dataset.cameras
+    outputs:
+      images: scene.extended.backdrops
+
   # The two control videos, one per pass, each the matted guide render at
   # that pass's cameras over 0.5 grey (mask_splat's composite, the colour
   # pass 2's control ends on), inactive frames included: BEFORE = 41 new
@@ -3851,8 +3911,12 @@ steps:
       guide_masks: scene.extended.guide_masks
       novel_images: scene.extended.novel_images
       novel_masks: scene.extended.novel_masks
+      # Over the studio, the new frames frozen 32 px past the matte — the
+      # split pass 1 and pass 2 get.
+      backdrops: scene.extended.backdrops
     params:
       bg_color: [0.5, 0.5, 0.5]
+      inactive_margin_px: 32
       debug_dir: ${globals.output_root}/debug/extension_input
     outputs:
       before_images: scene.extended.before_phase.images
@@ -3893,8 +3957,8 @@ steps:
       strength: [0.8, 0.8, 0.8, 0.8, 0.8, 0.8]
       prompt: "人工光、柔光、低对比度、均匀照明、环绕运镜。时间静止，人物完全静止。身体如雕塑般僵硬，胸口没有起伏，头部保持固定角度，面部肌\
         肉完全不动，维持单一的中性表情。双眼一眨不眨，眼睑保持张开且稳定，目光空洞而固定，锁定远处墙面上的一个点，对镜头毫无察觉、毫无反应。人物站\
-        在一间空房间里：灰色墙面上有均匀的网格线，深色地板，浅色天花板，墙面相交处有清晰的墙角。房间本身固定不动，镜头以匀速、固定焦距围绕主体平滑\
-        移动，墙角依次从画面中掠过。灯光属于房间本身，位置固定：大面积柔光从四周和上方均匀地包围人物，像一个固定在房间里的大型柔光罩，四面八方的光\
+        在一间宽敞的白色摄影棚里：白色无缝墙面以圆弧过渡到白色地面，高处是磨砂天窗。房间本身固定不动，镜头以匀速、固定焦距围绕主体平滑\
+        移动，墙面依次从画面中掠过。灯光属于房间本身，位置固定：大面积柔光从四周和上方均匀地包围人物，像一个固定在房间里的大型柔光罩，四面八方的光\
         线同样柔和。人物全身的亮度均匀一致，每一帧完全相同；镜头环绕时，从任何角度看到的皮肤和衣物都同样明亮，身体两侧受光相同。房间里的明暗同样固\
         定：墙面上柔和的明暗过渡、以及人物脚下淡淡的影子，始终落在房间中的同一位置，不随镜头移动。 Time is frozen and \
         only the camera moves. The gaze stays anchored to that point on the \
@@ -3902,10 +3966,10 @@ steps:
         always aimed past the lens at the wall behind it. Eyelids stay open \
         and steady, the expression holds without a single micro-movement, \
         and the head keeps its exact angle throughout. The frozen subject is \
-        $SUBJECT_DESC$, standing in an empty room: grey walls ruled with an \
-        even grid, a dark floor and a lighter ceiling, meeting at clear \
-        corners. The room is fixed in place and the camera travels through \
-        it, so the walls and their corners sweep past the frame while the \
+        $SUBJECT_DESC$, standing in a spacious white photo studio: seamless \
+        white walls curving into a white floor, under a high frosted \
+        skylight. The room is fixed in place and the camera travels through \
+        it, so the walls sweep past the frame while the \
         room itself never turns. Soft, even, low-contrast light fills the \
         room from every side and from above, like a large softbox dome fixed \
         in place, wrapping the subject in the same gentle brightness all the \
@@ -3951,8 +4015,8 @@ steps:
       strength: [0.8, 0.8, 0.8, 0.8, 0.8, 0.8]
       prompt: "人工光、柔光、低对比度、均匀照明、环绕运镜。时间静止，人物完全静止。身体如雕塑般僵硬，胸口没有起伏，头部保持固定角度，面部肌\
         肉完全不动，维持单一的中性表情。双眼一眨不眨，眼睑保持张开且稳定，目光空洞而固定，锁定远处墙面上的一个点，对镜头毫无察觉、毫无反应。人物站\
-        在一间空房间里：灰色墙面上有均匀的网格线，深色地板，浅色天花板，墙面相交处有清晰的墙角。房间本身固定不动，镜头以匀速、固定焦距围绕主体平滑\
-        移动，墙角依次从画面中掠过。灯光属于房间本身，位置固定：大面积柔光从四周和上方均匀地包围人物，像一个固定在房间里的大型柔光罩，四面八方的光\
+        在一间宽敞的白色摄影棚里：白色无缝墙面以圆弧过渡到白色地面，高处是磨砂天窗。房间本身固定不动，镜头以匀速、固定焦距围绕主体平滑\
+        移动，墙面依次从画面中掠过。灯光属于房间本身，位置固定：大面积柔光从四周和上方均匀地包围人物，像一个固定在房间里的大型柔光罩，四面八方的光\
         线同样柔和。人物全身的亮度均匀一致，每一帧完全相同；镜头环绕时，从任何角度看到的皮肤和衣物都同样明亮，身体两侧受光相同。房间里的明暗同样固\
         定：墙面上柔和的明暗过渡、以及人物脚下淡淡的影子，始终落在房间中的同一位置，不随镜头移动。 Time is frozen and \
         only the camera moves. The gaze stays anchored to that point on the \
@@ -3960,10 +4024,10 @@ steps:
         always aimed past the lens at the wall behind it. Eyelids stay open \
         and steady, the expression holds without a single micro-movement, \
         and the head keeps its exact angle throughout. The frozen subject is \
-        $SUBJECT_DESC$, standing in an empty room: grey walls ruled with an \
-        even grid, a dark floor and a lighter ceiling, meeting at clear \
-        corners. The room is fixed in place and the camera travels through \
-        it, so the walls and their corners sweep past the frame while the \
+        $SUBJECT_DESC$, standing in a spacious white photo studio: seamless \
+        white walls curving into a white floor, under a high frosted \
+        skylight. The room is fixed in place and the camera travels through \
+        it, so the walls sweep past the frame while the \
         room itself never turns. Soft, even, low-contrast light fills the \
         room from every side and from above, like a large softbox dome fixed \
         in place, wrapping the subject in the same gentle brightness all the \
