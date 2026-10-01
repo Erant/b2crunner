@@ -942,7 +942,7 @@ settings:
   - name: extend_tilt_deg
     label: Extension tilt (deg past the band)
     type: float
-    default: 10.0
+    default: 40.0
     minimum: 0.0
     maximum: 50.0
     advanced: true
@@ -960,7 +960,48 @@ settings:
       +40) leaves none within 5 deg, the nearest-view median 8.5 deg
       against pass 2's 9.6. Larger is new views from further above and
       below, which the model and the guide splat have less to go on for.
-      UNMEASURED on a pod.
+      40 (ends at -70 / +70) is the default since 2026-09-30: a splat is
+      only constrained up to its highest training view, and above it the
+      view-dependent colour extrapolates — on b24be4 at 10 the upper arms
+      and up-facing cloth seen from +55 / +70 came out mottled (most of
+      it in SH band 3), while renders at the splat's own +34..+40
+      training views were clean. Re-run locally (b2crig
+      work/b24be4/ext: the pod's extension and final training replayed,
+      WAN at 2+2 steps): 25 cleared +55, 40 cleared +55 and +70, the
+      front and low views unchanged. Not yet measured on a pod.
+
+  - name: extend_guide_sh
+    label: Extension guide SH bands (inactive frames)
+    type: int
+    default: 3
+    minimum: 0
+    maximum: 3
+    advanced: true
+    requires: extend_orbit
+    help: >-
+      With `extend_orbit` on: the SH bands of the guide render on each
+      extension pass's INACTIVE frames — the ones beside pass 2 that VACE
+      keeps and extends from. They look from where the guide splat was
+      trained, so every band it carries is supported: 3 gives VACE the
+      truest colour context (uniform SH 1 washed it out on b24be4 — a pale
+      leotard from above, 2026-09-30).
+
+  - name: extend_novel_sh
+    label: Extension guide SH bands (novel frames)
+    type: int
+    default: 1
+    minimum: 0
+    maximum: 3
+    advanced: true
+    requires: extend_orbit
+    help: >-
+      With `extend_orbit` on: the SH bands of the guide render on the
+      REACTIVE frames — the new views VACE paints, out to the tilt's
+      -30 - tilt / +30 + tilt degrees. The guide never saw those
+      elevations, so its higher bands only extrapolate there; 1 keeps
+      the base colour and its smooth view dependence. Setting it equal to
+      extend_guide_sh renders every frame alike (one render, as before
+      2026-09-30, then at 2).
 
   - name: extend_overlap_before
     label: Extension overlap, BEFORE pass (frames)
@@ -3712,8 +3753,10 @@ steps:
     outputs:
       splat_path: scene.extended.splat_path
 
-  # render_subject's render — the same bands, gate, cull colour and
-  # confidence tuning — of the splat fitted just above, at the two
+  # render_subject's render — the same gate, cull colour and confidence
+  # tuning, at extend_guide_sh bands (every band since 2026-09-30: these
+  # are the inactive frames' colour; extend_render_novel below renders the
+  # reactive ones at fewer) — of the splat fitted just above, at the two
   # passes' own cameras (`pass_cameras`: 81 + 81, inactive frames
   # included, each pass's control video is its whole render). The
   # `cameras` input is rendered verbatim; `dataset` is wired for the focal
@@ -3730,7 +3773,7 @@ steps:
     params:
       width: ${globals.resolution.0}
       height: ${globals.resolution.1}
-      sh_degree: 2
+      sh_degree: ${globals.extend_guide_sh}
       confidence: true
       cull_color: [0.5, 0.5, 0.5]
       conf_args: ["--conf-tau", "0.3", "--conf-angle-margin", "45"]
@@ -3750,6 +3793,41 @@ steps:
       low_vram: ${globals.low_vram}
     outputs:
       masks: scene.extended.guide_masks
+
+  # The same cameras again at fewer SH bands, for the REACTIVE frames only
+  # (extend_assemble picks per frame): the new views look from elevations the
+  # guide never saw, where its higher bands extrapolate; the inactive frames
+  # keep extend_render_guide's full-band colour as VACE's context. Every
+  # other knob is extend_render_guide's (tests/test_workflows.py pins it).
+  - id: extend_render_novel
+    step: render_splat
+    dispatch: in_process
+    when: ${globals.extend_orbit}
+    inputs:
+      splat_path: scene.extended.splat_path
+      cameras: scene.extended.pass_cameras
+      dataset: dataset
+    params:
+      width: ${globals.resolution.0}
+      height: ${globals.resolution.1}
+      sh_degree: ${globals.extend_novel_sh}
+      confidence: true
+      cull_color: [0.5, 0.5, 0.5]
+      conf_args: ["--conf-tau", "0.3", "--conf-angle-margin", "45"]
+      background: ""
+    outputs:
+      images: scene.extended.novel_images
+
+  - id: extend_novel_masks
+    step: rmbg
+    dispatch: in_process
+    when: ${globals.extend_orbit}
+    inputs:
+      images: scene.extended.novel_images
+    params:
+      low_vram: ${globals.low_vram}
+    outputs:
+      masks: scene.extended.novel_masks
 
   # The two control videos, one per pass, each the matted guide render at
   # that pass's cameras over 0.5 grey (mask_splat's composite, the colour
@@ -3771,6 +3849,8 @@ steps:
       overlap_after: scene.extended.overlap_after
       guide_images: scene.extended.guide_images
       guide_masks: scene.extended.guide_masks
+      novel_images: scene.extended.novel_images
+      novel_masks: scene.extended.novel_masks
     params:
       bg_color: [0.5, 0.5, 0.5]
       debug_dir: ${globals.output_root}/debug/extension_input

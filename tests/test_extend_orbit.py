@@ -326,6 +326,27 @@ class TestAssembleExtension(unittest.TestCase):
         out = run_step("assemble_extension", inputs, {})
         self.assertTrue(abs(int(out["before_images"][0][0, 0, 0]) - (100 + 127) // 2) <= 1)
 
+    def test_the_reactive_frames_come_from_the_novel_render(self):
+        """With a second render (fewer SH bands, in the workflow) the new
+        frames are its, the inactive frames stay the guide's."""
+        _, inputs = self._inputs()
+        inputs["novel_images"] = [_frame(200 + i) for i in range(2 * self.PHASE)]
+        inputs["novel_masks"] = [np.ones((8, 6), dtype=np.float32)] * (2 * self.PHASE)
+        out = run_step("assemble_extension", inputs, {})
+        self.assertEqual(self._flat(out["before_images"]), [200, 201, 102, 103, 104])
+        self.assertEqual(self._flat(out["after_images"]), [105, 106, 107, 108, 209])
+        self.assertEqual([float(m[0, 0]) for m in out["before_masks"]], [1, 1, 0, 0, 0])
+        self.assertEqual([float(m[0, 0]) for m in out["after_masks"]], [0, 0, 0, 0, 1])
+
+    def test_a_novel_render_needs_its_matte_and_every_camera(self):
+        _, inputs = self._inputs()
+        inputs["novel_images"] = [_frame(200 + i) for i in range(2 * self.PHASE)]
+        with self.assertRaisesRegex(ValueError, "together"):
+            run_step("assemble_extension", inputs, {})
+        inputs["novel_masks"] = [np.ones((8, 6), dtype=np.float32)] * (2 * self.PHASE - 1)
+        with self.assertRaisesRegex(ValueError, "novel-view render has 10 frames / 9 mattes"):
+            run_step("assemble_extension", inputs, {})
+
     def test_a_render_of_another_path_is_refused(self):
         _, inputs = self._inputs()
         inputs["guide_images"] = inputs["guide_images"][:-1]

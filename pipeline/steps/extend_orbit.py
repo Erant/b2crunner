@@ -435,7 +435,11 @@ class AssembleExtensionStep(Step):
               "overlap_before", "overlap_after": extend_helical_path's,
               "guide_images", "guide_masks": the guide splat's render at
               `pass_cameras` and rmbg's matte of it — the BEFORE pass's
-              frames then the AFTER pass's}
+              frames then the AFTER pass's;
+              optional "novel_images", "novel_masks": a second render of the
+              same cameras (and its matte) that the REACTIVE frames take
+              instead — the workflow renders it at fewer SH bands than the
+              inactive frames' render}
     outputs: {"before_images", "before_masks": the BEFORE pass — `before`
               reactive frames then `overlap_before` inactive ones (beside
               pass 2's first); "after_images", "after_masks": the AFTER pass
@@ -444,7 +448,13 @@ class AssembleExtensionStep(Step):
               inactive / 1.0 reactive}
 
     Every frame is the matted render over `bg_color`, inactive ones
-    included. Both passes are phase_frames long by construction (before +
+    included. With `novel_images` the reactive frames are that render's
+    instead: the inactive frames sit beside the capture, where every SH band
+    the guide carries is supported and is the colour context VACE extends
+    from, while the reactive frames look from elevations the guide never saw
+    and its higher bands only extrapolate there (b24be4 at tilt 40,
+    2026-09-30: inactive SH 3 / reactive SH 1 — uniform SH 1 washed the
+    context out, a pale leotard from above). Both passes are phase_frames long by construction (before +
     overlap_before = overlap_after + after). The dataset itself is not
     touched.
     """
@@ -492,6 +502,14 @@ class AssembleExtensionStep(Step):
                 f"assemble_extension: the guide render has {len(guide_images)} frames / "
                 f"{len(guide_masks)} mattes against the two passes' {2 * phase} cameras"
             )
+        novel_images, novel_masks = inputs.get("novel_images"), inputs.get("novel_masks")
+        if (novel_images is None) != (novel_masks is None):
+            raise ValueError("assemble_extension: novel_images and novel_masks come together or not at all")
+        if novel_images is not None and (len(novel_images) != 2 * phase or len(novel_masks) != 2 * phase):
+            raise ValueError(
+                f"assemble_extension: the novel-view render has {len(novel_images)} frames / "
+                f"{len(novel_masks)} mattes against the two passes' {2 * phase} cameras"
+            )
 
         height, width = source[0].shape[:2]
         for frame in source:
@@ -499,6 +517,10 @@ class AssembleExtensionStep(Step):
                 raise ValueError("assemble_extension: the source frames are not all one size")
         bg = tuple(float(c) for c in params["bg_color"])
         video = [_composite_one(img, mask, bg) for img, mask in zip(guide_images, guide_masks)]
+        if novel_images is not None:
+            # The reactive frames: the BEFORE pass's first `before`, the AFTER pass's last `after`.
+            for i in list(range(before)) + list(range(phase + overlap_after, 2 * phase)):
+                video[i] = _composite_one(novel_images[i], novel_masks[i], bg)
         for frame in video:
             if tuple(frame.shape[:2]) != (height, width):
                 raise ValueError(
@@ -529,8 +551,9 @@ class AssembleExtensionStep(Step):
         logger.info(
             "assemble_extension: two %d-frame passes of the guide's matted render over grey — "
             "BEFORE: %d reactive then %d inactive (beside pass 2's first %d); AFTER: %d "
-            "inactive (beside pass 2's last %d) then %d reactive",
+            "inactive (beside pass 2's last %d) then %d reactive; reactive frames from %s",
             phase, before, overlap_before, overlap_before, overlap_after, overlap_after, after,
+            "the novel-view render" if novel_images is not None else "the same render",
         )
         return result
 

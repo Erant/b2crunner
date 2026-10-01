@@ -1894,10 +1894,11 @@ class TestTheFirstDenoiseInputIsKept(unittest.TestCase):
 
 class TestOnlyTheHelicalRerenderCapsTheShBands(unittest.TestCase):
     """`render_subject` is the one render_splat that sets `sh_degree`, and
-    it sets 2 — and the two `extend_render_*` steps, which are that render
-    again on the extended cameras (TestTheOrbitExtension pins they agree),
-    say the same. Every other instance leaves the step's default (3, every band the
-    splat carries) alone — pinned as a workflow decision rather than as a
+    it sets 2. The extension's two guide renders (that render again on the
+    extended cameras, TestTheOrbitExtension pins they agree otherwise) take
+    theirs from settings: the inactive frames' `extend_guide_sh` (3) and the
+    reactive frames' `extend_novel_sh` (1). Every other instance leaves the
+    step's default (3, every band the splat carries) alone — pinned as a workflow decision rather than as a
     step default, because a `sh_degree:` line quietly added to the face
     cap's render would change what the final training is supervised by."""
 
@@ -1910,8 +1911,11 @@ class TestOnlyTheHelicalRerenderCapsTheShBands(unittest.TestCase):
         self.assertGreater(len(renders), 1)
         setting = {s.id: s.params.get("sh_degree") for s in renders}
         self.assertEqual(setting.pop("render_subject"), 2)
-        self.assertEqual(setting.pop("extend_render_guide"), 2)
+        self.assertEqual(setting.pop("extend_render_guide"), "${globals.extend_guide_sh}")
+        self.assertEqual(setting.pop("extend_render_novel"), "${globals.extend_novel_sh}")
         self.assertEqual(set(setting.values()), {None}, setting)
+        defaults = {s.name: s.default for s in spec.settings}
+        self.assertEqual((defaults["extend_guide_sh"], defaults["extend_novel_sh"]), (3, 1))
 
 
 class TestTheSingleViewInput(unittest.TestCase):
@@ -2312,7 +2316,7 @@ class TestTheOrbitExtension(unittest.TestCase):
 
     BRANCH = [
         "extend_path", "extend_masks", "extend_train_splat", "extend_render_guide",
-        "extend_guide_masks", "extend_assemble",
+        "extend_guide_masks", "extend_render_novel", "extend_novel_masks", "extend_assemble",
         "denoise_extension_before", "denoise_extension_after", "extend_splice",
     ]
 
@@ -2341,8 +2345,9 @@ class TestTheOrbitExtension(unittest.TestCase):
         self.assertNotIn("extend_guide", settings)
         self.assertEqual(settings["extend_overlap_before"].default, 40)
         self.assertEqual(settings["extend_overlap_after"].default, 41)
-        self.assertEqual(settings["extend_tilt_deg"].default, 10.0)
-        for name in ("extend_overlap_before", "extend_overlap_after", "extend_tilt_deg"):
+        self.assertEqual(settings["extend_tilt_deg"].default, 40.0)
+        for name in ("extend_overlap_before", "extend_overlap_after", "extend_tilt_deg",
+                     "extend_guide_sh", "extend_novel_sh"):
             self.assertEqual(settings[name].requires, "extend_orbit")
         for step_id in self.BRANCH:
             with self.subTest(step=step_id):
@@ -2421,14 +2426,26 @@ class TestTheOrbitExtension(unittest.TestCase):
                                          "dataset": "dataset"})
         self.assertNotIn("pattern", render.params)
         self.assertNotIn("override_cam_from_mesh", render.params)
-        for key in ("width", "height", "sh_degree", "confidence", "cull_color",
+        for key in ("width", "height", "confidence", "cull_color",
                     "conf_args", "background"):
             self.assertEqual(render.params[key], subject.params[key], key)
+        self.assertEqual(render.params["sh_degree"], "${globals.extend_guide_sh}")
         self.assertEqual(render.outputs, {"images": "scene.extended.guide_images"})
         matte = self._step(spec, "extend_guide_masks")
         self.assertEqual(matte.step, "rmbg")
         self.assertEqual(matte.inputs, {"images": "scene.extended.guide_images"})
         self.assertEqual(matte.outputs, {"masks": "scene.extended.guide_masks"})
+        # The reactive frames' render: the same render but for its bands, and its own matte.
+        novel = self._step(spec, "extend_render_novel")
+        self.assertEqual((novel.step, novel.inputs), (render.step, render.inputs))
+        self.assertEqual({k: v for k, v in novel.params.items() if k != "sh_degree"},
+                         {k: v for k, v in render.params.items() if k != "sh_degree"})
+        self.assertEqual(novel.params["sh_degree"], "${globals.extend_novel_sh}")
+        self.assertEqual(novel.outputs, {"images": "scene.extended.novel_images"})
+        nmatte = self._step(spec, "extend_novel_masks")
+        self.assertEqual((nmatte.step, nmatte.params), (matte.step, matte.params))
+        self.assertEqual(nmatte.inputs, {"images": "scene.extended.novel_images"})
+        self.assertEqual(nmatte.outputs, {"masks": "scene.extended.novel_masks"})
 
     def test_the_retrained_splat_is_fitted_on_pass_2s_frames_with_the_intermediates_knobs(self):
         spec = self._spec()
@@ -2466,6 +2483,8 @@ class TestTheOrbitExtension(unittest.TestCase):
             "overlap_after": "scene.extended.overlap_after",
             "guide_images": "scene.extended.guide_images",
             "guide_masks": "scene.extended.guide_masks",
+            "novel_images": "scene.extended.novel_images",
+            "novel_masks": "scene.extended.novel_masks",
         })
         scope = {"globals": dict(spec.globals, output_root="/out")}
         self.assertEqual(resolve(assemble.params, scope), {
