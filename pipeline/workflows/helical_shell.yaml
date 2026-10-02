@@ -502,6 +502,25 @@ settings:
       96% of the rendered weight agrees with its splat's class, median
       confidence 0.99, boundaries and the silhouette are where it wavers.
 
+  - name: lighting_correction
+    label: Lighting correction
+    default: prepass
+    choices: [prepass, "off"]
+    advanced: true
+    help: >-
+      Take the generator's frame-to-frame relighting out of the frames before
+      the deliverable training. The passes are generated separately and the
+      subject's exposure swings 10-23 % and its white balance 6-12 % across
+      the final frames; the splat's SH bands soak that up (on skin a
+      per-frame lighting over the surface normal explains 52-68 % of what
+      they carry). `prepass` trains a 5k-iteration splat on the final frames
+      for their geometry, fits every frame's departure from the common
+      lighting (27 numbers a frame, on the matte classes) and divides it out
+      of the frames the COLMAP bundle and the final training get. Measured
+      2026-10-02 on two subjects: SH share on skin 23 -> 15 % and 47 -> 31 %,
+      the colour cast between the passes gone, fit unchanged. ~10 s of
+      training and ~1 min of fitting. `off` trains on the frames as denoised.
+
   - name: outline_strength
     label: Outline strength
     type: float
@@ -4238,6 +4257,60 @@ steps:
       batch_size: 4
     outputs:
       normal_maps: scene.final_normal_maps
+
+  # The generator's frame-to-frame relighting out of the final frames
+  # (`lighting_correction`, steps/relight.py). A short training on exactly
+  # these frames and cameras gives the geometry the fit needs — every
+  # surface point, its normal and the frames that see it — including the
+  # clothing the body mesh does not follow. 5k iterations measured as good
+  # as the full deliverable's geometry downstream (2026-10-02: SH share on
+  # skin 15.2 % against 15.9 %, and 30.9 % against 28.1 %); 15k was no
+  # better. No normal maps, alignment or rig: geometry only. A warm start of
+  # the final training from it was measured too and is not used: slower (no
+  # progressive resolution), 33 % more splats, -0.25 dB.
+  - id: relight_pretrain
+    step: brush
+    dispatch: in_process
+    when:
+      - ${globals.export_ply}
+      - {eq: ["${globals.lighting_correction}", prepass]}
+    inputs:
+      cameras: dataset.cameras
+      image_names: dataset.image_names
+      points_3d: dataset.points_3d
+      images: dataset.images
+      masks: dataset.masks
+    params:
+      total_steps: 5000
+      align_iters: 0
+      polish_steps: 0
+      body_rig: false
+      random_background: true
+      output_dir: ${globals.output_root}/debug/relight
+    outputs:
+      splat_path: scene.relight_splat_path
+
+  # Each frame divided by its departure from the common lighting, per pixel
+  # at the pre-train's rendered normal, in linear light. Overwrites
+  # dataset.images, so the COLMAP bundle, photo_priority_final and the final
+  # training all see the corrected frames.
+  - id: relight_frames
+    step: relight_frames
+    dispatch: in_process
+    when:
+      - ${globals.export_ply}
+      - {eq: ["${globals.lighting_correction}", prepass]}
+    inputs:
+      cameras: dataset.cameras
+      images: dataset.images
+      masks: dataset.masks
+      labels: scene.seg_labels?
+      splat_path: scene.relight_splat_path
+    params:
+      debug_dir: ${globals.output_root}/debug/relight
+    outputs:
+      images: dataset.images
+      relight_stats: scene.relight_stats
 
   # Deliverable 1: a COLMAP dataset. `layout: brush` puts the frames in
   # images/ beside the three .txt files — what brush itself reads, and what

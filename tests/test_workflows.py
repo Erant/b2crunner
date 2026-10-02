@@ -1218,7 +1218,12 @@ class TestWorkflowFiles(unittest.TestCase):
         # made on, and a solve would move the middle cameras that
         # continuation is anchored to. refine_cameras_final covers all of
         # its frames afterwards (steps/extend_orbit.py).
-        unrefined = {"reoutline_train_splat", "extend_train_splat"}
+        #
+        # The lighting correction's pre-train is not a different dataset at
+        # all: it is train_final_splat's frames and cameras, after
+        # refine_cameras_final, trained briefly for their geometry
+        # (steps/relight.py). The final solve covers it.
+        unrefined = {"reoutline_train_splat", "extend_train_splat", "relight_pretrain"}
         for path in _workflows():
             spec = WorkflowSpec.from_yaml(str(path))
             ids = [s.id for s in spec.steps]
