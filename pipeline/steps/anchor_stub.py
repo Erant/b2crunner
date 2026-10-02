@@ -178,7 +178,12 @@ class GenerateFirstLastStep(Step):
              "camera": Camera, "original_focal_length": float,
              "render_size": Tuple[int, int],
              "bg_color": Optional[Tuple[float, float, float]] RGB [0,1],
-             defaults to white}
+             defaults to white,
+             "matte": Optional[np.ndarray] float32 [0,1] at the photo's size
+             (rmbg's `mask`) — when given, the photograph's own background
+             is replaced with bg_color before the warp, so the anchor frame
+             is the subject on the same flat colour as every render around
+             it, border and backdrop alike}
     outputs: {"warped_image": np.ndarray BGR uint8}
 
     Takes no params: everything it needs (including the border colour) comes
@@ -202,6 +207,18 @@ class GenerateFirstLastStep(Step):
             int(round(bg_rgb[1] * 255)),
             int(round(bg_rgb[0] * 255)),
         )
+
+        matte = inputs.get("matte")
+        if matte is not None:
+            if matte.shape[:2] != (h_img, w_img):
+                raise ValueError(
+                    f"generate_firstlast: matte is {matte.shape[:2]}, the photo "
+                    f"{(h_img, w_img)} — it must be the photo's own matte."
+                )
+            a = np.clip(matte.astype(np.float32), 0.0, 1.0)[..., None]
+            bg = np.asarray(border_color, dtype=np.float32)
+            img = np.clip(img.astype(np.float32) * a + bg * (1.0 - a),
+                          0, 255).round().astype(np.uint8)
 
         is_identity_rotation = np.allclose(camera.rotation, np.eye(3), atol=1e-5)
 

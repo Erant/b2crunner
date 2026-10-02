@@ -1448,6 +1448,19 @@ steps:
       splat_path: scene.face_splat_path
       splat_stats: scene.face_splat_stats
 
+  # The photograph's matte, for warp_reference_to_anchor: the anchor frame
+  # goes in cut out onto the renders' background instead of carrying the
+  # photo's own. (helical_shell's pointmap shell reads it too.)
+  - id: front_matte
+    step: rmbg
+    dispatch: in_process
+    inputs:
+      image: scene.front_image
+    params:
+      low_vram: ${globals.low_vram}
+    outputs:
+      mask: scene.front_matte
+
   # render's mesh_output wants a dict with vertices/cam_t/faces/
   # keypoints_3d/focal_length (see render.py's module docstring on why
   # keypoints_3d specifically, not joints) — reconstruct_body's outputs
@@ -1655,6 +1668,10 @@ steps:
       original_focal_length: scene.image_warp.original_focal_length
       render_size: scene.image_warp.render_size
       bg_color: scene.image_warp.bg_color
+      # The photograph's own background swapped for that same bg_color, so
+      # the anchor frame is the subject on the grey every render around it
+      # stands on, not on whatever the photo was taken against.
+      matte: scene.front_matte
     outputs:
       warped_image: dataset.anchor_image
 

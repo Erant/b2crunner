@@ -1173,12 +1173,15 @@ steps:
   # segmentation head: on whole-body inputs RMBG is the better matte, it is
   # already in this pipeline, and its softness is what the alpha wants.
   # Distinct from stage 2's `foreground_masks`, which mattes the whole
-  # denoised batch for brush.
+  # denoised batch for brush. Also what warp_reference_to_anchor cuts the
+  # photograph's own background out with (helical has this step too).
   - id: front_matte
     step: rmbg
     dispatch: in_process
     inputs:
       image: scene.front_image
+    params:
+      low_vram: ${globals.low_vram}
     outputs:
       mask: scene.front_matte
 
@@ -1446,6 +1449,10 @@ steps:
       original_focal_length: scene.image_warp.original_focal_length
       render_size: scene.image_warp.render_size
       bg_color: scene.image_warp.bg_color
+      # The photograph's own background swapped for that same bg_color, so
+      # the anchor frame is the subject on the grey every render around it
+      # stands on, not on whatever the photo was taken against.
+      matte: scene.front_matte
     outputs:
       warped_image: dataset.anchor_image
 

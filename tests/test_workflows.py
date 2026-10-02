@@ -133,12 +133,13 @@ BOOTSTRAPS = {
         "detect_face", "map_face_to_mesh", "fit_head_to_face",
         "locate_face", "crop_face", "face_seg", "face_mask",
         "face_normals", "face_splat",
+        "front_matte",
         "render_initial_views",
         "warp_reference_to_anchor", "reinject_anchor_initial",
     ],
     # The EXPERIMENT (2026-09-19): the same bootstrap with a whole-body
-    # pointmap shell built before the render (front_matte / front_normals /
-    # shell_splat) and the render drawing a helix that starts on the
+    # pointmap shell built before the render (front_normals / shell_splat,
+    # off the front_matte both files have) and the render drawing a helix that starts on the
     # photograph. The shell's two remaining steps (render_shell_views,
     # inject_shell_views) sit after the gated re-outline block, outside
     # this prologue — see SHELL_ONLY_STEPS and the mirror test.
@@ -157,7 +158,7 @@ BOOTSTRAPS = {
 #: out and the two files must agree step for step (test_helical_shell_
 #: mirrors_helical), with exactly the differences that test lists.
 SHELL_ONLY_STEPS = (
-    "front_matte", "front_normals", "shell_splat",
+    "front_normals", "shell_splat",
     "render_shell_views", "inject_shell_views",
 )
 

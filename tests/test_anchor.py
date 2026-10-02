@@ -332,5 +332,48 @@ class TestAnchorBorderColour(unittest.TestCase):
         self.assertEqual(self._border((1.0, 1.0, 1.0)), [255, 255, 255])
 
 
+
+class TestAnchorPhotoMatted(unittest.TestCase):
+    """The photograph's own background replaced with bg_color before the
+    warp, so the anchor frame stands on the renders' grey."""
+
+    def _warp(self, matte=None):
+        from body2colmap.camera import Camera
+
+        camera = Camera(
+            focal_length=(800.0, 800.0), image_size=(40, 40),
+            principal_point=(20.0, 20.0),
+            position=np.zeros(3, dtype=np.float32),
+            rotation=np.eye(3, dtype=np.float32),
+        )
+        photo = np.zeros((40, 40, 3), np.uint8)
+        photo[..., 2] = 255  # a red backdrop
+        photo[10:30, 10:30] = 200  # the subject
+        inputs = {"image": photo, "camera": camera,
+                  "original_focal_length": 800.0, "render_size": (40, 40),
+                  "bg_color": (0.5, 0.5, 0.5)}
+        if matte is not None:
+            inputs["matte"] = matte
+        return run_step("generate_firstlast", inputs, {})["warped_image"]
+
+    def test_the_backdrop_becomes_the_bg_colour(self):
+        matte = np.zeros((40, 40), np.float32)
+        matte[10:30, 10:30] = 1.0
+        out = self._warp(matte)
+        self.assertEqual(tuple(out[2, 2]), (128, 128, 128))
+        self.assertEqual(tuple(out[20, 20]), (200, 200, 200))
+
+    def test_a_soft_edge_blends(self):
+        out = self._warp(np.full((40, 40), 0.5, np.float32))
+        np.testing.assert_allclose(out[2, 2], [64, 64, 192], atol=1)
+
+    def test_without_a_matte_the_photo_goes_in_as_is(self):
+        self.assertEqual(tuple(self._warp()[2, 2]), (0, 0, 255))
+
+    def test_a_matte_of_another_size_is_refused(self):
+        with self.assertRaises(ValueError):
+            self._warp(np.ones((20, 20), np.float32))
+
+
 if __name__ == "__main__":
     unittest.main()
