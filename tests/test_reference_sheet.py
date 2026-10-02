@@ -214,6 +214,13 @@ class TestAutoLayoutRoutes(unittest.TestCase):
         self.assertLessEqual(seen["min_score"], 0.2)
         self.assertTrue(seen["model"].endswith(DETECTOR_MODEL_NAME))
 
+    def test_a_photographed_sheet_s_low_scoring_figures_still_count(self):
+        """Run 32c717 (2026-10-01): two full-height figures on opposite
+        sides at 0.55 / 0.41 — refused under the old 0.6 floor."""
+        out = _run_auto(_sheet(_panel(40), _panel(200)),
+                        [_figure(4, 28, 0.55), _figure(36, 60, 0.41)])
+        self.assertEqual(out["layout"], "sheet")
+
     def test_min_score_is_a_step_param(self):
         with self.assertRaises(ValueError):
             _run_auto(_panel(40), [_figure(4, 28, 0.7)], min_score=0.8)

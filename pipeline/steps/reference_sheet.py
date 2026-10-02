@@ -37,7 +37,11 @@ wired: 27/27 sheets in ~/datasets/cyberpunk2 gave exactly two boxes at
 front panel alone, a BACK panel alone) 1 each at 0.90-0.95, with every
 false positive at <= 0.52 and no taller than 6% of the frame. The two
 figure tests in `classify_layout` (score and height) come from those
-numbers. What was NOT good enough: MediaPipe's pose landmarker on the
+numbers. The score floor was 0.6 until 2026-10-01, when four of five
+photographed sheets (subject in a room, 3072x2720) failed on two
+full-height, opposite-side figures scoring 0.41-0.59 — unchanged when
+downscaled to 640 px, so it is the scene, not the size. The height test
+carries the false-positive rejection; the floor is now 0.35. What was NOT good enough: MediaPipe's pose landmarker on the
 whole image misses the back figure of a real sheet (1 of 2 on cyber_6f),
 the blaze face detector finds two faces on one person (retired in
 86c4f8e), SAM-3D-Body has no detector wired at all (steps/sam3d_body.py:
@@ -205,10 +209,14 @@ class SplitReferenceSheetStep(Step):
               choices=LAYOUTS),
         Param("front_side", str, "left", "Which half of the sheet holds the front view",
               choices=("left", "right")),
-        Param("min_score", float, 0.6,
+        Param("min_score", float, 0.35,
               "Detector confidence a `person` box needs to count as a figure "
-              "under `layout: auto`. Real figures measured 0.87-0.96, the "
-              "false positives at most 0.52 (and never tall enough anyway)",
+              "under `layout: auto`. Figures on a plain backdrop measured "
+              "0.87-0.96, but photographed sheets (a room behind the subject, "
+              "the panel edge cutting a door frame) only 0.41-0.76 at any "
+              "resolution (2026-10-01, five 3072x2720 uploads). The false "
+              "positives scored at most 0.52 but were never taller than 6% of "
+              "the frame, so MIN_FIGURE_HEIGHT is what rejects them, not this",
               minimum=0.0, maximum=1.0, advanced=True),
     )
 

@@ -76,6 +76,20 @@ class TestHeadCrop(unittest.TestCase):
         self.assertLess(y0, y1)
 
 
+class TestHeadSpan(unittest.TestCase):
+    def test_the_span_scales_with_the_focal_length_not_the_frame(self):
+        joints, verts, focal, w, h = _skeleton_and_mesh()
+        span = head_fit.head_span_px(joints, focal)
+        # Twice the focal = the same head on a twice-as-fine sensor: the
+        # span (and so the snap radius) doubles with it.
+        self.assertAlmostEqual(head_fit.head_span_px(joints, 2 * focal), 2 * span, places=6)
+
+    def test_the_span_is_ear_to_ear(self):
+        joints, verts, focal, w, h = _skeleton_and_mesh()
+        # Ears at +-0.08 m, 2.5 m out: 0.16 / 2.5 * focal.
+        self.assertAlmostEqual(head_fit.head_span_px(joints, focal), 0.16 / 2.5 * focal, places=6)
+
+
 class TestSnap(unittest.TestCase):
     def test_landmarks_take_the_nearest_visible_vertex_only(self):
         projected = np.array([[10.0, 10.0], [10.5, 10.5], [50.0, 50.0], [90.0, 90.0]])
@@ -128,6 +142,9 @@ class TestFitStepContract(unittest.TestCase):
         self.assertEqual(fit["pose_indices"], "18,19,20,21,22,23")
         self.assertEqual(fit["head_scale_index"], 4)
         self.assertEqual(fit["head_shape_from"], 20)
+        mapping = get_step_class("map_face_to_mesh").resolve_params({})
+        self.assertEqual(mapping["snap_head_fraction"], 0.015)
+        self.assertNotIn("snap_px", mapping)
 
 
 if __name__ == "__main__":

@@ -149,6 +149,15 @@ def _head_vertices(vertices_cam: np.ndarray, joints_cam: np.ndarray) -> np.ndarr
     return vertices_cam[:, 1] < joints_cam[_NECK, 1]
 
 
+def head_span_px(joints_cam: np.ndarray, focal: float) -> float:
+    """The projected head keypoints' (nose, eyes, ears) larger extent in frame
+    pixels — ear to ear from the front. The span detect_face_landmarks logs as
+    "mesh head spans"; not the vertices above the neck, which take in the
+    shoulders."""
+    px = _project(joints_cam[list(_HEAD_POINTS)], focal, 0.0, 0.0)
+    return float((px.max(0) - px.min(0)).max())
+
+
 def head_crop_box(vertices_cam: np.ndarray, joints_cam: np.ndarray, focal: float,
                   width: int, height: int, margin: float = 0.25) -> Tuple[int, int, int, int]:
     """A frame-clamped box around the projected head, padded by `margin`."""
@@ -210,9 +219,16 @@ class MapFaceToMeshStep(Step):
               "Render the head crop at this many times the frame's pixel "
               "density, so MediaPipe sees a face-filling image and the snap "
               "distance is a fraction of a frame pixel", minimum=1, maximum=6),
-        Param("snap_px", float, 2.0,
-              "A landmark further than this (in FRAME pixels) from every visible "
-              "vertex is left unmapped", minimum=0.1),
+        Param("snap_head_fraction", float, 0.015,
+              "A landmark further than this fraction of the head keypoints' "
+              "projected span (ear to ear; the 'mesh head spans' of "
+              "detect_face_landmarks) from every visible vertex is left unmapped. "
+              "Relative so the same geometric miss is judged the same at any "
+              "input resolution: it was a fixed 2 frame px, tuned on heads "
+              "spanning 120-153 px, and a 213 px head (a 3072x2720 sheet, "
+              "2026-10-01) lost 12 of one eye's 16 lid landmarks — the lids sit "
+              "2-5 px off the mesh's lid edge there. 0.015 is 1.8-2.3 px on "
+              "the old heads, 3.2 px on that one", minimum=0.001),
         Param("min_mapped", int, 200,
               "Refuse a correspondence with fewer landmarks mapped than this; "
               "the fit is dense or it is nothing", minimum=1),
@@ -289,22 +305,23 @@ class MapFaceToMeshStep(Step):
         zbuf[inside] = depth[v[inside], u[inside]]
         visible = inside & (zbuf > 0) & (vertices[:, 2] <= zbuf + 0.004)
 
+        snap_px = params["snap_head_fraction"] * head_span_px(joints, focal)
         vertex_of_landmark, dist = snap_landmarks_to_vertices(
-            lm_px, projected, visible, params["snap_px"] * k)
+            lm_px, projected, visible, snap_px * k)
         mapped = vertex_of_landmark >= 0
         if mapped.sum() < params["min_mapped"]:
             raise ValueError(
                 f"map_face_to_mesh: only {int(mapped.sum())} of {len(mapped)} landmarks "
-                f"landed within {params['snap_px']} px of a visible vertex "
+                f"landed within {snap_px:.1f} px of a visible vertex "
                 f"(min_mapped={params['min_mapped']}). The render and the landmarker "
                 f"disagree about where the face is."
             )
         snap_mean = float(dist[mapped].mean() / k)
         logger.info(
             "map_face_to_mesh: %d/%d landmarks mapped to visible vertices (%d visible "
-            "of %d), mean snap %.2f px, head box %s at %dx",
+            "of %d), mean snap %.2f px (limit %.1f), head box %s at %dx",
             int(mapped.sum()), len(mapped), int(visible.sum()), len(vertices), snap_mean,
-            (x0, y0, x1, y1), k,
+            snap_px, (x0, y0, x1, y1), k,
         )
         return {"face_correspondence": {
             "vertex_of_landmark": vertex_of_landmark,
