@@ -61,6 +61,11 @@ def _handle_sigterm(signum, frame) -> None:
     _cancelled = True
 
 
+#: Step types whose preview shows the frames cut out by `dataset.masks` —
+#: the ones that measure a matte without applying it (see _capture_previews).
+MATTE_PREVIEW_STEPS = frozenset({"rmbg"})
+
+
 class _StatusWriter:
     """Builds a `RunState` off `RunEvent`s and atomically publishes it."""
 
@@ -92,10 +97,20 @@ class _StatusWriter:
             return [], False
         if not images:
             return [], False
-        try:
-            masks = event.context.get("dataset.masks")
-        except (KeyError, AttributeError, TypeError):
-            masks = None
+        # The mask is composited in only where it is a MATTE the step just
+        # measured and has not applied — rmbg's. Everywhere else
+        # dataset.masks is either already baked into the pixels or is not a
+        # matte at all: after inject_anchor, mask_splat and the denoise it is
+        # the VACE control mask, not a matte; while the frozen studio
+        # backdrop shipped (dfd67b0, reverted) it was 0.0 over the room, and
+        # laying the frame over grey through it painted the room out of
+        # every preview of those steps.
+        masks = None
+        if event.step_name in MATTE_PREVIEW_STEPS:
+            try:
+                masks = event.context.get("dataset.masks")
+            except (KeyError, AttributeError, TypeError):
+                masks = None
         try:
             names = event.context.get("dataset.image_names") or []
         except (KeyError, AttributeError, TypeError):

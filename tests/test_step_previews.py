@@ -208,6 +208,31 @@ class TestCaptureIsNeverFatal(unittest.TestCase):
         )
 
 
+class TestOnlyAMatteIsCompositedIn(TestCaptureIsNeverFatal):
+    """dataset.masks is a matte only straight after rmbg. After the denoise
+    (and inject_anchor, mask_splat) it is the VACE control mask — 0.0 over
+    the frozen studio while dfd67b0 shipped — and compositing through it
+    greyed the room out of the preview."""
+
+    def _corner(self, step_name):
+        context = _FakeContext({
+            "dataset.images": [np.full((64, 32, 3), 200, np.uint8) for _ in range(8)],
+            "dataset.masks": [np.zeros((64, 32), np.float32) for _ in range(8)],
+            "dataset.image_names": [f"frame_{i + 1:05d}_.png" for i in range(8)],
+        })
+        event = RunEvent(kind="step_end", workflow="t", index=1, total=1,
+                         step_id="s", step_name=step_name, context=context)
+        previews, _ = self.writer._capture_previews(event)
+        import cv2
+        return int(cv2.imread(previews[0])[0, 0, 0])
+
+    def test_the_denoise_preview_shows_the_frame_as_it_is(self):
+        self.assertGreater(self._corner("wan22_vace_denoise"), 190)
+
+    def test_the_rmbg_preview_still_shows_the_cut_out(self):
+        self.assertLess(abs(self._corner("rmbg") - run_state.PREVIEW_BACKDROP), 3)
+
+
 class TestUnchangedStepsHaveNoRow(unittest.TestCase):
     """Camera refinement, splat training, the fits: most of a run's steps
     leave the sampled frames exactly as they found them, and a row that
@@ -266,7 +291,8 @@ class TestUnchangedStepsHaveNoRow(unittest.TestCase):
         self.assertTrue(self.writer.state.steps[1].unchanged)
 
     def test_a_masked_step_keeps_its_row(self):
-        """The compositing exists so that a mask-only step *is* a change."""
+        """The compositing exists so that a mask-only step *is* a change —
+        rmbg's, the one step whose matte is composited in."""
         self._end(1, 100)
         masks = [np.zeros((64, 32), np.float32) for _ in range(20)]
         for mask in masks:
@@ -278,7 +304,7 @@ class TestUnchangedStepsHaveNoRow(unittest.TestCase):
         })
         self.writer(RunEvent(
             kind="step_end", workflow="t", index=2, total=3,
-            step_id="refine_cameras", step_name="refine_cameras", context=context,
+            step_id="refine_cameras", step_name="rmbg", context=context,
         ))
         self.assertEqual(len(self.writer.state.steps[1].previews), 8)
         self.assertFalse(self.writer.state.steps[1].unchanged)
