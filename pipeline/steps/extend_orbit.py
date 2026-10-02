@@ -439,10 +439,7 @@ class AssembleExtensionStep(Step):
               optional "novel_images", "novel_masks": a second render of the
               same cameras (and its matte) that the REACTIVE frames take
               instead — the workflow renders it at fewer SH bands than the
-              inactive frames' render;
-              optional "backdrops": the room at every one of `pass_cameras`
-              (render_backdrop), which the matted frames are laid over
-              instead of `bg_color`}
+              inactive frames' render}
     outputs: {"before_images", "before_masks": the BEFORE pass — `before`
               reactive frames then `overlap_before` inactive ones (beside
               pass 2's first); "after_images", "after_masks": the AFTER pass
@@ -467,12 +464,6 @@ class AssembleExtensionStep(Step):
               "RGB in [0,1] behind the matted guide. 0.5 is the grey every control "
               "frame in this pipeline ends on, and is zero after the [-1, 1] "
               "normalisation"),
-        Param("inactive_margin_px", int, None,
-              "Freeze the backdrop past the subject in the REACTIVE frames: 1.0 over "
-              "the matte (0.5 and up) grown by this many pixels, 0.0 past it — the "
-              "same band pass 1 and pass 2 get (steps/backdrop.py `reactive_band`). "
-              "The inactive frames stay inactive whole. Empty: the reactive frames "
-              "are reactive whole, as before"),
         Param("debug_dir", str, None,
               "Where to dump the two control videos as datasets (before/ and after/, "
               "the VACE flag in the alpha), like pass 1's denoise_pass1_input/. None "
@@ -480,7 +471,6 @@ class AssembleExtensionStep(Step):
     )
 
     def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
-        from .backdrop import frozen_outside, matte_over
         from .mask_splat import _composite_one
 
         dataset = inputs["dataset"]
@@ -525,27 +515,12 @@ class AssembleExtensionStep(Step):
         for frame in source:
             if tuple(frame.shape[:2]) != (height, width):
                 raise ValueError("assemble_extension: the source frames are not all one size")
-        backdrops = inputs.get("backdrops")
-        if backdrops is not None and len(backdrops) != 2 * phase:
-            raise ValueError(
-                f"assemble_extension: {len(backdrops)} backdrops against the two "
-                f"passes' {2 * phase} cameras"
-            )
         bg = tuple(float(c) for c in params["bg_color"])
-
-        def matted(i, images, mattes):
-            if backdrops is not None:
-                return matte_over(images[i], mattes[i], backdrops[i])
-            return _composite_one(images[i], mattes[i], bg)
-
-        # The reactive frames: the BEFORE pass's first `before`, the AFTER pass's last `after`.
-        reactive = list(range(before)) + list(range(phase + overlap_after, 2 * phase))
-        mattes = list(guide_masks)
-        video = [matted(i, guide_images, guide_masks) for i in range(2 * phase)]
+        video = [_composite_one(img, mask, bg) for img, mask in zip(guide_images, guide_masks)]
         if novel_images is not None:
-            for i in reactive:
-                video[i] = matted(i, novel_images, novel_masks)
-                mattes[i] = novel_masks[i]
+            # The reactive frames: the BEFORE pass's first `before`, the AFTER pass's last `after`.
+            for i in list(range(before)) + list(range(phase + overlap_after, 2 * phase)):
+                video[i] = _composite_one(novel_images[i], novel_masks[i], bg)
         for frame in video:
             if tuple(frame.shape[:2]) != (height, width):
                 raise ValueError(
@@ -556,11 +531,8 @@ class AssembleExtensionStep(Step):
 
         one = np.ones((height, width), dtype=np.float32)
         zero = np.zeros((height, width), dtype=np.float32)
-        flags = [zero] * (2 * phase)
-        margin = params["inactive_margin_px"]
-        for i in reactive:
-            flags[i] = one if margin is None else frozen_outside(mattes[i], margin)
-        before_flags, after_flags = flags[:phase], flags[phase:]
+        before_flags = [one] * before + [zero] * overlap_before
+        after_flags = [zero] * overlap_after + [one] * after
         result: Dict[str, Any] = {
             "before_images": video[:phase], "before_masks": before_flags,
             "after_images": video[phase:], "after_masks": after_flags,
@@ -577,11 +549,10 @@ class AssembleExtensionStep(Step):
             logger.info("assemble_extension: both control videos written under %s", debug_dir)
 
         logger.info(
-            "assemble_extension: two %d-frame passes of the guide's matted render over %s — "
+            "assemble_extension: two %d-frame passes of the guide's matted render over grey — "
             "BEFORE: %d reactive then %d inactive (beside pass 2's first %d); AFTER: %d "
             "inactive (beside pass 2's last %d) then %d reactive; reactive frames from %s",
-            phase, "the backdrop" if backdrops is not None else "grey",
-            before, overlap_before, overlap_before, overlap_after, overlap_after, after,
+            phase, before, overlap_before, overlap_before, overlap_after, overlap_after, after,
             "the novel-view render" if novel_images is not None else "the same render",
         )
         return result

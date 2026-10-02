@@ -71,10 +71,7 @@ import numpy as np
 from ..masks import normalize_mask
 from ..registry import register_step
 from ..step import REQUIRED, Param, Step
-from .backdrop import (
-    BACKGROUND_FADE_PARAMS, BACKGROUND_PARAMS, build_background, reactive_band,
-    render_backdrops,
-)
+from .backdrop import BACKGROUND_FADE_PARAMS, BACKGROUND_PARAMS, build_background
 
 logger = logging.getLogger(__name__)
 
@@ -364,40 +361,6 @@ def _inactive_masks(
     ]
 
 
-def _freeze_outside_outline(
-    inactive_masks: Optional[List[np.ndarray]],
-    silhouettes: List[np.ndarray],
-    stick_masks: List[Optional[np.ndarray]],
-    *,
-    margin_px: int,
-) -> List[np.ndarray]:
-    """`inactive_masks` with everything past the drawing marked inactive.
-
-    The reactive region of each frame is its silhouette (the composite's
-    alpha, any coverage at all — the outline's blurred edge included) united
-    with the pixels the skeleton overlay drew, dilated by `margin_px` with a
-    disc; outside it the mask goes to 0.0, "real, keep it". Inside it the
-    batch is left as it was, so the splat's own inactive mark survives. None
-    in, an all-1.0 batch is the starting point — the frames' own reactive
-    default, which inject_anchor would otherwise have manufactured.
-    """
-    if inactive_masks is None:
-        inactive_masks = [np.ones(s.shape, dtype=np.float32) for s in silhouettes]
-    frozen = []
-    for mask, silhouette, sticks in zip(inactive_masks, silhouettes, stick_masks):
-        reactive = silhouette > 0.0
-        if sticks is not None:
-            reactive |= sticks
-        reactive = reactive_band(reactive, margin_px)
-        frozen.append(np.where(reactive, mask, 0.0).astype(np.float32))
-    share = float(np.mean([(m < 0.5).mean() for m in frozen]))
-    logger.info(
-        "render: outline_inactive_margin_px %d freezes %.1f%% of each frame "
-        "on average (the backdrop past the drawing)", margin_px, 100.0 * share,
-    )
-    return frozen
-
-
 def _clean_silhouette(silhouette: np.ndarray, diameter: int) -> np.ndarray:
     """Open then close a bool silhouette with a disc of `diameter` px.
 
@@ -509,10 +472,7 @@ class RenderStep(Step):
              the conditioning mask under `splat_inactive_mask`, 0.0 over the
              splat and 1.0 elsewhere, and None when that flag is off (see
              `_inactive_masks`; it is a SECOND batch, not a reinterpretation
-             of "masks"; `outline_inactive_margin_px` also zeroes it past
-             the drawing), "backdrop_images": Optional[List[np.ndarray]] —
-             the backdrop alone per frame, BGR uint8, None with no
-             `background`, "images_no_skeleton": Optional[List[np.ndarray]]
+             of "masks"), "images_no_skeleton": Optional[List[np.ndarray]]
              — the same frames without the skeleton overlay under
              `skeleton_free_copy`, None otherwise, "cameras": List[Camera],
              "image_names": List[str], "points_3d": (positions, colors),
@@ -668,23 +628,6 @@ class RenderStep(Step):
               "counts as covered at splat alpha >= 0.9, and a frame the angle "
               "cull dropped comes out wholly reactive rather than carrying no "
               "mask at all"),
-        Param("outline_inactive_margin_px", int, None,
-              "Mark everything this far OUTSIDE the drawing inactive in the "
-              "`inactive_masks` batch (0.0, \"real, keep it\"), so the denoise "
-              "repaints the subject and a band around it and leaves the "
-              "backdrop exactly as rendered. Meant for a silhouette that can "
-              "be trusted — the re-outline splat's, which is already the "
-              "dressed subject — over a backdrop that carries the room's "
-              "lighting: the model then paints the figure INTO a fixed studio "
-              "rather than inventing one per frame. The reactive region is "
-              "the silhouette united with every pixel the skeleton overlay "
-              "drew (a stick that pokes past the outline must stay reactive, "
-              "or the denoise is told to keep the ink), dilated by this many "
-              "pixels; the band is the room left for hair and cloth the "
-              "outline missed and for the contact shadow. Composes with "
-              "splat_inactive_mask (both marks apply) and publishes the batch "
-              "on its own when that is off. Empty: off, the whole frame "
-              "reactive outside the splat, as before", minimum=0),
         Param("skeleton_free_copy", bool, False,
               "The `*+skeleton` composite modes only: also publish "
               "`images_no_skeleton`, every frame composited a second time "
@@ -858,14 +801,6 @@ class RenderStep(Step):
                 f"splat_inactive_mask marks the splat overlay, and render_mode "
                 f"{render_mode!r} does not composite one. Use a `...+splat` "
                 f"mode, or leave the mask off."
-            )
-        if params["outline_inactive_margin_px"] is not None and base_render_mode not in (
-            "outline", "outline+skeleton"
-        ):
-            raise ValueError(
-                f"outline_inactive_margin_px freezes everything outside the "
-                f"outline drawing, and render_mode {render_mode!r} does not "
-                f"draw one. Use an `outline...` mode, or leave it empty."
             )
 
         if override_cam_from_mesh and pattern not in ("circular", "helical"):
@@ -1154,25 +1089,19 @@ class RenderStep(Step):
         # without touching alpha, so a backdrop composited after it would
         # blend the skeleton away everywhere outside the silhouette. The
         # single-mode branches below have no overlay and do their own.
-        # `scene.vertices` and not `mesh_output["vertices"]`: the fade's
-        # shell is fitted in the same world frame the cameras live in, and
-        # the auto-orient branch above has already turned the scene in
-        # place by then. The raw input is the pre-rotation mesh, which
-        # would put the clear zone somewhere off to the side of a
-        # non-override render.
-        background = build_background(params, cameras, scene.vertices)
         renderer = Renderer(
-            scene=scene, render_size=(width, height), background=background,
+            scene=scene, render_size=(width, height),
+            # `scene.vertices` and not `mesh_output["vertices"]`: the fade's
+            # shell is fitted in the same world frame the cameras live in, and
+            # the auto-orient branch above has already turned the scene in
+            # place by then. The raw input is the pre-rotation mesh, which
+            # would put the clear zone somewhere off to the side of a
+            # non-override render.
+            background=build_background(params, cameras, scene.vertices),
         )
 
         rendered_images = []
         stick_free_images = [] if params["skeleton_free_copy"] else None
-        # Where the skeleton overlay drew, per frame, for
-        # outline_inactive_margin_px: the stick-free composite differs from
-        # the drawing there and nowhere else, so it is rendered for the
-        # margin even when the copy itself is not published.
-        freeze_outside = params["outline_inactive_margin_px"] is not None
-        stick_masks: List[Optional[np.ndarray]] = []
         for index, camera in enumerate(cameras):
             if base_render_mode == "mesh":
                 img = renderer.render_mesh(camera=camera, mesh_color=mesh_color, bg_color=bg_color)
@@ -1234,23 +1163,13 @@ class RenderStep(Step):
                     modes=composite_modes,
                     splat_layer=splat_layers[index],
                 )
-                stick_free = None
-                if "skeleton" in composite_modes and (
-                    stick_free_images is not None or freeze_outside
-                ):
-                    stick_free = renderer.render_composite(
+                if stick_free_images is not None:
+                    stick_free_images.append(renderer.render_composite(
                         camera=camera,
                         modes={name: opts for name, opts in composite_modes.items()
                                if name not in ("skeleton", "face")},
                         splat_layer=splat_layers[index],
-                    )
-                if stick_free_images is not None:
-                    stick_free_images.append(stick_free[..., [2, 1, 0]])  # RGB -> BGR, as `images` below
-                if freeze_outside:
-                    stick_masks.append(
-                        None if stick_free is None
-                        else np.any(img[..., :3] != stick_free[..., :3], axis=-1)
-                    )
+                    )[..., [2, 1, 0]])  # RGB -> BGR, as `images` below
             else:
                 raise ValueError(f"Unknown render_mode: {render_mode}")
             if base_render_mode in ("mesh", "depth", "skeleton"):
@@ -1275,11 +1194,6 @@ class RenderStep(Step):
             _inactive_masks(splat_layers, width=width, height=height)
             if params["splat_inactive_mask"] else None
         )
-        if freeze_outside:
-            inactive_masks = _freeze_outside_outline(
-                inactive_masks, masks, stick_masks,
-                margin_px=params["outline_inactive_margin_px"],
-            )
         if inactive_masks is not None:
             covered = sum(int((mask < 0.5).any()) for mask in inactive_masks)
             logger.info(
@@ -1303,19 +1217,10 @@ class RenderStep(Step):
             else params["focal_length_mm"]
         )
 
-        # The room alone, per frame, for inject_anchor: the photograph it
-        # pastes at the anchor frame is a warped rectangle, and the room is
-        # what belongs around it — not the drawing, which can reach past a
-        # tightly cropped photo. None without a backdrop.
-        backdrop_images = (
-            render_backdrops(background, cameras) if background is not None else None
-        )
-
         result: Dict[str, Any] = {
             "images": images,
             "masks": masks,
             "inactive_masks": inactive_masks,
-            "backdrop_images": backdrop_images,
             "images_no_skeleton": stick_free_images,
             "cameras": cameras,
             "image_names": image_names,

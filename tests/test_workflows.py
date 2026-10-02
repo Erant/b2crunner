@@ -181,35 +181,6 @@ DRAWING_PROMPT = DENOISE_PROMPT.replace(_ROOM, _ROOM + ORBIT_SENTENCE)
 #: blank for the arm without. Pass 2's prompt is the pinned one.
 HINTED_DENOISE_PROMPT = DRAWING_PROMPT + " ${globals.elevation_hint}"
 
-#: Every pass but the 480p one since 2026-10-01: the 场景 slot describing the
-#: studio their controls now stand in (see the comment above denoise_pass1's
-#: prompt in helical.yaml). The description changes and nothing else; the
-#: 480p re-outline pass, a bare drawing, keeps the gridded room.
-STUDIO_SWAPS = (
-    ("在一间空房间里：灰色墙面上有均匀的网格线，深色地板，浅色天花板，墙面相"
-     "交处有清晰的墙角。",
-     "在一间宽敞的白色摄影棚里：白色无缝墙面以圆弧过渡到白色地面，高处是磨砂"
-     "天窗。"),
-    ("墙角依次从画面中掠过。", "墙面依次从画面中掠过。"),
-    ("standing in an empty room: grey walls ruled with an even grid, a dark "
-     "floor and a lighter ceiling, meeting at clear corners. ",
-     "standing in a spacious white photo studio: seamless white walls "
-     "curving into a white floor, under a high frosted skylight. "),
-    ("the walls and their corners sweep past", "the walls sweep past"),
-)
-
-
-def _studio(prompt):
-    for old, new in STUDIO_SWAPS:
-        assert prompt.count(old) == 1, old
-        prompt = prompt.replace(old, new)
-    return prompt
-
-
-STUDIO_DRAWING_PROMPT = _studio(DRAWING_PROMPT)
-STUDIO_DENOISE_PROMPT = _studio(DENOISE_PROMPT)
-HINTED_STUDIO_PROMPT = STUDIO_DRAWING_PROMPT + " ${globals.elevation_hint}"
-
 
 def _workflows():
     return sorted(WORKFLOW_DIR.glob("*.yaml"))
@@ -1542,11 +1513,6 @@ class TestWorkflowFiles(unittest.TestCase):
                     want = (HINTED_DENOISE_PROMPT if (path.name, step.id) in hinted
                             else DRAWING_PROMPT if step.id in drawn
                             else DENOISE_PROMPT)
-                    if step.id == "denoise_pass1":
-                        want = (HINTED_STUDIO_PROMPT if want is HINTED_DENOISE_PROMPT
-                                else STUDIO_DRAWING_PROMPT)
-                    elif step.id != "reoutline_denoise":
-                        want = STUDIO_DENOISE_PROMPT
                     self.assertEqual(step.params.get("prompt"), want)
                     self.assertEqual(
                         step.params.get("negative_prompt"), DENOISE_NEGATIVE_PROMPT
@@ -1622,10 +1588,7 @@ class TestWorkflowFiles(unittest.TestCase):
                          "lead_in_deg": 0.0, "lead_out_deg": 4.5,
                          "helix_anchor": "start"},
                     )
-                if step.id == "denoise_pass1":
-                    self.assertEqual(params.pop("prompt"), HINTED_STUDIO_PROMPT)
-                    self.assertEqual(base_params.pop("prompt"), STUDIO_DRAWING_PROMPT)
-                elif step.id in hinted:
+                if step.id in hinted:
                     self.assertEqual(params.pop("prompt"), HINTED_DENOISE_PROMPT)
                     self.assertEqual(base_params.pop("prompt"), DRAWING_PROMPT)
                 self.assertEqual(params, base_params)
@@ -2134,10 +2097,8 @@ class TestTheReoutlineBranch(unittest.TestCase):
         pass1 = self._step(spec, "denoise_pass1")
         self.assertEqual((pass1.params["steps_high"], pass1.params["steps_low"]), (2, 4))
         self.assertEqual(pass1.params["strength"], [1, 1, 0.5, 0.5, 0.5, 0.5])
-        # And pass 1's studio prompt (2026-10-01) is pass 1's alone: the
-        # 480p pass's control is a bare drawing, so it keeps the old text.
         expected = dict(pass1.params, width=480, height=832, steps_low=2,
-                        strength=[1, 1, 0.5, 0.5], prompt=DRAWING_PROMPT)
+                        strength=[1, 1, 0.5, 0.5])
         # Weak skeleton is pass 1's alone: this pass is kept for its
         # silhouette, which stick ink does not reach.
         del expected["skeleton_steps"]
@@ -2215,29 +2176,19 @@ class TestTheReoutlineBranch(unittest.TestCase):
 
     def test_the_re_render_is_the_first_render_plus_the_mattes(self):
         """Same params, so the same cameras; and it republishes nothing about
-        them, so nothing can drift. What differs: the fill's darkness, which
-        is the setting for a re-outlined drawing; the cleaning of the
-        splat's coverage, which a mesh silhouette does not need; and the
-        frozen studio room (2026-10-01), which only a silhouette of the
-        dressed subject can be trusted to sit in — the mesh outline still
-        needs a reactive frame to grow hair and clothing into."""
+        them, so nothing can drift. Two params differ: the fill's darkness,
+        which is the setting for a re-outlined drawing, and the cleaning of
+        the splat's coverage, which a mesh silhouette does not need."""
         spec = self._spec()
         first = self._step(spec, "render_initial_views")
         again = self._step(spec, "render_reoutlined_views")
         self.assertEqual(again.params, dict(first.params, outline_strength="${globals.reoutlined_strength}",
-                                            outline_mask_clean_px=9,
-                                            background="studio",
-                                            background_geometry="sphere",
-                                            background_fade="",
-                                            outline_inactive_margin_px=32))
-        self.assertEqual(first.params["background"], "")
-        self.assertNotIn("outline_inactive_margin_px", first.params)
+                                            outline_mask_clean_px=9))
         self.assertNotIn("outline_mask_clean_px", first.params)
         self.assertEqual(first.params["outline_strength"], "${globals.outline_strength}")
         self.assertEqual(again.inputs, dict(first.inputs, outline_masks="scene.outline_masks"))
         self.assertEqual(set(again.outputs),
-                         {"images", "masks", "inactive_masks", "images_no_skeleton",
-                          "backdrop_images"})
+                         {"images", "masks", "inactive_masks", "images_no_skeleton"})
         self.assertEqual(again.outputs["images_no_skeleton"],
                          first.outputs["images_no_skeleton"])
         self.assertEqual(again.outputs["images"], "dataset.images")
@@ -2274,12 +2225,7 @@ class TestTheReoutlineBranch(unittest.TestCase):
         spec = self._spec()
         first = self._step(spec, "reinject_anchor_initial")
         again = self._step(spec, "reinject_anchor_reoutlined")
-        # Plus the studio around the photograph (2026-10-01): only the
-        # re-outlined render draws a room to fill its border with.
-        self.assertEqual(again.inputs, dict(
-            first.inputs, backdrops="scene.reoutline_backdrops",
-            anchor_coverage="scene.anchor_coverage",
-            border_color="scene.anchor_border_color"))
+        self.assertEqual(again.inputs, first.inputs)
         self.assertEqual(again.outputs, first.outputs)
 
     def test_the_480p_pass_lands_in_the_debug_bundle(self):
@@ -2370,8 +2316,7 @@ class TestTheOrbitExtension(unittest.TestCase):
 
     BRANCH = [
         "extend_path", "extend_masks", "extend_train_splat", "extend_render_guide",
-        "extend_guide_masks", "extend_render_novel", "extend_novel_masks",
-        "extend_render_backdrop", "extend_assemble",
+        "extend_guide_masks", "extend_render_novel", "extend_novel_masks", "extend_assemble",
         "denoise_extension_before", "denoise_extension_after", "extend_splice",
     ]
 
@@ -2540,25 +2485,15 @@ class TestTheOrbitExtension(unittest.TestCase):
             "guide_masks": "scene.extended.guide_masks",
             "novel_images": "scene.extended.novel_images",
             "novel_masks": "scene.extended.novel_masks",
-            "backdrops": "scene.extended.backdrops",
         })
         scope = {"globals": dict(spec.globals, output_root="/out")}
         self.assertEqual(resolve(assemble.params, scope), {
             "bg_color": [0.5, 0.5, 0.5],
-            "inactive_margin_px": 32,
             "debug_dir": "/out/debug/extension_input",
         })
-        # The composite colour and the frozen band are pass 2's control's.
-        fringes = self._step(spec, "mask_splat_fringes")
-        for key in ("bg_color", "inactive_margin_px"):
-            self.assertEqual(assemble.params[key], fringes.params[key])
-        # And the room is pass 2's: the same step on the extension's cameras,
-        # sized against pass 2's orbit.
-        room = self._step(spec, "extend_render_backdrop")
-        self.assertEqual((room.step, room.params), ("render_backdrop", {}))
-        self.assertEqual(room.inputs, {"cameras": "scene.extended.pass_cameras",
-                                       "orbit_cameras": "dataset.cameras"})
-        self.assertEqual(self._step(spec, "render_pass2_backdrop").params, {})
+        # The composite colour is pass 2's control's.
+        self.assertEqual(assemble.params["bg_color"],
+                         self._step(spec, "mask_splat_fringes").params["bg_color"])
         self.assertEqual(assemble.outputs, {
             "before_images": "scene.extended.before_phase.images",
             "before_masks": "scene.extended.before_phase.masks",

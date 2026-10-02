@@ -182,37 +182,6 @@ class TestBuildBackground(unittest.TestCase):
         with self.assertRaises(ValueError):
             build_background(_rs_params(background="gird"), self.cameras)
 
-    def test_render_backdrop_draws_the_room_at_each_camera(self):
-        """The room alone for the frames `render` does not draw, sized
-        against `orbit_cameras` when given — one room for pass 2 and the
-        extension passes."""
-        from pipeline.registry import get_step_class
-
-        step = get_step_class("render_backdrop")
-        params = step.resolve_params({})
-        self.assertEqual((params["background"], params["background_geometry"]),
-                         ("studio", "sphere"))
-        out = step().run({"cameras": self.cameras[:2]}, params)["images"]
-        self.assertEqual(len(out), 2)
-        self.assertEqual(out[0].dtype, np.uint8)
-        self.assertEqual(out[0].shape[2], 3)
-
-    def test_studio_is_the_bundled_photograph(self):
-        """A name, not a generator: it resolves to a file in the repo, which
-        has to exist (the image ships the repo whole) and load as a 2:1
-        equirect on the sphere the workflow puts it on."""
-        from pathlib import Path
-
-        from pipeline.steps.backdrop import BUNDLED_BACKDROPS
-
-        self.assertTrue(Path(BUNDLED_BACKDROPS["studio"]).is_file())
-        background = build_background(
-            _rs_params(background="studio", background_geometry="sphere"),
-            self.cameras)
-        self.assertEqual(background.geometry, "sphere")
-        image = background.render(self.cameras[0])
-        self.assertGreater(float(image[..., :3].mean()), 100.0)
-
 
 class TestBackgroundParams(unittest.TestCase):
     """The backdrop's own appearance — its colours above all.

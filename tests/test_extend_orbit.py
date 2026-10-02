@@ -326,26 +326,6 @@ class TestAssembleExtension(unittest.TestCase):
         out = run_step("assemble_extension", inputs, {})
         self.assertTrue(abs(int(out["before_images"][0][0, 0, 0]) - (100 + 127) // 2) <= 1)
 
-    def test_over_the_room_with_the_new_frames_frozen_past_the_matte(self):
-        """2026-10-01: every frame over the studio, the reactive ones
-        reactive only over the matte and its band, the inactive ones
-        inactive whole."""
-        _, inputs = self._inputs()
-        matte = np.zeros((8, 6), dtype=np.float32)
-        matte[3:5, 2:4] = 1.0
-        inputs["guide_masks"] = [matte] * (2 * self.PHASE)
-        inputs["backdrops"] = [np.full((8, 6, 3), 230, np.uint8)] * (2 * self.PHASE)
-        out = run_step("assemble_extension", inputs, {"inactive_margin_px": 1})
-        self.assertEqual(int(out["before_images"][0][0, 0, 0]), 230)
-        self.assertEqual(int(out["before_images"][0][3, 2, 0]), 100)
-        first = out["before_masks"][0]
-        self.assertEqual((first[3, 1], first[3, 0], first[0, 0]), (1.0, 0.0, 0.0))
-        for mask in out["before_masks"][2:] + out["after_masks"][:4]:
-            self.assertTrue(np.all(mask == 0.0))
-        inputs["backdrops"] = inputs["backdrops"][:3]
-        with self.assertRaises(ValueError):
-            run_step("assemble_extension", inputs, {})
-
     def test_the_reactive_frames_come_from_the_novel_render(self):
         """With a second render (fewer SH bands, in the workflow) the new
         frames are its, the inactive frames stay the guide's."""
