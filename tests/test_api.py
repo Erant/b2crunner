@@ -548,18 +548,13 @@ class TestWhatAWorkflowDeclares(ApiTestCase):
         # also where Low VRAM (the machine) belongs. Weak skeleton joined the
         # fold on 2026-09-26, on by default, and the upscale left the
         # Outputs box (gone) for it. "Rig splat" (2026-09-30) is the one output
-        # in the open: it is a per-run choice, off by default. Batched
-        # oversample (2026-10-03) sits under Low VRAM: the same machine
-        # choice, refused together with it.
+        # in the open: it is a per-run choice, off by default.
         body = self.client.get(
             f"{API_PREFIX}/workflows/helical", headers=AUTH
         ).json()
         plain = [s["name"] for s in body["settings"] if not s["advanced"]]
         self.assertEqual(plain, ["resolution", "framing", "input_layout", "seed",
-                                 "low_vram", "batched_oversample"])
-        self.assertEqual(
-            {s["name"]: s["excludes"] for s in body["settings"] if s["excludes"]},
-            {"batched_oversample": "low_vram"})
+                                 "low_vram"])
         self.assertEqual([o["name"] for o in body["outputs"] if not o["advanced"]
                           and not o["always"]], ["rig_splat"])
         by_name = {s["name"]: s for s in body["settings"]}
@@ -571,8 +566,8 @@ class TestWhatAWorkflowDeclares(ApiTestCase):
             f"{API_PREFIX}/workflows/helical", headers=AUTH
         ).json()
         profiles = {p["name"]: p for p in body["profiles"]}
-        self.assertEqual(list(profiles), ["low", "medium", "high", "ultra"])
-        self.assertIs(profiles["ultra"]["settings"]["batched_oversample"], True)
+        self.assertEqual(list(profiles), ["low", "medium", "high"])
+        self.assertIs(profiles["high"]["settings"]["reupscale"], True)
         self.assertIs(profiles["low"]["settings"]["extend_orbit"], False)
 
     def test_debug_is_chosen_when_the_result_is_packaged(self):

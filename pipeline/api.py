@@ -315,9 +315,6 @@ def _param_json(param) -> Dict[str, Any]:
         # As on an output: the setting this one is only meaningful with, or
         # "", so a client can grey its control out behind that switch.
         "requires": param.requires,
-        # The switch this one cannot be on together with, or "": a run
-        # with both on is refused.
-        "excludes": param.excludes,
         "help": " ".join(param.help.split()),
     }
 

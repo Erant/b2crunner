@@ -342,7 +342,6 @@ def show_params(args: argparse.Namespace) -> int:
                 " (advanced)" if param.advanced else "",
                 f" [{param.group}]" if param.group else "",
                 f" (needs {param.requires})" if param.requires else "",
-                f" (not with {param.excludes})" if param.excludes else "",
             ])
             print(f"  {param.name:<28} {_short(spec.globals[param.name])}{flags}")
             if param.help:

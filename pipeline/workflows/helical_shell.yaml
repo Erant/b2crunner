@@ -270,22 +270,6 @@ settings:
       ~105 s a denoise step (ComfyUI with SageAttention: ~120 s). Off is the
       32 GB-card path.
 
-  - name: batched_oversample
-    label: Batched oversample
-    type: bool
-    default: false
-    excludes: low_vram
-    help: >-
-      How Re-upscale runs (nothing without it). On: 4 cameras interpolated
-      between every pair of neighbouring training cameras (806 views for
-      162), the splat rendered at all of them, SeedVR2 run in batches of 5
-      (a batch is upscaled as video, so its frames' detail agrees) and the
-      retraining fed all 806. The in-betweens' mattes are the render's alpha
-      and they carry no class map. ~5x the upscale's work, and ~7-9 GB of
-      the trainer's VRAM for the views alone: a 32 GB-card path, refused
-      together with Low VRAM. Off: the training cameras alone, one frame at
-      a time. UNMEASURED: the numbers in Re-upscale are from the off path.
-
   - name: weak_skeleton
     label: Weak skeleton
     type: bool
@@ -866,9 +850,9 @@ outputs:
 # Quality presets (`profiles:`, pipeline/workflow.py): values for the
 # settings and outputs above, applied to the controls by the Run tab's
 # "Quality profile" picker; anything a profile does not name keeps its value.
-# All four train the splat on relit (lighting_correction prepass), upscaled
+# All three train the splat on relit (lighting_correction prepass), upscaled
 # frames; they differ in the orbit's length and the re-upscale after the
-# training. Ultra's oversample is refused together with Low VRAM.
+# training.
 profiles:
   - name: low
     label: Low
@@ -879,7 +863,6 @@ profiles:
       run_upscale: true
       export_ply: true
       reupscale: false
-      batched_oversample: false
 
   - name: medium
     label: Medium
@@ -890,7 +873,6 @@ profiles:
       run_upscale: true
       export_ply: true
       reupscale: false
-      batched_oversample: false
 
   - name: high
     label: High
@@ -901,20 +883,6 @@ profiles:
       run_upscale: true
       export_ply: true
       reupscale: true
-      batched_oversample: false
-
-  - name: ultra
-    label: Ultra
-    help: >-
-      High with the re-upscale oversampled: 4 cameras between each pair, SeedVR2
-      in batches of 5, all 806 views trained. Not with Low VRAM.
-    settings:
-      extend_orbit: true
-      lighting_correction: prepass
-      run_upscale: true
-      export_ply: true
-      reupscale: true
-      batched_oversample: true
 
 globals:
   # What has no control of its own, and therefore no `settings:` entry.
@@ -4658,19 +4626,19 @@ steps:
   # splat before it is copied to debug/reupscale/ first: the retraining
   # exports over ply/scene.ply and takes dataset.splat_path, so export_subject
   # and rig_subject below work from the re-upscaled one.
-  # Without Batched oversample, the training cameras alone, upscaled one
-  # frame at a time (the Upscale step's batch 1: what fits a 12 GB card).
+  # The training cameras alone, upscaled one frame at a time (the Upscale
+  # step's batch 1: what fits a 12 GB card). A batched upscale over 4
+  # interpolated cameras between each pair (806 views, all retrained) was
+  # tried and removed 2026-10-03: that many views soften the splat.
   - id: reupscale_render
     step: reupscale_inputs
     dispatch: in_process
     when:
       - ${globals.export_ply}
       - ${globals.reupscale}
-      - {not: "${globals.batched_oversample}"}
     inputs:
       splat_path: dataset.splat_path
       cameras: dataset.cameras
-      image_names: dataset.image_names
       masks: dataset.masks
       labels: scene.seg_labels?
     params:
@@ -4678,7 +4646,6 @@ steps:
       render_height: 1280
       target_width: 1080
       target_height: 1920
-      inbetween: 0
       # The upscale and the retraining see bands 0..2: band 3, the most
       # view-dependent, left out of the frames they are given.
       sh_degree: 2
@@ -4686,43 +4653,6 @@ steps:
     outputs:
       images: scene.reupscale.render_images
       cameras: scene.reupscale.render_cameras
-      image_names: scene.reupscale.image_names
-      masks: scene.reupscale.masks
-      labels: scene.reupscale.labels
-
-  # Batched oversample: SeedVR2 takes a batch as video and expects little
-  # motion between its frames, and the training cameras are a helix ~2
-  # degrees apart, so 4 cameras are interpolated between every pair of
-  # neighbours (806 frames for 162), all upscaled in batches of 5 and all
-  # trained on. ~5x the upscale's work. UNMEASURED: the batch-1 path is the
-  # one the numbers in the `reupscale` setting are from.
-  - id: reupscale_render_batched
-    step: reupscale_inputs
-    dispatch: in_process
-    when:
-      - ${globals.export_ply}
-      - ${globals.reupscale}
-      - ${globals.batched_oversample}
-    inputs:
-      splat_path: dataset.splat_path
-      cameras: dataset.cameras
-      image_names: dataset.image_names
-      masks: dataset.masks
-      labels: scene.seg_labels?
-    params:
-      render_width: 720
-      render_height: 1280
-      target_width: 1080
-      target_height: 1920
-      inbetween: 4
-      # The upscale and the retraining see bands 0..2: band 3, the most
-      # view-dependent, left out of the frames they are given.
-      sh_degree: 2
-      keep_copy: ${globals.output_root}/debug/reupscale/final_before_reupscale.ply
-    outputs:
-      images: scene.reupscale.render_images
-      cameras: scene.reupscale.render_cameras
-      image_names: scene.reupscale.image_names
       masks: scene.reupscale.masks
       labels: scene.reupscale.labels
 
@@ -4734,7 +4664,6 @@ steps:
     when:
       - ${globals.export_ply}
       - ${globals.reupscale}
-      - {not: "${globals.batched_oversample}"}
     inputs:
       images: scene.reupscale.render_images
       cameras: scene.reupscale.render_cameras
@@ -4748,29 +4677,8 @@ steps:
       images: scene.reupscale.images
       cameras: scene.reupscale.cameras
 
-  - id: reupscale_sr_batched
-    step: seedvr2
-    dispatch: subprocess
-    env: seedvr2
-    when:
-      - ${globals.export_ply}
-      - ${globals.reupscale}
-      - ${globals.batched_oversample}
-    inputs:
-      images: scene.reupscale.render_images
-      cameras: scene.reupscale.render_cameras
-    params:
-      resolution: 1080
-      batch_size: 5
-      vae_encode_tiled: true
-      vae_decode_tiled: true
-      seed: ${globals.seed}
-    outputs:
-      images: scene.reupscale.images
-      cameras: scene.reupscale.cameras
-
   # The retraining: train_final_splat's recipe, alignment loop and body rig
-  # included, on every upscaled frame (806 with Batched oversample). The renders are registered, but SeedVR2 at batch 1 upscales
+  # included. The renders are registered, but SeedVR2 at batch 1 upscales
   # every frame on its own, so the detail it adds is not guaranteed to line
   # up between them; the loop flows each one onto the render and the rig
   # takes what moves per limb. No normal maps: the Sapiens maps are of the
@@ -4784,7 +4692,7 @@ steps:
       - ${globals.reupscale}
     inputs:
       cameras: scene.reupscale.cameras
-      image_names: scene.reupscale.image_names
+      image_names: dataset.image_names
       points_3d: dataset.points_3d
       images: scene.reupscale.images
       masks: scene.reupscale.masks

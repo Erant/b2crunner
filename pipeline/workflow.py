@@ -48,8 +48,7 @@ The three differ only in what they tell the UI:
     same `type`/`default`/`help`/`choices`/`minimum`/`maximum`/`advanced`
     vocabulary a step param has, plus a `label:`, a `group:` and an optional
     `requires:` naming a setting it is only meaningful with (drawn greyed
-    out while that one is off), and an optional `excludes:` naming a switch
-    it cannot be on together with (the run is refused). The UI draws these, through the same widget
+    out while that one is off). The UI draws these, through the same widget
     code it draws step params with. This is where `resolution` and
     `framing` live: what more than one step must agree on AND what somebody
     actually wants to change.
@@ -117,7 +116,7 @@ PARAM_TYPES: Dict[str, type] = {
 
 _SETTING_KEYS = frozenset({
     "name", "label", "type", "default", "help", "choices",
-    "minimum", "maximum", "advanced", "group", "requires", "excludes",
+    "minimum", "maximum", "advanced", "group", "requires",
 })
 
 _OUTPUT_KEYS = frozenset({
@@ -183,7 +182,6 @@ def setting_from_dict(data: Dict[str, Any]) -> Param:
         label=data.get("label", ""),
         group=data.get("group", ""),
         requires=data.get("requires", "") or "",
-        excludes=data.get("excludes", "") or "",
     )
 
 
@@ -527,16 +525,6 @@ class WorkflowSpec:
 
         self._validate_declarations()
 
-        # `excludes:` — two switches this run cannot have on together.
-        for param in self.settings:
-            if param.excludes and truthy(self.globals.get(param.name)) \
-                    and truthy(self.globals.get(param.excludes)):
-                other = next(p for p in self.settings if p.name == param.excludes)
-                raise ValueError(
-                    f"'{param.title}' and '{other.title}' cannot both be on: "
-                    "switch one of them off."
-                )
-
         for step in self.steps:
             step_class = get_step_class(step.step)
             declared = step_class.declared_params()
@@ -587,13 +575,6 @@ class WorkflowSpec:
         # and not the setting itself.
         settings_by_name = {param.name for param in self.settings}
         for param in self.settings:
-            if param.excludes and (param.excludes == param.name
-                                   or param.excludes not in settings_by_name):
-                raise ValueError(
-                    f"Workflow '{self.name}' setting '{param.name}' excludes "
-                    f"'{param.excludes}', which is not another declared setting. "
-                    f"It declares: {', '.join(sorted(settings_by_name))}."
-                )
             if not param.requires:
                 continue
             if param.requires == param.name or param.requires not in settings_by_name:
@@ -603,11 +584,8 @@ class WorkflowSpec:
                     f"It declares: {', '.join(sorted(settings_by_name))}."
                 )
 
-        # A profile names declared knobs only, with values that fit them, and
-        # never one a run would then refuse (`excludes:` against the
-        # defaults it leaves alone).
+        # A profile names declared knobs only, with values that fit them.
         knobs = self.declared_globals()
-        defaults = {name: param.default for name, param in knobs.items()}
         seen_profiles: set = set()
         for profile in self.profiles:
             where = f"Workflow '{self.name}' profile '{profile.name}'"
@@ -620,23 +598,15 @@ class WorkflowSpec:
                     f"{where} sets {', '.join(unknown)}, which this workflow does "
                     f"not declare as a setting or output."
                 )
-            values = dict(defaults)
             for key, value in profile.settings.items():
                 try:
-                    values[key] = coerce_param(value, knobs[key], where)
+                    coerced = coerce_param(value, knobs[key], where)
                 except ParamError as exc:
                     raise ValueError(f"{where}: {exc}") from None
-                if knobs[key].choices and not _among(values[key], knobs[key].choices):
+                if knobs[key].choices and not _among(coerced, knobs[key].choices):
                     raise ValueError(
                         f"{where}: {key}={value!r} is not one of "
                         f"{list(knobs[key].choices)!r}."
-                    )
-            for param in self.settings:
-                if param.excludes and truthy(values.get(param.name)) \
-                        and truthy(values.get(param.excludes)):
-                    raise ValueError(
-                        f"{where} turns on both '{param.name}' and "
-                        f"'{param.excludes}', which exclude each other."
                     )
 
         # A setting nothing reads is a dead control: it draws, it records an
