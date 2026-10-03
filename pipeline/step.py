@@ -96,6 +96,10 @@ class Param:
     setting is off, and follows it. Unlike an output, nothing is forced at
     run time: a setting behind an off switch is read by steps that are
     themselves `when:`-gated on that switch, so it simply goes unread.
+
+    `excludes`, also settings-only, names another switch this one cannot be
+    on together with: `WorkflowSpec.validate` refuses a run that turns both
+    on, so the refusal reaches the caller at submit time.
     """
 
     name: str
@@ -109,6 +113,7 @@ class Param:
     label: str = ""
     group: str = ""
     requires: str = ""
+    excludes: str = ""
 
     @property
     def title(self) -> str:

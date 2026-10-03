@@ -48,7 +48,8 @@ The three differ only in what they tell the UI:
     same `type`/`default`/`help`/`choices`/`minimum`/`maximum`/`advanced`
     vocabulary a step param has, plus a `label:`, a `group:` and an optional
     `requires:` naming a setting it is only meaningful with (drawn greyed
-    out while that one is off). The UI draws these, through the same widget
+    out while that one is off), and an optional `excludes:` naming a switch
+    it cannot be on together with (the run is refused). The UI draws these, through the same widget
     code it draws step params with. This is where `resolution` and
     `framing` live: what more than one step must agree on AND what somebody
     actually wants to change.
@@ -58,6 +59,11 @@ The three differ only in what they tell the UI:
     an optional `requires:` naming a setting it is only meaningful with.
   * `globals:` is what has no control: `output_root`, which the CLI and the
     run worker repoint at the run's own directory.
+
+A fourth block, `profiles:`, declares nothing new: each entry is a named set
+of values for settings and output switches already declared (a quality
+preset). The UI applies one to the controls and the run sees ordinary
+overrides; the API publishes them for a client to do the same.
 
 Everything else belongs in the step that consumes it, under that step's own
 `params:`, where it overrides the default the Step class declares (see
@@ -111,7 +117,7 @@ PARAM_TYPES: Dict[str, type] = {
 
 _SETTING_KEYS = frozenset({
     "name", "label", "type", "default", "help", "choices",
-    "minimum", "maximum", "advanced", "group", "requires",
+    "minimum", "maximum", "advanced", "group", "requires", "excludes",
 })
 
 _OUTPUT_KEYS = frozenset({
@@ -177,7 +183,48 @@ def setting_from_dict(data: Dict[str, Any]) -> Param:
         label=data.get("label", ""),
         group=data.get("group", ""),
         requires=data.get("requires", "") or "",
+        excludes=data.get("excludes", "") or "",
     )
+
+
+_PROFILE_KEYS = frozenset({"name", "label", "help", "settings"})
+
+
+@dataclass
+class Profile:
+    """A named preset: values for declared settings and output switches.
+
+    Applying one is the same as setting those controls by hand; whatever it
+    does not name keeps its value. "custom" is the UI's name for "apply
+    nothing", so a profile may not take it.
+    """
+
+    name: str
+    label: str = ""
+    help: str = ""
+    settings: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def title(self) -> str:
+        return self.label or self.name
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "Profile":
+        if not isinstance(data, dict) or "name" not in data:
+            raise ValueError(f"profiles: every entry needs a `name`; got {data!r}")
+        unknown = sorted(set(data) - _PROFILE_KEYS)
+        if unknown:
+            raise ValueError(
+                f"profile {data['name']!r}: unknown key(s) {', '.join(unknown)}. "
+                f"A profile accepts: {', '.join(sorted(_PROFILE_KEYS))}."
+            )
+        if str(data["name"]).lower() == "custom":
+            raise ValueError("profile 'custom' is reserved: it is the UI's 'apply nothing'.")
+        values = data.get("settings") or {}
+        if not isinstance(values, dict) or not values:
+            raise ValueError(f"profile {data['name']!r}: `settings` must be a non-empty mapping.")
+        return cls(name=data["name"], label=data.get("label", ""),
+                   help=data.get("help", ""), settings=dict(values))
 
 
 @dataclass
@@ -344,6 +391,9 @@ class WorkflowSpec:
     # because the order is the order the form draws them in.
     settings: List[Param] = field(default_factory=list)
     outputs: List["Output"] = field(default_factory=list)
+    # Presets over the two blocks above (`profiles:`), in the order the
+    # UI lists them.
+    profiles: List[Profile] = field(default_factory=list)
 
     # Every setting's and every output's current value lands in here, on top
     # of whatever the literal `globals:` block holds. That is the whole
@@ -371,6 +421,7 @@ class WorkflowSpec:
             )
         settings = [setting_from_dict(s) for s in data.get("settings") or ()]
         outputs = [Output.from_dict(o) for o in data.get("outputs") or ()]
+        profiles = [Profile.from_dict(p) for p in data.get("profiles") or ()]
 
         # Three passes onto one namespace, in declaration order, refusing a
         # name that appears twice. A setting with two homes is the failure
@@ -396,6 +447,7 @@ class WorkflowSpec:
             description=data.get("description", ""),
             settings=settings,
             outputs=outputs,
+            profiles=profiles,
             globals=merged,
             steps=[StepSpec.from_dict(s) for s in data["steps"]],
         )
@@ -475,6 +527,16 @@ class WorkflowSpec:
 
         self._validate_declarations()
 
+        # `excludes:` — two switches this run cannot have on together.
+        for param in self.settings:
+            if param.excludes and truthy(self.globals.get(param.name)) \
+                    and truthy(self.globals.get(param.excludes)):
+                other = next(p for p in self.settings if p.name == param.excludes)
+                raise ValueError(
+                    f"'{param.title}' and '{other.title}' cannot both be on: "
+                    "switch one of them off."
+                )
+
         for step in self.steps:
             step_class = get_step_class(step.step)
             declared = step_class.declared_params()
@@ -525,6 +587,13 @@ class WorkflowSpec:
         # and not the setting itself.
         settings_by_name = {param.name for param in self.settings}
         for param in self.settings:
+            if param.excludes and (param.excludes == param.name
+                                   or param.excludes not in settings_by_name):
+                raise ValueError(
+                    f"Workflow '{self.name}' setting '{param.name}' excludes "
+                    f"'{param.excludes}', which is not another declared setting. "
+                    f"It declares: {', '.join(sorted(settings_by_name))}."
+                )
             if not param.requires:
                 continue
             if param.requires == param.name or param.requires not in settings_by_name:
@@ -533,6 +602,42 @@ class WorkflowSpec:
                     f"'{param.requires}', which is not another declared setting. "
                     f"It declares: {', '.join(sorted(settings_by_name))}."
                 )
+
+        # A profile names declared knobs only, with values that fit them, and
+        # never one a run would then refuse (`excludes:` against the
+        # defaults it leaves alone).
+        knobs = self.declared_globals()
+        defaults = {name: param.default for name, param in knobs.items()}
+        seen_profiles: set = set()
+        for profile in self.profiles:
+            where = f"Workflow '{self.name}' profile '{profile.name}'"
+            if profile.name in seen_profiles:
+                raise ValueError(f"{where} is declared twice.")
+            seen_profiles.add(profile.name)
+            unknown = sorted(set(profile.settings) - set(knobs))
+            if unknown:
+                raise ValueError(
+                    f"{where} sets {', '.join(unknown)}, which this workflow does "
+                    f"not declare as a setting or output."
+                )
+            values = dict(defaults)
+            for key, value in profile.settings.items():
+                try:
+                    values[key] = coerce_param(value, knobs[key], where)
+                except ParamError as exc:
+                    raise ValueError(f"{where}: {exc}") from None
+                if knobs[key].choices and not _among(values[key], knobs[key].choices):
+                    raise ValueError(
+                        f"{where}: {key}={value!r} is not one of "
+                        f"{list(knobs[key].choices)!r}."
+                    )
+            for param in self.settings:
+                if param.excludes and truthy(values.get(param.name)) \
+                        and truthy(values.get(param.excludes)):
+                    raise ValueError(
+                        f"{where} turns on both '{param.name}' and "
+                        f"'{param.excludes}', which exclude each other."
+                    )
 
         # A setting nothing reads is a dead control: it draws, it records an
         # override, and the run ignores it. Cheap to catch, and the one new

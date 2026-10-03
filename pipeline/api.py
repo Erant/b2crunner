@@ -315,6 +315,9 @@ def _param_json(param) -> Dict[str, Any]:
         # As on an output: the setting this one is only meaningful with, or
         # "", so a client can grey its control out behind that switch.
         "requires": param.requires,
+        # The switch this one cannot be on together with, or "": a run
+        # with both on is refused.
+        "excludes": param.excludes,
         "help": " ".join(param.help.split()),
     }
 
@@ -399,7 +402,7 @@ def build_router(
 
     @router.get("/workflows/{name}")
     def get_workflow(name: str) -> Dict[str, Any]:
-        """The `settings:` and `outputs:` blocks the workflow declares.
+        """The `settings:`, `outputs:` and `profiles:` blocks the workflow declares.
 
         This is how a client discovers what `settings` keys are legal, and
         what each one accepts, without reading the YAML off the pod — the
@@ -420,6 +423,14 @@ def build_router(
                     "advanced": o.advanced, "always": o.always,
                 }
                 for o in outputs
+            ],
+            # Quality presets: the `settings` values each one stands for.
+            # Send them as a submission's `settings` (with anything else on
+            # top) to run at that profile.
+            "profiles": [
+                {"name": p.name, "label": p.title, "help": " ".join(p.help.split()),
+                 "settings": p.settings}
+                for p in spec.profiles
             ],
         }
 

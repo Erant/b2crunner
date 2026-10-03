@@ -256,6 +256,22 @@ def _widget_for(param: Param, value: Any, label: str, key: str):
     )
 
 
+def _widget_display(param: Param, value: Any) -> Any:
+    """`value` as `_widget_for`'s control for `param` shows it: what a
+    `gr.update(value=...)` from a quality profile has to hand it."""
+    if param.type is bool:
+        return bool(value)
+    if param.choices and param.type not in (int, float):
+        return _choice_label(value) if value is not None else None
+    if param.type in (list, dict):
+        return "" if value is None else yaml.safe_dump(value, default_flow_style=True).strip()
+    return value
+
+
+#: The quality-profile picker's "apply nothing" entry (pipeline/workflow.py `Profile`).
+CUSTOM_PROFILE = "custom"
+
+
 def _widget_value(param: Param, raw: Any) -> Any:
     """Bring a widget's value back to the param's declared type.
 
@@ -679,6 +695,24 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
                         with gr.Accordion("Settings", open=True):
                             if not plain and not advanced:
                                 gr.Markdown("_This pipeline declares no settings._")
+                            # The workflow's `profiles:`: picking one sets the
+                            # controls it names (their own .change handlers file
+                            # the values in param_state, as if set by hand);
+                            # Custom leaves them as they are. Editing any
+                            # setting by hand afterwards drops the picker
+                            # back to Custom.
+                            profile_in = None
+                            if spec.profiles:
+                                profile_in = gr.Dropdown(
+                                    choices=[(p.title, p.name) for p in spec.profiles]
+                                    + [("Custom", CUSTOM_PROFILE)],
+                                    value=CUSTOM_PROFILE, label="Quality profile",
+                                    info=" ".join(
+                                        [f"{p.title}: {' '.join(p.help.split())}" for p in spec.profiles]
+                                        + ["Custom: the settings as they are below."]
+                                    ),
+                                    interactive=True, key=f"{name}:profile",
+                                )
                             controls = {}
                             for param in plain:
                                 controls[param.name] = draw(param)
@@ -705,6 +739,45 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
                                     lambda on: gr.update(interactive=truthy(on)),
                                     inputs=[source], outputs=[controls[param.name]],
                                 )
+
+                            if profile_in is not None:
+                                knobs = {p.name: p for p in panel}
+                                covered = sorted({
+                                    key for profile in spec.profiles
+                                    for key in profile.settings if key in controls
+                                })
+                                wanted = {
+                                    profile.name: {
+                                        key: spec.coerce_global(key, value)
+                                        for key, value in profile.settings.items()
+                                        if key in controls
+                                    }
+                                    for profile in spec.profiles
+                                }
+
+                                def apply_profile(choice):
+                                    values = wanted.get(choice)
+                                    if values is None:
+                                        return [gr.update() for _ in covered]
+                                    return [
+                                        gr.update(value=_widget_display(knobs[key], values[key]))
+                                        if key in values else gr.update()
+                                        for key in covered
+                                    ]
+
+                                profile_in.change(
+                                    apply_profile, inputs=[profile_in],
+                                    outputs=[controls[key] for key in covered],
+                                )
+
+                                # Any setting edited by hand (.input: the
+                                # person, not a profile's own gr.update)
+                                # means the panel is no longer the profile.
+                                for control in controls.values():
+                                    control.input(
+                                        lambda: gr.update(value=CUSTOM_PROFILE),
+                                        inputs=None, outputs=[profile_in],
+                                    )
 
                     start_btn = gr.Button("Start run", variant="primary")
                 with gr.Column(scale=1):

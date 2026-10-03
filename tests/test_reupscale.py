@@ -1,11 +1,11 @@
-"""Re-upscale (steps/reupscale.py): camera scaling and interpolation, the keep step, and the wiring."""
+"""Re-upscale (steps/reupscale.py): camera scaling and interpolation, the oversampled views, and the wiring."""
 import tempfile
 import unittest
 from pathlib import Path
 
 import numpy as np
 
-from pipeline.steps.reupscale import ReupscaleKeepStep, interpolate_cameras, scale_cameras
+from pipeline.steps.reupscale import ReupscaleInputsStep, interpolate_cameras, scale_cameras
 from pipeline.workflow import WorkflowSpec, when_truthy
 
 WORKFLOWS = sorted((Path(__file__).resolve().parent.parent / "pipeline" / "workflows").glob("helical*.yaml"))
@@ -60,36 +60,118 @@ class TestCameras(unittest.TestCase):
         self.assertEqual(len(interpolate_cameras(cams, 0)), len(cams))
 
 
-class TestKeep(unittest.TestCase):
-    def test_keeps_the_training_cameras(self):
-        cams = interpolate_cameras(_orbit(), 4)
-        images = [np.full((2, 2, 3), i, np.uint8) for i in range(len(cams))]
-        out = ReupscaleKeepStep().run({"images": images, "cameras": cams, "keep_every": 5}, {})
-        self.assertEqual([int(im[0, 0, 0]) for im in out["images"]], list(range(0, len(cams), 5)))
-        self.assertEqual(len(out["cameras"]), 6)
+def _run_inputs(inputs, params, seen=None):
+    """ReupscaleInputsStep.run with the rasteriser faked: view i renders as value i, alpha 0.25."""
+    from unittest import mock
 
-    def test_refuses_a_count_that_is_not_a_densified_path(self):
-        cams = _orbit()
+    def fake(**kw):
+        if seen is not None:
+            seen.update(kw)
+        n = len(kw["cameras"])
+        return ([np.full((4, 4, 3), i, np.uint8) for i in range(n)],
+                [np.full((4, 4), 0.25, np.float32) for _ in range(n)])
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ply = Path(tmp) / "s.ply"
+        ply.write_bytes(b"")
+        with mock.patch("pipeline.steps.splat._rasterize", fake), \
+                mock.patch("body2colmap.splat_scene.SplatScene.from_ply", lambda path: None):
+            return ReupscaleInputsStep().run({"splat_path": str(ply), **inputs},
+                                             ReupscaleInputsStep.resolve_params(params))
+
+
+class TestOversample(unittest.TestCase):
+    def _inputs(self, n=6, labels=True):
+        return {"cameras": _orbit(n), "image_names": [f"frame_{i + 1:05d}_.png" for i in range(n)],
+                "masks": [np.ones((8, 8), np.float32)] * n,
+                "labels": [np.full((8, 8), 3, np.uint8)] * n if labels else None}
+
+    def test_every_view_goes_to_the_retraining(self):
+        out = _run_inputs(self._inputs(), {"inbetween": 4, "target_width": 4, "target_height": 4})
+        n = (6 - 1) * 5 + 1
+        for key in ("images", "cameras", "image_names", "masks", "labels"):
+            self.assertEqual(len(out[key]), n, key)
+        self.assertNotIn("keep_every", out)
+        self.assertEqual(len(set(Path(name).stem for name in out["image_names"])), n)
+
+    def test_training_cameras_keep_their_frames_names_mattes_and_labels(self):
+        out = _run_inputs(self._inputs(), {"inbetween": 4, "target_width": 4, "target_height": 4})
+        for i in range(len(out["images"])):
+            train = i % 5 == 0
+            with self.subTest(view=i):
+                if train:
+                    self.assertEqual(out["image_names"][i], f"frame_{i // 5 + 1:05d}_.png")
+                    self.assertEqual(int(out["masks"][i].max()), 255)
+                    self.assertEqual(int(out["labels"][i][0, 0]), 3)
+                else:
+                    self.assertEqual(out["image_names"][i], f"frame_{i // 5 + 1:05d}__ib{i % 5}.png")
+                    self.assertEqual(int(out["masks"][i].max()), 64)      # the render's alpha, 0.25
+                    self.assertIsNone(out["labels"][i])
+                self.assertEqual(out["masks"][i].dtype, np.uint8)
+                self.assertEqual(out["masks"][i].shape, (4, 4))
+
+    def test_no_inbetween_is_the_training_cameras(self):
+        inputs = self._inputs(labels=False)
+        out = _run_inputs(inputs, {"inbetween": 0, "target_width": 4, "target_height": 4})
+        self.assertEqual(out["image_names"], inputs["image_names"])
+        self.assertIsNone(out["labels"])
+
+    def test_refuses_names_that_do_not_match_the_cameras(self):
+        inputs = self._inputs()
+        inputs["image_names"] = inputs["image_names"][:-1]
         with self.assertRaises(ValueError):
-            ReupscaleKeepStep().run({"images": [np.zeros((2, 2, 3), np.uint8)] * 6, "cameras": cams, "keep_every": 4}, {})
+            _run_inputs(inputs, {})
+
+
+class TestPartialLabels(unittest.TestCase):
+    def test_a_view_without_a_class_map_writes_no_sidecar(self):
+        from pipeline.steps.brush import _labels, write_labels
+
+        labels = _labels({"labels": [np.zeros((2, 2), np.uint8), None, np.ones((2, 2), np.uint8)]}, 3)
+        with tempfile.TemporaryDirectory() as tmp:
+            write_labels(Path(tmp), ["a.png", "b.png", "c.png"], labels)
+            self.assertEqual(sorted(p.name for p in (Path(tmp) / "labels").iterdir()), ["a.png", "c.png"])
+        self.assertIsNone(_labels({"labels": [None, None]}, 2))
 
 
 class TestWiring(unittest.TestCase):
-    def test_one_render_and_one_upscale_per_low_vram_setting(self):
+    def test_one_render_and_one_upscale_per_oversample_setting(self):
+        from pipeline.templating import resolve
+
         for path in WORKFLOWS:
             spec = WorkflowSpec.from_yaml(str(path))
             by_id = {s.id: s for s in spec.steps}
-            for low_vram in (True, False):
-                with self.subTest(workflow=path.name, low_vram=low_vram):
-                    g = {"export_ply": True, "reupscale": True, "low_vram": low_vram}
-                    from pipeline.templating import resolve
-                    live = [s.id for s in spec.steps if s.id.startswith("reupscale")
-                            and when_truthy(resolve(s.when, {"globals": g}))]
-                    render = "reupscale_render" if low_vram else "reupscale_render_batched"
-                    sr = "reupscale_sr" if low_vram else "reupscale_sr_batched"
-                    self.assertEqual(live, [render, sr, "reupscale_keep", "reupscale_train"])
-                    batch = by_id[sr].params["batch_size"]
-                    self.assertEqual(by_id[render].params["inbetween"] + 1, batch if not low_vram else 1)
+            for oversample in (True, False):
+                for low_vram in (True, False):
+                    with self.subTest(workflow=path.name, oversample=oversample, low_vram=low_vram):
+                        g = {"export_ply": True, "reupscale": True, "batched_oversample": oversample,
+                             "low_vram": low_vram}
+                        live = [s.id for s in spec.steps if s.id.startswith("reupscale")
+                                and when_truthy(resolve(s.when, {"globals": g}))]
+                        render = "reupscale_render_batched" if oversample else "reupscale_render"
+                        sr = "reupscale_sr_batched" if oversample else "reupscale_sr"
+                        self.assertEqual(live, [render, sr, "reupscale_train"])
+                        batch = by_id[sr].params["batch_size"]
+                        self.assertEqual(by_id[render].params["inbetween"] + 1, batch if oversample else 1)
+                        self.assertEqual(by_id["reupscale_train"].inputs["image_names"],
+                                         by_id[render].outputs["image_names"])
+
+    def test_batched_oversample_sits_below_low_vram_and_refuses_it(self):
+        for path in WORKFLOWS:
+            with self.subTest(workflow=path.name):
+                spec = WorkflowSpec.from_yaml(str(path))
+                names = [p.name for p in spec.settings]
+                self.assertEqual(names.index("batched_oversample"), names.index("low_vram") + 1)
+                setting = spec.settings[names.index("batched_oversample")]
+                self.assertIs(setting.default, False)
+                self.assertEqual(setting.excludes, "low_vram")
+                spec.validate()
+                for both in ({"batched_oversample": True}, {"low_vram": True}):
+                    spec.globals.update({"batched_oversample": False, "low_vram": False, **both})
+                    spec.validate()
+                spec.globals.update({"batched_oversample": True, "low_vram": True})
+                with self.assertRaisesRegex(ValueError, "Batched oversample.*Low VRAM"):
+                    spec.validate()
 
     def test_the_retraining_replaces_the_deliverable_and_keeps_the_first(self):
         for path in WORKFLOWS:
@@ -99,7 +181,7 @@ class TestWiring(unittest.TestCase):
             with self.subTest(workflow=path.name):
                 final, train = by_id["train_final_splat"], by_id["reupscale_train"]
                 self.assertLess(ids.index("train_final_splat"), ids.index("reupscale_render"))
-                self.assertLess(ids.index("reupscale_keep"), ids.index("reupscale_train"))
+                self.assertLess(ids.index("reupscale_sr_batched"), ids.index("reupscale_train"))
                 self.assertLess(ids.index("reupscale_train"), ids.index("export_subject"))
                 self.assertEqual(train.params["export_dir"], final.params["export_dir"])
                 self.assertEqual(train.params["export_name"], final.params["export_name"])
@@ -115,23 +197,9 @@ class TestWiring(unittest.TestCase):
 
 class TestShDegree(unittest.TestCase):
     def _render(self, params):
-        from unittest import mock
-        from pipeline.steps.reupscale import ReupscaleInputsStep
-
         seen = {}
-
-        def fake(**kw):
-            seen.update(kw)
-            n = len(kw["cameras"])
-            return [np.zeros((4, 4, 3), np.uint8)] * n, [np.ones((4, 4), np.float32)] * n
-
-        with tempfile.TemporaryDirectory() as tmp:
-            ply = Path(tmp) / "s.ply"
-            ply.write_bytes(b"")
-            with mock.patch("pipeline.steps.splat._rasterize", fake), \
-                    mock.patch("body2colmap.splat_scene.SplatScene.from_ply", lambda path: None):
-                ReupscaleInputsStep().run({"splat_path": str(ply), "cameras": _orbit()},
-                                          ReupscaleInputsStep.resolve_params(params))
+        cams = _orbit()
+        _run_inputs({"cameras": cams, "image_names": [f"f{i}.png" for i in range(len(cams))]}, params, seen)
         return seen["sh_degree"]
 
     def test_defaults_to_two(self):

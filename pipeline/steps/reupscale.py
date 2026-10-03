@@ -20,14 +20,16 @@ SeedVR2 will hand back, so the retraining's sidecars line up with its
 frames. The splat it starts from is copied aside first: the retraining
 exports over it.
 
-Batched upscales (`inbetween` > 0, for a card that holds a SeedVR2 batch):
+Batched oversample (`inbetween` > 0, the `batched_oversample` setting):
 SeedVR2 treats a batch as video and expects little motion between its
 frames, and the training cameras are a helix ~2 degrees apart. So
 `inbetween` cameras are interpolated between every pair of neighbouring
 ones (the frames are in path order across the passes: 41 + 81 + 40 along
-one helix), the whole sequence is upscaled, and `reupscale_keep` keeps the
-frames at the training cameras for the retraining. With `inbetween` equal
-to the batch size minus 1, a batch spans one interval of the original path.
+one helix), the whole sequence is upscaled, and the retraining is fed all
+of it: 806 views for 162. The in-betweens have no frame of their own, so
+their matte is the render's alpha and they carry no class map (the trainer
+reads the labels/ sidecar per view); the training cameras keep their
+names, the in-betweens are named after the camera before them.
 """
 
 from __future__ import annotations
@@ -123,15 +125,17 @@ def scale_cameras(cameras: List[Any], width: int, height: int) -> List[Any]:
 class ReupscaleInputsStep(Step):
     """Render the trained splat at its cameras for a SeedVR2 pass, with sidecars at the upscaled size.
 
-    inputs: {"splat_path": str, "cameras": List[Camera],
+    inputs: {"splat_path": str, "cameras": List[Camera], "image_names": List[str] — the training cameras',
              "masks": Optional[List[np.ndarray]] — the frames' mattes, any size,
              "labels": Optional[List[np.ndarray]] uint8 class ids, any size}
     outputs: {"images": List[np.ndarray] BGR uint8 at render_width x render_height (for seedvr2), the
                         training cameras and `inbetween` interpolated ones between each pair of them,
               "cameras": List[Camera] the same, at the render size (seedvr2 rescales them with its frames),
-              "keep_every": int — the training cameras are every keep_every-th of them (reupscale_keep),
-              "masks": List[np.ndarray] float32 at target_width x target_height, one per training camera,
-              "labels": Optional[List[np.ndarray]] uint8 at the target size, one per training camera}
+              "image_names": List[str] one per view: the training cameras' own, `<stem>_ibK.png` between,
+              "masks": List[np.ndarray] uint8 at target_width x target_height, one per view (the
+                       in-betweens': the render's alpha),
+              "labels": Optional[List[Optional[np.ndarray]]] uint8 at the target size, one per view,
+                        None at the in-betweens}
     """
 
     PARAMS = (
@@ -153,10 +157,13 @@ class ReupscaleInputsStep(Step):
     def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
         splat_path = Path(inputs["splat_path"])
         cameras = list(inputs["cameras"])
+        names = list(inputs["image_names"])
         masks: Optional[List[np.ndarray]] = inputs.get("masks")
         labels: Optional[List[np.ndarray]] = inputs.get("labels")
         if not cameras:
             raise ValueError("reupscale_inputs: no cameras")
+        if len(names) != len(cameras):
+            raise ValueError(f"reupscale_inputs: {len(names)} image names for {len(cameras)} cameras")
         for name, maps in (("masks", masks), ("labels", labels)):
             if maps is not None and len(maps) != len(cameras):
                 raise ValueError(f"reupscale_inputs: {len(maps)} {name} for {len(cameras)} cameras")
@@ -181,38 +188,26 @@ class ReupscaleInputsStep(Step):
             width=rw, height=rh, bg_color=(0.5, 0.5, 0.5), render_path=params["render_path"],
             sh_degree=int(params["sh_degree"]))
 
-        # The mattes the retraining needs: the frames' own where wired (what the deliverable was fitted to),
-        # else the render's alpha. Bilinear up to the size SeedVR2 hands back.
-        source = masks if masks is not None else alphas
-        out_masks = [np.clip(cv2.resize(normalize_mask(m), (tw, th), interpolation=cv2.INTER_LINEAR), 0.0, 1.0)
-                     .astype(np.float32) for m in source]
-        out_labels = None
-        if labels is not None:
-            out_labels = [cv2.resize(np.asarray(l, np.uint8), (tw, th), interpolation=cv2.INTER_NEAREST) for l in labels]
+        # The mattes the retraining needs: the frames' own at the training cameras where wired (what the
+        # deliverable was fitted to), the render's alpha elsewhere. Bilinear up to the size SeedVR2 hands back,
+        # uint8: 806 float32 mattes at 1080x1920 would be 6.7 GB of host memory.
+        stride = inbetween + 1
+        out_masks: List[np.ndarray] = []
+        out_names: List[str] = []
+        out_labels: Optional[List[Optional[np.ndarray]]] = [] if labels is not None else None
+        for i, alpha in enumerate(alphas):
+            train = i % stride == 0
+            src = masks[i // stride] if train and masks is not None else alpha
+            out_masks.append(np.clip(cv2.resize(normalize_mask(src), (tw, th), interpolation=cv2.INTER_LINEAR)
+                                     * 255.0 + 0.5, 0, 255).astype(np.uint8))
+            if out_labels is not None:
+                out_labels.append(cv2.resize(np.asarray(labels[i // stride], np.uint8), (tw, th),
+                                             interpolation=cv2.INTER_NEAREST) if train else None)
+            name = names[i // stride]
+            out_names.append(name if train else f"{Path(name).stem}_ib{i % stride}{Path(name).suffix or '.png'}")
         logger.info("reupscale_inputs: %d views of %s (%d training cameras, %d between each pair) rendered at %dx%d "
-                    "with SH bands 0..%d for the upscale; mattes%s at %dx%d", len(images), splat_path.name, len(cameras), inbetween,
-                    rw, rh, int(params["sh_degree"]),
-                    " and class maps" if out_labels is not None else "", tw, th)
-        return {"images": images, "cameras": render_cams, "keep_every": inbetween + 1, "masks": out_masks,
+                    "with SH bands 0..%d for the upscale and the retraining; mattes%s at %dx%d", len(images),
+                    splat_path.name, len(cameras), inbetween, rw, rh, int(params["sh_degree"]),
+                    " and class maps (training cameras only)" if out_labels is not None else "", tw, th)
+        return {"images": images, "cameras": render_cams, "image_names": out_names, "masks": out_masks,
                 "labels": out_labels}
-
-
-@register_step("reupscale_keep")
-class ReupscaleKeepStep(Step):
-    """Keep every `keep_every`-th upscaled frame and its camera: the training cameras out of a densified path.
-
-    inputs: {"images": List[np.ndarray], "cameras": List[Camera], "keep_every": int}
-    outputs: {"images", "cameras"} — the kept ones, in order
-    """
-
-    PARAMS = ()
-
-    def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
-        images, cameras = list(inputs["images"]), list(inputs["cameras"])
-        every = int(inputs["keep_every"])
-        if len(images) != len(cameras):
-            raise ValueError(f"reupscale_keep: {len(images)} images for {len(cameras)} cameras")
-        if every < 1 or (len(images) - 1) % every != 0:
-            raise ValueError(f"reupscale_keep: {len(images)} frames are not training cameras every {every}")
-        logger.info("reupscale_keep: %d of %d upscaled frames (every %d)", len(images[::every]), len(images), every)
-        return {"images": images[::every], "cameras": cameras[::every]}

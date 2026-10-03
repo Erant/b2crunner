@@ -342,6 +342,7 @@ def show_params(args: argparse.Namespace) -> int:
                 " (advanced)" if param.advanced else "",
                 f" [{param.group}]" if param.group else "",
                 f" (needs {param.requires})" if param.requires else "",
+                f" (not with {param.excludes})" if param.excludes else "",
             ])
             print(f"  {param.name:<28} {_short(spec.globals[param.name])}{flags}")
             if param.help:
@@ -353,6 +354,12 @@ def show_params(args: argparse.Namespace) -> int:
             needs = f" (needs {output.requires})" if output.requires else ""
             value = "always" if output.always else _short(spec.globals[output.name])
             print(f"  {output.name:<28} {value} -> {output.directory}/{needs}")
+
+    if spec.profiles:
+        print("\nprofiles:  (presets; pass their values as --param <name>=<value>)")
+        for profile in spec.profiles:
+            values = " ".join(f"{k}={_short(v)}" for k, v in profile.settings.items())
+            print(f"  {profile.name:<28} {values}")
 
     plumbing = {
         key: value for key, value in spec.globals.items()

@@ -625,10 +625,15 @@ def _loss_weights(inputs: Dict[str, Any], count: int) -> Optional[List[np.ndarra
     return list(weights)
 
 
-def _labels(inputs: Dict[str, Any], count: int) -> Optional[List[np.ndarray]]:
-    """The `labels` input, checked against the training views like `weights`."""
+def _labels(inputs: Dict[str, Any], count: int) -> Optional[List[Optional[np.ndarray]]]:
+    """The `labels` input, checked against the training views like `weights`.
+
+    An entry may be None: that view has no class map and casts no vote (the
+    trainer reads the labels/ sidecar per view). reupscale_inputs' in-between
+    cameras are the case.
+    """
     labels = inputs.get("labels")
-    if labels is None or len(labels) == 0:
+    if labels is None or len(labels) == 0 or all(label is None for label in labels):
         return None
     if len(labels) != count:
         raise ValueError(
@@ -640,28 +645,33 @@ def _labels(inputs: Dict[str, Any], count: int) -> Optional[List[np.ndarray]]:
 
 
 def write_labels(colmap_dir: Path, image_names: Sequence[str],
-                 labels: Optional[Sequence[np.ndarray]]) -> None:
+                 labels: Optional[Sequence[Optional[np.ndarray]]]) -> None:
     """Write the training views' class maps as b2ctrain's `labels/` sidecar.
 
     Single-channel 8-bit PNGs of class ids, one per frame, named like the
     `masks/` sidecar so the trainer matches them by stem. The ids are
     written as they are — NOT through `mask_to_alpha_u8`, which scales a
     [0, 1] map to 0..255 and would turn class 3 into 255. Nothing is written
-    when there are none; the directory's absence means "no vote".
+    when there are none; the directory's absence means "no vote", and so
+    does a view's own None.
     """
     if not labels:
         return
     labels_dir = colmap_dir / "labels"
     labels_dir.mkdir(exist_ok=True)
+    written = 0
     for label, filename in zip(labels, image_names):
+        if label is None:
+            continue
         label = np.asarray(label)
         if label.ndim != 2:
             raise ValueError(f"labels must be HxW class-id maps, got shape {label.shape}")
         cv2.imwrite(str(labels_dir / _sidecar_name(filename)), label.astype(np.uint8))
+        written += 1
     logger.info(
-        "brush: %d training view(s) carry a labels/ sidecar (per-pixel class "
+        "brush: %d of %d training view(s) carry a labels/ sidecar (per-pixel class "
         "ids); the trainer votes them onto the splats at export as seg_label / "
-        "seg_conf", len(labels),
+        "seg_conf", written, len(labels),
     )
 
 
@@ -846,8 +856,9 @@ class BrushStep(Step):
              "normal_maps": Optional[List[np.ndarray]] HxWx3 float32 [-1,1],
              "weights": Optional[List[np.ndarray]] float32 [0,1], a per-pixel
                         loss weight per training view (weights/ sidecar),
-             "labels": Optional[List[np.ndarray]] HxW uint8 class ids per
-                        training view (sapiens2_seg's batched `labels`),
+             "labels": Optional[List[Optional[np.ndarray]]] HxW uint8 class ids per
+                        training view (sapiens2_seg's batched `labels`; None
+                        for a view without one),
                         written as the labels/ sidecar; the trainer votes
                         them onto the splats and the exported .ply carries
                         `seg_label` / `seg_conf` per Gaussian (b2ctrain
