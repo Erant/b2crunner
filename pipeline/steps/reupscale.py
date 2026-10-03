@@ -142,6 +142,10 @@ class ReupscaleInputsStep(Step):
         Param("inbetween", int, 0,
               "Cameras interpolated between every pair of neighbouring ones, for a batched upscale that expects "
               "little motion between frames; 0 renders the training cameras alone", minimum=0),
+        Param("sh_degree", int, 2,
+              "Highest spherical-harmonic band the views are rendered with, 0..3 (render_splat's `sh_degree`: "
+              "clamped to the splat's own degree; 0 is the DC colour alone). 2 drops band 3, the most "
+              "view-dependent, from what SeedVR2 sees and the retraining fits", minimum=0, maximum=3),
         Param("keep_copy", str, "", "Copy the splat here before the retraining exports over it"),
         Param("render_path", str, "brush-splat-render", "The rasteriser binary", advanced=True),
     )
@@ -174,7 +178,8 @@ class ReupscaleInputsStep(Step):
         images, alphas = _rasterize(
             scene=SplatScene.from_ply(str(splat_path)), splat_path=str(splat_path), cameras=render_cams,
             image_names=[f"frame_{i + 1:05d}_.png" for i in range(len(render_cams))],
-            width=rw, height=rh, bg_color=(0.5, 0.5, 0.5), render_path=params["render_path"])
+            width=rw, height=rh, bg_color=(0.5, 0.5, 0.5), render_path=params["render_path"],
+            sh_degree=int(params["sh_degree"]))
 
         # The mattes the retraining needs: the frames' own where wired (what the deliverable was fitted to),
         # else the render's alpha. Bilinear up to the size SeedVR2 hands back.
@@ -185,7 +190,8 @@ class ReupscaleInputsStep(Step):
         if labels is not None:
             out_labels = [cv2.resize(np.asarray(l, np.uint8), (tw, th), interpolation=cv2.INTER_NEAREST) for l in labels]
         logger.info("reupscale_inputs: %d views of %s (%d training cameras, %d between each pair) rendered at %dx%d "
-                    "for the upscale; mattes%s at %dx%d", len(images), splat_path.name, len(cameras), inbetween, rw, rh,
+                    "with SH bands 0..%d for the upscale; mattes%s at %dx%d", len(images), splat_path.name, len(cameras), inbetween,
+                    rw, rh, int(params["sh_degree"]),
                     " and class maps" if out_labels is not None else "", tw, th)
         return {"images": images, "cameras": render_cams, "keep_every": inbetween + 1, "masks": out_masks,
                 "labels": out_labels}

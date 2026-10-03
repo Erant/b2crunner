@@ -4762,6 +4762,9 @@ steps:
       target_width: 1080
       target_height: 1920
       inbetween: 0
+      # The upscale and the retraining see bands 0..2: band 3, the most
+      # view-dependent, left out of the frames they are given.
+      sh_degree: 2
       keep_copy: ${globals.output_root}/debug/reupscale/final_before_reupscale.ply
     outputs:
       images: scene.reupscale.render_images
@@ -4794,6 +4797,9 @@ steps:
       target_width: 1080
       target_height: 1920
       inbetween: 4
+      # The upscale and the retraining see bands 0..2: band 3, the most
+      # view-dependent, left out of the frames they are given.
+      sh_degree: 2
       keep_copy: ${globals.output_root}/debug/reupscale/final_before_reupscale.ply
     outputs:
       images: scene.reupscale.render_images

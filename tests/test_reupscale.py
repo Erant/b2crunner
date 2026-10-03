@@ -1,4 +1,5 @@
 """Re-upscale (steps/reupscale.py): camera scaling and interpolation, the keep step, and the wiring."""
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -110,6 +111,42 @@ class TestWiring(unittest.TestCase):
                 self.assertNotIn("normal_maps", train.inputs)
                 setting = next(p for p in spec.settings if p.name == "reupscale")
                 self.assertIs(setting.default, False)
+
+
+class TestShDegree(unittest.TestCase):
+    def _render(self, params):
+        from unittest import mock
+        from pipeline.steps.reupscale import ReupscaleInputsStep
+
+        seen = {}
+
+        def fake(**kw):
+            seen.update(kw)
+            n = len(kw["cameras"])
+            return [np.zeros((4, 4, 3), np.uint8)] * n, [np.ones((4, 4), np.float32)] * n
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ply = Path(tmp) / "s.ply"
+            ply.write_bytes(b"")
+            with mock.patch("pipeline.steps.splat._rasterize", fake), \
+                    mock.patch("body2colmap.splat_scene.SplatScene.from_ply", lambda path: None):
+                ReupscaleInputsStep().run({"splat_path": str(ply), "cameras": _orbit()},
+                                          ReupscaleInputsStep.resolve_params(params))
+        return seen["sh_degree"]
+
+    def test_defaults_to_two(self):
+        self.assertEqual(self._render({}), 2)
+
+    def test_reaches_the_rasteriser(self):
+        self.assertEqual(self._render({"sh_degree": 0}), 0)
+
+    def test_every_instance_renders_at_two(self):
+        for path in WORKFLOWS:
+            spec = WorkflowSpec.from_yaml(str(path))
+            for step in spec.steps:
+                if step.step == "reupscale_inputs":
+                    with self.subTest(workflow=path.name, step=step.id):
+                        self.assertEqual(step.params["sh_degree"], 2)
 
 
 if __name__ == "__main__":
