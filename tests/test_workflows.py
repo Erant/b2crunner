@@ -1223,7 +1223,11 @@ class TestWorkflowFiles(unittest.TestCase):
         # all: it is train_final_splat's frames and cameras, after
         # refine_cameras_final, trained briefly for their geometry
         # (steps/relight.py). The final solve covers it.
-        unrefined = {"reoutline_train_splat", "extend_train_splat", "relight_pretrain"}
+        #
+        # The re-upscale's retraining (steps/reupscale.py) trains on renders
+        # of the final splat at those same solved cameras: registered by
+        # construction, nothing to solve.
+        unrefined = {"reoutline_train_splat", "extend_train_splat", "relight_pretrain", "reupscale_train"}
         for path in _workflows():
             spec = WorkflowSpec.from_yaml(str(path))
             ids = [s.id for s in spec.steps]
@@ -1837,10 +1841,14 @@ class TestTheIntermediateSplatIsKept(unittest.TestCase):
 
         spec = WorkflowSpec.from_yaml(resolve_workflow("helical"))
         scope = {"globals": dict(spec.globals, output_root="/out")}
+        # The re-upscale's retraining exports over the deliverable on purpose
+        # (steps/reupscale.py copies the splat aside first), so it is the one
+        # training left out; that it lands exactly on train_final_splat's path
+        # is checked in test_reupscale.
         exports = [
             (resolve(step.params, scope).get("export_dir"),
              resolve(step.params, scope).get("export_name"))
-            for step in spec.steps if step.step == "brush"
+            for step in spec.steps if step.step == "brush" and step.id != "reupscale_train"
         ]
         self.assertEqual(len(exports), len(set(exports)), f"two trainings share a path: {exports}")
 

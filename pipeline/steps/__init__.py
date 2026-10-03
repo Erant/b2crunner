@@ -31,6 +31,7 @@ from . import reference_sheet  # noqa: F401
 from . import reference_view  # noqa: F401
 from . import refine_cameras  # noqa: F401
 from . import relight  # noqa: F401
+from . import reupscale  # noqa: F401
 from . import render  # noqa: F401
 from . import resize  # noqa: F401
 from . import rmbg  # noqa: F401

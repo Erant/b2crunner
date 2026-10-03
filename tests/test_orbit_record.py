@@ -223,7 +223,11 @@ class TestTheWiring(unittest.TestCase):
                 # rig_subject (the Rig splat switch) rigs the subject file in place.
                 self.assertEqual(order[-1], "rig_subject")
                 self.assertEqual(order[-2], "export_subject")
-                self.assertEqual(order[-3], "train_final_splat")
+                # The last training before the subject file: the final one, or the re-upscale's retraining of it
+                # (the `reupscale` switch), which writes the same splat path.
+                self.assertEqual(order[-3], "reupscale_train")
+                self.assertLess(order.index("train_final_splat"), order.index("reupscale_render"))
+                self.assertEqual(steps["reupscale_train"].outputs["splat_path"], steps["train_final_splat"].outputs["splat_path"])
                 self.assertNotIn("embed_orbit_record", order)   # no header records any more
                 self.assertEqual(steps["snapshot_orbit"].when, "${globals.export_ply}")
                 self.assertEqual(steps["export_subject"].when,

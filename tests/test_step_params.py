@@ -155,7 +155,7 @@ class TestEveryRegisteredStep(unittest.TestCase):
         """A step with no declaration is invisible to the UI and unchecked
         by `WorkflowSpec.validate`. The ones that legitimately take none are
         named here so adding another is a deliberate act."""
-        takes_none = {"generate_firstlast", "embed_orbit_record"}
+        takes_none = {"generate_firstlast", "embed_orbit_record", "reupscale_keep"}   # keep: its stride is an input
         for name, step_class in sorted(STEP_REGISTRY.items()):
             if name.startswith("_test"):
                 continue

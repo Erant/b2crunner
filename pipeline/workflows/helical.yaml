@@ -585,6 +585,27 @@ settings:
       (steps/seedvr2.py). Off is the shorter pipeline that used to be a
       separate workflow.
 
+  - name: reupscale
+    label: Re-upscale
+    type: bool
+    default: false
+    advanced: true
+    help: >-
+      After the deliverable training, render the splat at its own cameras at
+      720x1280, upscale those renders with SeedVR2 (the Upscale step's
+      settings) and train the splat again on them. Independent of Upscale:
+      with Upscale off the first training runs on the 720p frames and the
+      re-upscale is the same either way, which is the A/B for whether the
+      first upscale earns its time. Measured 2026-10-02 on one subject
+      (plain trainer flags): band-limited sharpness +63 %, the head +77 %,
+      the same between the training views, for ~2 dB of fidelity to the real
+      frames (1.4 of it from retraining on renders at all). The retraining
+      keeps the final training's alignment loop and body rig (SeedVR2
+      upscales each frame on its own, so its detail is not guaranteed to line
+      up between them) and drops the normal maps; the first splat is kept as
+      debug/reupscale/final_before_reupscale.ply. ~15 min of SeedVR2 on a
+      4070 Ti plus a training.
+
   - name: extra_debug
     label: Extra debug outputs
     type: bool
@@ -4683,6 +4704,171 @@ steps:
     outputs:
       # Overwrites the stage-2 intermediate, so Dataset.to_disk's splat.ply
       # and the CLI's closing "splat:" line both name the final one.
+      splat_path: dataset.splat_path
+
+  # Re-upscale (`reupscale`, steps/reupscale.py): the deliverable splat's own
+  # renders at 720x1280, SeedVR2 to 1080x1920, and the splat trained again on
+  # them. Its renders agree between views by construction, so the detail the
+  # upscale adds survives the retraining (measured: band-limited sharpness
+  # +63 %, head +77 %, the same at cameras between the training views). The
+  # splat before it is copied to debug/reupscale/ first: the retraining
+  # exports over ply/scene.ply and takes dataset.splat_path, so export_subject
+  # and rig_subject below work from the re-upscaled one.
+  # With Low VRAM, the training cameras alone, upscaled one frame at a time
+  # (the Upscale step's batch 1: what fits a 12 GB card).
+  - id: reupscale_render
+    step: reupscale_inputs
+    dispatch: in_process
+    when:
+      - ${globals.export_ply}
+      - ${globals.reupscale}
+      - ${globals.low_vram}
+    inputs:
+      splat_path: dataset.splat_path
+      cameras: dataset.cameras
+      masks: dataset.masks
+      labels: scene.seg_labels?
+    params:
+      render_width: 720
+      render_height: 1280
+      target_width: 1080
+      target_height: 1920
+      inbetween: 0
+      keep_copy: ${globals.output_root}/debug/reupscale/final_before_reupscale.ply
+    outputs:
+      images: scene.reupscale.render_images
+      cameras: scene.reupscale.render_cameras
+      keep_every: scene.reupscale.keep_every
+      masks: scene.reupscale.masks
+      labels: scene.reupscale.labels
+
+  # Without Low VRAM, a batched upscale: SeedVR2 takes a batch as video and
+  # expects little motion between its frames, and the training cameras are a
+  # helix ~2 degrees apart, so 4 cameras are interpolated between every pair
+  # of neighbours (806 frames for 162) and a batch of 5 spans one interval of
+  # the original path. ~5x the upscale's work. UNMEASURED: the batch-1 path
+  # is the one the numbers in the `reupscale` setting are from.
+  - id: reupscale_render_batched
+    step: reupscale_inputs
+    dispatch: in_process
+    when:
+      - ${globals.export_ply}
+      - ${globals.reupscale}
+      - {not: "${globals.low_vram}"}
+    inputs:
+      splat_path: dataset.splat_path
+      cameras: dataset.cameras
+      masks: dataset.masks
+      labels: scene.seg_labels?
+    params:
+      render_width: 720
+      render_height: 1280
+      target_width: 1080
+      target_height: 1920
+      inbetween: 4
+      keep_copy: ${globals.output_root}/debug/reupscale/final_before_reupscale.ply
+    outputs:
+      images: scene.reupscale.render_images
+      cameras: scene.reupscale.render_cameras
+      keep_every: scene.reupscale.keep_every
+      masks: scene.reupscale.masks
+      labels: scene.reupscale.labels
+
+  # The Upscale step's own settings (tiled VAE), on the renders.
+  - id: reupscale_sr
+    step: seedvr2
+    dispatch: subprocess
+    env: seedvr2
+    when:
+      - ${globals.export_ply}
+      - ${globals.reupscale}
+      - ${globals.low_vram}
+    inputs:
+      images: scene.reupscale.render_images
+      cameras: scene.reupscale.render_cameras
+    params:
+      resolution: 1080
+      batch_size: 1
+      vae_encode_tiled: true
+      vae_decode_tiled: true
+      seed: ${globals.seed}
+    outputs:
+      images: scene.reupscale.images
+      cameras: scene.reupscale.cameras
+
+  - id: reupscale_sr_batched
+    step: seedvr2
+    dispatch: subprocess
+    env: seedvr2
+    when:
+      - ${globals.export_ply}
+      - ${globals.reupscale}
+      - {not: "${globals.low_vram}"}
+    inputs:
+      images: scene.reupscale.render_images
+      cameras: scene.reupscale.render_cameras
+    params:
+      resolution: 1080
+      batch_size: 5
+      vae_encode_tiled: true
+      vae_decode_tiled: true
+      seed: ${globals.seed}
+    outputs:
+      images: scene.reupscale.images
+      cameras: scene.reupscale.cameras
+
+  # The upscaled frames at the training cameras (all of them at batch 1).
+  - id: reupscale_keep
+    step: reupscale_keep
+    dispatch: in_process
+    when:
+      - ${globals.export_ply}
+      - ${globals.reupscale}
+    inputs:
+      images: scene.reupscale.images
+      cameras: scene.reupscale.cameras
+      keep_every: scene.reupscale.keep_every
+    outputs:
+      images: scene.reupscale.images
+      cameras: scene.reupscale.cameras
+
+  # The retraining: train_final_splat's recipe, alignment loop and body rig
+  # included. The renders are registered, but SeedVR2 at batch 1 upscales
+  # every frame on its own, so the detail it adds is not guaranteed to line
+  # up between them; the loop flows each one onto the render and the rig
+  # takes what moves per limb. No normal maps: the Sapiens maps are of the
+  # frames, at their resolution. The growth threshold is the one the
+  # measurement used (which ran without the loop and the rig).
+  - id: reupscale_train
+    step: brush
+    dispatch: in_process
+    when:
+      - ${globals.export_ply}
+      - ${globals.reupscale}
+    inputs:
+      cameras: scene.reupscale.cameras
+      image_names: dataset.image_names
+      points_3d: dataset.points_3d
+      images: scene.reupscale.images
+      masks: scene.reupscale.masks
+      mesh: scene.mesh_world?
+      body_rig: scene.body_rig?
+      labels: scene.reupscale.labels?
+    params:
+      total_steps: 30000
+      hollow_weight: 0.5
+      hollow_margin: 0.03
+      cull_weight: 5
+      evidence_prune_wall: 5
+      random_background: true
+      growth_grad_threshold: 0.0035
+      align_iters: 4
+      align_debug_dir: ${globals.output_root}/debug/reupscale/alignment
+      polish_steps: 0
+      export_dir: ${globals.output_root}/ply
+      export_name: scene.ply
+      trainer_files_dir: ${globals.output_root}/debug/reupscale
+    outputs:
       splat_path: dataset.splat_path
 
   # The deliverable as one glTF file beside the bare scene.ply (b2cgltf
