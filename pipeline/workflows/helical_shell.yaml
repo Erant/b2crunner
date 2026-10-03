@@ -1225,6 +1225,21 @@ steps:
     outputs:
       mask: scene.front_matte
 
+  # The sheet's back panel gets the same cut-out as the photograph:
+  # matte_reference below lays it over the anchor border's grey, so the
+  # reference every denoise conditions on carries no room either. A
+  # single photo has no back panel (dataset.reference_image is None): no
+  # matte, no model load (steps/rmbg.py).
+  - id: back_matte
+    step: rmbg
+    dispatch: in_process
+    inputs:
+      image: dataset.reference_image?
+    params:
+      low_vram: ${globals.low_vram}
+    outputs:
+      mask: scene.back_matte
+
   # Surface normals for the same photograph. The depth the shell is built
   # on is integrated from them, with the pointmap pinning the low
   # frequencies — as for the face. The step's default checkpoint, the 1b
@@ -1495,6 +1510,19 @@ steps:
       matte: scene.front_matte
     outputs:
       warped_image: dataset.anchor_image
+
+  # The back panel onto the same grey as the anchor frame — the
+  # reference pass 1, the re-outline and pass 2 (via pick_rear_view's
+  # sheet branch) condition on. None on a single photo, handed through.
+  - id: matte_reference
+    step: matte_reference
+    dispatch: in_process
+    inputs:
+      reference_image: dataset.reference_image?
+      matte: scene.back_matte?
+      bg_color: scene.image_warp.bg_color
+    outputs:
+      reference_image: dataset.reference_image
 
   # The initial anchor injection — the pre-denoise one. This is what
   # cyber_6f/initial already has baked in: the warped photo overwrites

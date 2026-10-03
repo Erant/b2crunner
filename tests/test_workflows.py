@@ -133,9 +133,10 @@ BOOTSTRAPS = {
         "detect_face", "map_face_to_mesh", "fit_head_to_face",
         "locate_face", "crop_face", "face_seg", "face_mask",
         "face_normals", "face_splat",
-        "front_matte",
+        "front_matte", "back_matte",
         "render_initial_views",
-        "warp_reference_to_anchor", "reinject_anchor_initial",
+        "warp_reference_to_anchor", "matte_reference",
+        "reinject_anchor_initial",
     ],
     # The EXPERIMENT (2026-09-19): the same bootstrap with a whole-body
     # pointmap shell built before the render (front_normals / shell_splat,
@@ -148,9 +149,10 @@ BOOTSTRAPS = {
         "detect_face", "map_face_to_mesh", "fit_head_to_face",
         "locate_face", "crop_face", "face_seg", "face_mask",
         "face_normals", "face_splat",
-        "front_matte", "front_normals", "shell_splat",
+        "front_matte", "back_matte", "front_normals", "shell_splat",
         "render_initial_views",
-        "warp_reference_to_anchor", "reinject_anchor_initial",
+        "warp_reference_to_anchor", "matte_reference",
+        "reinject_anchor_initial",
     ],
 }
 
@@ -1974,16 +1976,38 @@ class TestTheSingleViewInput(unittest.TestCase):
         self.assertEqual(step.outputs.get("reference_image"), "dataset.reference_image")
         self.assertEqual(step.inputs.get("masks"), "dataset.masks")
 
-    def test_the_reference_has_exactly_two_writers(self):
-        """The split (the back panel, or None) and the pick (the rear view,
-        or the back panel again). A third would be a second opinion on
-        what pass 2 conditions on."""
+    def test_the_reference_has_exactly_three_writers(self):
+        """The split (the back panel, or None), the matte (that panel cut
+        out onto the anchor border's grey, or None again) and the pick (the
+        rear view, or the matted panel again). A fourth would be a second
+        opinion on what the denoise passes condition on."""
         spec = self._spec()
         writers = [
             s.id for s in spec.steps
             if "dataset.reference_image" in s.outputs.values()
         ]
-        self.assertEqual(writers, ["split_sheet", "pick_rear_view"])
+        self.assertEqual(writers, ["split_sheet", "matte_reference", "pick_rear_view"])
+
+    def test_every_denoise_reads_the_matted_panel(self):
+        """No pass conditions on the room the sheet was photographed in:
+        the matte lands before the first step that reads the reference."""
+        spec = self._spec()
+        order = [s.id for s in spec.steps]
+        matte = order.index("matte_reference")
+        readers = [
+            s.id for s in spec.steps
+            # split_sheet reads the upload itself out of that slot, and
+            # back_matte reads the panel to make the matte.
+            if s.id not in ("split_sheet", "back_matte", "matte_reference") and any(
+                v.rstrip("?") == "dataset.reference_image"
+                for v in s.inputs.values())
+        ]
+        self.assertTrue(readers)
+        for reader in readers:
+            self.assertLess(matte, order.index(reader), reader)
+        step = self._step(spec, "matte_reference")
+        self.assertEqual(step.inputs.get("matte"), "scene.back_matte?")
+        self.assertEqual(step.inputs.get("bg_color"), "scene.image_warp.bg_color")
 
     def test_pass_2_reads_what_the_pick_wrote(self):
         spec = self._spec()

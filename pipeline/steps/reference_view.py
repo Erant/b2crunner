@@ -20,7 +20,8 @@ produced it) and laid over 0.5 grey, `matte: true` — the ground the warped
 anchor photograph is bordered with (generate_firstlast) and the frames pass
 2 sees are composited on (mask_splat_fringes), so the reference agrees with
 the batch it sits beside rather than carrying whatever room pass 1 painted.
-The sheet's back panel is not matted: it is the upload as given.
+The sheet's back panel comes in already matted the same way (matte_reference,
+right after the anchor warp), so both branches hand pass 2 a cut-out.
 
 The `layout` input is the split step's verdict, and this step runs in
 both modes because a `when:` resolves against globals before the run
@@ -149,3 +150,40 @@ def _most_opposite(cameras, anchor: np.ndarray, target: np.ndarray):
     index = int(np.argmin(cosines))
     angle = float(np.degrees(np.arccos(np.clip(cosines[index], -1.0, 1.0))))
     return index, angle
+
+
+@register_step("matte_reference")
+class MatteReferenceStep(Step):
+    """The sheet's back panel cut out onto the renders' ground.
+
+    The reference wan22_vace_denoise conditions on in every pass, matted
+    the way generate_firstlast mattes the anchor photograph: the subject
+    over `bg_color`, softness and all, so neither of the two real images a
+    pass sees carries the room the sheet was photographed in. A single
+    photo has no back panel; None goes through as None, and pick_rear_view
+    fills the slot (already matted) after pass 1.
+
+    inputs:  {"reference_image": np.ndarray BGR | None — the back panel,
+              "matte": np.ndarray float32 [0,1] | None — its rmbg mask,
+              "bg_color": (r, g, b) in 0..1 — the anchor border's colour}
+    outputs: {"reference_image": np.ndarray BGR uint8 | None}
+    """
+
+    def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+        reference = inputs.get("reference_image")
+        if reference is None:
+            return {"reference_image": None}
+        matte = inputs.get("matte")
+        if matte is None:
+            raise ValueError(
+                "matte_reference: a back panel came in without its matte — "
+                "the rmbg step on dataset.reference_image should have made one"
+            )
+        if matte.shape[:2] != reference.shape[:2]:
+            raise ValueError(
+                f"matte_reference: matte is {matte.shape[:2]}, the panel "
+                f"{reference.shape[:2]} — it must be the panel's own matte."
+            )
+        bg_color = tuple(inputs["bg_color"])
+        logger.info("back panel matted over %s", list(bg_color))
+        return {"reference_image": _composite_one(reference, matte, bg_color)}

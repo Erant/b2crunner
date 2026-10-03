@@ -148,5 +148,49 @@ class TestSheetMode(unittest.TestCase):
             _run("stereo", reference=np.zeros((4, 4, 3), np.uint8))
 
 
+class TestMatteReference(unittest.TestCase):
+    """matte_reference: the sheet's back panel onto the anchor border's grey."""
+
+    def _panel(self):
+        panel = np.zeros((8, 8, 3), np.uint8)
+        panel[..., 2] = 255  # a red room
+        panel[2:6, 2:6] = 200  # the subject
+        return panel
+
+    def test_the_room_becomes_the_bg_colour(self):
+        mask = np.zeros((8, 8), np.float32)
+        mask[2:6, 2:6] = 1.0
+        out = run_step("matte_reference", {
+            "reference_image": self._panel(), "matte": mask,
+            "bg_color": (0.5, 0.5, 0.5),
+        })["reference_image"]
+        self.assertEqual(tuple(out[0, 0]), (128, 128, 128))
+        self.assertEqual(tuple(out[3, 3]), (200, 200, 200))
+
+    def test_a_single_photo_has_no_panel_to_matte(self):
+        out = run_step("matte_reference", {
+            "reference_image": None, "matte": None, "bg_color": (0.5, 0.5, 0.5),
+        })
+        self.assertIsNone(out["reference_image"])
+
+    def test_a_panel_without_its_matte_is_refused(self):
+        with self.assertRaises(ValueError):
+            run_step("matte_reference", {
+                "reference_image": self._panel(), "matte": None,
+                "bg_color": (0.5, 0.5, 0.5),
+            })
+
+    def test_a_matte_of_another_size_is_refused(self):
+        with self.assertRaises(ValueError):
+            run_step("matte_reference", {
+                "reference_image": self._panel(),
+                "matte": np.ones((4, 4), np.float32),
+                "bg_color": (0.5, 0.5, 0.5),
+            })
+
+    def test_rmbg_makes_no_matte_of_no_image(self):
+        self.assertIsNone(run_step("rmbg", {"image": None})["mask"])
+
+
 if __name__ == "__main__":
     unittest.main()
