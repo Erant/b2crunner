@@ -168,8 +168,3 @@ Stdlib `unittest`, no pytest dependency:
 python -m unittest discover -s tests -t .
 ```
 
-Most tests are golden-output tests against `cyber_6f/` — a real completed
-run of the original ComfyUI pipeline, kept as local reference data and
-gitignored. They skip cleanly when it is absent, so a fresh clone still
-runs the suite; with it present they compare ported steps against the
-frames and COLMAP files the ComfyUI graphs actually produced.

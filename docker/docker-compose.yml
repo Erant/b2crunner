@@ -17,8 +17,6 @@
 #   # or one-shot CLI runs, unchanged from before the entrypoint existed
 #   docker compose -f docker/docker-compose.yml run --rm pipeline \
 #       doctor
-#   docker compose -f docker/docker-compose.yml run --rm pipeline \
-#       run fast_helical_local_smoke --dataset /data/cyber_6f/initial
 #
 #   # a shell, without needing --entrypoint
 #   docker compose -f docker/docker-compose.yml run --rm pipeline bash
@@ -73,10 +71,6 @@ services:
       # dispatchers' IPC pickles — goes here. The container's own writable
       # layer is small enough that a single 81-frame batch can fill it.
       - b2c_data:/data
-      # Bind the local reference dataset in read-only so the UI's dataset
-      # picker finds cyber_6f/initial without a copy. Drop this line on a
-      # machine that doesn't have it; the volume above is what matters.
-      - ../cyber_6f:/data/cyber_6f:ro
     deploy:
       resources:
         reservations:

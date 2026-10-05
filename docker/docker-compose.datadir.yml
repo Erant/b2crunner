@@ -1,0 +1,19 @@
+# Overlay for docker-compose.yml: keep /data — every intermediate and final
+# file the pipeline writes — in a directory on the host instead of the
+# b2c_data named volume. run.sh adds it when given a directory:
+#
+#   ./run.sh /mnt/data/b2crunner_data
+#
+# which is the same as
+#
+#   B2C_DATA_HOST_DIR=/mnt/data/b2crunner_data docker compose \
+#       -f docker/docker-compose.yml -f docker/docker-compose.weights.yml \
+#       -f docker/docker-compose.datadir.yml up
+#
+# Compose merges volumes by their container path, so this bind replaces the
+# named volume's /data entry. The container runs as root: what it writes
+# there is owned by root.
+services:
+  pipeline:
+    volumes:
+      - ${B2C_DATA_HOST_DIR:?set B2C_DATA_HOST_DIR to the host data directory}:/data
