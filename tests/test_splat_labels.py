@@ -136,7 +136,8 @@ class TestTheWorkflowVotesLabelsOntoTheFinalSplat(unittest.TestCase):
         self.assertIs(setting.default, True)
         seg = self._step(spec, "segment_views")
         self.assertEqual(seg.step, "sapiens2_seg")
-        self.assertEqual(seg.when, "${globals.splat_labels}")
+        # Also gated off when only the re-upscale's retraining would read it (tests/test_reupscale.py).
+        self.assertEqual(seg.when[0], "${globals.splat_labels}")
         self.assertEqual(seg.inputs, {"images": "dataset.images"})
         self.assertEqual(seg.params.get("dtype"), "bfloat16")
         self.assertEqual(seg.outputs, {"labels": "scene.seg_labels"})
@@ -153,7 +154,7 @@ class TestTheWorkflowVotesLabelsOntoTheFinalSplat(unittest.TestCase):
     def test_the_face_branch_keeps_its_float32_matte(self):
         spec = self._spec()
         for s in spec.steps:
-            if s.step == "sapiens2_seg" and s.id != "segment_views":
+            if s.step == "sapiens2_seg" and s.id not in ("segment_views", "reupscale_segment"):
                 self.assertNotIn("dtype", s.params, s.id)
 
 

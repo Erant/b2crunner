@@ -1124,6 +1124,10 @@ class BrushStep(Step):
               "Export straight into this directory instead, for a training whose .ply "
               "is a deliverable and needs a predictable path. Wins over output_dir"),
         Param("export_name", str, "export.ply", "Filename of the exported .ply"),
+        Param("defer_labels", bool, False,
+              "Ignore the wired `labels`: no labels/ sidecar, no seg_label/seg_conf in the .ply. For a "
+              "training a later one replaces (the re-upscale's), so the class vote lands on the last "
+              "splat only"),
         Param("trainer_files_dir", str, None,
               "Move what the trainer writes beside its export besides the .ply (b2ctrain's "
               "body_rig_omega.json) into this directory, so a deliverable export directory holds "
@@ -1156,6 +1160,9 @@ class BrushStep(Step):
         normal_maps = inputs.get("normal_maps")
         weights = _loss_weights(inputs, len(images))
         labels = _labels(inputs, len(images))
+        if labels is not None and params["defer_labels"]:
+            logger.info("brush: labels wired but deferred (defer_labels): a later training votes them")
+            labels = None
         support = _SupportViews.from_inputs(inputs, image_names)
         mesh = inputs.get("mesh")
         body_params = inputs.get("body_params")

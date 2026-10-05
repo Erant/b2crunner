@@ -1,11 +1,11 @@
-"""Re-upscale (steps/reupscale.py): camera scaling, the views and their sidecars, and the wiring."""
+"""Re-upscale (steps/reupscale.py): the band of views, the renders and their mattes, and the wiring."""
 import tempfile
 import unittest
 from pathlib import Path
 
 import numpy as np
 
-from pipeline.steps.reupscale import ReupscaleInputsStep, scale_cameras
+from pipeline.steps.reupscale import ReupscaleInputsStep, band_cameras
 from pipeline.workflow import WorkflowSpec, when_truthy
 
 WORKFLOWS = sorted((Path(__file__).resolve().parent.parent / "pipeline" / "workflows").glob("helical*.yaml"))
@@ -27,16 +27,47 @@ def _orbit(n=6):
 
 
 class TestCameras(unittest.TestCase):
-    def test_scaling_is_intrinsics_only(self):
+    def _band(self, n=81, lo=-70.0, hi=70.0):
         cams = _orbit()
-        out = scale_cameras(cams, 720, 1280)
-        for a, b in zip(cams, out):
-            self.assertEqual((b.width, b.height), (720, 1280))
-            self.assertAlmostEqual(b.fx, a.fx * 720 / 1080, places=3)
-            self.assertAlmostEqual(b.cy, a.cy * 1280 / 1920, places=3)
-            np.testing.assert_allclose(b.position, a.position)
-            np.testing.assert_allclose(b.rotation, a.rotation)
+        return cams, band_cameras(cams, n, lo, hi, 720, 1280)
 
+    def _elevations(self, cams):
+        return np.degrees(np.arcsin([c.position[1] / np.linalg.norm(c.position) for c in cams]))
+
+    def test_count_size_and_lens(self):
+        cams, band = self._band()
+        self.assertEqual(len(band), 81)
+        for c in band:
+            self.assertEqual((c.width, c.height), (720, 1280))
+            self.assertAlmostEqual(c.fx, cams[0].fx * 720 / 1080, places=3)
+            self.assertAlmostEqual(c.cy, cams[0].cy * 1280 / 1920, places=3)
+
+    def test_band_spans_minus_to_plus_seventy(self):
+        cams, band = self._band()
+        el = self._elevations(band)
+        self.assertAlmostEqual(el.min(), -70.0, places=2)
+        self.assertAlmostEqual(el.max(), 70.0, places=2)
+        # every camera at the orbit's median radius, looking at its centre
+        radius = np.median([np.linalg.norm(c.position) for c in cams])
+        for c in band:
+            self.assertAlmostEqual(float(np.linalg.norm(c.position)), radius, delta=0.02)
+            np.testing.assert_allclose(c.get_forward_vector(), -c.position / np.linalg.norm(c.position), atol=1e-4)
+
+    def test_evenly_spaced(self):
+        _, band = self._band()
+        d = np.array([c.position / np.linalg.norm(c.position) for c in band], np.float64)
+        ang = np.degrees(np.arccos(np.clip(d @ d.T, -1, 1)))
+        np.fill_diagonal(ang, 360)
+        nearest = ang.min(1)
+        self.assertLess(nearest.max() / nearest.min(), 1.6)     # no clumps, no gaps
+        # consecutive views are neighbours on the sphere (the rig smooths between them)
+        steps = [ang[i, i + 1] for i in range(len(band) - 1)]
+        self.assertLess(np.median(steps), 1.2 * np.median(nearest))
+
+    def test_more_views_at_the_equator_than_the_poles(self):
+        _, band = self._band()
+        el = np.round(self._elevations(band), 1)
+        self.assertGreater(np.sum(el == 0.0), np.sum(el == 70.0))
 
 
 def _run_inputs(inputs, params, seen=None):
@@ -60,31 +91,16 @@ def _run_inputs(inputs, params, seen=None):
 
 
 class TestViews(unittest.TestCase):
-    def _inputs(self, n=6, labels=True, masks=True):
-        return {"cameras": _orbit(n),
-                "masks": [np.ones((8, 8), np.float32)] * n if masks else None,
-                "labels": [np.full((8, 8), 3, np.uint8)] * n if labels else None}
-
-    def test_one_view_per_training_camera_with_its_matte_and_labels(self):
-        out = _run_inputs(self._inputs(), {"target_width": 4, "target_height": 4})
-        for key in ("images", "cameras", "masks", "labels"):
+    def test_one_view_per_training_camera_by_default_with_the_alpha_as_matte(self):
+        out = _run_inputs({"cameras": _orbit(6)}, {"target_width": 4, "target_height": 4})
+        for key in ("images", "cameras", "image_names", "masks"):
             self.assertEqual(len(out[key]), 6, key)
-        for mask, label in zip(out["masks"], out["labels"]):
-            self.assertEqual(mask.dtype, np.uint8)
-            self.assertEqual(mask.shape, (4, 4))
-            self.assertEqual(int(mask.max()), 255)
-            self.assertEqual(int(label[0, 0]), 3)
-
-    def test_without_mattes_the_render_alpha_is_the_matte(self):
-        out = _run_inputs(self._inputs(labels=False, masks=False), {"target_width": 4, "target_height": 4})
         self.assertEqual([int(m.max()) for m in out["masks"]], [64] * 6)     # the render's alpha, 0.25
-        self.assertIsNone(out["labels"])
+        self.assertEqual(len(set(out["image_names"])), 6)
 
-    def test_refuses_mattes_that_do_not_match_the_cameras(self):
-        inputs = self._inputs()
-        inputs["masks"] = inputs["masks"][:-1]
-        with self.assertRaises(ValueError):
-            _run_inputs(inputs, {})
+    def test_views_param_sets_the_count(self):
+        out = _run_inputs({"cameras": _orbit(6)}, {"views": 20, "target_width": 4, "target_height": 4})
+        self.assertEqual(len(out["images"]), 20)
 
 
 class TestWiring(unittest.TestCase):
@@ -96,12 +112,14 @@ class TestWiring(unittest.TestCase):
             by_id = {s.id: s for s in spec.steps}
             for low_vram in (True, False):
                 with self.subTest(workflow=path.name, low_vram=low_vram):
-                    g = {"export_ply": True, "reupscale": True, "low_vram": low_vram}
+                    g = {"export_ply": True, "reupscale": True, "low_vram": low_vram, "splat_labels": True}
                     live = [s.id for s in spec.steps if s.id.startswith("reupscale")
                             and when_truthy(resolve(s.when, {"globals": g}))]
-                    self.assertEqual(live, ["reupscale_render", "reupscale_sr", "reupscale_train"])
+                    self.assertEqual(live, ["reupscale_render", "reupscale_sr", "reupscale_segment", "reupscale_train"])
                     self.assertEqual(by_id["reupscale_sr"].params["batch_size"], 1)
-                    self.assertEqual(by_id["reupscale_train"].inputs["image_names"], "dataset.image_names")
+                    self.assertEqual(by_id["reupscale_train"].inputs["image_names"], "scene.reupscale.image_names")
+                    render = by_id["reupscale_render"].params
+                    self.assertEqual((render["min_elevation_deg"], render["max_elevation_deg"]), (-70, 70))
 
     def test_the_retraining_replaces_the_deliverable_and_keeps_the_first(self):
         for path in WORKFLOWS:
@@ -123,6 +141,37 @@ class TestWiring(unittest.TestCase):
                 self.assertNotIn("normal_maps", train.inputs)
                 setting = next(p for p in spec.settings if p.name == "reupscale")
                 self.assertIs(setting.default, False)
+
+
+class TestLabelsOnTheLastSplat(unittest.TestCase):
+    def _live(self, step, **g):
+        from pipeline.templating import resolve
+
+        s = next(x for x in self.spec.steps if x.id == step)
+        base = {"export_ply": True, "splat_labels": True, "reupscale": False, "lighting_correction": "prepass"}
+        base.update(g)
+        return when_truthy(resolve(s.when, {"globals": base})), resolve(s.params.get("defer_labels"), {"globals": base})
+
+    def test_the_first_training_defers_its_vote_when_retrained(self):
+        for path in WORKFLOWS:
+            self.spec = WorkflowSpec.from_yaml(str(path))
+            with self.subTest(workflow=path.name):
+                self.assertIs(self._live("train_final_splat", reupscale=True)[1], True)
+                self.assertIs(self._live("train_final_splat", reupscale=False)[1], False)
+
+    def test_early_segmentation_only_where_something_reads_it(self):
+        for path in WORKFLOWS:
+            self.spec = WorkflowSpec.from_yaml(str(path))
+            with self.subTest(workflow=path.name):
+                self._early()
+
+    def _early(self):
+        self.assertTrue(self._live("segment_views")[0])
+        self.assertTrue(self._live("segment_views", reupscale=True)[0])                  # relight's fit
+        self.assertFalse(self._live("segment_views", reupscale=True, lighting_correction="off")[0])
+        self.assertFalse(self._live("segment_views", splat_labels=False)[0])
+        self.assertTrue(self._live("reupscale_segment", reupscale=True)[0])
+        self.assertFalse(self._live("reupscale_segment", reupscale=True, splat_labels=False)[0])
 
 
 class TestShDegree(unittest.TestCase):

@@ -305,9 +305,12 @@ settings:
     default: false
     advanced: true
     help: >-
-      After the deliverable training, render the splat at its own cameras at
-      720x1280, upscale those renders with SeedVR2 (the Upscale step's
-      settings) and train the splat again on them. Independent of Upscale:
+      After the deliverable training, render the splat at 720x1280 from views
+      spread evenly over -70..+70 deg elevation (as many as the training
+      cameras, not the orbit's path), upscale those renders with SeedVR2 (the
+      Upscale step's settings) and train the splat again on them; the class
+      maps for the label vote are made on the upscaled renders, and only the
+      retrained splat carries it. Independent of Upscale:
       with Upscale off the first training runs on the 720p frames and the
       re-upscale is the same either way, which is the A/B for whether the
       first upscale earns its time. Measured 2026-10-02 on one subject
@@ -4311,10 +4314,18 @@ steps:
   # instance never touches a matte). ~0.24 s a frame on a 4070 Ti. The maps
   # reach b2ctrain as a labels/ sidecar beside the frames and the trainer
   # votes them onto the splats in its export pass; see steps/brush.py.
+  # With the re-upscale on, the vote moves to the retraining and its own
+  # maps (reupscale_segment); these are then made only for relight_frames,
+  # which drops hair, glasses, shoes and the mouth from its lighting fit.
   - id: segment_views
     step: sapiens2_seg
     dispatch: in_process
-    when: ${globals.splat_labels}
+    when:
+      - ${globals.splat_labels}
+      - any:
+          - {not: "${globals.reupscale}"}
+          - {not: "${globals.export_ply}"}
+          - {eq: ["${globals.lighting_correction}", prepass]}
     inputs:
       images: dataset.images
     params:
@@ -4490,7 +4501,9 @@ steps:
       # The per-frame class maps (segment_views): the trainer votes them
       # onto the splats at export and scene.ply carries seg_label/seg_conf
       # per Gaussian. Optional, so `splat_labels: false` leaves this
-      # training byte-identical to before.
+      # training byte-identical to before. Held back (`defer_labels`) when
+      # the re-upscale retrains over this splat: the vote lands on the last
+      # splat only, from reupscale_segment's maps.
       labels: scene.seg_labels?
       # The final frames' normal maps (final_normal_maps): brush writes
       # them as the normals/ sidecar and emits the normal-loss flags; the
@@ -4516,6 +4529,7 @@ steps:
       support_masks: scene.photo_support_final.masks?
       support_cameras: scene.photo_support_final.cameras?
     params:
+      defer_labels: ${globals.reupscale}
       # See train_splat's note. Same count; a run tuning the deliverable
       # splat alone changes it here.
       total_steps: 30000
@@ -4626,10 +4640,14 @@ steps:
   # splat before it is copied to debug/reupscale/ first: the retraining
   # exports over ply/scene.ply and takes dataset.splat_path, so export_subject
   # and rig_subject below work from the re-upscaled one.
-  # The training cameras alone, upscaled one frame at a time (the Upscale
+  # The views are NOT the orbit's: nothing is denoised as a video any more,
+  # so they sit evenly on rings from -70 to +70 deg elevation, as many as
+  # there are training cameras, upscaled one frame at a time (the Upscale
   # step's batch 1: what fits a 12 GB card). A batched upscale over 4
   # interpolated cameras between each pair (806 views, all retrained) was
-  # tried and removed 2026-10-03: that many views soften the splat.
+  # tried and removed 2026-10-03: that many views soften the splat. The
+  # render's alpha is the matte; the class maps are made on the upscaled
+  # renders (reupscale_segment).
   - id: reupscale_render
     step: reupscale_inputs
     dispatch: in_process
@@ -4639,9 +4657,10 @@ steps:
     inputs:
       splat_path: dataset.splat_path
       cameras: dataset.cameras
-      masks: dataset.masks
-      labels: scene.seg_labels?
     params:
+      views: 0
+      min_elevation_deg: -70
+      max_elevation_deg: 70
       render_width: 720
       render_height: 1280
       target_width: 1080
@@ -4653,8 +4672,8 @@ steps:
     outputs:
       images: scene.reupscale.render_images
       cameras: scene.reupscale.render_cameras
+      image_names: scene.reupscale.image_names
       masks: scene.reupscale.masks
-      labels: scene.reupscale.labels
 
   # The Upscale step's own settings (tiled VAE), on the renders.
   - id: reupscale_sr
@@ -4677,6 +4696,23 @@ steps:
       images: scene.reupscale.images
       cameras: scene.reupscale.cameras
 
+  # The class maps of the upscaled renders, for the label vote on the
+  # retrained splat — the last one, so the only one that carries it
+  # (train_final_splat defers its vote). segment_views' settings.
+  - id: reupscale_segment
+    step: sapiens2_seg
+    dispatch: in_process
+    when:
+      - ${globals.export_ply}
+      - ${globals.reupscale}
+      - ${globals.splat_labels}
+    inputs:
+      images: scene.reupscale.images
+    params:
+      dtype: bfloat16
+    outputs:
+      labels: scene.reupscale.labels
+
   # The retraining: train_final_splat's recipe, alignment loop and body rig
   # included. The renders are registered, but SeedVR2 at batch 1 upscales
   # every frame on its own, so the detail it adds is not guaranteed to line
@@ -4692,7 +4728,7 @@ steps:
       - ${globals.reupscale}
     inputs:
       cameras: scene.reupscale.cameras
-      image_names: dataset.image_names
+      image_names: scene.reupscale.image_names
       points_3d: dataset.points_3d
       images: scene.reupscale.images
       masks: scene.reupscale.masks
