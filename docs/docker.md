@@ -108,9 +108,10 @@ than trusting markers that vouch for another cache's contents.
 | anything else | Exec'd verbatim — `docker run IMAGE nvidia-smi` needs no `--entrypoint`. |
 
 Whichever mode, it first creates the volume's directory layout and reports
-how much space is on it, then (for the UI) runs `doctor --summary` so the
-pod's log records what the machine could actually do *before* anything
-depends on it.
+how much space is on it. With `B2C_STARTUP_DOCTOR=1` the UI mode then runs
+`doctor --summary`, so the pod's log records what the machine could
+actually do *before* anything depends on it; it is off by default because
+it slows every start, and the UI's Doctor tab runs it on demand.
 
 ## Which code a run ran (2026-09-13)
 

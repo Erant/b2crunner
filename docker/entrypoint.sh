@@ -163,13 +163,17 @@ serve_ui() {
     prepare_volume
     start_sshd
 
-    # A summary sweep, not the full one: it costs a couple of seconds and
-    # puts the pod's actual capabilities (EGL for render, the trainer
-    # binaries, the venvs, the HF token) in the log *before* anyone starts a run that
-    # depends on them. Non-blocking on purpose — a WARN or even a FAIL is
-    # still worth having a UI to look at.
-    log "preflight:"
-    "$PYTHON" -m pipeline.cli doctor --summary || log "doctor reported failures (continuing)"
+    # Off by default: even the summary sweep delays the UI noticeably, and on
+    # a machine already known to work it says nothing new. The UI's Doctor
+    # tab runs it on demand; B2C_STARTUP_DOCTOR=1 puts it back here, which
+    # records the machine's capabilities (EGL for render, the trainer
+    # binaries, the venvs, the HF token) in the log before any run depends
+    # on them. Non-blocking — a WARN or even a FAIL is still worth having a
+    # UI to look at.
+    if [ "${B2C_STARTUP_DOCTOR:-0}" = "1" ]; then
+        log "preflight:"
+        "$PYTHON" -m pipeline.cli doctor --summary || log "doctor reported failures (continuing)"
+    fi
 
     start_prefetch
 
