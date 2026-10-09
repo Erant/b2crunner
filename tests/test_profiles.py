@@ -17,16 +17,16 @@ def _live(spec):
 
 
 class TestShippedProfiles(unittest.TestCase):
-    def test_low_medium_high(self):
+    def test_medium_high(self):
         for path in WORKFLOWS:
             spec = WorkflowSpec.from_yaml(str(path))
             with self.subTest(workflow=path.name):
-                self.assertEqual([p.name for p in spec.profiles], ["low", "medium", "high"])
-                self.assertEqual([p.title for p in spec.profiles], ["Low", "Medium", "High"])
+                self.assertEqual([p.name for p in spec.profiles], ["medium", "high"])
+                self.assertEqual([p.title for p in spec.profiles], ["Medium", "High"])
 
     def test_each_profile_runs_what_it_says(self):
         # (extend, reupscale) — every one relit, upscaled and trained
-        expect = {"low": (False, False), "medium": (True, False), "high": (True, True)}
+        expect = {"medium": (False, False), "high": (True, False)}
         for path in WORKFLOWS:
             for profile in WorkflowSpec.from_yaml(str(path)).profiles:
                 with self.subTest(workflow=path.name, profile=profile.name):

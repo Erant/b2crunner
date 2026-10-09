@@ -1139,12 +1139,12 @@ outputs:
 # Quality presets (`profiles:`, pipeline/workflow.py): values for the
 # settings and outputs above, applied to the controls by the Run tab's
 # "Quality profile" picker; anything a profile does not name keeps its value.
-# All three train the splat on relit (lighting_correction prepass), upscaled
-# frames; they differ in the orbit's length and the re-upscale after the
-# training.
+# Both train the splat on relit (lighting_correction prepass), upscaled
+# frames; they differ in the orbit's length. Neither turns on the re-upscale:
+# it is hit or miss (2026-10-09), so it stays a hand-picked setting.
 profiles:
-  - name: low
-    label: Low
+  - name: medium
+    label: Medium
     help: The single helical orbit (no extension), relit, upscaled and trained.
     settings:
       extend_orbit: false
@@ -1153,8 +1153,8 @@ profiles:
       export_ply: true
       reupscale: false
 
-  - name: medium
-    label: Medium
+  - name: high
+    label: High
     help: The extended orbit, relit, upscaled and trained.
     settings:
       extend_orbit: true
@@ -1162,16 +1162,6 @@ profiles:
       run_upscale: true
       export_ply: true
       reupscale: false
-
-  - name: high
-    label: High
-    help: The extended orbit, relit, upscaled, trained, then re-upscaled and trained again.
-    settings:
-      extend_orbit: true
-      lighting_correction: prepass
-      run_upscale: true
-      export_ply: true
-      reupscale: true
 
 globals:
   # What has no control of its own, and therefore no `settings:` entry.

@@ -566,9 +566,9 @@ class TestWhatAWorkflowDeclares(ApiTestCase):
             f"{API_PREFIX}/workflows/helical", headers=AUTH
         ).json()
         profiles = {p["name"]: p for p in body["profiles"]}
-        self.assertEqual(list(profiles), ["low", "medium", "high"])
-        self.assertIs(profiles["high"]["settings"]["reupscale"], True)
-        self.assertIs(profiles["low"]["settings"]["extend_orbit"], False)
+        self.assertEqual(list(profiles), ["medium", "high"])
+        self.assertIs(profiles["high"]["settings"]["reupscale"], False)
+        self.assertIs(profiles["medium"]["settings"]["extend_orbit"], False)
 
     def test_debug_is_chosen_when_the_result_is_packaged(self):
         # Not an output since 2026-09-26: every run writes debug/, and
