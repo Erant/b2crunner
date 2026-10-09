@@ -81,8 +81,26 @@ _KP_NOSE, _KP_L_EYE, _KP_R_EYE = 0, 1, 2
 LID_RING_IMAGE_LEFT = (33, 7, 163, 144, 145, 153, 154, 155, 133, 173, 157, 158, 159, 160, 161, 246)
 LID_RING_IMAGE_RIGHT = (263, 249, 390, 373, 374, 380, 381, 382, 362, 398, 384, 385, 386, 387, 388, 466)
 IRIS_IMAGE_LEFT, IRIS_IMAGE_RIGHT = 468, 473
-EYE_SIDES = (("image_left", LID_RING_IMAGE_LEFT, IRIS_IMAGE_LEFT),
-             ("image_right", LID_RING_IMAGE_RIGHT, IRIS_IMAGE_RIGHT))
+
+#: The same lid contours as MHR vertices, one per MediaPipe landmark above
+#: (the repeated 4384/1498 is where two landmarks share a vertex). Facts about
+#: the MHR topology, so `paste_eyes` takes them over the per-run landmark snap:
+#: on a head tilted back or rolled the snap lands lid landmarks centimetres
+#: off the lid (2 of 74 runs in the 2026-10-05 batch, 3.2-3.3 cm from the eye
+#: joint). Measured 2026-10-09 by `map_face_to_mesh` on the rest-pose body
+#: (all parameters zero) at 1.6/2.0/2.5/3.0 m, upsample 6: a majority vote
+#: over those four renders and both eyes (the mesh is mirror-symmetric to
+#: 1.2 mm, the two rings are MediaPipe's mirror pairs), the image-right ring
+#: being the mirror of the image-left one. Each ring sits 15.4-19.3 mm from its
+#: eye joint (122/124), its centroid 13.9 mm.
+MHR_LID_RING_IMAGE_LEFT = (4430, 4384, 4384, 4383, 4382, 4381, 4276, 4794,
+                           5481, 4215, 4275, 4379, 4620, 4646, 4432, 4431)
+MHR_LID_RING_IMAGE_RIGHT = (1544, 1498, 1498, 1497, 1496, 1495, 1390, 1908,
+                            2595, 1329, 1389, 1493, 1734, 1760, 1546, 1545)
+MHR_VERTICES = 18439
+
+EYE_SIDES = (("image_left", MHR_LID_RING_IMAGE_LEFT, IRIS_IMAGE_LEFT),
+             ("image_right", MHR_LID_RING_IMAGE_RIGHT, IRIS_IMAGE_RIGHT))
 
 
 # -- geometry helpers (pure numpy, tested) -------------------------------------
@@ -588,38 +606,51 @@ class FitHeadPerViewStep(Step):
 
 # -- paste_eyes -----------------------------------------------------------------
 
+class EyesUnavailable(RuntimeError):
+    """This subject's eyes cannot be modelled; `paste_eyes` leaves the frames as they are.
+
+    Raised for what the subject does, not for bad wiring: the anchor
+    photograph's head turned so far that one eye is hidden (its fitted lids
+    show no opening), or a lid ring centimetres from its eye joint (a fitted
+    head deformed there). 4 of 74 runs in the 2026-10-05 batch died here
+    after ~80 minutes of work, with no splat at all — two of them on lid
+    rings the per-run landmark snap misplaced, which the topology rings
+    (`MHR_LID_RING_*`) now rule out.
+    """
+
+
 class EyeModel:
     """Two textured eyeballs on the canonical head, rendered through fitted lids.
 
-    Built from the canonical (refit) head `V0`, its joints `J0`, the mesh
-    faces and the landmark->vertex map: per eye the lid ring vertices, the
+    Built from the canonical (refit) head `V0`, its joints `J0` and the mesh
+    faces: per eye the lid ring vertices (`MHR_LID_RING_*`), the
     eye joint (the nearer of the MHR's two), the eye-surface faces removed
     from the occluder (centroid inside the lid contour, within 2 cm of the
     joint). The sphere sits at the joint with `radius`; per view it moves
     rigidly with its lid ring (Kabsch of the ring, canonical -> fitted).
     """
 
-    def __init__(self, V0: np.ndarray, J0: np.ndarray, faces: np.ndarray, vertex_of_landmark: np.ndarray,
+    def __init__(self, V0: np.ndarray, J0: np.ndarray, faces: np.ndarray,
                  radius: float, supersample: int, depth_tolerance: float, sphere_subdivisions: int = 5) -> None:
         import trimesh
 
         self.V0, self.J0, self.F = np.asarray(V0, np.float64), np.asarray(J0, np.float64), np.asarray(faces, np.int64)
         self.radius, self.ss, self.depth_tol = float(radius), int(supersample), float(depth_tolerance)
-        vol = np.asarray(vertex_of_landmark, np.int64)
         if max(MHR_EYE_JOINTS) + 1 >= len(self.J0):
             raise ValueError(f"paste_eyes: the body has {len(self.J0)} joints, not the MHR's 127")
+        if len(self.V0) != MHR_VERTICES:
+            raise ValueError(f"paste_eyes: the body has {len(self.V0)} vertices, not the MHR's {MHR_VERTICES}; "
+                             f"the lid rings are MHR vertex indices")
         self.eyes: Dict[str, Dict[str, Any]] = {}
         centroids = self.V0[self.F].mean(1)
         removed = np.zeros(len(self.F), bool)
-        for side, ring_lm, iris_lm in EYE_SIDES:
-            ring = np.array([int(vol[i]) for i in ring_lm if vol[i] >= 0])
-            if len(ring) < 8:
-                raise ValueError(f"paste_eyes: only {len(ring)} of the {len(ring_lm)} {side} lid landmarks map to a vertex")
+        for side, ring_vertices, iris_lm in EYE_SIDES:
+            ring = np.asarray(ring_vertices, np.int64)
             ring_c = self.V0[ring].mean(0)
             j = min(MHR_EYE_JOINTS, key=lambda k: np.linalg.norm(self.J0[k] - ring_c))
             if np.linalg.norm(self.J0[j] - ring_c) > 0.03:
-                raise ValueError(f"paste_eyes: MHR joint {j} is {np.linalg.norm(self.J0[j] - ring_c) * 100:.1f} cm from the "
-                                 f"{side} lid ring; not an eye joint on this body")
+                raise EyesUnavailable(f"paste_eyes: MHR joint {j} is {np.linalg.norm(self.J0[j] - ring_c) * 100:.1f} cm from the "
+                                 f"{side} lid ring (13.9 mm at rest); the fitted head is deformed there")
             near = np.linalg.norm(centroids - self.J0[j], axis=1) < 0.02
             eye_faces = np.zeros(len(self.F), bool)
             eye_faces[near] = inside_contour_cylinder(centroids[near], self.V0[ring])
@@ -656,7 +687,7 @@ class EyeModel:
         return np.asarray(color), np.asarray(depth)
 
     def layer(self, verts: np.ndarray, img: np.ndarray, R, t, K, *, sample: bool = False,
-              min_fraction: float = 0.5, dark_min: float = 0.3) -> Tuple[np.ndarray, np.ndarray, Tuple[int, int], Dict[str, Any]]:
+              min_fraction: float = 0.5, max_fraction: float = 1.05, dark_min: float = 0.3) -> Tuple[np.ndarray, np.ndarray, Tuple[int, int], Dict[str, Any]]:
         """Both eyeballs for one view (`verts` = that view's fitted head).
 
         Returns the premultiplied RGB layer and its coverage alpha (frame
@@ -716,6 +747,13 @@ class EyeModel:
                 if dark < dark_min:
                     info[side] = {"skipped": "nothing dark inside the lids (occluded?)", "dark": dark, "fraction": fraction}
                     continue
+                if fraction > max_fraction:
+                    # Clipped to the lid cylinder, the sphere's visible part stays inside the lid polygon up to a
+                    # grazing-angle sliver; well past it, this view's fitted lids disagree with the frame and the
+                    # eye lands on the cheek.
+                    info[side] = {"skipped": "visible eye larger than its lid polygon (fit inconsistent)", "dark": dark,
+                                  "fraction": fraction}
+                    continue
                 if fraction < min_fraction:
                     info[side] = {"skipped": "less than half the lid polygon visible", "dark": dark, "fraction": fraction}
                     continue
@@ -757,7 +795,7 @@ class EyeModel:
         for side, E in self.eyes.items():
             s = samples.get(side, {})
             if "sampled" not in s:
-                raise RuntimeError(f"paste_eyes: the anchor photograph shows no {side} eye through the fitted lids "
+                raise EyesUnavailable(f"paste_eyes: the anchor photograph shows no {side} eye through the fitted lids "
                                    f"({s.get('skipped', 'no samples')})")
             ok, colour, Rr, tr = s["sampled"], s["colour"], s["R"], s["t"]
             centre = Rr @ E["centre"] + tr
@@ -805,7 +843,7 @@ class PasteEyesStep(Step):
     """The anchor's eyes, as textured eyeballs, rendered into every fitted frame through its lids.
 
     inputs:  {"images": [BGR(A)], "image_names": [str], "cameras": [Camera],
-              "head_fit_views": fit_head_per_view's output, "face_correspondence": map_face_to_mesh's,
+              "head_fit_views": fit_head_per_view's output,
               "image": the anchor photograph, "face_landmarks": its landmarks (detect_face_landmarks)}
     outputs: {"images": the frames, the fitted ones with the eyes pasted (the rest are the same arrays),
               "eye_stats": {...}}
@@ -815,6 +853,11 @@ class PasteEyesStep(Step):
         Param("eye_radius_mm", float, 15.5,
               "Eyeball radius; the MHR lid ring sits 15.4-20.6 mm from the eye joint and a sphere fitted to its eye "
               "surface has r 15.8-16.4, so this sits just inside the lids", minimum=5.0, maximum=30.0),
+        Param("max_visible_fraction", float, 1.05,
+              "Skip an eye whose visible part covers more than this fraction of its lid polygon. Clipped to the lid "
+              "cylinder it barely can, unless the view's head fit is inconsistent with the frame — on "
+              "helical-joined_00018 (2026-10-09) the two eyes over 1.0 (1.83, 1.86) were the two pasted onto the "
+              "cheek, every other drawn eye was 0.50-0.88", minimum=0.0),
         Param("min_visible_fraction", float, 0.5,
               "Skip an eye whose visible part covers less than this fraction of its lid polygon: the far eye "
               "peeking past the model's narrower nose is not the frame's eye", minimum=0.0, maximum=1.0),
@@ -836,9 +879,6 @@ class PasteEyesStep(Step):
         fit = inputs.get("head_fit_views")
         if not isinstance(fit, dict) or "verts_world" not in fit:
             raise ValueError("paste_eyes needs 'head_fit_views' from fit_head_per_view")
-        corr = inputs.get("face_correspondence")
-        if not isinstance(corr, dict) or "vertex_of_landmark" not in corr:
-            raise ValueError("paste_eyes needs 'face_correspondence' from map_face_to_mesh")
         anchor_img = np.asarray(inputs["image"])
         lm = inputs["face_landmarks"]
         a_h, a_w = anchor_img.shape[:2]
@@ -847,17 +887,26 @@ class PasteEyesStep(Step):
         if tuple(int(v) for v in anchor["image_size"]) != (a_w, a_h):
             raise ValueError(f"paste_eyes: the head fit's anchor camera is for a {anchor['image_size']} image, the photograph is {a_w}x{a_h}")
 
-        model = EyeModel(fit["verts0_world"], fit["joints0_world"], fit["faces"], corr["vertex_of_landmark"],
-                         radius=params["eye_radius_mm"] / 1000.0, supersample=params["supersample"],
-                         depth_tolerance=params["depth_tolerance_mm"] / 1000.0)
-        texture = model.texture_from_anchor(np.asarray(anchor["verts_world"], np.float64), anchor_img,
-                                            np.asarray(anchor["R"], np.float64), np.asarray(anchor["t"], np.float64),
-                                            np.asarray(anchor["K"], np.float64), anchor_px, params["iris_deg"])
+        debug = Path(params["debug_dir"]) if params["debug_dir"] else None
+        try:
+            model = EyeModel(fit["verts0_world"], fit["joints0_world"], fit["faces"],
+                             radius=params["eye_radius_mm"] / 1000.0, supersample=params["supersample"],
+                             depth_tolerance=params["depth_tolerance_mm"] / 1000.0)
+            texture = model.texture_from_anchor(np.asarray(anchor["verts_world"], np.float64), anchor_img,
+                                                np.asarray(anchor["R"], np.float64), np.asarray(anchor["t"], np.float64),
+                                                np.asarray(anchor["K"], np.float64), anchor_px, params["iris_deg"])
+        except EyesUnavailable as exc:
+            # Both eyes or neither: one pasted eye beside one the diffusion invented reads worse than two invented.
+            logger.warning("%s — the frames keep their own eyes", exc)
+            stats = {"fitted_views": len(fit["names"]), "views_pasted": 0, "eyes_drawn": 0, "skipped": str(exc)}
+            if debug:
+                debug.mkdir(parents=True, exist_ok=True)
+                (debug / "eyes.json").write_text(json.dumps(stats, indent=1))
+            return {"images": images, "eye_stats": stats}
         logger.info("paste_eyes: eye model textured from the anchor — %s", "; ".join(
             f"{s}: {v['sampled']}/{v['sphere_vertices']} sphere vertices, iris {v['iris_sampled']}/{v['iris_vertices']}"
             for s, v in texture.items()))
 
-        debug = Path(params["debug_dir"]) if params["debug_dir"] else None
         if debug:
             debug.mkdir(parents=True, exist_ok=True)
             np.savez(debug / "eye_colors.npz", **model.colors, sphere_vertices=model.SV, sphere_faces=model.SF, radius=model.radius)
@@ -874,7 +923,8 @@ class PasteEyesStep(Step):
             img = images[i]
             R, t, K = opencv_camera(cameras[i])
             layer, a, (x0, y0), info = model.layer(np.asarray(fit["verts_world"][k], np.float64), img, R, t, K,
-                                                   min_fraction=params["min_visible_fraction"], dark_min=params["dark_min"])
+                                                   min_fraction=params["min_visible_fraction"],
+                                                   max_fraction=params["max_visible_fraction"], dark_min=params["dark_min"])
             per_view[name] = {s: {kk: v for kk, v in e.items() if kk in ("skipped", "fraction", "pixels", "dark")} for s, e in info.items()}
             drawn = sum(1 for e in info.values() if "skipped" not in e)
             if drawn == 0:

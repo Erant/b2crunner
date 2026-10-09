@@ -257,6 +257,49 @@ class TestGeometry(unittest.TestCase):
         np.testing.assert_allclose(t, t_true, atol=1e-6)
 
 
+class TestPasteEyesUnavailable(unittest.TestCase):
+    """A subject whose eyes cannot be modelled keeps its frames, and the run goes on."""
+
+    def test_the_frames_pass_through_and_the_reason_is_recorded(self):
+        class NoEyes(fv.EyeModel):
+            def __init__(self, *args, **kwargs):
+                raise fv.EyesUnavailable("paste_eyes: MHR joint 122 is 3.3 cm from the image_left lid ring")
+
+        images = [np.full((8, 8, 3), k, np.uint8) for k in range(3)]
+        inputs = {"images": images, "image_names": ["a", "b", "c"], "cameras": [None] * 3,
+                  "head_fit_views": {"verts_world": [], "verts0_world": None, "joints0_world": None, "faces": None,
+                                     "names": ["a", "b"], "anchor": {"image_size": (8, 8)}},
+                  "image": np.zeros((8, 8, 3), np.uint8), "face_landmarks": {"landmarks": np.zeros((478, 3))}}
+        step = get_step_class("paste_eyes")()
+        original, fv.EyeModel = fv.EyeModel, NoEyes
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                params = step.resolve_params({"debug_dir": tmp})
+                out = step.run(inputs, params)
+                self.assertTrue((Path(tmp) / "eyes.json").exists())
+        finally:
+            fv.EyeModel = original
+        self.assertEqual(len(out["images"]), 3)
+        for a, b in zip(out["images"], images):
+            self.assertIs(a, b)
+        self.assertEqual(out["eye_stats"]["views_pasted"], 0)
+        self.assertIn("3.3 cm", out["eye_stats"]["skipped"])
+
+
+class TestMhrLidRings(unittest.TestCase):
+    def test_one_vertex_per_mediapipe_lid_landmark(self):
+        self.assertEqual(len(fv.MHR_LID_RING_IMAGE_LEFT), len(fv.LID_RING_IMAGE_LEFT))
+        self.assertEqual(len(fv.MHR_LID_RING_IMAGE_RIGHT), len(fv.LID_RING_IMAGE_RIGHT))
+        for ring in (fv.MHR_LID_RING_IMAGE_LEFT, fv.MHR_LID_RING_IMAGE_RIGHT):
+            self.assertTrue(all(0 <= v < fv.MHR_VERTICES for v in ring))
+        self.assertFalse(set(fv.MHR_LID_RING_IMAGE_LEFT) & set(fv.MHR_LID_RING_IMAGE_RIGHT))
+
+    def test_a_body_that_is_not_the_mhr_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "not the MHR's"):
+            fv.EyeModel(np.zeros((100, 3)), np.zeros((127, 3)), np.zeros((1, 3), np.int64),
+                        radius=0.0155, supersample=1, depth_tolerance=0.001)
+
+
 class TestStepsRegistered(unittest.TestCase):
     def test_defaults_resolve(self):
         for name in ("detect_face_views", "fit_head_per_view", "paste_eyes", "build_face_rig"):

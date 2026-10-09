@@ -4416,7 +4416,6 @@ steps:
       image_names: dataset.image_names
       cameras: dataset.cameras
       head_fit_views: scene.head_fit_views
-      face_correspondence: scene.face_correspondence
       image: scene.front_image
       face_landmarks: scene.face_landmarks
     params:
