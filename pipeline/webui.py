@@ -1238,6 +1238,12 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
             button that returns nothing for four minutes is indistinguishable
             from a hung one. It ends when the packaging does, so it cannot
             linger the way the old polling generators did.
+
+            The archives go out in the last yield only. Gradio SHA-256s every
+            file it is handed, whole, on every yield (`save_file_to_cache`), so
+            streaming the growing list re-read each archive once per later
+            run: 63 runs of 0.6 GB hashed ~1.2 TB to write 38 GB, 2 s per run
+            at the start and 90 s at the end (2026-10-09).
             """
             icons = {"done": "✅", "failed": "❌", "cancelled": "⛔",
                      "unknown": "•"}
@@ -1255,7 +1261,7 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
             for index, state in enumerate(runs, 1):
                 yield (
                     f"Packaging **{index} of {len(runs)}** — `{state.name}`…",
-                    rows, archives, gr.update(), thumbs,
+                    rows, gr.update(), gr.update(), thumbs,
                 )
                 contents, size = run_contents(state, bool(debug), fmt)
                 archive = build_result_zip(
@@ -1283,7 +1289,7 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
             ]
             combined = gr.update(visible=False, value=None)
             if bundle:
-                yield ("Building the combined .zip…", rows, archives,
+                yield ("Building the combined .zip…", rows, gr.update(),
                        gr.update(), thumbs)
                 path = build_bundle_zip(runs, reuse=True, debug=bool(debug), fmt=fmt)
                 if path:

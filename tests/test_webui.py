@@ -246,6 +246,18 @@ class TestWiring(unittest.TestCase):
                     self.assertEqual([n for n in bundle.namelist() if n.startswith("ply/")], [member])
                 self.assertIn(f"`{member}`", info)
 
+    def test_all_results_hands_over_the_archives_once_at_the_end(self):
+        # Gradio hashes every file it is handed on every yield; a growing list per yield re-reads them all.
+        for name in ("one", "two", "three"):
+            self._finished_run(name)
+        all_results = next(fn for fn in self.app.fns.values()
+                           if fn.fn is not None and fn.fn.__name__ == "on_all_results")
+        outs = list(all_results.fn(True, False, "ply"))
+        for out in outs[:-1]:
+            self.assertIsInstance(out[2], dict)   # gr.update(): leave the file list alone
+        self.assertEqual(len(outs[-1][2]), 3)
+        self.assertTrue(all(Path(a).is_file() for a in outs[-1][2]))
+
     def test_packaging_a_run_this_server_is_still_running_is_refused(self):
         self._live_run("live")
         package = next(
