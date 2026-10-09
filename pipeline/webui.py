@@ -93,10 +93,12 @@ is where the two are put on one port: the API first, the UI mounted under it.
 
 from __future__ import annotations
 
+import html
 import logging
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import quote
 
 import gradio as gr
 import yaml
@@ -455,6 +457,32 @@ _SPLAT_FORMAT_INFO = (
     "splat comes with (b2cgltf SPEC.md); the PLY is the trained splat alone. "
     "Nothing else is packaged beside either."
 )
+
+
+def _download_links(archives: List[str]) -> str:
+    """`archives` as links onto Gradio's own `file=` route, for a `gr.HTML`.
+
+    Not `gr.File` values: Gradio SHA-256s every file a component is given,
+    whole, and copies it into its cache (`save_file_to_cache`) — a second
+    full copy of every archive on the volume, and a full read each time a
+    run with a built archive was looked at. The `file=` route serves a path
+    under `allowed_paths` (`build_server` lists the output directory) as it
+    stands, behind the same login as the page, with Range support. Relative,
+    so it holds under a proxy's prefix. Empty for no archives.
+    """
+    items = []
+    for archive in archives:
+        path = Path(archive)
+        try:
+            size = f" — {path.stat().st_size / 1e9:.2f} GB"
+        except OSError:
+            size = ""
+        href = html.escape(f"gradio_api/file={quote(str(path.resolve()))}", quote=True)
+        items.append(
+            f'<li><a href="{href}" download="{html.escape(path.name, quote=True)}">'
+            f"{html.escape(path.name)}</a>{size}</li>"
+        )
+    return f"<ul>{''.join(items)}</ul>" if items else ""
 
 
 def _result_summary(
@@ -878,7 +906,8 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
                          "(hundreds of MB) and, if the run had Extra debug "
                          "outputs on, two more COLMAP datasets.",
                 )
-                results_zip = gr.File(label="Result (.zip)", scale=3)
+                # Links, not gr.File: see `_download_links`.
+                results_zip = gr.HTML(label="Result (.zip)", scale=3)
             # b2cviewer on this run's subject file, in a browser tab of its
             # own (`pipeline/viewer.py`); shown when both exist.
             results_viewer = gr.Button(
@@ -937,9 +966,8 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
                 datatype=["str", "str", "str", "str", "str"],
                 interactive=False, label="Completed runs",
             )
-            all_files = gr.File(
-                label="Result archives — one per run", file_count="multiple")
-            bundle_out = gr.File(label="Everything in one .zip", visible=False)
+            all_files = gr.HTML(label="Result archives — one per run")
+            bundle_out = gr.HTML(label="Everything in one .zip", visible=False)
             all_gallery = gr.Gallery(
                 label="One frame per run", columns=6, height=300,
                 object_fit="contain",
@@ -1054,7 +1082,8 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
                 filter_upd = previews_upd = keep
 
             if stale:
-                info_upd, frames_upd, zip_upd = _result_summary(state, bool(debug), fmt)
+                info_upd, frames_upd, archive = _result_summary(state, bool(debug), fmt)
+                zip_upd = _download_links([archive] if archive else [])
                 viewable = viewer_on and has_subject_file(state.output_dir)
                 viewer_upd = gr.update(
                     link=viewer_link(state.name) if viewable else None, visible=viewable,
@@ -1223,7 +1252,7 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
             if not archive:
                 raise gr.Error("This run produced no deliverables to package.")
             info, _frames, _archive = _result_summary(state, bool(debug), fmt or DEFAULT_SPLAT_FORMAT)
-            return info, archive
+            return info, _download_links([archive])
 
         package_btn.click(
             on_package, inputs=[run_picker, results_debug_in, results_format_in],
@@ -1239,11 +1268,11 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
             from a hung one. It ends when the packaging does, so it cannot
             linger the way the old polling generators did.
 
-            The archives go out in the last yield only. Gradio SHA-256s every
-            file it is handed, whole, on every yield (`save_file_to_cache`), so
-            streaming the growing list re-read each archive once per later
-            run: 63 runs of 0.6 GB hashed ~1.2 TB to write 38 GB, 2 s per run
-            at the start and 90 s at the end (2026-10-09).
+            The archives go out as links (`_download_links`), in the last
+            yield only. They were `gr.File` values streamed with every yield,
+            and Gradio hashed the whole growing list each time: 63 runs of
+            0.6 GB hashed ~1.2 TB to write 38 GB, 2 s per run at the start and
+            90 s at the end (2026-10-09).
             """
             icons = {"done": "✅", "failed": "❌", "cancelled": "⛔",
                      "unknown": "•"}
@@ -1293,11 +1322,11 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
                        gr.update(), thumbs)
                 path = build_bundle_zip(runs, reuse=True, debug=bool(debug), fmt=fmt)
                 if path:
-                    combined = gr.update(visible=True, value=path)
+                    combined = gr.update(visible=True, value=_download_links([path]))
                     info.append(
                         f"`{bundle_path(fmt).name}` holds all {len(archives)} under "
                         "`<run name>/`.")
-            yield "\n\n".join(info), rows, archives, combined, thumbs
+            yield "\n\n".join(info), rows, _download_links(archives), combined, thumbs
 
         all_refresh.click(
             on_all_results, inputs=[bundle_in, all_debug_in, all_format_in],

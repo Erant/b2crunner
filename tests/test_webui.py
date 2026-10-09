@@ -33,6 +33,7 @@ except ImportError:  # pragma: no cover - depends on the local env
 
 from pipeline.gpu_scheduler import GpuScheduler
 from pipeline.run_state import RunJob
+from pipeline.runs import result_archive_path
 
 
 def _no_change(value) -> bool:
@@ -195,7 +196,7 @@ class TestWiring(unittest.TestCase):
         run = self._finished_run("done")
         out = self._dep("load").fn("done", {}, webui.PREVIEW_ALL)
         info, _frames, archive = out[7], out[8], out[9]
-        self.assertIsNone(archive)
+        self.assertEqual(archive, "")
         self.assertIn("Package .zip", info)
         self.assertEqual(list((self.data / "output").glob("*.zip")), [])
 
@@ -203,18 +204,19 @@ class TestWiring(unittest.TestCase):
             fn for fn in self.app.fns.values()
             if fn.fn is not None and fn.fn.__name__ == "on_package"
         )
-        info, archive = package.fn("done")
-        self.assertTrue(Path(archive).is_file())
+        info, links = package.fn("done")
+        (archive,) = (self.data / "output").glob("*.zip")
+        self.assertIn(f'href="gradio_api/file={archive.resolve()}"', links)
         self.assertIn("The .zip contains", info)
 
         # Now the view finds the archive it did not build.
         out = self._dep("change", self.picker).fn("done", {}, webui.PREVIEW_ALL)
-        self.assertEqual(out[8], archive)
+        self.assertEqual(out[8], links)
         # ...until the run directory changes under it.
         time.sleep(0.01)
         _touch(run / "colmap" / "new.txt")
         out = self._dep("change", self.picker).fn("done", {}, webui.PREVIEW_ALL)
-        self.assertIsNone(out[8])
+        self.assertEqual(out[8], "")
 
     def test_both_results_tabs_pick_the_splat_format_gltf_first(self):
         dropdowns = [b for b in self.app.blocks.values()
@@ -241,7 +243,8 @@ class TestWiring(unittest.TestCase):
                        if fn.fn is not None and fn.fn.__name__ == "on_package")
         for fmt, member in (("gltf", "ply/scene.glb"), ("ply", "ply/scene.ply")):
             with self.subTest(fmt=fmt):
-                info, archive = package.fn("splat", False, fmt)
+                info, _links = package.fn("splat", False, fmt)
+                archive = result_archive_path(self.data / "output" / "splat", fmt)
                 with zipfile.ZipFile(archive) as bundle:
                     self.assertEqual([n for n in bundle.namelist() if n.startswith("ply/")], [member])
                 self.assertIn(f"`{member}`", info)
@@ -255,8 +258,17 @@ class TestWiring(unittest.TestCase):
         outs = list(all_results.fn(True, False, "ply"))
         for out in outs[:-1]:
             self.assertIsInstance(out[2], dict)   # gr.update(): leave the file list alone
-        self.assertEqual(len(outs[-1][2]), 3)
-        self.assertTrue(all(Path(a).is_file() for a in outs[-1][2]))
+        for name in ("one", "two", "three"):
+            self.assertIn(f"{name}-result-ply.zip</a>", outs[-1][2])
+        self.assertEqual(outs[-1][2].count("<li>"), 3)
+
+    def test_download_links_point_at_the_gradio_file_route(self):
+        archive = self.data / "output" / "a b&c-result.zip"
+        _touch(archive, 2_000_000_000 // 1000)
+        links = webui._download_links([str(archive)])
+        self.assertIn(f'href="gradio_api/file={self.data.resolve()}/output/a%20b%26c-result.zip"', links)
+        self.assertIn('download="a b&amp;c-result.zip"', links)
+        self.assertEqual(webui._download_links([]), "")
 
     def test_packaging_a_run_this_server_is_still_running_is_refused(self):
         self._live_run("live")
