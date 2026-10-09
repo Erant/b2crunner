@@ -149,6 +149,23 @@ def _head_vertices(vertices_cam: np.ndarray, joints_cam: np.ndarray) -> np.ndarr
     return vertices_cam[:, 1] < joints_cam[_NECK, 1]
 
 
+def head_sphere_vertices(vertices_cam: np.ndarray, joints_cam: np.ndarray,
+                         radius_ear_spans: float = 1.0) -> np.ndarray:
+    """Vertices within `radius_ear_spans` ear-to-ear distances of the head
+    keypoints' (nose, eyes, ears) centroid: the head wherever it points.
+
+    Not `_head_vertices`: "above the neck joint" is the head only while the
+    body stands upright. A bowed head or a squat drops the face out of it, a
+    raised arm or a hand on the head joins it (2026-10-05 batch). On the
+    rest-pose MHR (ears 15.4 cm apart) a 1.0 span sphere reaches the crown and
+    the top of the neck, takes 97% of the head (the rest is neck just above
+    the joint), the head's full width and no vertex below the neck joint.
+    """
+    head = joints_cam[list(_HEAD_POINTS)]
+    span = float(np.linalg.norm(joints_cam[_L_EAR] - joints_cam[_R_EAR]))
+    return np.linalg.norm(vertices_cam - head.mean(0), axis=1) < radius_ear_spans * span
+
+
 def head_span_px(joints_cam: np.ndarray, focal: float) -> float:
     """The projected head keypoints' (nose, eyes, ears) larger extent in frame
     pixels — ear to ear from the front. The span detect_face_landmarks logs as
@@ -160,8 +177,9 @@ def head_span_px(joints_cam: np.ndarray, focal: float) -> float:
 
 def head_crop_box(vertices_cam: np.ndarray, joints_cam: np.ndarray, focal: float,
                   width: int, height: int, margin: float = 0.25) -> Tuple[int, int, int, int]:
-    """A frame-clamped box around the projected head, padded by `margin`."""
-    head = vertices_cam[_head_vertices(vertices_cam, joints_cam)]
+    """A frame-clamped box around the projected head (`head_sphere_vertices`),
+    padded by `margin`."""
+    head = vertices_cam[head_sphere_vertices(vertices_cam, joints_cam)]
     if len(head) < 10:
         head = joints_cam[list(_HEAD_POINTS)]
     px = _project(head, focal, width / 2.0, height / 2.0)
@@ -638,20 +656,29 @@ class FitHeadToFaceStep(Step):
         pose_idx_t = torch.tensor(pose_idx, device=device)
         head = self._head
 
-        def forward(dpose, dscale, dshape):
-            body = b0.clone()
+        def replay(g, b, h, sc, sh, ex, so, dpose, dscale, dshape):
+            body = b.clone()
             body[0, pose_idx_t] = body[0, pose_idx_t] + dpose
-            shape = sh0.clone()
+            shape = sh.clone()
             shape[0, shape_from:] = shape[0, shape_from:] + dshape
-            so = so0.clone()
+            so = so.clone()
             so[0, scale_idx] = so[0, scale_idx] + dscale
             verts, keypoints, joints, rots = head.mhr_forward(
-                global_trans=torch.zeros_like(g0), global_rot=g0, body_pose_params=body,
-                hand_pose_params=h0, scale_params=sc0, shape_params=shape, expr_params=ex0,
+                global_trans=torch.zeros_like(g), global_rot=g, body_pose_params=body,
+                hand_pose_params=h, scale_params=sc, shape_params=shape, expr_params=ex,
                 return_keypoints=True, return_joint_coords=True, return_joint_rotations=True,
                 scale_offsets=so,
             )
             return verts[0] * flip, keypoints[0, :n_keypoints] * flip, joints[0] * flip, rots[0]
+
+        def forward(dpose, dscale, dshape):
+            return replay(g0, b0, h0, sc0, sh0, ex0, so0, dpose, dscale, dshape)
+
+        def forward_rest(dpose, dscale, dshape):
+            """The body model's rest pose (every parameter zero), where the
+            handle check runs — see `_check_handles`."""
+            return replay(*(torch.zeros_like(t) for t in (g0, b0, h0, sc0, sh0, ex0, so0)),
+                          dpose, dscale, dshape)
 
         def project(points):
             p = points + cam_t
@@ -672,8 +699,8 @@ class FitHeadToFaceStep(Step):
                 f"deformed the vertices without updating the parameters, or "
                 f"mesh_output and pose_params are from different fits."
             )
-        self._check_handles(forward, verts0, keypoints0, pose_idx, zero_pose, zero_scale,
-                            zero_shape, params["fit_scale"])
+        self._check_handles(forward_rest, pose_idx, zero_pose, zero_scale, zero_shape,
+                            params["fit_scale"])
 
         target_f = torch.tensor(photo_px[feature], dtype=torch.float32, device=device)
         target_o = torch.tensor(photo_px[oval], dtype=torch.float32, device=device)
@@ -793,33 +820,44 @@ class FitHeadToFaceStep(Step):
         }
 
     @staticmethod
-    def _check_handles(forward, verts0, keypoints0, pose_idx, zero_pose, zero_scale,
-                       zero_shape, check_scale: bool) -> None:
+    def _check_handles(forward_rest, pose_idx, zero_pose, zero_scale, zero_shape,
+                       check_scale: bool) -> None:
         """Each fitted parameter must move the head and (almost) nothing else.
 
         The indices are facts about the MHR model that ships with the
         checkpoint, found by perturbation; this repeats the measurement so a
         changed model fails here instead of quietly re-posing a shoulder.
+
+        Measured in the model's REST pose, not the subject's: "the head" is
+        the vertices above the neck joint in y, which only holds while the
+        body stands upright. Until 2026-10-09 it ran on the fitted pose and
+        failed 7 of 74 runs (2026-10-05 batch) on subjects squatting, leaning
+        or bowing the head — the head hangs below the neck joint there. At
+        rest, with the shipped model: indices 18-23 move 0.92-1.00 head
+        vertices, the head scale 0.99, the neighbouring indices 14-17 and
+        24-25 0.02-0.42; a 40 deg forward lean takes the handles to
+        0.84-0.88, the failing runs' 0.76-0.90.
         """
         import torch
 
-        joints_cam = keypoints0.cpu().numpy()
-        head = torch.as_tensor(_head_vertices(verts0.cpu().numpy(), joints_cam), device=verts0.device)
         with torch.no_grad():
+            verts0, keypoints0, _, _ = forward_rest(zero_pose, zero_scale, zero_shape)
+            head = torch.as_tensor(_head_vertices(verts0.cpu().numpy(), keypoints0.cpu().numpy()),
+                                   device=verts0.device)
             for slot, i in enumerate(pose_idx):
                 dpose = zero_pose.clone()
                 dpose[slot] = 0.1
-                verts, _, _, _ = forward(dpose, zero_scale, zero_shape)
+                verts, _, _, _ = forward_rest(dpose, zero_scale, zero_shape)
                 moved = (verts - verts0).norm(dim=1) > 1e-3
                 if moved.sum() == 0 or (moved & head).sum().item() / moved.sum().item() < 0.9:
                     raise RuntimeError(
                         f"fit_head_to_face: body_pose_params[{i}] does not move only the "
                         f"head ({(moved & head).sum().item()} of {moved.sum().item()} moved "
-                        f"vertices are above the neck). The body model's parameter layout "
+                        f"vertices are above the neck, in the rest pose). The body model's parameter layout "
                         f"differs from the one these defaults were measured on; set "
                         f"pose_indices to this model's neck/head joints.")
             if check_scale:
-                verts, _, _, _ = forward(zero_pose, zero_scale + 0.1, zero_shape)
+                verts, _, _, _ = forward_rest(zero_pose, zero_scale + 0.1, zero_shape)
                 moved = (verts - verts0).norm(dim=1) > 1e-3
                 if moved.sum() == 0 or (moved & head).sum().item() / moved.sum().item() < 0.9:
                     raise RuntimeError(

@@ -66,6 +66,21 @@ class TestHeadCrop(unittest.TestCase):
         body_centre_v = focal * 0.5 / 2.5 + h / 2
         self.assertLess(y1, body_centre_v)
 
+    def test_a_bowed_head_stays_in_and_a_raised_arm_stays_out(self):
+        joints, verts, focal, w, h = _skeleton_and_mesh()
+        # Bow the head below the neck joint (a squat seen from the front)...
+        verts[:400, 1] += 0.3
+        joints[:5, 1] += 0.3
+        # ...and raise an arm above it.
+        arm = np.array([0.4, -0.4, 2.5]) + np.random.RandomState(1).normal(scale=0.03, size=(50, 3))
+        verts = np.concatenate([verts, arm])
+        x0, y0, x1, y1 = head_fit.head_crop_box(verts, joints, focal, w, h)
+        face_px = head_fit._project(joints[:5], focal, w / 2, h / 2)
+        self.assertTrue((face_px[:, 0] >= x0).all() and (face_px[:, 0] <= x1).all())
+        self.assertTrue((face_px[:, 1] >= y0).all() and (face_px[:, 1] <= y1).all())
+        arm_px = head_fit._project(arm, focal, w / 2, h / 2)
+        self.assertTrue((arm_px[:, 0] > x1).all())
+
     def test_the_box_is_clamped_to_the_frame(self):
         joints, verts, focal, w, h = _skeleton_and_mesh()
         verts[:, 1] -= 1.0                                # push the head off the top

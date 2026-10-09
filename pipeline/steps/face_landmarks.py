@@ -215,10 +215,11 @@ def mesh_head_box(mesh: Dict[str, Any], width: int, height: int,
     (111 px span): 0.5 / 0.75 / 1.0 agree to 0.9 / 0.6 / 0.7 px mean, the
     landmarker's own crop-to-crop jitter.
 
-    Not `head_fit.head_crop_box`: that takes every vertex above the neck
-    joint, which is the shoulders as well as the head — the right extent
-    for a render nothing has to find a face in, and on an 867x1552
-    portrait a 730x487 crop for a 110 px face.
+    Not `head_fit.head_crop_box`: that takes the whole head's vertices plus
+    a margin — the right extent for a render nothing has to find a face in,
+    and looser than a face-filling crop. (Until 2026-10-09 it took every
+    vertex above the neck joint, the shoulders too: a 730x487 crop for a
+    110 px face on an 867x1552 portrait.)
 
     When the mesh publishes the size it was fitted on it must be this
     frame's: a resized copy would be self-consistent and silently wrong,
