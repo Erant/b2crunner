@@ -264,7 +264,7 @@ comments too:
   anything — `fused_cache_dir` and the cache it managed are gone. 47 GB per
   load rather than 81 GB. It has not yet produced real frames end to end,
   so look at the first pod run's output before trusting a long one. See
-  `docs/fp8-quant-notes.md`.
+  `docs/design-notes.md#weights-fp8-experts-unfused-lightning-lora`.
 
 ## Gotchas worth knowing before you hit them again
 

@@ -127,11 +127,12 @@ class SAM3DBodyStep(Step):
         Param("bbox_thr", float, 0.8,
               "Person-detection confidence floor", minimum=0.0, maximum=1.0),
         Param("use_mask", bool, False, "Let the estimator segment the subject first"),
+        # Empty falls back to the model's default of focal = sqrt(h**2 + w**2),
+        # a guess from the image dimensions, not the real lens. Only 'moge2' is
+        # implemented upstream.
         Param("fov_estimator", str, "moge2",
-              "Monocular estimator run before mesh fitting to recover the camera "
-              "focal length / intrinsics. Empty string falls back to the model's "
-              "default of focal = sqrt(h**2 + w**2) — a guess from the image "
-              "dimensions, not the real lens. Only 'moge2' is implemented upstream."),
+              "Estimator for the camera focal length ('moge2', or empty for a "
+              "guess)"),
         Param("fov_checkpoint", str, None,
               "Local dir or HF repo for the FOV estimator's weights; empty means "
               + DEFAULT_FOV_CHECKPOINT_REPO, advanced=True),
@@ -139,10 +140,11 @@ class SAM3DBodyStep(Step):
               "HF repo the checkpoint is pulled from", advanced=True),
         Param("checkpoint_dir", str, None,
               "A local snapshot directory to use instead of downloading", advanced=True),
+        # Upstream's own "" default is not genuinely optional (it reaches
+        # torch.jit.load and crashes), so run() fills the default in itself.
         Param("mhr_path", str, None,
               "The mhr_model.pt to load; empty means assets/mhr_model.pt inside the "
-              "checkpoint directory. Not genuinely optional — an empty string reaches "
-              "torch.jit.load and crashes", advanced=True),
+              "checkpoint directory", advanced=True),
         Param("device", str, "cuda", "Torch device", advanced=True),
     )
 

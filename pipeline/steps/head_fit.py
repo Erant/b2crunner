@@ -233,23 +233,23 @@ class MapFaceToMeshStep(Step):
     """
 
     PARAMS = (
+        # So MediaPipe sees a face-filling image and the snap distance is a
+        # fraction of a frame pixel.
         Param("upsample", int, 3,
-              "Render the head crop at this many times the frame's pixel "
-              "density, so MediaPipe sees a face-filling image and the snap "
-              "distance is a fraction of a frame pixel", minimum=1, maximum=6),
+              "Render the head crop at this multiple of the frame's resolution",
+              minimum=1, maximum=6),
+        # The span is ear to ear (the 'mesh head spans' of
+        # detect_face_landmarks). Relative so the same geometric miss is
+        # judged the same at any input resolution: a fixed 2 px tuned on
+        # 120-153 px heads lost 12 of one eye's 16 lid landmarks on a 213 px
+        # head, whose lids sit 2-5 px off the mesh's lid edge. 0.015 is
+        # 1.8-2.3 px on the small heads, 3.2 px on the large one.
         Param("snap_head_fraction", float, 0.015,
-              "A landmark further than this fraction of the head keypoints' "
-              "projected span (ear to ear; the 'mesh head spans' of "
-              "detect_face_landmarks) from every visible vertex is left unmapped. "
-              "Relative so the same geometric miss is judged the same at any "
-              "input resolution: it was a fixed 2 frame px, tuned on heads "
-              "spanning 120-153 px, and a 213 px head (a 3072x2720 sheet, "
-              "2026-10-01) lost 12 of one eye's 16 lid landmarks — the lids sit "
-              "2-5 px off the mesh's lid edge there. 0.015 is 1.8-2.3 px on "
-              "the old heads, 3.2 px on that one", minimum=0.001),
+              "Leave a landmark unmapped if further than this fraction of the "
+              "head width from the mesh", minimum=0.001),
+        # The fit is dense or it is nothing.
         Param("min_mapped", int, 200,
-              "Refuse a correspondence with fewer landmarks mapped than this; "
-              "the fit is dense or it is nothing", minimum=1),
+              "Fail if fewer landmarks than this map onto the mesh", minimum=1),
         Param("min_detection_confidence", float, 0.3,
               "MediaPipe's detection floor on the render", minimum=0.0, maximum=1.0,
               advanced=True),
@@ -519,23 +519,24 @@ class FitHeadToFaceStep(Step):
     """
 
     PARAMS = (
+        # Per sigma squared, against the landmark loss in pixels. 1.0 leaves
+        # the shape 1.8 sigma rms from SAM-3D-Body's fit on a subject the
+        # model finds unusual; 0.3 buys 0.3 px for another half sigma.
         Param("shape_regularisation", float, 1.0,
-              "L2 pull on the head shape components, per sigma squared, against "
-              "the landmark loss in pixels. 1.0 leaves the shape 1.8 sigma rms "
-              "from SAM-3D-Body's fit on a subject the model finds unusual; 0.3 "
-              "buys 0.3 px for another half sigma", minimum=0.0),
+              "Pull of the head shape toward the body model's (higher = "
+              "stiffer)", minimum=0.0),
+        # Off is cheap, and enough when the body model's face already has the
+        # subject's proportions.
         Param("fit_shape", bool, True,
-              "Fit the head-only shape components. Off, the head is only turned "
-              "and scaled — cheap, and enough when the body model's face already "
-              "has the subject's proportions"),
+              "Fit the head shape too; off only turns and scales the head"),
         Param("fit_scale", bool, True, "Fit the head joint's scale"),
         Param("iterations", int, 600, "Adam steps of the joint pose+scale+shape "
               "stage; the pose+scale warm-up runs half as many", minimum=1),
         Param("learning_rate", float, 0.01,
               "Adam step; rotations are in radians, so 0.01 is ~0.6 deg", advanced=True),
+        # So MediaPipe's occasional outlier does not steer the fit.
         Param("huber_px", float, 4.0,
-              "Landmark residuals beyond this many pixels count linearly, not "
-              "quadratically — MediaPipe's occasional outlier does not steer the fit",
+              "Landmark residuals beyond this many pixels count linearly",
               minimum=0.1, advanced=True),
         Param("pose_indices", str, ",".join(str(i) for i in DEFAULT_POSE_INDICES),
               "body_pose_params indices of the neck/head joint rotations", advanced=True),

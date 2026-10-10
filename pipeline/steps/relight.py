@@ -213,21 +213,23 @@ class RelightFramesStep(Step):
     """
 
     PARAMS = (
+        # Opaque, flat splats; more costs time, not accuracy.
         Param("max_points", int, 60000,
-              "Surface splats sampled for the fit (opaque, flat ones); more costs time, not accuracy",
+              "Surface splats sampled for the lighting fit",
               minimum=1000),
         Param("min_views", int, 12, "A surface point is used when this many frames see it", minimum=2),
+        # Default: eyeglass, hair, shoes, teeth, tongue.
         Param("exclude_classes", list, list(DEFAULT_EXCLUDE),
-              "Goliath class ids the fit ignores (needs `labels`): eyeglass, hair, shoes, teeth, tongue"),
+              "Goliath class ids the fit ignores; needs `labels`"),
         Param("k_min", float, 0.5, "Lower clamp of the per-pixel correction factor", minimum=0.05),
         Param("k_max", float, 2.0, "Upper clamp of the per-pixel correction factor", minimum=1.0),
         Param("iterations", int, 4, "Alternating rounds of the fit (it settles in two)", minimum=1),
         Param("grid", int, 8, "Visibility z-buffer cell size, in pixels", minimum=1, advanced=True),
         Param("depth_tolerance", float, 0.015,
-              "Metres behind the z-buffer a splat centre may sit and still count as seen", minimum=0.0,
+              "Depth (m) behind the visible surface a splat may sit and still count as seen", minimum=0.0,
               advanced=True),
         Param("min_samples", int, 20000,
-              "Below this many (point, frame) samples the frames pass through untouched", minimum=0, advanced=True),
+              "Leave the frames untouched below this many (point, frame) samples", minimum=0, advanced=True),
         Param("render_path", str, "brush-splat-render", "The rasteriser binary for the normal maps", advanced=True),
         Param("debug_dir", str, "", "Write stats.json and the per-frame lighting coefficients here"),
     )

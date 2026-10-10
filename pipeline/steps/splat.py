@@ -51,7 +51,7 @@ the output contract, which is the part to be careful with:
 
 The decision is made once, in 3-D, from what the training views actually
 constrained — where the old pair guessed it per pixel per frame from
-accumulated opacity. docs/spatial-reinforcement.md is the before/after.
+accumulated opacity. docs/design-notes.md#the-confidence-gated-re-render-render_subject--resplat_foreground_masks--mask_splat_fringes is the before/after.
 
 **Keep it off for any render that feeds `select_support_views`** (the
 face-view cap renders in both bootstrap workflows). That step
@@ -188,7 +188,7 @@ class LoadSplatStep(Step):
 
     PARAMS = (
         Param("filepath", str, None,
-              "The .ply to load. A `splat_path` input wins over it"),
+              "The .ply to load; a `splat_path` input overrides it"),
     )
 
     def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
@@ -290,114 +290,111 @@ class RenderSplatStep(Step):
     # and `n_frames` therefore cannot be REQUIRED — it is read only when a
     # pattern is set, and _generate_path says so if it is missing then.
     PARAMS = (
+        # Empty reuses the source dataset's cameras verbatim, so replace_views
+        # can swap the exact same views back in. `cap` is not an orbit at all:
+        # a disc of views around the photograph's own view of the splat, for
+        # supervising a training off its denoising path.
         Param("pattern", str, "",
-              "Shape of the new camera path. Empty reuses the source dataset's "
-              "cameras verbatim, which is how outline.json re-renders the exact "
-              "same views for replace_views to swap back in. `cap` is the odd one "
-              "out and is not an orbit at all: a disc of views around the "
-              "photograph's own view of the splat, for supervising a training "
-              "off its denoising path",
+              "Shape of the new camera path; empty reuses the dataset's cameras",
               choices=("", "circular", "sinusoidal", "helical", "cap")),
         Param("n_frames", int, None, "Views to render; required when a pattern is set",
               minimum=1),
         Param("width", int, 720, "Render width", minimum=1),
         Param("height", int, 1280, "Render height", minimum=1),
+        # helical threads one `framing` global through both the mesh `render`
+        # and this step, so a non-'full' preset re-renders the splat on the
+        # same re-aimed, tighter-framed orbit the mesh render used and the
+        # splat was trained on.
         Param("framing", str, "full",
-              "Which of the source render's framing presets to reuse for the "
-              "bounds. helical threads one `framing` global through "
-              "both the mesh `render` and this step, so a non-'full' preset "
-              "re-renders the splat on the same re-aimed, tighter-framed orbit "
-              "the mesh render used and the splat was trained on",
+              "Which framing preset of the source render sets the bounds",
               choices=("full", "torso", "bust", "head")),
         Param("fill_ratio", float, 0.8, "How much of the frame the subject fills",
               minimum=0.0, maximum=1.0),
+        # 'dataset' is the source render's `framing` box, which keeps a
+        # re-render framed identically to the render it replaces. 'splat' uses
+        # the loaded splat's own box, for a splat that is not the one the
+        # dataset was framed around — a head-only splat orbited on the body's
+        # box is a smudge in the middle of the frame. Pattern-only, and
+        # incompatible with override_cam_from_mesh (which takes its target
+        # from the dataset's metadata and never looks at a box at all).
         Param("bounds_source", str, "dataset",
-              "Which bounding box sizes and aims the new orbit. 'dataset' is the "
-              "source render's `framing` box, which is what keeps a re-render framed "
-              "identically to the render it replaces. 'splat' ignores that box and "
-              "uses the loaded splat's own, for rendering a splat that is not the "
-              "one the dataset was framed around — a head-only splat orbited on the "
-              "body's box is a smudge in the middle of the frame. Pattern-only, and "
-              "incompatible with override_cam_from_mesh (which takes its target from "
-              "the dataset's metadata and never looks at a box at all)",
+              "Bounding box that sizes and aims the new orbit: the dataset's or the splat's",
               choices=("dataset", "splat")),
         Param("focal_length_mm", float, 0.0,
               "0 inherits the dataset's, then falls back to one derived from width"),
+        # Anchors as steps/render.py does and publishes anchor_position /
+        # anchor_frame_index. ON for the helical re-render of a dataset that
+        # was rendered in override mode: inject_anchor matches on position, so
+        # it can only re-apply the anchor to a path that actually passes
+        # through it. Requires the marker an override-mode render leaves in
+        # the extras (original_focal_length); a dataset without one has been
+        # auto-oriented and its original camera is no longer at the origin.
         Param("override_cam_from_mesh", bool, False,
-              "Anchor the new path on the dataset's original camera, as steps/render.py "
-              "does, and publish where it landed as anchor_position / "
-              "anchor_frame_index. ON for the helical re-render of a dataset that was "
-              "rendered in override mode: inject_anchor matches on position, so it can "
-              "only re-apply the anchor to a path that actually passes through it. "
-              "Requires the marker an override-mode render leaves in the extras "
-              "(original_focal_length); a dataset without one has been auto-oriented "
-              "and its original camera is no longer at the world origin"),
+              "Anchor the new path on the dataset's original (photograph) camera"),
+        # The trained splat keeps every band it has; this only shortens the
+        # colour sum per view (2 drops band 3, 0 is the DC colour with no view
+        # dependence). Alpha and geometry are the same at every setting.
+        # Clamped to the splat's own degree by the rasteriser.
         Param("sh_degree", int, 3,
-              "Highest spherical-harmonic band the render evaluates, 0..3. The "
-              "trained splat keeps every band it has; this only shortens the "
-              "colour sum per view, so 3 renders all of them, 2 drops band 3, and "
-              "0 is each Gaussian's DC colour with no view dependence at all. "
-              "Alpha and geometry are the same at every setting. Clamped to the "
-              "splat's own degree by the rasteriser, so 3 is 'everything the "
-              "splat has'. The helical re-render (rerender_splat) is the one "
-              "instance that overrides it, to 2",
+              "Highest spherical-harmonic band rendered, 0..3 (0 = no view-dependent colour)",
               minimum=0, maximum=3),
+        # Black, not 127 grey: black is where the pipeline ends up after
+        # mask_splat, and an intermediate grey would reintroduce the same halo,
+        # just dimmer.
         Param("bg_color", list, [0.0, 0.0, 0.0],
-              "RGB in [0,1]. Black, not the recorded run's 127 grey: black is where "
-              "that pipeline ends up after mask_splat, and matching its intermediate "
-              "grey would reintroduce the same halo, just dimmer. IGNORED when "
-              "`confidence` is on — `cull_color` is the background there"),
+              "Background RGB in [0,1]; ignored when `confidence` is on"),
+        # Instead of leaving mask_splat to threshold rendered alpha afterwards.
+        # The alpha that comes back is then the gate, not accumulated opacity,
+        # and the RGB is composited over `cull_color` rather than `bg_color`.
+        # Needs a .ply trained with brush's `export_evidence`, or an
+        # `evidence_dataset`. Off for any render feeding select_support_views:
+        # that step requires premultiplied-over-black and refuses this output.
         Param("confidence", bool, False,
-              "Gate the render on each Gaussian's multi-view evidence instead of "
-              "leaving mask_splat to threshold rendered alpha afterwards. The alpha "
-              "that comes back is then the gate, not accumulated opacity, and the "
-              "RGB is composited over `cull_color` rather than `bg_color`. Needs a "
-              ".ply trained with brush's `export_evidence`, or an `evidence_dataset` "
-              "to measure against. Off for any render feeding select_support_views: "
-              "that step requires premultiplied-over-black and refuses this output"),
+              "Mask the render by each Gaussian's multi-view evidence"),
+        # One colour for both is the point: partial coverage fades toward the
+        # same value the gate rejects to, so there is no halo to filter away.
         Param("cull_color", list, [0.5, 0.5, 0.5],
-              "RGB in [0,1] that culled pixels resolve to in confidence mode, and "
-              "the colour the kept ones are composited over. One colour for both is "
-              "the point: partial coverage fades toward the same value the gate "
-              "rejects to, so there is no halo to filter away afterwards"),
+              "Confidence mode: RGB in [0,1] for culled pixels and the background"),
         Param("gate_lo", float, 0.45,
               "Confidence at or below which a pixel is fully culled", minimum=0.0,
               maximum=1.0),
         Param("gate_hi", float, 0.65,
-              "Confidence at or above which a pixel is fully kept; between the two "
-              "the gate is a smoothstep", minimum=0.0, maximum=1.0),
+              "Confidence at or above which a pixel is fully kept (smoothstep between)",
+              minimum=0.0, maximum=1.0),
+        # Tuning only: the frames are unaffected, and the sidecars are copied
+        # out of the render's temp directory into the log dir, since nothing
+        # downstream reads them.
         Param("confidence_sidecar", bool, False,
-              "Also keep each frame's raw per-pixel confidence as <stem>.conf.png. "
-              "Tuning only: the frames themselves are unaffected, and the sidecars "
-              "are copied out of the render's temp directory into the log dir, since "
-              "nothing downstream reads them", advanced=True),
-        Param("evidence_dataset", str, None,
-              "Training dataset directory to measure evidence against when the .ply "
-              "carries none — a run whose splat predates brush's export_evidence. "
-              "The debug bundle's colmap_intermediate/ is exactly what train_splat "
-              "saw. Unused when the .ply has its own ev_* block", advanced=True),
-        Param("conf_args", list, [],
-              "Extra --conf-* flags passed verbatim to brush-splat-render, for "
-              "tuning the confidence measure itself (--conf-tau, --conf-min-views, "
-              "--conf-angle-margin, ...). Empty leaves the binary's defaults",
+              "Also save each frame's raw per-pixel confidence as <stem>.conf.png",
               advanced=True),
+        # For a splat that predates brush's export_evidence. The debug bundle's
+        # colmap_intermediate/ is exactly what train_splat saw. Unused when the
+        # .ply has its own ev_* block.
+        Param("evidence_dataset", str, None,
+              "Training dataset to measure evidence against when the .ply has none",
+              advanced=True),
+        # e.g. --conf-tau, --conf-min-views, --conf-angle-margin. Empty leaves
+        # the binary's defaults.
+        Param("conf_args", list, [],
+              "Extra --conf-* flags passed verbatim to the rasteriser",
+              advanced=True),
+        # The mesh render's cloud describes the actual subject geometry; one
+        # sampled from a trained splat inherits its noise.
         Param("override_pointcloud", bool, False,
-              "Sample a fresh point cloud off the splat instead of keeping the "
-              "dataset's. The mesh render's cloud describes the actual subject "
-              "geometry; one sampled from a trained splat inherits its noise"),
+              "Sample a fresh point cloud off the splat instead of keeping the dataset's"),
 
+        # 30 is where body2colmap measured a Face_Neck shell still reading
+        # cleanly — past it a 2.5-D shell is into its own open rim, and a rim
+        # is not supervision. A cap built on the body model's surface
+        # (face_pointmap_splat's mesh_surface prior) has no open rim and is
+        # rendered with the body's occlusion (`cull_mesh`); the validated face
+        # recipe samples it at 60.
         Param("cap_radius_deg", float, 30.0,
-              "Cap: angular radius of the disc of views, about the splat's centre. "
-              "30 is where body2colmap measured a Face_Neck shell still reading "
-              "cleanly — past it a 2.5-D shell is into its own open rim, and a rim "
-              "is not supervision. A cap built on the body model's surface "
-              "(face_pointmap_splat's mesh_surface prior) has no open rim and is "
-              "rendered with the body's occlusion (`cull_mesh`), and the validated "
-              "face recipe samples it at 60", minimum=0.0, maximum=180.0),
+              "Cap: angular radius of the disc of views, in degrees",
+              minimum=0.0, maximum=180.0),
         Param("cull_margin", float, 0.015,
-              "With a `cull_mesh` input: a Gaussian further than this (metres) "
-              "behind the body's surface along its pixel's ray is left out of that "
-              "view's render", minimum=0.0, advanced=True),
+              "With a body mesh: hide Gaussians more than this (metres) behind its surface",
+              minimum=0.0, advanced=True),
         Param("elevation_deg", float, 0.0, "Circular: camera elevation"),
         Param("start_azimuth_deg", float, 0.0, "Where the orbit starts"),
         Param("overlap", int, 1,

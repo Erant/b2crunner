@@ -33,20 +33,21 @@ _STD = (0.229, 0.224, 0.225)
 class RMBGStep(Step):
     PARAMS = (
         Param("batch_size", int, 8, "Images per forward pass", minimum=1, advanced=True),
+        # At 8 frames of 1024x1024 a batch asked for 3 GiB on top of 5.3 GiB
+        # held on the 4070 Ti.
         Param("low_vram", bool, False,
-              "Halve batch_size, for a 12 GB card. At 8 frames of 1024x1024 a "
-              "batch asked for 3 GiB on top of 5.3 GiB held on the 4070 Ti",
+              "Halve batch_size, for 12 GB cards",
               advanced=True),
         Param("checkpoint", str, DEFAULT_CHECKPOINT, "HF repo for the segmentation model",
               advanced=True),
         Param("device", str, None, "Torch device; empty means cuda if available",
               advanced=True),
+        # frame_NNNNN.png / matte_NNNNN.png. The re-outline branch points it
+        # under output_root/debug/ so the 480p denoise output, which exists
+        # nowhere else on disk, rides in the result .zip. Off (None) for every
+        # other instance.
         Param("debug_dir", str, None,
-              "When set, write the frames this step was handed and the mattes "
-              "it produced there as PNGs (frame_NNNNN.png / matte_NNNNN.png). "
-              "The re-outline branch points it under output_root/debug/ so the "
-              "480p denoise output, which exists nowhere else on disk, rides "
-              "in the result .zip. Off (None) for every other instance",
+              "When set, write the input frames and their mattes here as PNGs",
               advanced=True),
     )
 

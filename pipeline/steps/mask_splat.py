@@ -40,7 +40,7 @@ which is what `denoise_pass2` reads and what `inject_anchor` writes its 0.0
 into. That is also why the step stays here rather than being deleted: the
 ordering it anchors ("inject_anchor must run AFTER mask_splat", see
 steps/anchor_stub.py) still holds, and `mode: threshold` keeps the recorded
-run reproducible for an A/B. See docs/spatial-reinforcement.md.
+run reproducible for an A/B. See docs/design-notes.md#the-confidence-gated-re-render-render_subject--resplat_foreground_masks--mask_splat_fringes.
 
 **Mask conventions.** ComfyUI's MASK is inverted (1.0 = background), so the
 graph binarises the *background* and inverts it. This pipeline's convention
@@ -135,28 +135,29 @@ class MaskSplatStep(Step):
     # were fitted against the recorded ComfyUI run this step reproduces (see
     # the module docstring), and moving them breaks that agreement.
     PARAMS = (
+        # threshold: the recorded ComfyUI subgraph — alpha cut, dilate,
+        # composite over black, bilateral filter. passthrough: leave the frames
+        # exactly as they arrived, because render_splat already gated them on
+        # per-Gaussian confidence. composite: alpha-blend the frames over
+        # `bg_color` using dataset.masks as they arrive, for a matte that came
+        # from somewhere better than the render's own alpha (rmbg). The masks
+        # are replaced by the all-1.0 VACE batch in every mode.
         Param("mode", str, "threshold",
               choices=("threshold", "passthrough", "composite"),
-              help="threshold: the recorded ComfyUI subgraph — alpha cut, dilate, "
-                   "composite over black, bilateral filter. passthrough: leave the "
-                   "frames exactly as they arrived, because render_splat already "
-                   "gated them on per-Gaussian confidence. composite: alpha-blend "
-                   "the frames over `bg_color` using dataset.masks as they arrive, "
-                   "for a matte that came from somewhere better than the render's "
-                   "own alpha (rmbg). The masks are replaced by the all-1.0 VACE "
-                   "batch in every mode"),
+              help="How frames are masked: alpha threshold, unchanged, or composited by mask"),
+        # Mid grey, which is what the denoise pass downstream is handed
+        # elsewhere — the renders it sees ground on #7F7F7F — and what the
+        # warped anchor photo's border is filled with, so the injected real
+        # frame does not arrive as the one bright thing in the batch.
         Param("bg_color", list, [0.5, 0.5, 0.5],
-              "composite mode only: the RGB in [0,1] the subject is laid over. Mid "
-              "grey, which is what the denoise pass downstream has always been "
-              "handed — the renders it sees elsewhere ground on #7F7F7F — and what "
-              "the warped anchor photo's border is filled with, so the injected "
-              "real frame does not arrive as the one bright thing in the batch"),
+              "Composite mode: background RGB in [0,1] behind the subject"),
         Param("filter_size", int, 6, "Bilateral filter diameter", minimum=0),
-        Param("dilation", int, 2, "Grow the kept region back out by this many pixels; "
-              "0 is a valid no-dilate case", minimum=0),
+        Param("dilation", int, 2, "Grow the kept region back out by this many pixels",
+              minimum=0),
+        # Inverted ComfyUI sense: a pixel survives at alpha >= 1 - threshold/255,
+        # so 16 means essentially opaque.
         Param("threshold", int, 16,
-              "Opacity cutoff in the inverted ComfyUI sense: a pixel survives at "
-              "alpha >= 1 - threshold/255, so 16 means essentially opaque",
+              "Opacity cutoff, 1..255; a pixel is kept at alpha >= 1 - threshold/255",
               minimum=1, maximum=255, advanced=True),
         Param("sigma_color", float, 0.5, "Bilateral filter colour sigma, in [0,1] image units",
               advanced=True),

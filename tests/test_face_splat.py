@@ -14,7 +14,7 @@ the one everything else rests on:
   * The composite's CULL: which frames are close enough to the photograph's
     view to take the splat layer at all, and what that angle is measured
     about. The blend itself is body2colmap's again as of 2026-08-31 (see
-    docs/revert-when-body2colmap-drops-gsplat.md), so what is tested here
+    docs/design-notes.md#supporting-views-and-premultiplied-renders), so what is tested here
     is only the part `render` still owns.
 
 Same discipline as the shell's tests — synthetic geometry with a known
@@ -400,7 +400,7 @@ class TestSplatLayerCull(unittest.TestCase):
     `steps/splat.py`'s `render_splat_layers` passes the background itself.
     What stays on this side is the cull — `render` builds its own cameras
     and never touches `OrbitPipeline`, so `splat_view_angle_deg` is not
-    reachable from it. See docs/revert-when-body2colmap-drops-gsplat.md.
+    reachable from it. See docs/design-notes.md#supporting-views-and-premultiplied-renders.
     """
 
     CENTRE = np.array([0.0, 0.0, -2.0])   # the "head", 2 m down -Z

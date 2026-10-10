@@ -212,7 +212,7 @@ class TestTheWiring(unittest.TestCase):
         from pipeline.workflow import WorkflowSpec
         from tests.test_workflows import WORKFLOW_DIR
 
-        for name in ("helical.yaml", "helical_shell.yaml"):
+        for name in ("helical.yaml",):
             with self.subTest(workflow=name):
                 spec = WorkflowSpec.from_yaml(str(WORKFLOW_DIR / name))
                 steps = {s.id: s for s in spec.steps}

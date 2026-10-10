@@ -61,15 +61,15 @@ class PickRearViewStep(Step):
     """
 
     PARAMS = (
+        # So the reference stands on the same ground as the batch.
         Param("matte", bool, True,
-              "Cut the picked frame with its matte and lay it over `bg_color`, "
-              "so the reference stands on the same ground as the batch"),
+              "Cut out the picked frame and place it over `bg_color`"),
+        # 0.5 grey is what the anchor border and mask_splat_fringes use.
         Param("bg_color", list, [0.5, 0.5, 0.5],
-              "RGB in 0..1 the matted frame is composited over; 0.5 grey is "
-              "what the anchor border and mask_splat_fringes use"),
+              "Background RGB (0-1) behind the cut-out frame"),
+        # rear_view.png and rear_view.json; nothing is written in sheet mode.
         Param("debug_dir", str, None,
-              "When set, write the picked frame (rear_view.png) and which "
-              "frame it was (rear_view.json) there. Nothing in sheet mode",
+              "When set, write the picked frame and its index here",
               advanced=True),
     )
 

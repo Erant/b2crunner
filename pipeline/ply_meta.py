@@ -23,7 +23,7 @@ Line format, one per key::
 docs/ply-header-records.md is the format's contract for readers outside b2crunner.
 
 Version 2 (2026-09-29) writes `global_rots` in the same world frame as `joints`; version 1 headers wrote
-`rotation @ rots` without the raw frame's flip (docs/ply-header-global-rots-flip-2026-09-25.md).
+`rotation @ rots` without the raw frame's flip (docs/design-notes.md#mhr-body-record-frames-and-conventions).
 """
 from __future__ import annotations
 

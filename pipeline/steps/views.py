@@ -224,8 +224,8 @@ class FilterFoVStep(Step):
     PARAMS = (
         Param("azimuth_deg", float, 0.0, "Centre of the cone; 0 is the skeleton's front"),
         Param("fov_deg", float, 180.0,
-              "Total width of the cone — a view is kept when it falls within "
-              "half of this either side of azimuth_deg", minimum=0.0, maximum=360.0),
+              "Total width of the kept cone of views, in degrees",
+              minimum=0.0, maximum=360.0),
     )
 
     def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
@@ -276,9 +276,9 @@ class RotateViewsStep(Step):
     """
 
     PARAMS = (
+        # Absolute, not an offset, so applying it twice is idempotent.
         Param("start_azimuth_deg", float, 0.0,
-              "Which azimuth frame_00001 should sit at, relative to the skeleton's "
-              "front. Absolute, not an offset, so applying it twice is idempotent"),
+              "Azimuth of the first frame, relative to the skeleton's front"),
     )
 
     def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
@@ -348,8 +348,8 @@ class ReplaceViewsStep(Step):
 
     PARAMS = (
         Param("tolerance_pct", float, 0.1,
-              "How close two cameras must be to count as the same view, as a "
-              "percentage of the base set's camera bounding-box diagonal"),
+              "Max distance for two cameras to be the same view, in % of the "
+              "camera bbox diagonal"),
     )
 
     def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
@@ -430,8 +430,8 @@ class MergeDatasetsStep(Step):
 
     PARAMS = (
         Param("pointcloud_mode", str, "first",
-              "Which point cloud the merged dataset carries: the first input's, "
-              "all of them concatenated, or a resample of the concatenation",
+              "Merged point cloud: the first input's, all concatenated, or a "
+              "resample of all",
               choices=("first", "merge", "resample")),
         Param("pointcloud_samples", int, 10000,
               "How many points to keep; resample mode only", minimum=1),

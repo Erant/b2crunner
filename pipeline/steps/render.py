@@ -496,184 +496,177 @@ class RenderStep(Step):
         Param("pattern", str, "circular", "Shape of the camera path",
               choices=("circular", "sinusoidal", "helical")),
         Param("n_frames", int, REQUIRED, "How many views to render", minimum=1),
+        # The shipped workflow passes ${globals.resolution} straight through,
+        # so one global fixes the frame size for every stage — there is no
+        # separate width/height knob on this step to drift from it.
         Param("resolution", list, [720, 1280],
-              "Render size as [width, height]. The shipped workflow passes "
-              "${globals.resolution} straight through, so one global fixes "
-              "the frame size for every stage — there is no separate "
-              "width/height knob on this step to drift from it."),
-        Param("render_mode", str, "depth+skeleton", "What each frame draws. "
-              "`outline` and `outline+splat` are the skeleton ABLATION: the "
-              "same frame the shipped workflow denoises, minus the skeleton "
-              "overlay and nothing else — same silhouette, same backdrop, "
-              "same face splat. Run one against `outline+skeleton+splat` to "
-              "see what the skeleton is actually contributing",
+              "Render size as [width, height], in pixels"),
+        # `outline` and `outline+splat` are the skeleton ABLATION: the same
+        # frame the shipped workflow denoises, minus the skeleton overlay and
+        # nothing else — same silhouette, same backdrop, same face splat. Run
+        # one against `outline+skeleton+splat` to see what the skeleton
+        # actually contributes.
+        Param("render_mode", str, "depth+skeleton",
+              "Which layers each frame draws (body base, skeleton, face splat)",
               choices=("mesh", "depth", "skeleton", "outline", "mesh+skeleton",
                        "depth+skeleton", "outline+skeleton", "outline+splat",
                        "mesh+skeleton+splat", "depth+skeleton+splat",
                        "outline+skeleton+splat")),
+        # 0 matches the fixed #7F7F7F background (the silhouette disappears),
+        # 100 is solid black; the default lands the fill on #6F6F6F. Ignored
+        # by every non-outline render_mode.
         Param("outline_strength", float, _DEFAULT_OUTLINE_STRENGTH,
-              "outline+skeleton mode only: how dark the flat silhouette fill "
-              "is, as a percentage. 0 matches the fixed #7F7F7F background "
-              "(the silhouette disappears), 100 is solid black. The default "
-              "lands the fill on #6F6F6F. Ignored by every other render_mode",
+              "Outline modes: darkness of the silhouette fill, in percent "
+              "(0 = background grey, 100 = black)",
               minimum=0.0, maximum=100.0),
+        # body2colmap's own render_outline `blur`; the skeleton overlay is
+        # composited on top afterwards and stays sharp.
         Param("outline_blur", int, _OUTLINE_DEFAULT_BLUR,
-              "outline+skeleton mode only: Gaussian softening of the "
-              "silhouette edge, in pixels (0 leaves a hard two-tone edge). "
-              "This is body2colmap's own render_outline `blur`; the skeleton "
-              "overlay is composited on top afterwards and stays sharp. "
-              "Ignored by every other render_mode",
+              "Outline modes: softening of the silhouette edge, in pixels "
+              "(0 = hard edge)",
               minimum=0, advanced=True),
+        # The silhouette is cut hard at this level and then softened by
+        # `outline_blur` exactly as the mesh silhouette is, so a soft rmbg
+        # edge is re-softened rather than carried. Ignored without an
+        # `outline_masks` input.
         Param("outline_mask_threshold", float, 0.5,
-              "With an `outline_masks` input only: the matte level at or "
-              "above which a pixel counts as subject. The silhouette is cut "
-              "hard at this level and then softened by `outline_blur` exactly "
-              "as the mesh silhouette is, so a soft rmbg edge is re-softened "
-              "rather than carried. Ignored without the input",
+              "Matte level (0-1) at or above which a pixel counts as subject",
               minimum=0.0, maximum=1.0, advanced=True),
+        # A morphological opening then closing with a disc of this diameter,
+        # so anything thinner — a protrusion or a gap — is removed before the
+        # blur. For a silhouette that is a splat's coverage: a splat trained
+        # on a single-elevation orbit grows opaque needle Gaussians along the
+        # cameras' horizontal rays at the body's edge, which the orbit's other
+        # cameras see as horizontal hairs (measured: 0.78% of the fill thinner
+        # than 9 px against 0.04% of the mattes it was fitted to; 9 removes
+        # all of it and 0.04% of a matte's own thin structure, fingers kept).
+        # Ignored without an `outline_masks` input.
         Param("outline_mask_clean_px", int, 0,
-              "With an `outline_masks` input only: a morphological opening "
-              "then closing of the thresholded silhouette with a disc of this "
-              "diameter, in pixels, so anything thinner than it — a "
-              "protrusion or a gap — is removed before the blur. 0 leaves the "
-              "silhouette as cut. For a silhouette that is a splat's "
-              "coverage: a splat trained on a single-elevation orbit grows "
-              "opaque needle Gaussians along the cameras' horizontal rays "
-              "at the body's edge, which the orbit's other cameras see as "
-              "horizontal hairs (measured on helical-20260920-150953: 0.78% "
-              "of the fill thinner than 9 px against 0.04% of the mattes "
-              "it was fitted to; 9 removes all of it and 0.04% of a matte's "
-              "own thin structure, fingers kept)",
+              "Remove silhouette details thinner than this many pixels "
+              "(0 = off)",
               minimum=0, advanced=True),
+        # `depth` fills the silhouette with the body model's depth, smoothed
+        # to body scale and cut to `outline_relief_levels` greys between
+        # `outline_strength` ± `outline_relief_amplitude` — near surface
+        # lighter, far darker, the mean grey the flat fill's. A flat
+        # silhouette plus a 2-D skeleton is the same drawing from the front
+        # and from behind, mirrored, and a video model conditioned on it can
+        # turn the head and not the torso. The relief puts back the one bit
+        # the drawing lacks — which surface faces the camera — without the
+        # full depth map that had the denoise trace the naked model. The
+        # window is `outline_relief_depth_m` metres centred on the orbit's
+        # target, so a surface keeps its grey around the orbit; an
+        # outline_masks silhouette wider than the model (hair, a coat) takes
+        # the nearest model depth.
         Param("outline_relief", str, "none",
-              "`outline*` modes only: what the silhouette is filled with. "
-              "`none` is the flat grey of `outline_strength`. `depth` fills "
-              "it with the body model's depth, smoothed to body scale and "
-              "cut to `outline_relief_levels` greys between "
-              "`outline_strength` ± `outline_relief_amplitude` — the near "
-              "surface lighter, the far surface darker, the mean grey the "
-              "flat fill's. A flat silhouette plus a 2-D skeleton is the "
-              "same drawing from the front and from behind, mirrored, and "
-              "a video model conditioned on it can turn the head and not "
-              "the torso (helical-20260920-202010: breastplate painted at "
-              "azimuth 171). The relief puts back the one bit the drawing "
-              "lacks — which surface faces the camera — without the full "
-              "depth map that had the denoise trace the naked model. The "
-              "window is `outline_relief_depth_m` metres centred on the "
-              "orbit's target, so a surface keeps its grey around the orbit; "
-              "an outline_masks silhouette wider than the model (hair, a "
-              "coat) takes the nearest model depth",
+              "Outline modes: fill the silhouette flat grey or with coarse "
+              "body depth",
               choices=("none", "depth")),
+        # On the same percentage ramp as outline_strength (100 = the whole
+        # #7F7F7F-to-black range). 6.25 is 8 bytes each way, which with 16
+        # levels makes every level a distinct byte; the ends clip at 0 and 100.
         Param("outline_relief_amplitude", float, 6.25,
-              "With `outline_relief: depth`: how far the relief's near and "
-              "far ends sit either side of `outline_strength`, on the same "
-              "percentage ramp (100 = the whole #7F7F7F-to-black range). "
-              "6.25 is 8 bytes each way, which with 16 levels makes every "
-              "level a distinct byte; the ends clip at 0 (the ground) and "
-              "100", minimum=0.0, maximum=50.0, advanced=True),
+              "Depth relief: how far near/far greys sit either side of "
+              "outline_strength, in percent",
+              minimum=0.0, maximum=50.0, advanced=True),
+        # More levels than the byte gap between the ends collapses levels
+        # together.
         Param("outline_relief_levels", int, 16,
-              "With `outline_relief: depth`: how many greys the relief is "
-              "cut to. More than the byte gap between the ends collapses "
-              "levels together", minimum=2, maximum=256, advanced=True),
+              "Depth relief: number of grey levels",
+              minimum=2, maximum=256, advanced=True),
+        # 0.8 with 16 levels is 5 cm a level, so the face reads against the
+        # back of the head and a heel against a toe, but not a fold of the
+        # model.
         Param("outline_relief_depth_m", float, 0.8,
-              "With `outline_relief: depth`: the metric depth the levels "
-              "span, centred on the orbit target — 0.8 with 16 levels is "
-              "5 cm a level, so the face reads against the back of the "
-              "head and a heel against a toe, but not a fold of the model",
+              "Depth relief: depth range the levels span, in metres, centred "
+              "on the orbit target",
               minimum=0.01, advanced=True),
+        # What keeps the relief at body scale — no finger, no naked contour
+        # under the clothes — rather than the model's own detail. 0 leaves
+        # the model's relief.
         Param("outline_relief_smooth", float, 12.0,
-              "With `outline_relief: depth`: Gaussian sigma, in pixels at "
-              "the render size, applied to the depth before it is cut into "
-              "levels. What keeps the relief at body scale — no finger, no "
-              "naked contour under the clothes — rather than the model's "
-              "own detail. 0 leaves the model's relief",
+              "Depth relief: blur applied to the depth before cutting into "
+              "levels, in pixels",
               minimum=0.0, advanced=True),
+        # DWPose's own rule for a keypoint its detector did not find, so the
+        # far arm behind the torso in profile is not drawn through it and the
+        # drawing stops supporting the mirrored reading of the pose. The value
+        # applies to limb joints (their own flesh); torso joints get more and
+        # face landmarks less, by body2colmap's per-joint table (hips 2x,
+        # neck 2.5x, face 0.5x). 0.12 was measured to keep every joint of a
+        # fitted body from every side and drop those behind another part
+        # (37-57 cm back). 0 draws every bone through everything.
         Param("skeleton_occlusion_m", float, 0.0,
-              "The `*+skeleton` modes: hide every joint that the body model "
-              "hides from the camera, and every bone ending on one — "
-              "DWPose's own rule for a keypoint its detector did not find, "
-              "so the far arm behind the torso in profile is not drawn "
-              "through it, and the drawing stops supporting the mirrored "
-              "reading of the pose. The value is the depth, in metres, a "
-              "limb joint may sit behind the model's surface and still be "
-              "drawn (its own flesh); the torso joints get more and the "
-              "face landmarks less, by body2colmap's per-joint table "
-              "(hips 2x, neck 2.5x, face 0.5x). 0.12 was measured to keep "
-              "every joint of a fitted body from every side and drop those "
-              "behind another part (37-57 cm back). 0 draws every bone "
-              "through everything, as before", minimum=0.0),
+              "Skeleton modes: hide joints more than this many metres behind "
+              "the body surface (0 = off)",
+              minimum=0.0),
+        # Past the angle the layer is dropped entirely rather than faded: what
+        # appears out there is the 2.5-D shell's open rim, and a
+        # half-transparent rim is still a rim. 60 runs to the far end of
+        # body2colmap's measured band, where the shell is mostly edge, to reach
+        # the views furthest from the photograph; affordable because these
+        # frames feed two denoise passes which can rewrite a flared rim. 45 is
+        # the measurement's clean limit and what a frame nobody denoises
+        # afterwards should be held to (see select_support_views' own, tighter
+        # cull).
         Param("splat_max_angle_deg", float, 60.0,
-              "The `+splat` modes only: composite the splat on every frame whose "
-              "view of it is within this angle of the photograph's. Past it the "
-              "layer is dropped entirely rather than faded — what appears out "
-              "there is the 2.5-D shell's open rim, and a half-transparent rim "
-              "is still a rim. 60 runs to the far end of body2colmap's measured "
-              "band, where the shell is mostly edge, to reach the views the "
-              "photograph is furthest from; that is affordable because these "
-              "frames are inputs to two denoise passes which can rewrite a "
-              "flared rim. 45 is the measurement's clean limit and what a frame "
-              "nobody denoises afterwards should be held to (see "
-              "select_support_views' own, tighter cull). 0 disables the "
-              "compositing", minimum=0.0, maximum=180.0),
+              "Splat modes: draw the face splat only within this angle of the "
+              "photo's view, in degrees (0 = never)",
+              minimum=0.0, maximum=180.0),
+        # The mask is 0.0 where the splat covers, 1.0 everywhere else —
+        # wan22_vace_denoise's `control_masks` convention. Off by default
+        # because nothing downstream is obliged to read it: off, the output is
+        # None and inject_anchor makes its own all-1.0 batch. It is
+        # body2colmap's `InactiveMaskOptions` at its defaults — a pixel counts
+        # as covered at splat alpha >= 0.9, and a frame the angle cull dropped
+        # comes out wholly reactive rather than carrying no mask.
         Param("splat_inactive_mask", bool, False,
-              "The `+splat` modes only: also publish an `inactive_masks` batch "
-              "marking the splat as the one part of the frame a denoise pass "
-              "must NOT repaint — 0.0 where the splat covers, 1.0 everywhere "
-              "else, which is wan22_vace_denoise's `control_masks` convention "
-              "exactly. Off by default because nothing downstream is obliged "
-              "to read it: with it off the output is None and inject_anchor "
-              "goes on manufacturing its all-1.0 batch, which is what every "
-              "run before this did. The mask is body2colmap's "
-              "`InactiveMaskOptions` (81a0e1b), at its defaults — a pixel "
-              "counts as covered at splat alpha >= 0.9, and a frame the angle "
-              "cull dropped comes out wholly reactive rather than carrying no "
-              "mask at all"),
+              "Splat modes: also output a mask that stops the denoise "
+              "repainting the face splat"),
+        # Same base, relief, backdrop and splat layer, so the two batches
+        # differ in the stick pixels (and the face overlay) and nowhere else.
+        # Feeds wan22_vace_denoise's `control_video_alt` (the Weak skeleton
+        # setting). Off: the output is None.
         Param("skeleton_free_copy", bool, False,
-              "The `*+skeleton` composite modes only: also publish "
-              "`images_no_skeleton`, every frame composited a second time "
-              "with the skeleton (and the face overlay it draws) left out — "
-              "same base, relief, backdrop and splat layer, so the two "
-              "batches differ in the stick pixels and nowhere else. "
-              "wan22_vace_denoise's `control_video_alt` (the Weak skeleton "
-              "setting). Off: the output is None"),
+              "Skeleton modes: also output every frame without the skeleton "
+              "overlay"),
         Param("framing", str, "full", "How much of the body fills the frame",
               choices=("full", "torso", "bust", "head")),
+        # 'shape' is a stronger gaze cue at the resolutions the diffusion pass
+        # conditions on. Only takes effect with a face_landmarks input.
         Param("eye_style", str, "shape",
-              "How the face overlay draws the eyes: 'shape' fills each eye as a "
-              "flat sclera with a pupil disc (a stronger gaze cue at the "
-              "resolutions the diffusion pass conditions on), 'dots' is the "
-              "older landmark-dot rendering. Only takes effect with a "
-              "face_landmarks input",
+              "Face overlay eyes: filled sclera with pupil ('shape') or "
+              "landmark dots ('dots')",
               choices=("shape", "dots")),
         Param("eye_color", list, [1.0, 1.0, 1.0],
-              "RGB in [0,1] for the filled eye shape (sclera). eye_style "
-              "'shape' only"),
+              "Sclera colour, RGB in [0,1] (eye_style 'shape')"),
         Param("pupil_color", list, [0.0, 0.0, 0.0],
-              "RGB in [0,1] for the pupil disc. eye_style 'shape' only"),
+              "Pupil colour, RGB in [0,1] (eye_style 'shape')"),
         Param("pupil_scale", float, 0.75,
-              "Pupil diameter as a fraction of the eye height measured at the "
-              "pupil; 1.0 is a disc touching both lids. eye_style 'shape' only",
+              "Pupil diameter as a fraction of eye height (1.0 touches both "
+              "lids)",
               minimum=0.0, maximum=1.0),
+        # Circular or helical only; bypasses focal_length_mm / radius /
+        # start_azimuth_deg in favour of the orbit derived from that camera.
         Param("override_cam_from_mesh", bool, False,
-              "Anchor one frame exactly at the original SAM-3D-Body camera, so a "
-              "reference photo can be warped onto it. Circular or helical only, and "
-              "it bypasses focal_length_mm/radius/start_azimuth_deg in favour of the "
-              "orbit derived from that camera"),
+              "Put one frame exactly at the photo's camera so the photo can "
+              "be warped onto it"),
         Param("fill_ratio", float, 0.8, "How much of the frame the subject fills",
               minimum=0.0, maximum=1.0),
+        # Ignored under override_cam_from_mesh.
         Param("focal_length_mm", float, 0.0,
-              "0 means derive one from the render width. Ignored under "
-              "override_cam_from_mesh"),
+              "Camera focal length in mm; 0 derives one from the render width"),
+        # Ignored under override_cam_from_mesh, which must keep the mesh where
+        # the original camera saw it.
         Param("initial_rotation", float, 0.0,
-              "Extra rotation applied after auto-orienting the body toward the "
-              "camera. Ignored under override_cam_from_mesh, which must keep the "
-              "mesh where the original camera saw it"),
+              "Extra rotation applied after auto-orienting the body to the "
+              "camera"),
+        # Does NOT paint the depth render's background, nor the outline modes'
+        # (always the fixed #7F7F7F ground): its only other use is being
+        # published as image_warp["bg_color"], the border colour
+        # generate_firstlast fills around the warped reference.
         Param("bg_color", list, [1.0, 1.0, 1.0],
-              "RGB in [0,1]. Note this does NOT paint the depth render's background, "
-              "nor the outline+skeleton one (that is always the fixed #7F7F7F "
-              "ground): its only other use is being published as "
-              "image_warp[\"bg_color\"], the border colour generate_firstlast fills "
-              "around the warped reference"),
+              "Background colour, RGB in [0,1]"),
 
         Param("elevation_deg", float, 0.0, "Circular: camera elevation"),
         Param("start_azimuth_deg", float, 0.0, "Where the orbit starts"),
@@ -685,17 +678,8 @@ class RenderStep(Step):
         Param("n_loops", int, 2, "Helical: turns around the subject"),
         Param("lead_in_deg", float, 45.0, "Helical: azimuth spent easing in"),
         Param("lead_out_deg", float, 45.0, "Helical: azimuth spent easing out"),
-        Param("helix_anchor", str, "ramp",
-              "Helical under override_cam_from_mesh: where on the helix the "
-              "photograph's camera lands. `ramp` bends the helix so the frame "
-              "whose elevation matches the anchor's sits on it — mid-ramp, so the "
-              "path starts and ends on the far side of the subject. `start` "
-              "begins the helix ON the anchor: frame 0 is the photograph's camera "
-              "and the elevation climbs from there by 2 x amplitude_deg over the "
-              "loops (a negative amplitude descends), so the first frame is the "
-              "photograph and the last is the same azimuth, lifted. See "
-              "workflows/helical_shell.yaml",
-              choices=("ramp", "start"), advanced=True),
+        # Helical under override_cam_from_mesh: the helix is bent so the frame
+        # whose elevation matches the anchor's sits on it, mid-ramp.
 
         Param("radius", float, None,
               "Orbit radius; empty derives one from the framing", advanced=True),
@@ -704,16 +688,15 @@ class RenderStep(Step):
               advanced=True),
         Param("skeleton_format", str, "openpose_body25_hands", "Skeleton topology",
               advanced=True),
+        # `dwpose` reproduces the pose maps Wan 2.2 VACE conditions on (see
+        # body2colmap.skeleton): body limbs dimmed to 60% with undimmed joint
+        # dots, hands a quarter as thick under a hue sweep with blue
+        # keypoints, the palette indexed off DWPose's own limb order.
+        # `openpose` is the older scheme — full-brightness limbs on a palette
+        # that agrees with DWPose across the upper body and is one hue step
+        # out everywhere below the hips.
         Param("skeleton_style", str, "dwpose",
-              "Which drawing convention the skeleton overlay follows. "
-              "`dwpose` reproduces the pose maps Wan 2.2 VACE conditions on "
-              "(see body2colmap.skeleton): body limbs dimmed to 60% with "
-              "undimmed joint dots, hands a quarter as thick under a hue "
-              "sweep with blue keypoints, and the palette indexed off DWPose's "
-              "own limb order. `openpose` is this project's older scheme — "
-              "full-brightness limbs on a palette that agreed with DWPose "
-              "across the upper body and was one hue step out everywhere "
-              "below the hips",
+              "Skeleton drawing convention",
               choices=("dwpose", "openpose"), advanced=True),
         # None, not a literal: the two styles want different sizes, and
         # hard-coding either here would silently mis-size the other. See
@@ -724,13 +707,13 @@ class RenderStep(Step):
         Param("bone_radius", float, None,
               "Skeleton bone thickness, in metres. Unset takes the style's "
               "own default", advanced=True),
+        # Only meaningful with a face_landmarks input.
         Param("face_mode", str, "full",
-              "Face overlay: points plus connectivity lines, points alone, or none. "
-              "Only meaningful with a face_landmarks input",
+              "Face overlay: points plus lines, points alone, or none",
               choices=("full", "points", "none"), advanced=True),
         Param("face_max_angle", float, 90.0,
-              "Skip the face overlay past this angle between the face normal and the "
-              "camera: 90 is the full hemisphere, 45 near-frontal only",
+              "Hide the face overlay past this face-to-camera angle, in "
+              "degrees (90 = hemisphere)",
               minimum=0.0, maximum=180.0, advanced=True),
         Param("pointcloud_samples", int, 10000,
               "Points sampled off the mesh for points3D.txt", minimum=1, advanced=True),
@@ -879,37 +862,12 @@ class RenderStep(Step):
                     lead_in_deg=params["lead_in_deg"],
                     lead_out_deg=params["lead_out_deg"],
                 )
-                if params["helix_anchor"] == "start":
-                    # The helix begins on the photograph's camera, the way
-                    # the circular orbit does, and climbs from there. The
-                    # anchor's spherical coordinates about the target are
-                    # the circular path's own (radius, azimuth, elevation);
-                    # body2colmap's ramp puts frame 0 at -amplitude whatever
-                    # the lead-in, so lifting every frame by the anchor's
-                    # elevation plus the amplitude lands frame 0 exactly on
-                    # the anchor and the ramp's end 2 x amplitude above it.
-                    # A signed amplitude is legal here — the ramp is linear
-                    # in it, so a negative one descends — where the mid-ramp
-                    # solve below requires it positive.
-                    amplitude = float(helix_params["amplitude_deg"])
-                    if amplitude == 0.0:
-                        raise ValueError(
-                            "helix_anchor 'start' needs a non-zero amplitude_deg: "
-                            "with none the helix is the circular orbit"
-                        )
-                    orbit_params = compute_original_camera_orbit_params(orbit_center)
-                    derived_radius = float(orbit_params["radius"])
-                    anchor_azimuth = float(orbit_params["start_azimuth_deg"])
-                    anchor_frame_index = 0
-                    helix_start_azimuth = anchor_azimuth
-                    helix_elevation_offset = float(orbit_params["elevation_deg"]) + amplitude
-                else:
-                    anchor_info = compute_helical_anchor_params(target=orbit_center, **helix_params)
-                    derived_radius = float(anchor_info["radius"])
-                    anchor_frame_index = int(anchor_info["anchor_frame_index"])
-                    anchor_azimuth = float(anchor_info["anchor_azimuth_deg"])
-                    helix_start_azimuth = float(anchor_info["start_azimuth_deg"])
-                    helix_elevation_offset = float(anchor_info["elevation_offset_deg"])
+                anchor_info = compute_helical_anchor_params(target=orbit_center, **helix_params)
+                derived_radius = float(anchor_info["radius"])
+                anchor_frame_index = int(anchor_info["anchor_frame_index"])
+                anchor_azimuth = float(anchor_info["anchor_azimuth_deg"])
+                helix_start_azimuth = float(anchor_info["start_azimuth_deg"])
+                helix_elevation_offset = float(anchor_info["elevation_offset_deg"])
 
                 path_gen = OrbitPath(target=orbit_center, radius=derived_radius)
                 cameras = path_gen.helical(

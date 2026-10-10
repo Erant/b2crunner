@@ -61,9 +61,10 @@ class RigSubjectStep(Step):
     """
 
     PARAMS = (
+        # export_colmap's dataset: the views the containment fine-tune keeps
+        # the splat faithful to.
         Param("capture_dir", str, REQUIRED,
-              "The run's COLMAP dataset with its labels/ (export_colmap's): the views the containment fine-tune "
-              "keeps the splat faithful to"),
+              "The run's COLMAP dataset, with its labels/"),
         Param("debug_dir", str, REQUIRED, "Where the unrigged subject file, the pose set and the training log go"),
         Param("clip", str, "rom_tour", "The clip written beside the subject file ('none': no clip)",
               choices=["rom_tour", "none"]),
@@ -71,8 +72,8 @@ class RigSubjectStep(Step):
               advanced=True),
         Param("python", str, "", "The interpreter that runs b2crig (empty: $B2CRIG_PYTHON, the checkout's .venv, "
               "this one)", advanced=True),
-        Param("keep_work", bool, False, "Keep b2crig's work directory (pose library cages, training dataset) under "
-              "debug_dir", advanced=True),
+        # The work directory holds the pose library cages and training dataset.
+        Param("keep_work", bool, False, "Keep b2crig's work directory under debug_dir", advanced=True),
     )
 
     def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:

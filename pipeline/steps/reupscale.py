@@ -123,13 +123,14 @@ class ReupscaleInputsStep(Step):
         Param("target_width", int, 1080, "Width SeedVR2 hands back (its `resolution` is the short edge)", minimum=1),
         Param("target_height", int, 1920, "Height SeedVR2 hands back", minimum=1),
         Param("views", int, 0, "Views on the band; 0 = as many as there are training cameras", minimum=0),
-        Param("min_elevation_deg", float, -70.0, "Lowest ring of views, degrees below eye level negative",
+        Param("min_elevation_deg", float, -70.0, "Lowest view elevation in degrees (negative is below eye level)",
               minimum=-89.0, maximum=89.0),
-        Param("max_elevation_deg", float, 70.0, "Highest ring of views", minimum=-89.0, maximum=89.0),
+        Param("max_elevation_deg", float, 70.0, "Highest view elevation in degrees", minimum=-89.0, maximum=89.0),
+        # render_splat's `sh_degree`: clamped to the splat's own degree. 2 drops
+        # band 3, the most view-dependent, from what SeedVR2 sees and the
+        # retraining fits.
         Param("sh_degree", int, 2,
-              "Highest spherical-harmonic band the views are rendered with, 0..3 (render_splat's `sh_degree`: "
-              "clamped to the splat's own degree; 0 is the DC colour alone). 2 drops band 3, the most "
-              "view-dependent, from what SeedVR2 sees and the retraining fits", minimum=0, maximum=3),
+              "Highest spherical-harmonic band rendered, 0-3 (0 = base colour only)", minimum=0, maximum=3),
         Param("keep_copy", str, "", "Copy the splat here before the retraining exports over it"),
         Param("render_path", str, "brush-splat-render", "The rasteriser binary", advanced=True),
     )

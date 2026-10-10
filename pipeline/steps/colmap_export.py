@@ -92,10 +92,11 @@ class ColmapExportStep(Step):
 
     PARAMS = (
         Param("output_dir", str, REQUIRED, "Directory to write the COLMAP dataset into"),
+        # flat is the ComfyUI stage's shape and what the golden test compares
+        # against; brush is what a dataset handed to somebody wants.
         Param("layout", str, "flat",
-              "flat: frames beside the .txt files (the ComfyUI stage's shape, and what "
-              "the golden test compares against). brush: images/ and normals/ "
-              "subdirectories, which is what a dataset handed to somebody wants",
+              "flat: frames beside the .txt files; brush: images/ and normals/ "
+              "subdirectories",
               choices=("flat", "brush")),
     )
 

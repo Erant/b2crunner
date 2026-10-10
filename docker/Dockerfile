@@ -135,7 +135,7 @@ RUN cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
 # It is here for exactly one step, `refine_cameras`
 # (pipeline/steps/refine_cameras.py), which bundle-adjusts the generated
 # orbit against the frames before each brush training: +0.63 PSNR / +0.0045
-# SSIM on held-out views (docs/camera-pose-refinement.md).
+# SSIM on held-out views (docs/design-notes.md#camera-refinement-refine_cameras-refine_cameras_final).
 #
 # WHY CUDA IS ON, since nothing in this pipeline runs COLMAP's SIFT or its
 # dense MVS. The refinement's cost is ALIKED feature extraction and LightGlue
@@ -145,7 +145,7 @@ RUN cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
 # (src/colmap/feature/onnx_utils.cc). A CPU build is not an error, it is just
 # the slow path, and `pipeline/doctor.py`'s colmap check WARNs when it sees
 # one. Measured on this stage's own binary against the 81-frame dataset in
-# docs/camera-pose-refinement.md, CPU vs the CUDA provider on an RTX 4070 Ti:
+# docs/design-notes.md#camera-refinement-refine_cameras-refine_cameras_final, CPU vs the CUDA provider on an RTX 4070 Ti:
 # extraction 32.6 s -> 2.8 s, exhaustive matching 176 s -> 24.3 s. So 209 s
 # of the refinement becomes 27 s, twice per run; the bundle adjustment behind
 # it is Ceres on the CPU either way.
@@ -234,7 +234,7 @@ RUN curl -fsSL -o /tmp/onnxruntime.tgz \
 # (It is also a one-commit fetch rather than COLMAP's full history.)
 #
 # 921c0006 is the 4.2.0 release commit, and it is the exact tree
-# docs/camera-pose-refinement.md's +0.63 PSNR was measured on — the
+# docs/design-notes.md#camera-refinement-refine_cameras-refine_cameras_final's +0.63 PSNR was measured on — the
 # workstation build there reports `COLMAP 4.2.0.dev0 (Commit 921c0006 ...)`.
 # Moving it means re-checking the option names steps/refine_cameras.py
 # passes; COLMAP renamed several of them in the 3.x -> 4.x window
@@ -285,7 +285,7 @@ RUN mkdir -p /src/colmap && cd /src/colmap \
 #
 # nvcc/gcc: Ubuntu 24.04 is gcc 13 and CUDA 13's nvcc accepts up to 14, so
 # CUDA compiles here. That is the one thing the workstation build in
-# docs/camera-pose-refinement.md could not do — its host gcc is 15, which
+# docs/design-notes.md#camera-refinement-refine_cameras-refine_cameras_final could not do — its host gcc is 15, which
 # is why the measurement was taken on a CPU-only COLMAP.
 ARG COLMAP_CUDA_ARCHITECTURES="89;100;120"
 RUN cmake -S /src/colmap -B /build -GNinja \
@@ -472,7 +472,7 @@ RUN make-child-venv /opt/venv_main \
 # torchao >= 0.16 is also what resolves the "version triangle" that used to
 # make the fp8 path unusable — LoRA onto quantized weights, and safetensors
 # serialization of quantized weights, both of which diffusers gates on
-# exactly that version. See docs/fp8-quant-notes.md.
+# exactly that version. See docs/design-notes.md#weights-fp8-experts-unfused-lightning-lora.
 #
 # sageattention is NOT installed here — it is built from source in its own
 # layer near the end of this stage (search for SAGE_REF). It cannot come

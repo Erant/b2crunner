@@ -1,7 +1,7 @@
 """Flow alignment: pull a set of training views onto the splat's own consensus.
 
 The final `.ply` comes out markedly softer than the frames it was trained
-on — measured on the refinesplat rig (docs/final-splat-alignment-guide.md):
+on — measured on the refinesplat rig (docs/design-notes.md#the-deliverable-training-train_final_splat):
 the trained splat's face scored 52.6 raw Laplacian variance against 400-770
 for the SeedVR2 frames it was fitted to, and 75-82 for the *un-upscaled*
 720p ones. **The fit is what destroys the detail, not the upscaler**, so no
@@ -77,7 +77,7 @@ class AlignStats:
 
     `mean` and `p90` are of the smoothed field *before* the cap, over the
     subject only — i.e. the disagreement that was measured, not the part of
-    it that was applied. That is the quantity the guide's §0 numbers are
+    it that was applied. That is the quantity the design notes' numbers are
     (1.7-3.6 px mean, p90 up to 8), so a run can be compared against them,
     and a p90 at or above the cap is the sign that the cap is binding.
     """
@@ -198,7 +198,7 @@ def align_view(
     # The flow maps frame -> render, and this is a backward map, so the
     # inverse is approximated by its negation. Exact only for a locally
     # constant field, which after a sigma-6 blur is very nearly what this
-    # is — and the measured trajectory (guide §3) is of this warp, not of a
+    # is — and the measured trajectory (docs/design-notes.md) is of this warp, not of a
     # properly inverted one.
     warped = cv2.remap(
         frame, gx - flow[..., 0], gy - flow[..., 1], cv2.INTER_LANCZOS4,

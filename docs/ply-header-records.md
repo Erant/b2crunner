@@ -55,7 +55,7 @@ fitted mesh in the splat's world. `joints` are already in world.
 In version 2 a joint's rotation and position agree: for a bone from parent `p` to child `c`,
 `joints[c] - joints[p] = scale * global_rots[p] @ offset` with `offset` the bone in the parent's local frame.
 
-**Version 1 caveat (`docs/ply-header-global-rots-flip-2026-09-25.md`):** version 1 headers wrote `global_rots` as
+**Version 1 caveat (`docs/design-notes.md#mhr-body-record-frames-and-conventions`):** version 1 headers wrote `global_rots` as
 `rotation @ rots_mhr`, without the `diag(1, -1, -1)` flip that the positions went through, so they are not in the same
 frame as `joints`. Convert them with `rotation @ diag(1, -1, -1) @ rotation.T @ global_rots` (the version 2 value), or
 replay `pose_params`.

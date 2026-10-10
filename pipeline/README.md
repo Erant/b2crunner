@@ -165,7 +165,7 @@ pipeline/
 │                      elevation and handed to the first brush training as
 │                      supporting views. Subclasses PointmapSplatStep.
 │                      Validated against a captured dataset outside this
-│                      repo (docs/stage1-support-views-implementation.md);
+│                      repo (docs/design-notes.md#dead-ends--do-not-repeat);
 │                      never run inside a pipeline run on a pod
 │   ├── colmap_export.py real, verified against cyber_6f's recorded
 │                      colmap/ export (cameras.txt and points3D.txt
@@ -173,8 +173,8 @@ pipeline/
 │   ├── refine_cameras.py refine_cameras — bundle-adjusts the generated
 │                      orbit against the frames before each brush
 │                      training. Drives upstream COLMAP; verified end to
-│                      end against the dataset docs/camera-pose-
-│                      refinement.md measured (+21.7% BA inflation undone,
+│                      end against the measured dataset (design-notes.md;
+│                      +21.7% BA inflation undone,
 │                      centre movement within 7% of the recorded run),
 │                      never yet run on a pod. What it moves is REBUILT
 │                      after it, not carried: the face splat runs again
@@ -665,7 +665,7 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   `bg_color` (0.5 grey, the colour the warped anchor photo is bordered
   with) with a soft edge, no threshold and no bilateral filter.
   `mode: passthrough` is the same step with the compositing dropped too.
-  See `docs/spatial-reinforcement.md`.
+  See `docs/design-notes.md#the-confidence-gated-re-render-render_subject--resplat_foreground_masks--mask_splat_fringes`.
 - `views` (`drop_views`/`filter_fov`/`rotate_views`/`replace_views`/
   `merge_datasets`) — verified against `cyber_6f`'s real 81-camera helical
   orbit rather than synthetic data, which matters because the
@@ -714,7 +714,7 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   checkpoint.
 - `detect_face_views` + `fit_head_per_view` + `paste_eyes` (`face_views.py`)
   and `build_face_rig` (`body_rig.py`) — the face per view, before the final
-  training (docs/face-refine.md). Per-frame landmarks from the projected
+  training (docs/design-notes.md#face-per-view-and-the-anchors-eyes). Per-frame landmarks from the projected
   refit head (no detector; 35-38 of 81 helical frames), the MHR head fitted
   to each of them — neck/head pose plus the 72 expression blendshapes, one
   batched run in the sam3dbody env, 6.4 → 2.1 px — and the anchor
@@ -724,9 +724,7 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   lets the canonical face converge to the anchor's eye opening. Measured on
   four subjects: eye error 51-82 → 28-56, face and hair sharpness unchanged.
 - `PointmapSplatStep` (`pointmap_splat.py`; the base class, registered
-  whole-body as `pointmap_splat` — retired with the shell bootstrap on
-  2026-09-04, back on 2026-09-19 for `helical_shell.yaml`'s shell, which
-  is a control-video ingredient for pass 1 and reaches no training)
+  whole-body as `pointmap_splat` for `tools/pointmap_clip.py`)
   — one photo into a feed-forward
   Gaussian shell, in SAM-3D-Body's own world: Sapiens2 pointmap, depth
   re-solved from `sapiens2_lite`'s normals, one oriented Gaussian per
@@ -788,7 +786,7 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   `anchor_stub.py` — because body2colmap's mode rasterised through gsplat,
   which this project dropped to get rid of its runtime CUDA toolchain. The
   library now shells out to the same `brush-splat-render` binary, so the
-  detour is gone; see `docs/revert-when-body2colmap-drops-gsplat.md` for
+  detour is gone; see `docs/design-notes.md#supporting-views-and-premultiplied-renders` for
   what it was and what came out. The rasterisation is the library's too, as
   of the same day: `steps/splat.py`'s `_rasterize` drives
   `SplatRenderer.render_many` rather than carrying a parallel copy of it,
@@ -858,7 +856,7 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   count at the shipped `every_n: 10`. It is the change in the shared tail
   most able to make the deliverable worse rather than better, which is why
   it was measured against a captured dataset before landing
-  (`docs/stage1-support-views-implementation.md`).
+  (`docs/design-notes.md#dead-ends--do-not-repeat`).
 
   Two seams opened in `pointmap_splat.py` for it, and both keep the two
   registered splat steps byte-identical: `_build_shell`, which is `run()`'s
@@ -929,7 +927,7 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   CUDA on so ALIKED and LightGlue use the ONNX CUDA provider) and ~65 MB of
   ONNX weights that `pipeline/models.py` prefetches. `pipeline/doctor.py`
   checks both. Full write-up, traps and measurements:
-  `docs/camera-pose-refinement.md`.
+  `docs/design-notes.md#camera-refinement-refine_cameras-refine_cameras_final`.
 - **What the refinement moves is rebuilt, not carried.** The face splat is
   unprojected from the reference photograph through the **anchor** camera
   in the bootstrap, and `refine_cameras` moves that camera. From 2026-08-31
@@ -1091,7 +1089,7 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   be got wrong this way). `confidence_sidecar` keeps the raw per-pixel confidence
   under the log dir for tuning; `conf_args` passes `--conf-*` flags
   through verbatim — `helical` sends `--conf-tau 0.3
-  --conf-angle-margin 45`, both measured (`docs/intermediate-splat-guide.md`). Argv-level tests only (`tests/test_splat.py`,
+  --conf-angle-margin 45`, both measured (`docs/design-notes.md#the-intermediate-training-train_splat`). Argv-level tests only (`tests/test_splat.py`,
   `tests/test_workflows.py`) — the gating itself is the renderer's, and
   has not been through this pipeline on a pod.
 
@@ -1149,7 +1147,7 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   third view votes the same result, so the cost is the ~20 s segmentation
   pass and nothing at export. Tests in `tests/test_splat_labels.py`.
   **Update (2026-09-06):** `align_iters` (4 by default) makes the training a
-  loop. The measurement behind it (`docs/final-splat-alignment-guide.md`):
+  loop. The measurement behind it (`docs/design-notes.md#the-deliverable-training-train_final_splat`):
   the deliverable splat is markedly softer than the frames it was fitted to
   *because of the fit* — the generated views disagree with each other about
   where texture sits by 1.7-3.6 px mean, and a photometric loss averages

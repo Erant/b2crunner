@@ -5,7 +5,7 @@ the face. Everything else the photograph shows — the front of the jacket,
 the hands, the skirt's front — is trained from the photograph AND the ten
 or so denoised frames either side of it, which are the diffusion model's
 re-lit, slightly displaced re-drawings of the same surface (5-10 px above
-the photograph in every run, see docs/vace-denoise-findings-2026-09-07.md),
+the photograph in every run, see docs/design-notes.md#video-denoise-wan-22-vace),
 and the fit averages them into a softer, drifted front. The mesh path's one
 unambiguous win was the opposite rule (`photo_texture`, 2026-09-16: every
 texel the photograph's camera sees is the photograph's pixel; whole-subject
@@ -35,7 +35,7 @@ uses for the cap's hair rim) and nothing beyond it, clipped to the frame's
 own alpha when `alphas` is wired. The rest of the frame keeps weight 1.
 
 Fading the neighbours is only half of it. Measured on the 2026-09-18 pod
-run's own intermediate export (docs/photo-priority.md): with the frames
+run's own intermediate export (docs/design-notes.md#photo-priority-off-by-default): with the frames
 faded to nothing where the photograph sees the body, the photograph still
 reached only 20.6 dB at its own view, and the confidence render greyed out
 45 % of the front — one frame is one vote, and one supporting view is
@@ -209,53 +209,65 @@ class PhotoPriorityWeightsStep(Step):
     """
 
     PARAMS = (
+        # The views' weight at full confidence is 1 - strength; at 0 the input
+        # weights pass through.
         Param("strength", float, 0.5,
-              "How far the views yield to the photograph where it sees the body: the weight "
-              "at full confidence is 1 - strength. 0 is off (the input weights pass through)",
+              "How much the other views give way to the photograph where it sees the body (0-1)",
               minimum=0.0, maximum=1.0),
         Param("facing_lo", float, 0.2,
-              "The photograph's confidence ramps in from this cosine between the surface and "
-              "its camera (photo_texture's skin/cloth ramp) ...", minimum=-1.0, maximum=1.0),
-        Param("facing_hi", float, 0.5, "... to full at this one", minimum=-1.0, maximum=1.0),
+              "Surface-to-camera cosine where the photograph's confidence starts",
+              minimum=-1.0, maximum=1.0),
+        Param("facing_hi", float, 0.5,
+              "Surface-to-camera cosine where the photograph's confidence is full",
+              minimum=-1.0, maximum=1.0),
+        # Angle about the subject's centre. The per-pixel visibility already
+        # localises the yield; this only keeps the views round the back untouched.
         Param("cap_radius_deg", float, 45.0,
-              "Views within this angle of the anchor camera (about the subject's centre) yield in "
-              "full; the per-pixel visibility already localises the yield, this only keeps the "
-              "views round the back untouched", minimum=0.0, maximum=180.0),
+              "Views within this many degrees of the photograph's camera give way in full",
+              minimum=0.0, maximum=180.0),
         Param("fade_deg", float, 45.0,
-              "Past cap_radius_deg the yield ramps linearly to nothing over this many degrees",
+              "Degrees past cap_radius_deg over which the effect fades to nothing",
               minimum=0.0, maximum=180.0),
         Param("feather_px", float, 4.0,
-              "Gaussian sigma, in pixels, over the confidence before it becomes a weight",
+              "Blur (Gaussian sigma, px) applied to the confidence map",
               minimum=0.0),
+        # Covers hair and a skirt's flare; clipped to the view's alpha when wired.
         Param("extend_px", float, 24.0,
-              "Pixels beyond the body mesh's silhouette that take the nearest on-mesh confidence "
-              "(hair, a skirt's flare); clipped to the view's alpha when wired", minimum=0.0),
+              "Extend the confidence this many pixels past the body mesh's silhouette",
+              minimum=0.0),
         Param("occlusion_margin", float, 0.015,
-              "A surface point further than this (metres) behind the body's depth from the "
-              "photograph's camera is hidden from it", minimum=0.0, advanced=True),
+              "Depth margin (m) behind the body beyond which a point counts as hidden from the photo",
+              minimum=0.0, advanced=True),
+        # OFF by default: a helix starts AND ends on the anchor, and the last
+        # frame comes back from the denoiser as a repaint (measured 14.5 dB from
+        # the photograph, a different face), which at full weight outvotes the
+        # photograph one to one at its own pose. Only `anchor_frame_index` is
+        # the photograph.
         Param("anchor_tolerance_pct", float, 0.0,
-              "Also treat every view within this percentage of the camera bounding-box diagonal of the "
-              "anchor position as the photograph (weight 1). OFF by default, and for a reason: a helix "
-              "starts AND ends on the anchor, and the last frame comes back from the denoiser as a "
-              "repaint (measured 2026-09-19: 14.5 dB from the photograph, a different face), which "
-              "at full weight outvotes the photograph one to one at its own pose. Only "
-              "`anchor_frame_index` is the photograph", minimum=0.0, advanced=True),
+              "Also treat views this close to the anchor (% of camera bbox diagonal) as the photo; 0 is off",
+              minimum=0.0, advanced=True),
+        # The copies are votes AND supporting views for the evidence gate; 12
+        # measured a little better than 6 on both trainings.
         Param("copies", int, 12,
-              "How many masked copies of the photograph's frame go to the training as supporting views at the "
-              "anchor camera (votes AND supporting views for the evidence gate; 12 measured a little better than 6 "
-              "on both trainings). 0 makes none. Needs `images`", minimum=0),
+              "Masked copies of the photograph added to training; 0 for none. Needs `images`",
+              minimum=0),
+        # A photograph's outermost pixels are its anti-aliased, backdrop-mixed
+        # edge, lighter than the garment behind; twelve copies weight that edge
+        # hard at the anchor camera, a few px off the frames' silhouette, and
+        # the splat learns a thin light rim seen only head-on. Measured
+        # front-halo fraction: 0.20 as-is, 0.13 without the copies, 0.30 with
+        # the mask grown 4 px, 0.14 with it shrunk 4 px.
         Param("copies_erode_px", int, 4,
-              "How far the copies' mask is shrunk from the photograph's silhouette. A photograph's outermost pixels are "
-              "its anti-aliased, backdrop-mixed edge, lighter than the garment behind them; twelve copies weight that edge "
-              "hard at the anchor camera, where they also sit a few px off the frames' silhouette, and the splat learns a "
-              "thin light rim seen only head-on (run c0514e; measured 2026-09-19 on its colmap_intermediate: front-halo "
-              "fraction 0.20 as-is, 0.13 without the copies, 0.30 with the mask grown 4 px, 0.14 with it shrunk 4 px). "
-              "0 leaves the matte as it is", minimum=0),
+              "Shrink the copies' mask this many pixels in from the photo's silhouette; 0 is off",
+              minimum=0),
+        # `matte` (the photograph's own silhouette) measured best: the hair,
+        # the loose clothing and every grazing surface are where the photograph
+        # still beats the repaints, and `confidence` (the facing-cosine field)
+        # leaves those out. Without an alpha to read the matte from, the
+        # confidence field is used.
         Param("copies_mask", str, "matte",
-              "What masks the copies: `matte` (the photograph's own silhouette — measured best: the hair, the loose "
-              "clothing and every grazing surface are where the photograph still beats the repaints) or `confidence` "
-              "(the facing-cosine field the frames' fade uses, which leaves those out). Without an alpha to read the "
-              "matte from, the confidence field is used", choices=("matte", "confidence")),
+              "Mask for the copies: the photo's silhouette or the facing-confidence field",
+              choices=("matte", "confidence")),
         Param("debug_dir", str, "", "Write each view's confidence and weight here, and stats.json"),
     )
 

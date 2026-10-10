@@ -19,7 +19,7 @@ from ..step import REQUIRED, Param, Step
 class SaveDatasetStep(Step):
     PARAMS = (
         Param("directory", str, REQUIRED,
-              "Where to write the checkpoint. Usually ${globals.output_root}/something."),
+              "Directory to write the dataset checkpoint to"),
     )
 
     def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:

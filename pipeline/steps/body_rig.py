@@ -55,12 +55,14 @@ class BuildBodyRigStep(Step):
     """
 
     PARAMS = (
+        # An active joint gets a per-view rotation.
         Param("min_subtree", int, 30,
-              "A joint is active (gets a per-view rotation) when its subtree is skinned to at least this many "
-              "mesh vertices", minimum=1),
+              "Min mesh vertices skinned to a joint's subtree for it to be active", minimum=1),
+        # Excludes the root chain (root, pelvis, spine): a rotation there moves
+        # the whole body per view and was measured to destroy sharpness
+        # everywhere.
         Param("max_subtree_fraction", float, 0.5,
-              "...and to at most this fraction of the body: the root chain (root, pelvis, spine) is excluded, a "
-              "rotation there moves the whole body per view and was measured to destroy sharpness everywhere",
+              "Max fraction of the body a joint's subtree may cover for it to be active",
               minimum=0.01, maximum=1.0),
         Param("vertex_stride", int, 4, "Keep every n-th mesh vertex for the splat binding", minimum=1),
         Param("debug_dir", str, "", "Write body_rig.json (active joints, subtree sizes) here"),
@@ -151,10 +153,10 @@ class BuildFaceRigStep(Step):
     """
 
     PARAMS = (
+        # Anything above 0.01 that is not around 0.5 is the whole head too: the
+        # expression basis touches every head vertex by a hair.
         Param("face_motion_cm", float, 0.5,
-              "The face core: vertices the expression basis can move by at least this many centimetres. 0 = no "
-              "restriction (whole-head deltas). Anything above 0.01 that is not around 0.5 is the whole head too — "
-              "the basis touches every head vertex by a hair", minimum=0.0),
+              "Face core = vertices expressions move at least this many cm; 0 = whole head", minimum=0.0),
         Param("face_fade_cm", float, 3.0, "Fade the deltas to zero this far outside the face core", minimum=0.1),
         Param("gap", int, 4, "Interpolate across runs of at most this many unfitted frames between fitted ones", minimum=0),
         Param("hold", int, 3, "An unfitted frame within this many frames of a fitted one holds its deltas", minimum=0),

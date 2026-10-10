@@ -69,8 +69,9 @@ class ExportSubjectStep(Step):
 
     PARAMS = (
         Param("name", str, "scene.glb", "The subject file's name, beside the .ply"),
+        # Written as B2C_orbit.final_cameras.dataset, a hint only.
         Param("dataset_uri", str, "../colmap/",
-              "B2C_orbit.final_cameras.dataset: where the training dataset sits relative to the file (a hint)",
+              "Where the training dataset sits, relative to the subject file",
               advanced=True),
     )
 

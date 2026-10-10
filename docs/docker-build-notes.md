@@ -428,7 +428,7 @@ including Vulkan and EGL. 122 in-image tests pass.
 Image size did not move: **5.66 GB content vs 5.67 GB** on torch 2.9.1.
 
 **Why the bump was worth taking:** it resolves the fp8 "version triangle"
-in `docs/fp8-quant-notes.md`. torchao 0.18 (which needs torch ≥ 2.11) is
+in `docs/design-notes.md#weights-fp8-experts-unfused-lightning-lora`. torchao 0.18 (which needs torch ≥ 2.11) is
 what lets diffusers apply a LoRA to quantized weights and serialize them to
 safetensors. Both were verified on GPU, not assumed. The torchao pin moved
 to `0.18.0` in lockstep — **never move one without the other**, or `import
@@ -794,7 +794,7 @@ serializing the scene back out) — but hadn't yet been pushed; `4bb9dd9c`
 ("Add crash-report and progress hooks to SplatRenderer") is the pushed
 commit that actually carries them, and is what the pin now names. And
 `steps/splat.py`'s parallel subprocess driver is gone. See
-`docs/revert-when-body2colmap-drops-gsplat.md`.
+`docs/design-notes.md#supporting-views-and-premultiplied-renders`.
 Full design rationale, the `cameras.json` schema, and the OpenGL/OpenCV
 camera-convention derivation (verified against a real gsplat oracle: mean
 abs error 0.0008-0.0015 on RGB) live in
@@ -813,7 +813,7 @@ oracle images the new renderer was validated against, per
 
 ## The colmap-builder stage (added 2026-08-31), and what to check
 
-New stage, for `refine_cameras` (`docs/camera-pose-refinement.md`). Upstream
+New stage, for `refine_cameras` (`docs/design-notes.md#camera-refinement-refine_cameras-refine_cameras_final`). Upstream
 COLMAP, pinned at 4.2.0's `921c0006`, `-DCUDA_ENABLED=ON`. **Built and
 verified on 2026-08-31** — the notes below are what it took, kept because
 two of the three cost a build each to find. Three things to check when

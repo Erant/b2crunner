@@ -118,7 +118,7 @@ DENOISE_NEGATIVE_PROMPT = (
 #: 2026-08-31: `render_face_views` and `composite_face` LEFT.
 #: body2colmap dropped gsplat for brush-splat-render, so its own
 #: `skeleton+splat` composite mode is usable here and `render_initial_views`
-#: draws the overlay itself — see docs/revert-when-body2colmap-drops-gsplat.md.
+#: draws the overlay itself — see docs/design-notes.md#supporting-views-and-premultiplied-renders.
 #: 2026-09-02: `render_face_support_views` and `face_support_views` LEFT the
 #: bootstrap for the tail, where they follow `face_splat_refined` —
 #: the face splat built again through the REFINED anchor camera after
@@ -138,31 +138,7 @@ BOOTSTRAPS = {
         "warp_reference_to_anchor", "matte_reference",
         "reinject_anchor_initial",
     ],
-    # The EXPERIMENT (2026-09-19): the same bootstrap with a whole-body
-    # pointmap shell built before the render (front_normals / shell_splat,
-    # off the front_matte both files have) and the render drawing a helix that starts on the
-    # photograph. The shell's two remaining steps (render_shell_views,
-    # inject_shell_views) sit after the gated re-outline block, outside
-    # this prologue — see SHELL_ONLY_STEPS and the mirror test.
-    "helical_shell": [
-        "split_sheet", "reconstruct_body",
-        "detect_face", "map_face_to_mesh", "fit_head_to_face",
-        "locate_face", "crop_face", "face_seg", "face_mask",
-        "face_normals", "face_splat",
-        "front_matte", "back_matte", "front_normals", "shell_splat",
-        "render_initial_views",
-        "warp_reference_to_anchor", "matte_reference",
-        "reinject_anchor_initial",
-    ],
 }
-
-#: The steps helical_shell.yaml has and helical.yaml does not. Take them
-#: out and the two files must agree step for step (test_helical_shell_
-#: mirrors_helical), with exactly the differences that test lists.
-SHELL_ONLY_STEPS = (
-    "front_normals", "shell_splat",
-    "render_shell_views", "inject_shell_views",
-)
 
 #: The one sentence pass 1 and the re-outline pass carry that pass 2 does
 #: not, since 2026-09-20: their control is a drawing, whose silhouette and
@@ -177,13 +153,6 @@ ORBIT_SENTENCE = (
 _ROOM = "meeting at clear corners. "
 assert DENOISE_PROMPT.count(_ROOM) == 1
 DRAWING_PROMPT = DENOISE_PROMPT.replace(_ROOM, _ROOM + ORBIT_SENTENCE)
-
-#: helical_shell.yaml's first denoise (and its re-outline pass, which must
-#: read as pass 1 does) carries the `elevation_hint` setting appended to the
-#: drawing prompt — one sentence per language about the camera climbing,
-#: blank for the arm without. Pass 2's prompt is the pinned one.
-HINTED_DENOISE_PROMPT = DRAWING_PROMPT + " ${globals.elevation_hint}"
-
 
 def _workflows():
     return sorted(WORKFLOW_DIR.glob("*.yaml"))
@@ -415,7 +384,7 @@ class TestWorkflowFiles(unittest.TestCase):
         guarded by the same conjunction, both skipped unless it holds. It
         was three until 2026-09-06: the normals were estimated for a brush
         training that has stopped supervising on them
-        (docs/final-splat-alignment-guide.md §1).
+        (docs/design-notes.md#the-deliverable-training-train_final_splat).
 
         `extra_debug` because this is a debug-only dataset, and
         `run_upscale` because with the upscale off these are colmap/'s own
@@ -1208,7 +1177,7 @@ class TestWorkflowFiles(unittest.TestCase):
         # The re-outline branch's training is the one brush that takes no
         # solve of its own, on purpose: it is fitted on the orbit's ideal
         # cameras and its coverage rendered straight back onto them
-        # (docs/re-outline.md). A refinement for it could not publish to
+        # (docs/design-notes.md#re-outline-the-silhouette-from-a-splat-not-the-mesh). A refinement for it could not publish to
         # dataset.cameras — those stay the ideal orbit the re-render and
         # the main solve read — and what it would correct is
         # per-frame jitter with the common mode removed, a sharpness lever
@@ -1462,7 +1431,7 @@ class TestWorkflowFiles(unittest.TestCase):
         unasked would be publishing an output for nobody. In THIS workflow
         it has a reader (`reinject_anchor_initial` passes it through to the
         denoise) and 2026-09-08's sweep measured it worth having, so every
-        reference run in docs/vace-denoise-findings-2026-09-07.md carries
+        reference run in docs/design-notes.md#video-denoise-wan-22-vace carries
         it. It spent a week as a per-run `--param`, which is the wrong
         place for something that works: forgetting it costs a whole pod
         run, and the run looks fine.
@@ -1505,12 +1474,8 @@ class TestWorkflowFiles(unittest.TestCase):
         # full-resolution passes, the gated 480p re-outline pass, and the
         # two gated orbit-extension passes (2026-09-21), which are pass 2's
         # block on the two extension videos and carry pass 2's prompt.
-        expected = {"helical.yaml": 5, "helical_shell.yaml": 5}
+        expected = {"helical.yaml": 5}
         drawn = {"denoise_pass1", "reoutline_denoise"}
-        # The experiment's pass 1 and re-outline pass carry the hint
-        # appended (HINTED_DENOISE_PROMPT); its pass 2 does not.
-        hinted = {("helical_shell.yaml", "denoise_pass1"),
-                  ("helical_shell.yaml", "reoutline_denoise")}
         workflows = _workflows()
         seen = 0
         for path in workflows:
@@ -1522,9 +1487,7 @@ class TestWorkflowFiles(unittest.TestCase):
                 seen += 1
                 passes += 1
                 with self.subTest(workflow=path.name, step=step.id):
-                    want = (HINTED_DENOISE_PROMPT if (path.name, step.id) in hinted
-                            else DRAWING_PROMPT if step.id in drawn
-                            else DENOISE_PROMPT)
+                    want = DRAWING_PROMPT if step.id in drawn else DENOISE_PROMPT
                     self.assertEqual(step.params.get("prompt"), want)
                     self.assertEqual(
                         step.params.get("negative_prompt"), DENOISE_NEGATIVE_PROMPT
@@ -1545,83 +1508,6 @@ class TestWorkflowFiles(unittest.TestCase):
             spec = WorkflowSpec.from_yaml(str(WORKFLOW_DIR / f"{name}.yaml"))
             with self.subTest(workflow=name):
                 self.assertEqual([s.id for s in spec.steps[: len(prologue)]], prologue)
-
-    def test_helical_shell_mirrors_helical(self):
-        """helical_shell.yaml is helical.yaml with five shell steps added
-        and a short list of deliberate differences. There is no include
-        mechanism, so the thing worth checking is that nothing ELSE has
-        drifted between the two: an A/B against helical.yaml is only an A/B
-        if the tail is the same tail.
-
-        Compared, step by step after SHELL_ONLY_STEPS are removed: id,
-        class, dispatch, env, inputs, outputs, when, keep_loaded and the raw
-        params block — except where this test says the file differs:
-
-          * both mesh renders draw the helix: `pattern`, `n_loops`,
-            `amplitude_deg`, `lead_in_deg`, `lead_out_deg`, `helix_anchor`
-            replace helical's `pattern: circular`; every other param on
-            those steps is the same;
-          * pass 1 and the re-outline pass carry the prompt hint
-            (HINTED_DENOISE_PROMPT, pinned above); nothing else on them
-            differs.
-
-        Globals: helical's, all of them, at the same values, plus the
-        experiment's own settings and a per-file output_root.
-        """
-        base = WorkflowSpec.from_yaml(str(WORKFLOW_DIR / "helical.yaml"))
-        shell = WorkflowSpec.from_yaml(str(WORKFLOW_DIR / "helical_shell.yaml"))
-        for name in SHELL_ONLY_STEPS:
-            self.assertIn(name, [s.id for s in shell.steps])
-            self.assertNotIn(name, [s.id for s in base.steps])
-        mirrored = [s for s in shell.steps if s.id not in SHELL_ONLY_STEPS]
-        self.assertEqual([s.id for s in mirrored], [s.id for s in base.steps],
-                         "helical_shell's steps have drifted from helical's")
-
-        helix_keys = {"pattern", "n_loops", "amplitude_deg", "lead_in_deg",
-                      "lead_out_deg", "helix_anchor"}
-        renders = {"render_initial_views", "render_reoutlined_views"}
-        hinted = {"denoise_pass1", "reoutline_denoise"}
-        for step, twin in zip(mirrored, base.steps):
-            with self.subTest(step=step.id):
-                self.assertEqual(step.step, twin.step)
-                self.assertEqual(step.dispatch, twin.dispatch)
-                self.assertEqual(step.env, twin.env)
-                self.assertEqual(step.inputs, twin.inputs)
-                self.assertEqual(step.outputs, twin.outputs)
-                self.assertEqual(step.when, twin.when)
-                self.assertEqual(step.keep_loaded, twin.keep_loaded)
-                params, base_params = dict(step.params), dict(twin.params)
-                if step.id in renders:
-                    self.assertEqual(base_params.pop("pattern"), "circular")
-                    self.assertEqual(
-                        {k: params.pop(k) for k in helix_keys},
-                        {"pattern": "helical", "n_loops": 1,
-                         "amplitude_deg": "${globals.helix_amplitude_deg}",
-                         "lead_in_deg": 0.0, "lead_out_deg": 4.5,
-                         "helix_anchor": "start"},
-                    )
-                if step.id in hinted:
-                    self.assertEqual(params.pop("prompt"), HINTED_DENOISE_PROMPT)
-                    self.assertEqual(base_params.pop("prompt"), DRAWING_PROMPT)
-                self.assertEqual(params, base_params)
-
-        own = {"helix_amplitude_deg", "shell_tail_frames", "shell_head_frames",
-               "shell_reference", "elevation_hint"}
-        self.assertEqual(set(shell.globals) - set(base.globals), own)
-        for key, value in base.globals.items():
-            with self.subTest(glob=key):
-                if key == "output_root":
-                    self.assertNotEqual(shell.globals[key], value)
-                    continue
-                self.assertEqual(shell.globals.get(key), value,
-                                 f"global '{key}' differs between the two files")
-        # The hint is what makes the two prompts differ; blank, they are
-        # the same string — which is the arm without.
-        self.assertTrue(shell.globals["elevation_hint"].strip())
-        self.assertEqual(
-            resolve(HINTED_DENOISE_PROMPT, {"globals": {"elevation_hint": ""}}),
-            DRAWING_PROMPT + " ",
-        )
 
     def test_every_render_with_a_backdrop_draws_the_same_room(self):
         """The backdrop was a pipeline SETTING until 2026-09-01, which made
@@ -2042,7 +1928,7 @@ class TestThePixelOpsShipOff(unittest.TestCase):
 
 class TestTheDenoiseSettingsAreTheMeasuredOnes(unittest.TestCase):
     """The two passes ship the settings the 2026-09-08 sweeps settled on
-    (docs/vace-denoise-findings-2026-09-07.md, sections 5 and 6), applied
+    (docs/design-notes.md#video-denoise-wan-22-vace), applied
     2026-09-09. Pinned because they are decisions with numbers behind them,
     and a step default drifting under them — the step's own `sampler_shift`
     is 8, which cost pass 2 three points of head sharpness — would be
@@ -2086,7 +1972,7 @@ class TestTheDenoiseSettingsAreTheMeasuredOnes(unittest.TestCase):
 
 class TestTheReoutlineBranch(unittest.TestCase):
     """The experimental branch that redraws the silhouette from a splat of
-    the subject (docs/re-outline.md): eight gated steps between the anchor
+    the subject (docs/design-notes.md#re-outline-the-silhouette-from-a-splat-not-the-mesh): eight gated steps between the anchor
     injection and the first denoise. What is pinned is what makes it a
     faithful copy of pass 1 and of the first render — a different denoise
     would matte a different subject, a splat trained or rendered on other
@@ -2864,7 +2750,7 @@ class TestWeakSkeleton(unittest.TestCase):
 
     def test_it_is_an_advanced_setting_that_defaults_on(self):
         """On by default since 2026-09-26: no side effect seen with it."""
-        for name in ("helical", "helical_shell"):
+        for name in ("helical",):
             with self.subTest(workflow=name):
                 spec, _ = self._steps(name)
                 setting = next(s for s in spec.settings if s.name == "weak_skeleton")
@@ -2873,7 +2759,7 @@ class TestWeakSkeleton(unittest.TestCase):
                 self.assertTrue(setting.advanced)
 
     def test_both_control_renders_publish_the_copy(self):
-        for name in ("helical", "helical_shell"):
+        for name in ("helical",):
             _, by_id = self._steps(name)
             for render_id in ("render_initial_views", "render_reoutlined_views"):
                 with self.subTest(workflow=name, step=render_id):
@@ -2882,7 +2768,7 @@ class TestWeakSkeleton(unittest.TestCase):
                     self.assertEqual(step.outputs["images_no_skeleton"], "scene.control_no_skeleton")
 
     def test_the_copy_gets_the_anchor_frames_its_drawing_gets(self):
-        for name in ("helical", "helical_shell"):
+        for name in ("helical",):
             spec, by_id = self._steps(name)
             order = [s.id for s in spec.steps]
             with self.subTest(workflow=name):
@@ -2900,7 +2786,7 @@ class TestWeakSkeleton(unittest.TestCase):
                     self.assertEqual(by_id[copy].outputs, {"images": "scene.control_no_skeleton"})
 
     def test_pass_1_reads_it_optionally_and_keeps_the_sticks_on_step_1(self):
-        for name in ("helical", "helical_shell"):
+        for name in ("helical",):
             with self.subTest(workflow=name):
                 _, by_id = self._steps(name)
                 pass1 = by_id["denoise_pass1"]

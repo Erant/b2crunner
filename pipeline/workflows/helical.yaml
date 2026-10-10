@@ -59,7 +59,7 @@
 # matte instead of the mesh** — `re_outline`, a setting, off by default
 # until 2026-09-21 and on since. The silhouette pass 1 conditions on is the SAM-3D-Body mesh's,
 # and the mesh is wrong wherever hair and clothing leave the body model
-# (docs/vace-denoise-findings-2026-09-07.md: scalp 7 px low, feet 22 px
+# (docs/design-notes.md#video-denoise-wan-22-vace: scalp 7 px low, feet 22 px
 # high). With the setting on, eight gated steps between
 # `reinject_anchor_initial` and `dump_denoise_input` run the same control
 # video through a third wan22_vace_denoise at 480x832 with pass 1's exact
@@ -71,7 +71,7 @@
 # as `outline_masks` — body2colmap 76a74bc's `render_outline(mask=...)` —
 # under the same skeleton and face splat, then re-inject the anchor.
 # `dump_denoise_input` and pass 1 read whichever render came last.
-# docs/re-outline.md has the argument, and the reason the 480p batch is
+# docs/design-notes.md#re-outline-the-silhouette-from-a-splat-not-the-mesh has the argument, and the reason the 480p batch is
 # resized HERE rather than handed to diffusers at `width: 480` (it would
 # run at 464x832 and letterbox the reference).
 #
@@ -99,13 +99,13 @@
 # 2026-09-05 for the reasons in that entry below; this removes the switch
 # rather than leaving a control that never wins. The steps THEMSELVES are
 # untouched (steps/elevation_views.py, its tests, and the measurement in
-# docs/stage1-support-views-implementation.md), so putting the block back
+# docs/design-notes.md#dead-ends--do-not-repeat), so putting the block back
 # is pasting three steps and three settings, not rebuilding anything.
 # `merge_support_views` stays where it is: the face cap is gated, and this
 # is still the one ungated writer of scene.support_views.*.
 #
 # WHAT CHANGED (2026-09-05, last): **the intermediate splat was measured,
-# and five things moved with the answer** (docs/intermediate-splat-guide.md,
+# and five things moved with the answer** (docs/design-notes.md#the-intermediate-training-train_splat,
 # measured against the 81 novel helical cameras the second denoise sees):
 #
 #   * the evidence gate stops culling the subject — brush a9405881 fixed two
@@ -184,7 +184,7 @@
 # alone take the photograph's view from 17.8 to 23.1 dB (sharpness x2.8),
 # the fade adds a few tenths at the cost of fidelity to the frames beside
 # it. Setting `photo_priority` (the strength, 0.5; the copies are the
-# step's `copies`, 6). docs/photo-priority.md has the sweep. Ported from
+# step's `copies`, 6). docs/design-notes.md#photo-priority-off-by-default has the sweep. Ported from
 # the mesh path's `photo_texture`, whose projection of the photograph was
 # its one clear win; the splat's own meshification is otherwise being
 # wound down (skin artefacts in the texture the user could not resolve).
@@ -294,7 +294,7 @@
 # tests/test_workflows.py refuses an inject_anchor whose batch was
 # re-rendered along an unanchored path.
 #
-# WHAT CHANGED (2026-09-02): the FACE CAP WINS (docs/face-priority.md).
+# WHAT CHANGED (2026-09-02): the FACE CAP WINS (docs/design-notes.md#face-cap-priority-face_priority_weights).
 # The shared tail
 # gained `face_priority` (after face_support_views) and
 # `face_priority_shells` (after stage1_support_band), both the new
@@ -348,7 +348,7 @@
 # training's own. Three settings drive it (`stage1_support_views`,
 # `stage1_support_every_n` = 10, `stage1_support_elevation_deg` = 10);
 # validated against a captured dataset in
-# docs/stage1-support-views-implementation.md, never yet run on a pod.
+# docs/design-notes.md#dead-ends--do-not-repeat, never yet run on a pod.
 #
 # WHAT CHANGED (2026-08-31): the face splat is composited by the mesh
 # render itself instead of by a pair of extra steps. body2colmap dropped
@@ -405,7 +405,7 @@
 # project deliberately has none (see pyproject.toml — dropping it removed
 # the last runtime CUDA toolchain); the library now rasterises through
 # brush-splat-render too, so the detour is gone. See
-# docs/revert-when-body2colmap-drops-gsplat.md for what came out.
+# docs/design-notes.md#supporting-views-and-premultiplied-renders for what came out.
 # This is what the bootstrap hands the shared tail, ready-made: a dataset
 # rendered with override_cam_from_mesh whose extras carry orbit_target /
 # anchor_position / focal_length_mm / original_focal_length, with a warped
@@ -470,11 +470,8 @@
 # effective value of every one of them, defaults included.
 name: helical
 description: >-
-  From a front/back reference sheet or a single frontal photo: split it (or
-  not), reconstruct a body, render its own anchored views, then run the
-  shared six-stage tail over that dataset — denoise, train+re-render a
-  splat, mask, denoise again, upscale, export a COLMAP dataset and/or a
-  flow-aligned .ply.
+  From a front/back reference sheet or a single frontal photo: generate an
+  orbit of views, train a Gaussian splat, and export it with a COLMAP dataset.
 
 settings:
   # The knobs the Run tab draws, in this order, straight from these
@@ -484,267 +481,109 @@ settings:
   # reads, so a setting reaches the steps that need it exactly the way it
   # always has: as a `${globals.<name>}` written at each step that consumes
   # it. A setting nothing reads is refused at load (`WorkflowSpec.validate`).
+  # Keep `help:` to one line; the background lives in docs/design-notes.md.
 
   - name: resolution
     label: Resolution
     type: list
     default: [720, 1280]
     choices: [[720, 1280], [600, 1040], [480, 832]]
-    help: >-
-      Frame size, width x height, and the value more than one step must agree
-      on: the render size, wan22_vace_denoise's width/height, and
-      render_splat's. `render` takes it whole and has no width/height override
-      of its own, so that stage cannot drift; denoise and render_splat split
-      it via .0/.1. Only sizes the denoise model was trained for are offered.
-      (2026-08-25: this file inherited [512, 512] from an earlier draft.)
+    help: Frame size, width x height.
 
   - name: framing
     label: Framing
     default: full
     choices: [full, torso, bust, head]
-    help: >-
-      How much of the body fills the frame. Threaded through both renderers
-      that see it — the mesh render (render_initial_views) and the splat
-      re-render (render_subject) — because they have to agree: `render` frames
-      the mesh at this preset, the splat is trained on cameras aimed for it,
-      and render_subject rebuilds its helical orbit around the same preset.
-      `full` is the whole body and what every prior run used; torso / bust /
-      head crop progressively tighter. Only the mesh reconstruction's skeleton
-      makes the tighter presets available — `render` falls back to `full` for
-      any it cannot compute, and render_subject follows.
+    help: How much of the body fills the frame.
 
   - name: input_layout
     label: Input
     default: auto
     choices: [auto, sheet, single]
-    help: >-
-      What the uploaded image is. `sheet`: the two-panel front/back sheet,
-      cut down the middle — the front half is the subject, the back half is
-      the reference both denoise passes condition on. `single`: one frontal
-      photo of the subject — there is no back view, so the first denoise
-      runs on the injected photograph alone and the second conditions on
-      the first's own rear-view frame (pick_rear_view). `auto` (the
-      default) counts the figures with a person detector: two, one each
-      side of the centre, is a sheet; one is a photo; anything else stops
-      the run and asks for this to be set. Measured 27/27 on the cyberpunk2
-      sheets and every single photo tried (steps/reference_sheet.py).
+    help: A front/back sheet, a single frontal photo, or auto-detect.
 
 
   - name: seed
     label: Seed
     type: int
     default: 0
-    help: >-
-      One seed for every stochastic stage: both wan22_vace_denoise passes and
-      the SeedVR2 upscale. Those were three independent step params (0, 0 and
-      42) before this became a setting. Change it to draw a different sample
-      of the same pipeline.
+    help: Random seed for the denoise passes and the upscale.
 
   - name: low_vram
     label: Low VRAM
     type: bool
     default: false
-    help: >-
-      Run the Wan denoise passes the way ComfyUI does on a ~12 GB card: the
-      eight VACE hints computed one at a time beside the block they feed
-      instead of all held at once, the per-token work chunked, and the
-      weights streamed a block at a time from the memory-mapped checkpoints
-      without host copies, and the VAE tiled. The transformer's arithmetic
-      is the stock forward's, bitwise; the tiled VAE blends its seams, so
-      the frames are near-identical rather than identical. About 7.5 GiB of
-      VRAM and ~3 GB of host RAM beyond the page cache. Measured on an RTX 4070 Ti at 720x1280x81:
-      ~105 s a denoise step (ComfyUI with SageAttention: ~120 s). Off is the
-      32 GB-card path.
+    help: Stream the denoise model's weights to fit a ~12 GB GPU (slower).
 
   - name: weak_skeleton
     label: Weak skeleton
     type: bool
     default: true
     advanced: true
-    help: >-
-      Show pass 1's denoise the DWPose skeleton on its first step only; the
-      five steps after it get the same drawing with the sticks left out
-      (silhouette, relief and face splat). For subjects whose costume gives
-      a coloured line somewhere to hide — measured on a black suit with
-      glowing cyan trim (run 1127f0), where every step that saw the sticks
-      painted them as glowing piping down the legs and torso. The first step
-      is where the skeleton sets the pose and the turn; with the sticks on
-      it alone, the same seed gives the same picture without the ink, on
-      that subject and on a clean one (e9eb3a). Costs one extra render
-      composite per frame and one extra VAE encode of the control video.
-      On by default since 2026-09-26: no side effect seen on any run with it.
+    help: Show the skeleton to the first denoise step only, so it isn't painted into costumes.
 
   - name: run_upscale
     label: Upscale dataset
     type: bool
     default: true
     advanced: true
-    help: >-
-      Run the SeedVR2 upscale (720x1280 -> 1080x1920) before the export, which
-      also rescales the dataset's camera intrinsics to match, in the same step
-      (steps/seedvr2.py). Off is the shorter pipeline that used to be a
-      separate workflow.
+    help: Upscale the frames with SeedVR2 to 1080x1920 before training.
 
   - name: reupscale
     label: Re-upscale
     type: bool
     default: false
     advanced: true
-    help: >-
-      After the deliverable training, render the splat at 720x1280 from views
-      spread evenly over -70..+70 deg elevation (as many as the training
-      cameras, not the orbit's path), upscale those renders with SeedVR2 (the
-      Upscale step's settings) and train the splat again on them; the class
-      maps for the label vote are made on the upscaled renders, and only the
-      retrained splat carries it. Independent of Upscale:
-      with Upscale off the first training runs on the 720p frames and the
-      re-upscale is the same either way, which is the A/B for whether the
-      first upscale earns its time. Measured 2026-10-02 on one subject
-      (plain trainer flags): band-limited sharpness +63 %, the head +77 %,
-      the same between the training views, for ~2 dB of fidelity to the real
-      frames (1.4 of it from retraining on renders at all). The retraining
-      keeps the final training's alignment loop and body rig (SeedVR2
-      upscales each frame on its own, so its detail is not guaranteed to line
-      up between them) and drops the normal maps; the first splat is kept as
-      debug/reupscale/final_before_reupscale.ply. ~15 min of SeedVR2 on a
-      4070 Ti plus a training.
+    help: Re-render the trained splat, upscale the renders and train again (sharper, less faithful).
 
   - name: extra_debug
     label: Extra debug outputs
     type: bool
     default: false
     advanced: true
-    help: >-
-      Write the two debug COLMAP datasets nothing else needs:
-      `colmap_intermediate/`, what the FIRST brush training is handed (the
-      denoised frames, their mattes and normal maps, and a pose for every
-      supporting view — the face cap), and `colmap_preupscale/`, the frames
-      as they were BEFORE the upscale (only with the upscale on; off, it
-      would be colmap/ under a second name), which costs an extra RMBG
-      pass. Everything else in `debug/` is written by every run. Either way
-      `debug/` only goes into the result .zip when the Results tab's
-      "Include debug/" is ticked.
+    help: Also write the intermediate and pre-upscale COLMAP datasets to debug/.
 
   - name: face_splat
     label: Face splat
     type: bool
     default: true
     advanced: true
-    help: >-
-      Whether the face branch runs: a Gaussian splat of the subject's actual
-      face, composited onto the skeleton drawings wherever the camera can see
-      it (+-60 deg). It REPLACES the MediaPipe landmark overlay this file used
-      to draw, so turning this off leaves the skeleton frames with no face at
-      all rather than falling back to landmarks. That gap is deliberate: the
-      landmarks are still detected (the head fit needs them) but they are not
-      wired into render_initial_views; putting the overlay back means one
-      `face_landmarks:` input line on that step, whose params for it are all
-      still there. Costs a third 1B Sapiens2 head
-      (~6.5 GB, segmentation) on top of the normal head, plus the pointmap
-      head the splat itself needs.
+    help: Draw a splat of the subject's real face into the control frames.
 
   - name: refine_cameras
     label: Refine camera poses (COLMAP)
     type: bool
     default: true
     advanced: true
-    help: >-
-      Bundle-adjust the generated orbit against the frames themselves before
-      each brush training, with the gauge restored afterwards so the splat keeps
-      its scale. Worth +0.63 PSNR / +0.0045 SSIM on held-out views, measured over
-      three seeds per condition against a baseline whose own seed spread is
-      +-0.003 (docs/camera-pose-refinement.md). It runs twice — once on the
-      denoised bootstrap batch, once on the re-rendered helical one — because
-      both paths are generated rather than measured, and each run costs a
-      COLMAP feature/match/triangulate/BA pass over the training frames. At 81
-      frames, measured: 27 s of features and matching on the pod image's CUDA
-      build (2.8 s + 24.3 s) against 209 s on a CPU one, plus a bundle
-      adjustment that is CPU-bound either way. Off gives the poses exactly as
-      the renderer wrote them, which is
-      what every run before 2026-08-31 used. Note what it never sees: the
-      supporting views, which are renders made FROM these poses and so have no
-      independent evidence to offer about them.
+    help: Bundle-adjust the camera poses against the frames before each training.
 
   - name: refit_body
     label: Refit the body model to the intermediate splat
     type: bool
     default: true
     advanced: true
-    help: >-
-      After the first training, move SAM-3D-Body's mesh and skeleton onto the
-      splat (pipeline/steps/body_refit.py, docs/body-refit.md): the splat
-      follows the generated frames and by then sits centimetres off the body
-      the run started from (3 cm up, 1.3 cm sideways and a 3 deg yaw on the
-      2026-09-09 example run, arms visibly off). The final training's hollow
-      loss then forbids weight behind a body that is where the splat is, which
-      lets its margin come down from 5 cm to 3 cm at the same PSNR, with four
-      times less weight behind the body; the refit skeleton is also what a
-      later re-posing of the splat will hang from. Costs a probe render of the
-      training views and ~90 s of fitting. Off, the final training keeps the
-      original mesh at the 3 cm margin below, which is the riskier setting for
-      a mesh that may be too big for the subject.
+    help: Fit the body model to the intermediate splat (needed by the face fit and rigging).
 
   - name: body_rig_intermediate
     label: Per-view body rig on the intermediate training
     type: bool
     default: true
     advanced: true
-    help: >-
-      Deform the intermediate splat per training view with the INITIAL body's
-      skeleton (pipeline/body_rig.py), the way `body_rig` already does for the
-      final training. The generated frames swing the arms by centimetres
-      between segments of the orbit, and a single canonical body cannot
-      explain them all: the splat answers with a translucent double limb, and
-      the helical re-render that pass 2 is built from inherits it. Measured on
-      the 2026-09-09 example run (b2ctrain docs/STATUS.md, "The rig at the
-      INTERMEDIATE stage"): hand sharpness +27%, body +7%, head +9%, at no
-      extra time and 1% fewer splats. There is no splat to refit the body to
-      at this point, and none is needed — the initial body rigs the
-      intermediate splat as well as a refit one does. Only the real frames get
-      a rotation; the face supporting views are renders of a fixed splat and
-      render undeformed, which is what keeps the head gain (letting them
-      deform loses all of it).
+    help: Pose the intermediate splat per view with the body skeleton.
 
   - name: face_refine
     label: Per-view face fit and the anchor's eyes
     type: bool
     default: true
     advanced: true
-    help: >-
-      Before the final training, fit the refit body's head to every frame
-      that shows the face (neck/head pose plus the MHR expression
-      blendshapes, through the frame's own camera) and hand the trainer the
-      per-view face geometry the way the body rig hands it the arms; and
-      replace the frames' eyes — the diffusion's invention per frame, three
-      consecutive frames showing three eye states — with eyeballs textured
-      from the anchor photograph, rendered into each frame through that
-      frame's fitted lids (pipeline/steps/face_views.py, docs/face-refine.md).
-      Measured on four subjects (b2ctrain docs/STATUS.md, "The face per
-      view"): eye error against the eye model 51-82 -> 28-56, closed slits
-      and blue smears become open eyes with an iris at every novel view.
-      Needs the body refit. Off, the final training sees the frames as the
-      upscale left them. Whether the fit also DEFORMS the splat's face per
-      view is the separate `face_rig` switch below.
+    help: Fit the head per frame and replace the frames' eyes with the photograph's.
 
   - name: face_rig
     label: Per-view face deltas in the rig (rig v3)
     type: bool
     default: false
     advanced: true
-    help: >-
-      Hand the trainer the per-view head fit as vertex displacements of the
-      rig's face core (`build_face_rig`, rig v3), so the canonical face
-      follows each frame's fitted expression and pose. OFF by default since
-      2026-09-14: the fit is landmark-driven, and MediaPipe's landmarks on
-      the 60-85 degree views put the face in the wrong place, so those
-      views drag the canonical face apart — the deliverable's face at
-      70-110 degrees was a smear with a head orientation matching no frame
-      (b2ctrain out/preup, variants_profile.jpg). Without the deltas the
-      profile is clean and the frontal face, the hair and the pasted eyes
-      are unchanged (the eyes live in the frames, not in the deltas). The
-      four-subject measurement that motivated the deltas looked at frontal
-      novel views only. On, the old behaviour; `face_motion_cm` and `hold`
-      on `build_face_rig` are its knobs.
+    help: Also deform the splat's face per view from the head fit.
 
   - name: photo_priority
     label: The photograph wins over the surface it sees
@@ -753,27 +592,7 @@ settings:
     minimum: 0.0
     maximum: 1.0
     advanced: true
-    help: >-
-      In the intermediate training, how far the denoised frames yield to the
-      photograph wherever its camera sees the body head-on enough
-      (steps/photo_priority.py): the frame's loss weight there is 1 minus
-      this. The face cap's own yield (face_priority_weights) stacks on top.
-      The frames either side of the anchor are the denoiser's re-lit,
-      slightly displaced re-drawings of the front the photograph already
-      shows, and the fit averaged them with it; the step also hands the
-      training twelve masked copies of the photograph as supporting views,
-      which is what makes it win (measured 2026-09-19: 17.8 -> 23.1 dB at
-      its own view from the copies alone, 23.3 at 0.5, 23.5 at 0.8; the
-      strength trades fidelity to the photograph against fidelity to the
-      frames beside it, -1.5 dB at view 3 from 0.5 to 0.8). 0 keeps the
-      copies and no fade; the copies switch off with the step's `copies`.
-      (The removed mesh path's photo_texture was the same rule for its
-      atlas, measured there at +30 % subject sharpness.)
-      Off, and the copies with it, since 2026-09-25: the frame at the anchor
-      pose is the denoiser's repaint, not the photograph (17-20 dB from it on
-      08ac56 and 416580), so this pinned a repaint, and the copies left a
-      layer of opacity behind the front (+50 % see-through near the anchor
-      in 416580's final splat, rebuilt locally with and without them).
+    help: How much the intermediate training favours the photograph over the frames near it (0-1).
 
   - name: specular_suppress
     label: Highlight suppression
@@ -782,54 +601,21 @@ settings:
     minimum: 0.0
     maximum: 1.0
     advanced: true
-    help: >-
-      Pull the highlights down on the first denoise's output before the
-      intermediate splat is trained on it, 0 (off) to 1. The second denoise
-      conditions on a re-render of that splat, so it re-lights frames that
-      already carry one diffusion pass's shading and specular — blown-out
-      highlights, plasticky skin, reflective clothing — and the splat's SH
-      has fitted pass 1's frame-to-frame inconsistent highlights as sparkle.
-      This removes the specular excess (the per-pixel minimum channel above
-      the batch's `mean + eta * std`, subtracted from all three channels
-      equally, so colour and diffuse shading stay) from the training frames,
-      so the splat never learns it and its re-render is clean in every view.
-      The photograph's frame is left as it is. Off is the run as it was; see
-      pixel_ops' `specular_eta` / `specular_blur` for the shape of the cut.
+    help: Remove highlights from the first denoise's frames (0 = off, 1 = full).
 
   - name: splat_labels
     label: Body-part label per splat
     type: bool
     default: true
     advanced: true
-    help: >-
-      Segment every final frame with Sapiens2 (Goliath body parts: face, hair,
-      hands, arms, legs, clothing, shoes...) and vote the classes onto the
-      splats as they are exported: scene.ply gains two float properties per
-      Gaussian, `seg_label` (the class id) and `seg_conf` (the winner's share
-      of the splat's rendered weight). Viewers ignore the extra columns. ~20 s
-      of GPU for 81 frames and an unmeasurable cost at export; the same maps
-      go into the COLMAP bundle as a labels/ sidecar. Measured 2026-09-11:
-      96% of the rendered weight agrees with its splat's class, median
-      confidence 0.99, boundaries and the silhouette are where it wavers.
+    help: Store a body-part label per splat in the exported .ply.
 
   - name: lighting_correction
     label: Lighting correction
     default: prepass
     choices: [prepass, "off"]
     advanced: true
-    help: >-
-      Take the generator's frame-to-frame relighting out of the frames before
-      the deliverable training. The passes are generated separately and the
-      subject's exposure swings 10-23 % and its white balance 6-12 % across
-      the final frames; the splat's SH bands soak that up (on skin a
-      per-frame lighting over the surface normal explains 52-68 % of what
-      they carry). `prepass` trains a 5k-iteration splat on the final frames
-      for their geometry, fits every frame's departure from the common
-      lighting (27 numbers a frame, on the matte classes) and divides it out
-      of the frames the COLMAP bundle and the final training get. Measured
-      2026-10-02 on two subjects: SH share on skin 23 -> 15 % and 47 -> 31 %,
-      the colour cast between the passes gone, fit unchanged. ~10 s of
-      training and ~1 min of fitting. `off` trains on the frames as denoised.
+    help: Remove frame-to-frame lighting changes before the final training.
 
   - name: outline_strength
     label: Outline strength
@@ -838,40 +624,14 @@ settings:
     minimum: 0.0
     maximum: 100.0
     advanced: true
-    help: >-
-      How dark the flat silhouette fill in the first drawing is, as a
-      percentage from the #7F7F7F ground (0, no silhouette) to black
-      (100). This is the drawing whose outline is the BODY MODEL's — wrong
-      wherever hair and clothing leave it — so it is kept faint on purpose,
-      a hint under the skeleton rather than a shape to trace: 6.25 lands the
-      fill one sixteenth of the way to black (#777777). With `re_outline`
-      off this drawing is what pass 1 conditions on; with it on, it is what
-      the 480p re-outline denoise conditions on, and pass 1 gets the
-      re-outlined drawing at `reoutlined_strength` instead. Was the render
-      step's own 12.6% (#6F6F6F) until 2026-09-20.
+    help: Darkness of the body-model silhouette in the control drawing (0-100).
 
   - name: re_outline
     label: Re-outline
     type: bool
     default: true
     advanced: true
-    help: >-
-      Draw the silhouette pass 1 conditions on from a splat of the subject
-      instead of from the body mesh. The mesh outline is wrong wherever hair
-      and clothing extend past the body model; this runs the same control
-      video through an extra Wan 2.2 denoise at 480x832 (pass 1's settings
-      at four steps, 2 high / 2 low), mattes the result with rmbg, trains a
-      splat to those mattes
-      on the orbit's own cameras, and re-renders the orbit with the splat's
-      coverage as the outline — one subject every frame agrees on, rather
-      than 81 mattes that do not. Skeleton, face splat and everything after
-      are unchanged. Costs a third 81-frame denoise (the resident experts
-      are reused, so no second load) and a third splat training. On by
-      default since 2026-09-21, after helical-20260920-150953 and the runs
-      that followed it; off, pass 1 conditions on the body model's outline
-      at `outline_strength`, as every run before did. `debug/reoutline/` in
-      the result .zip holds the 480p frames and their mattes when it is on,
-      and `debug/reoutline_splat.ply` the splat. See docs/re-outline.md.
+    help: Draw the silhouette from a quick splat of the subject instead of the body model.
 
   - name: reoutlined_strength
     label: Re-outlined strength
@@ -881,39 +641,14 @@ settings:
     maximum: 100.0
     advanced: true
     requires: re_outline
-    help: >-
-      With `re_outline` on: how dark the silhouette fill is in the drawing
-      pass 1 conditions on, the one whose outline is the re-outline splat's
-      coverage — the subject's own shape, hair and clothing included, that
-      every frame of the 480p pass had to agree on. That outline can be
-      trusted where the body model's cannot, so it is drawn darker: 20
-      lands the fill a fifth of the way to black (#666666), against
-      `outline_strength`'s 6.25 for the model's. Greyed out with
-      `re_outline` off, when no step reads it.
+    help: Darkness of the re-outlined silhouette (0-100).
 
   - name: outline_relief
     label: Outline relief
     default: none
     choices: [none, depth]
     advanced: true
-    help: >-
-      What fills the silhouette in both drawings (the body model's and,
-      with `re_outline`, the splat's). `none` is the flat grey of the
-      strength settings above. `depth` fills it with the body model's
-      depth at that same mean grey: smoothed to body scale, cut to 16
-      levels over 80 cm centred on the orbit target, the near surface
-      lighter and the far surface darker by `outline_relief_amplitude`.
-      Why: a flat silhouette under a 2-D skeleton is the same drawing
-      from the front and from behind, mirrored, and the denoise can turn
-      the head without the torso (helical-20260920-202010 painted the
-      breastplate at azimuth 171, and its 480p pass never showed the back
-      at all). The relief puts back the one bit the drawing lacks — which
-      surface faces the camera — at outline strength rather than as the
-      depth map that had the denoise trace the naked model. Where the
-      re-outline's silhouette is wider than the model (hair, clothing) it
-      takes the nearest model depth. Applied to the drawing the 480p pass
-      sees and to the one pass 1 sees alike: the 480p pass has the same
-      ambiguity, and its silhouette is only as trustworthy as its turn.
+    help: Shade the silhouette with the body model's depth.
 
   - name: outline_relief_amplitude
     label: Relief amplitude
@@ -922,13 +657,7 @@ settings:
     minimum: 0.0
     maximum: 50.0
     advanced: true
-    help: >-
-      With `outline_relief: depth`: how far the relief's near and far ends
-      sit either side of the fill's strength, on the same percentage ramp.
-      6.25 is 8 bytes each way — 16 distinct greys — and at
-      `outline_strength` 6.25 puts the nearest level on the ground, where
-      only a point 40 cm nearer than the orbit target reaches it. Raise
-      the strength or lower this if that matters.
+    help: Strength of the depth shading.
 
   - name: skeleton_occlusion_m
     label: Skeleton occlusion (m)
@@ -937,50 +666,14 @@ settings:
     minimum: 0.0
     maximum: 1.0
     advanced: true
-    help: >-
-      In both drawings, hide every skeleton joint the body model hides
-      from the camera, and every bone ending on one — the far arm behind
-      the torso in profile is then not drawn through it. That is DWPose's
-      own rule for a keypoint its detector did not find, so the drawing
-      stays one it could have made, and it stops supporting the mirrored
-      reading of a profile. The value is how deep, in metres, a limb joint
-      may sit behind the model's surface and still count as seen (its own
-      flesh); torso joints get 2-2.5x and face landmarks half, by
-      body2colmap's table. 0.12 was measured to keep every joint of a
-      fitted body from every side and drop the ones behind another part,
-      and is the default since helical-20260920-220458, the first run
-      with it, came back with the turn intact. 0 draws every bone
-      through everything, as every run before 2026-09-20 did.
+    help: Hide skeleton joints the body hides from the camera; depth tolerance in metres (0 = off).
 
   - name: extend_orbit
     label: Extend the orbit
     type: bool
     default: true
     advanced: true
-    help: >-
-      After the second denoise, lengthen the helical orbit with two VACE
-      video extensions (steps/extend_orbit.py), each an 81-frame pass like
-      pass 2 itself. The BEFORE pass ends on 40 INACTIVE frames beside
-      pass 2's first 40 — mask 0, kept as given, the flag the anchor frame
-      has always carried — and paints 41 new frames ahead of them; the
-      AFTER pass starts on 41 beside pass 2's last and paints 40 after (the overlaps
-      below, one apart so each pass's mask changes on a latent frame's
-      edge). The new cameras continue render_subject's helix at its own
-      step: the lead-in's -30 deg elevation carried on ahead of it and
-      the lead-out's +30 deg after, each ramped `extend_tilt_deg` further
-      out of the band by its far end. What the passes see, every frame of
-      them, is a render of a splat trained on pass 2's 81 frames, at the
-      passes' own cameras — for the inactive frames a continuation of that
-      ramp beside pass 2's cameras, so each pass is one uniform helix; what
-      they hand back for the overlap is discarded, pass 2's frames stay. Everything downstream — the
-      upscale, the final camera solve, the face fits, the deliverable
-      training — then runs on 162 views instead of 81. ON by default:
-      two more denoises at pass 2's cost (the resident experts serve
-      them, no reload), a fourth splat training, and
-      twice the frames through everything after. UNMEASURED on a pod as
-      of 2026-09-21; `debug/extension_input/{before,after}/` in the
-      result hold the two control videos and `debug/extension_splat.ply`
-      the guide splat.
+    help: Add two more denoise passes above and below the orbit (162 views instead of 81).
 
   - name: extend_tilt_deg
     label: Extension tilt (deg past the band)
@@ -990,28 +683,7 @@ settings:
     maximum: 50.0
     advanced: true
     requires: extend_orbit
-    help: >-
-      With `extend_orbit` on: how far past the helix's -30 / +30 deg
-      elevation band the extension's outermost frames reach. The BEFORE
-      pass's new frames ramp from -30 beside pass 2's first frame down to
-      -30 minus this at its first; the AFTER pass's from +30 up to +30
-      plus this at its last. 0 is the flat lead-in and lead-out carried
-      on, which repeats views: each 41-frame ring laps its own first
-      frames 2.6 deg apart and runs over the helix's first and last
-      third-turn, 32 of the 81 new frames within 5 deg of a view the
-      orbit already has (e9eb3a's cameras, 2026-09-24). 10 (ends at -40 /
-      +40) leaves none within 5 deg, the nearest-view median 8.5 deg
-      against pass 2's 9.6. Larger is new views from further above and
-      below, which the model and the guide splat have less to go on for.
-      40 (ends at -70 / +70) is the default since 2026-09-30: a splat is
-      only constrained up to its highest training view, and above it the
-      view-dependent colour extrapolates — on b24be4 at 10 the upper arms
-      and up-facing cloth seen from +55 / +70 came out mottled (most of
-      it in SH band 3), while renders at the splat's own +34..+40
-      training views were clean. Re-run locally (b2crig
-      work/b24be4/ext: the pod's extension and final training replayed,
-      WAN at 2+2 steps): 25 cleared +55, 40 cleared +55 and +70, the
-      front and low views unchanged. Not yet measured on a pod.
+    help: How far past the orbit's ±30° band the extension reaches, in degrees.
 
   - name: extend_guide_sh
     label: Extension guide SH bands (inactive frames)
@@ -1021,13 +693,7 @@ settings:
     maximum: 3
     advanced: true
     requires: extend_orbit
-    help: >-
-      With `extend_orbit` on: the SH bands of the guide render on each
-      extension pass's INACTIVE frames — the ones beside pass 2 that VACE
-      keeps and extends from. They look from where the guide splat was
-      trained, so every band it carries is supported: 3 gives VACE the
-      truest colour context (uniform SH 1 washed it out on b24be4 — a pale
-      leotard from above, 2026-09-30).
+    help: SH bands of the guide render on the frames shared with the orbit.
 
   - name: extend_novel_sh
     label: Extension guide SH bands (novel frames)
@@ -1037,14 +703,7 @@ settings:
     maximum: 3
     advanced: true
     requires: extend_orbit
-    help: >-
-      With `extend_orbit` on: the SH bands of the guide render on the
-      REACTIVE frames — the new views VACE paints, out to the tilt's
-      -30 - tilt / +30 + tilt degrees. The guide never saw those
-      elevations, so its higher bands only extrapolate there; 1 keeps
-      the base colour and its smooth view dependence. Setting it equal to
-      extend_guide_sh renders every frame alike (one render, as before
-      2026-09-30, then at 2).
+    help: SH bands of the guide render on the new frames.
 
   - name: extend_overlap_before
     label: Extension overlap, BEFORE pass (frames)
@@ -1054,17 +713,7 @@ settings:
     maximum: 80
     advanced: true
     requires: extend_orbit
-    help: >-
-      With `extend_orbit` on: how many of pass 2's FIRST frames close the
-      BEFORE pass as its inactive frames. The pass is 81 frames (the count
-      the model was calibrated at; `phase_frames` on extend_path), so it
-      paints 81 minus this many new frames ahead of them: 41 at 40, which
-      is 425 deg on this helix's 10.37 deg a frame, not 360 — a turn is
-      34.7 frames here. Wan's temporal VAE encodes frame 0 alone and then
-      every 4 frames, so the mask changes on a latent edge only when the
-      new-frame count is 4k+1: 41 (overlap 40), 37 (44), 33 (48). Any
-      other value runs, with a warning, one latent straddling the
-      boundary.
+    help: Orbit frames reused at the end of the BEFORE extension pass.
 
   - name: extend_overlap_after
     label: Extension overlap, AFTER pass (frames)
@@ -1074,13 +723,7 @@ settings:
     maximum: 80
     advanced: true
     requires: extend_orbit
-    help: >-
-      With `extend_orbit` on: how many of pass 2's LAST frames open the
-      AFTER pass as its inactive frames; it paints 81 minus this many new
-      frames after them (40 at 41, 415 deg). One more than the BEFORE
-      pass's on purpose: here the inactive block starts the video, so it
-      is this count itself that has to be 4k+1 for the mask to change on
-      a latent edge — 41, 45 (36 new), 49 (32 new).
+    help: Orbit frames reused at the start of the AFTER extension pass.
 
 outputs:
   # What stage 6 produces. `dir:` is where its steps land it under
@@ -1099,42 +742,21 @@ outputs:
     label: COLMAP dataset
     dir: colmap
     always: true
-    help: >-
-      cameras.txt, images.txt and points3D.txt, plus images/, built from the
-      frames as they finally are. No normals/: the final training computes
-      its own (final_normal_maps) but the export does not carry them. No switch since
-      2026-09-26: writing it is seconds, and the .ply is trained on the same
-      frames anyway.
+    help: cameras.txt, images.txt, points3D.txt and images/.
 
   - name: export_ply
     label: Trained .ply (flow-aligned)
     dir: ply
     default: true
     advanced: true
-    help: >-
-      A second brush training over that dataset, exported as scene.ply (the
-      bare splat) and, with the body refit on, scene.glb (the splat with its
-      body, skeleton and cameras; b2cgltf SPEC.md). A full
-      30,000 iterations — roughly an hour of GPU — and then four alignment
-      iterations, another ~5 minutes, which warp the frames onto the splat's
-      own renders and refit so the fit stops blurring its own training data
-      (docs/final-splat-alignment-guide.md).
+    help: Train the final splat (scene.glb and scene.ply, about an hour of GPU).
 
   - name: rig_splat
     label: Rig splat
     dir: ply
     default: false
     requires: export_ply
-    help: >-
-      Rig the trained splat with b2crig so it can be posed: scene.glb gains
-      b2crig's cage (the refit MHR body plus garment, hair and face layers)
-      and the splat's binding to it (b2cgltf SPEC 5), and rom_tour.clip.glb
-      beside it is a clip through the range-of-motion poses to pose it with
-      in the viewer. On the way the splat is split at the finger joints and
-      fine-tuned for a minute so that posed limbs do not throw splats outside
-      the figure (pose containment), so the rigged splat is not byte-for-byte
-      the delivered one; the unrigged file stays in debug/rig/. Needs the
-      body refit. About a minute of GPU.
+    help: Rig the splat with b2crig so it can be posed (adds a motion clip).
 
 # Quality presets (`profiles:`, pipeline/workflow.py): values for the
 # settings and outputs above, applied to the controls by the Run tab's
@@ -1520,7 +1142,7 @@ steps:
 
   # The photograph's matte, for warp_reference_to_anchor: the anchor frame
   # goes in cut out onto the renders' background instead of carrying the
-  # photo's own. (helical_shell's pointmap shell reads it too.)
+  # photo's own.
   - id: front_matte
     step: rmbg
     dispatch: in_process
@@ -1611,7 +1233,7 @@ steps:
       # in this workflow reinject_anchor_initial reads it, and the mask was
       # measured to earn its place: every reference run of the 2026-09-08
       # skeleton-leak sweep carries it (section 1a of
-      # docs/vace-denoise-findings-2026-09-07.md). It was a per-run
+      # docs/design-notes.md#video-denoise-wan-22-vace). It was a per-run
       # `--param` for a week, and forgetting it costs a whole pod run —
       # the wrong way round for something that works.
       splat_inactive_mask: true
@@ -1837,7 +1459,7 @@ steps:
   # Why: the outline is the mesh's, and the mesh is a naked body model.
   # Wherever hair, a coat or a platform sole leaves that model the outline
   # tells the denoiser the subject stops short of where the photograph
-  # says it goes (docs/vace-denoise-findings-2026-09-07.md measured the
+  # says it goes (docs/design-notes.md#video-denoise-wan-22-vace measured the
   # scalp 7 px low and the feet 22 px high on cyber_6f). A denoised copy
   # of these very frames — the same control video, the same photograph at
   # the anchor, pass 1's own settings — has the subject where the model
@@ -2118,7 +1740,7 @@ steps:
       # in this workflow reinject_anchor_initial reads it, and the mask was
       # measured to earn its place: every reference run of the 2026-09-08
       # skeleton-leak sweep carries it (section 1a of
-      # docs/vace-denoise-findings-2026-09-07.md). It was a per-run
+      # docs/design-notes.md#video-denoise-wan-22-vace). It was a per-run
       # `--param` for a week, and forgetting it costs a whole pod run —
       # the wrong way round for something that works.
       splat_inactive_mask: true
@@ -2269,7 +1891,7 @@ steps:
   # about the input — is the skeleton too much ink, is the face splat
   # where it belongs, does the anchor frame carry the photograph — had to
   # be answered by re-running the first fourteen steps locally from the
-  # same upload (the recipe in docs/vace-denoise-findings-2026-09-07.md),
+  # same upload (the recipe in docs/design-notes.md#video-denoise-wan-22-vace),
   # and could not be answered at all about a run whose upload is gone.
   #
   # It is written in `save_dataset`'s own format, which is `load_dataset`'s:
@@ -2337,9 +1959,8 @@ steps:
       seed: ${globals.seed}
       low_vram: ${globals.low_vram}
       # The sampler and the scale schedule are run E4's, the settled result
-      # of the 2026-09-08 skeleton-leak sweep (docs/vace-denoise-findings-
-      # 2026-09-07.md, section 5; sidecar docs/vace-leak-sweep/E4-shift5-
-      # unipc.yaml), applied here on 2026-09-09. The question the sweep
+      # of the 2026-09-08 skeleton-leak sweep
+      # (docs/design-notes.md#pass-1-skeleton-ink-and-the-settled-settings). The question the sweep
       # answered: the DWPose skeleton in the control drawing was surviving
       # the denoise as painted sticks — red neck/shoulder "yoke" over the
       # hair on back views, coloured limb lines over the trousers — and
@@ -2627,7 +2248,7 @@ steps:
   # height std exactly 0 — and the frames have since been through a
   # diffusion pass that had its own opinion about where the subject was.
   # Refining against the frames themselves is worth +0.63 PSNR / +0.0045
-  # SSIM on held-out views (docs/camera-pose-refinement.md; three seeds per
+  # SSIM on held-out views (docs/design-notes.md#camera-refinement-refine_cameras-refine_cameras_final; three seeds per
   # condition, baseline seed spread +-0.003).
   #
   # WHERE IT SITS is the whole of the wiring, and there are three consumers
@@ -3050,7 +2671,7 @@ steps:
       # `b_*` triple of merge_support_views below). Fading the neighbours
       # alone left the photograph one vote against forty and a front the
       # evidence gate culled; the copies are what made it win (measured
-      # 2026-09-19, docs/photo-priority.md: 17.8 -> 23.5 dB at its view).
+      # 2026-09-19, docs/design-notes.md#photo-priority-off-by-default: 17.8 -> 23.5 dB at its view).
       images: dataset.images
     params:
       strength: ${globals.photo_priority}
@@ -3234,7 +2855,7 @@ steps:
       # to drive the helical re-render, ~5 minutes is a tenth of its
       # runtime again, and nothing has looked at what a sharper
       # intermediate does to the second denoise pass. Flip it to 4 to find
-      # out (docs/final-splat-alignment-guide.md).
+      # out (docs/design-notes.md#the-deliverable-training-train_final_splat).
       align_iters: 0
       # The hollow loss (b2ctrain, 2026-09-09): splat weight arriving from
       # behind the SAM-3D-Body surface is penalised, which is what makes
@@ -3359,7 +2980,7 @@ steps:
   # render_initial_views, which frames the mesh at that same preset — the
   # splat re-render has to match it or the two disagree about how tight the
   # body fills the frame.
-  # Body refit (docs/body-refit.md): the splat trained above is where the
+  # Body refit (docs/design-notes.md#body-refit-to-the-intermediate-splat): the splat trained above is where the
   # subject actually is; the body model has not moved since the photograph.
   # `splat_surface` samples the splat's median surface through the trainer's
   # probe; `refit_body_to_splat` re-runs the MHR forward with root, pose,
@@ -3482,7 +3103,7 @@ steps:
       # below. The alpha that comes back is the gate, not accumulated
       # opacity, and the RGB is composited over `cull_color`. `bg_color` is
       # ignored in this mode and is therefore not set here. See
-      # docs/spatial-reinforcement.md.
+      # docs/design-notes.md#the-confidence-gated-re-render-render_subject--resplat_foreground_masks--mask_splat_fringes.
       confidence: true
       # 0.5 GREY again (the step's default), as of 2026-09-07. It was black
       # from 2026-09-05: the argument was that a culled pixel is a hole in
@@ -3504,7 +3125,7 @@ steps:
       cull_color: [0.5, 0.5, 0.5]
       # Tuning for the confidence measure itself, passed verbatim to
       # brush-splat-render. Both were measured on a real run's .ply with the
-      # fixed evidence (brush a9405881; docs/intermediate-splat-guide.md):
+      # fixed evidence (brush a9405881; docs/design-notes.md#the-intermediate-training-train_splat):
       #
       #   --conf-tau 0.3      the `agree` term's tolerance. The default 0.08
       #                       is too tight for a view-dependent material and
@@ -3687,9 +3308,8 @@ steps:
       cfg: 1.0
       seed: ${globals.seed}
       low_vram: ${globals.low_vram}
-      # The pass-2 quality sweep's settings (docs/vace-denoise-findings-
-      # 2026-09-07.md, section 6; six runs F1-F6 on E4's pass 1, 2026-09-08),
-      # applied 2026-09-09. This pass's control is a splat render, not a
+      # The pass-2 quality sweep's settings
+      # (docs/design-notes.md#pass-2-strength-is-a-dial-the-sampler-axis-is-dead). This pass's control is a splat render, not a
       # drawing, and the sweep found the sampler axis dead or harmful on
       # it: shift 8 (the step's default, and what shipped here) cost 3.2
       # points of the deliverable's head sharpness for +0.09 dB (F4);
@@ -3721,7 +3341,7 @@ steps:
       # cap out of this pass's VACE mask so it reproduces the trained
       # splat's face instead of repainting it, was wired on 2026-09-09 and
       # backed out the same day: it was detrimental to the splat
-      # (docs/face-priority.md, "Tried and backed out").
+      # (docs/design-notes.md#face-cap-priority-face_priority_weights, "Tried and backed out").
       # `sampler_low: euler` since 2026-09-20, with pass 1's: the step's
       # default is `uni_pc`, and this workflow no longer runs UniPC on any
       # expert of any pass. Unmeasured on this pass — the F sweep only
@@ -4334,7 +3954,7 @@ steps:
       stats: scene.camera_refinement_final
 
   # ------------------------------------------- the face per view (stage 6)
-  # steps/face_views.py, docs/face-refine.md. After the refinement, so the
+  # steps/face_views.py, docs/design-notes.md#face-per-view-and-the-anchors-eyes. After the refinement, so the
   # per-view fit looks through the cameras the training will use; before
   # export_colmap, so the delivered dataset is the one the splat was trained
   # on (eyes and all). All four are one switch, `face_refine`, and need the
@@ -4466,7 +4086,7 @@ steps:
 
   # The deliverable training's normal maps (2026-09-28), Sapiens2 1b over the
   # final frames after the eye paste — what train_final_splat supervises on.
-  # Off between 2026-09-06 and 2026-09-28 (docs/final-splat-alignment-guide.md
+  # Off between 2026-09-06 and 2026-09-28 (docs/design-notes.md#the-deliverable-training-train_final_splat
   # §1 measured -18% sharpness, -1.8 dB); back because of what they do to
   # the GEOMETRY an animated splat needs: on two subjects the arm splats more
   # than 2 cm off the refit body went 20% -> 7% and 22% -> 10%. Against the
@@ -4570,7 +4190,7 @@ steps:
   # `ply/scene.ply`.
   #
   # It is the training the 2026-09-06 measurement session was run against
-  # (docs/final-splat-alignment-guide.md), and the two things that session
+  # (docs/design-notes.md#the-deliverable-training-train_final_splat), and the two things that session
   # found are set below: the alignment loop on, and normal supervision off
   # — which held until 2026-09-28, when it came back with a random training
   # background and a raised growth threshold (see the params). What is
@@ -4676,7 +4296,7 @@ steps:
       # 2026-09-09 as equal PSNR to 5 cm with four times less weight behind the
       # body; 2 cm measured best still, on the one example run. With refit_body
       # off this margin applies to SAM-3D-Body's own mesh, where 5 cm was the safe
-      # setting (docs/body-refit.md).
+      # setting (docs/design-notes.md#body-refit-to-the-intermediate-splat).
       hollow_margin: 0.03
       # The visibility cull (b2ctrain docs/unsupported-splats-2026-09-28.md).
       # The hollow loss seals the front (weight from behind the body 3x
@@ -4719,7 +4339,7 @@ steps:
       # s1, novel views gaining in the same ratio, fidelity rising with it.
       # Worth as much as brush's dense growth at a fifth of the .ply size,
       # which is why the growth knobs beside it are left at brush's own
-      # defaults (guide §2 — they stack, at 4.6x the asset).
+      # defaults (docs/design-notes.md — they stack, at 4.6x the asset).
       #
       # align_flow_sigma/align_flow_cap take one value per iteration and are
       # left at their default of 6 px throughout, which is what the
@@ -4762,7 +4382,7 @@ steps:
       # are written by the trainer in the same layout.
       #
       # NOT yet checked in-trainer: the band-limited face sharpness the
-      # loop's settings were tuned on (docs/final-splat-alignment-guide.md).
+      # loop's settings were tuned on (docs/design-notes.md#the-deliverable-training-train_final_splat).
       # PSNR of the finished splat against the pristine frames (32.24 dB
       # against the pipeline loop's 32.29), the trajectory shape (1.47 ->
       # 1.83 px, rising and decelerating) and the flow's batch mean (1.48

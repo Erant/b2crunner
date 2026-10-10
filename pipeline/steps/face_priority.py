@@ -129,32 +129,30 @@ class FacePriorityWeightsStep(Step):
     """
 
     PARAMS = (
+        # The weight at full coverage is 1 - strength. 1.0 masks the face out
+        # of the other sources entirely; the default leaves a tenth, which
+        # keeps the cap's rim tied to the frames around it.
         Param("strength", float, 0.9,
-              "How far the other sources yield to the face cap where it covers "
-              "them: the weight at full coverage is 1 - strength. 1.0 masks the "
-              "face out of them entirely; the default leaves a tenth, which keeps "
-              "the cap's rim tied to the frames around it",
+              "How far other views yield to the face cap where it covers them, 0..1",
               minimum=0.0, maximum=1.0),
+        # Match render_face_support_views' cap_radius_deg: it is where the
+        # 2.5-D face shell still reads cleanly, and past it the shell has
+        # nothing to say that could replace what is silenced.
         Param("cap_radius_deg", float, 30.0,
-              "Views within this angle of the anchor camera's view of the splat "
-              "yield in full. Match render_face_support_views' cap_radius_deg: it "
-              "is where the 2.5-D face shell still reads cleanly, and past it "
-              "the shell has nothing to say that could replace what is silenced",
+              "Views within this angle (degrees) of the anchor view yield in full",
               minimum=0.0, maximum=180.0),
         Param("fade_deg", float, 15.0,
-              "Past cap_radius_deg the attenuation ramps linearly to nothing over "
-              "this many degrees; 0 is a hard edge", minimum=0.0, maximum=180.0),
+              "Degrees past cap_radius_deg over which the effect fades out; 0 = hard edge",
+              minimum=0.0, maximum=180.0),
+        # So the weight ramps at the splat's edge instead of stepping.
         Param("feather_px", float, 4.0,
-              "Gaussian sigma, in pixels, applied to the splat's coverage before it "
-              "becomes a weight, so the weight ramps at the splat's edge instead "
-              "of stepping; 0 uses the coverage as rendered", minimum=0.0),
+              "Blur (sigma, pixels) on the face cap's coverage; 0 = none", minimum=0.0),
         Param("render_path", str, None,
               "The rasteriser binary; empty uses render_splat's default",
               advanced=True),
         Param("cull_margin", float, 0.015,
-              "With `mesh_world`: a Gaussian further than this (metres) behind the "
-              "body's surface along its pixel's ray is not part of that view's "
-              "coverage", minimum=0.0, advanced=True),
+              "With a body mesh: ignore Gaussians more than this (metres) behind its surface",
+              minimum=0.0, advanced=True),
     )
 
     def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:

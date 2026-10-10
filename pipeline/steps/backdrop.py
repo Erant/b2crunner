@@ -92,95 +92,78 @@ logger = logging.getLogger(__name__)
 #: defaults and help by construction — a person tuning a run reads one set of
 #: controls, and a workflow sets the same names on either.
 BACKGROUND_PARAMS: Tuple[Param, ...] = (
+    # Over a blank background a video model reads an orbit as the subject
+    # turning on a turntable; a backdrop sweeping past is the counter-cue.
+    # `grid` (ruled walls meeting at corners, floor and ceiling distinct) is
+    # what body2colmap measured as carrying it most strongly (958fd3b);
+    # `checker` has more raw azimuthal signal but self-similar cells say the
+    # view turned, not how far; `blender_sky` is symmetric bar its sun;
+    # `gradient` is the no-cue control. (none) is REQUIRED of any render
+    # feeding select_support_views, which divides the alpha back out and would
+    # recover the room as the subject's colour. Never exported: `rmbg`
+    # re-derives the training matte from the denoised frames.
     Param(
         "background", str, "grid",
-        "The room this render draws the subject in. It exists to break one "
-        "failure: over a blank background a video diffusion model reads an "
-        "orbit as the SUBJECT turning on a turntable, and the prompt is not "
-        "strong enough to talk it out of that — a backdrop that sweeps past as "
-        "the camera moves is the cue that says otherwise. `grid` is ruled walls "
-        "meeting at corners over a floor and ceiling that read apart, which is "
-        "the arrangement body2colmap measured as carrying that cue most "
-        "strongly (958fd3b); `checker` carries more raw azimuthal signal but "
-        "its cells are self-similar, so it says the view turned without saying "
-        "how far; `blender_sky` is symmetric about the vertical axis apart from "
-        "its sun; `gradient` is the control with no cue at all. A path to an "
-        "equirectangular image, a packed cubemap or a directory of six cube "
-        "faces works instead of a generator. (none) is the flat grey every run "
-        "before 2026-09-01 used, and is REQUIRED of any render feeding "
-        "select_support_views, which divides the alpha back out and would "
-        "recover the room as the subject's own colour. Nothing exports it: "
-        "`rmbg` re-derives the training matte from the denoised frames, so what "
-        "brush fits is still the subject cut out of the room",
+        "Room drawn behind the subject (or a path to an equirect/cubemap image); "
+        "empty for flat grey",
         choices=("grid", "checker", "blender_sky", "gradient", ""),
     ),
+    # A cube at a finite radius has corners to pass, which carries the
+    # rotation cue; a sphere has none and is for a sky.
     Param(
         "background_geometry", str, "cube",
-        "Surface the texture is mapped onto. A cube at a finite radius is a room "
-        "with corners to pass, which is what carries the rotation cue; a sphere "
-        "has none, and is for a sky",
+        "Surface the backdrop texture is mapped onto",
         choices=("cube", "sphere"),
     ),
+    # The colour the silhouette must stand out against: the drawings' fill
+    # lands on #6F6F6F (111), and grid's own [0.42, 0.44, 0.48] renders
+    # 107/112/122, close enough to swallow it. Applies to any generator taking
+    # a `base_color` (grid, checker, gradient). Empty is the only value safe
+    # for every generator. Setting `base_color` in background_params as well
+    # is refused.
     Param(
         "background_base_color", list, None,
-        "The WALL colour, as RGB in [0,1] — the one backdrop knob this "
-        "pipeline actually tunes, so it gets its own control instead of "
-        "living in `background_params` behind a key name. It is the colour "
-        "the silhouette has to stand out against: the drawings' fill lands on "
-        "#6F6F6F (111), and grid's own [0.42, 0.44, 0.48] renders 107/112/122, "
-        "close enough to swallow it. Also `checker`'s and `gradient`'s wall — "
-        "any generator that takes a `base_color`. EMPTY leaves the generator's "
-        "own, which is the only value that is safe for every generator",
+        "Wall colour as RGB in [0,1]; empty keeps the generator's own",
     ),
+    # Grid's own ruling is [0.88, 0.89, 0.92] (224/226/234). Setting
+    # `line_color` in background_params as well is refused.
     Param(
         "background_line_color", list, None,
-        "The colour of grid's RULING, as RGB in [0,1]. Its own control for the "
-        "same reason as background_base_color: it and the wall are the pair "
-        "that decide whether the room reads. EMPTY leaves grid's own "
-        "[0.88, 0.89, 0.92] (224/226/234). Only `grid` takes it",
+        "Grid line colour as RGB in [0,1] (grid only); empty keeps the default",
     ),
+    # Passed to the generator whole, as a YAML mapping, e.g.
+    # {floor_color: [0.2, 0.2, 0.2]}; a key the generator does not accept is
+    # rejected by name, which is why nothing grid-only is defaulted here.
+    # grid: floor_color, ceiling_color, n_per_face (default 6), line_width
+    # (fraction of a cell, default 0.035); checker: color_a, color_b,
+    # n_per_face; gradient: top_color, bottom_color; blender_sky:
+    # zenith_color, horizon_color, ground_color, sun_* angles. Colours are RGB
+    # in [0,1]. Must be empty when background is a path.
     Param(
         "background_params", dict, {},
-        "Colours and shape for the chosen generator, passed to it whole — the "
-        "backdrop's own appearance, as opposed to where its surface sits. EVERY "
-        "colour is configurable, none is baked in. Each generator names its "
-        "own: grid takes floor_color and ceiling_color, plus n_per_face "
-        "(divisions per face, default 6) and line_width (a fraction of one "
-        "cell, default 0.035); checker takes color_a/color_b and n_per_face; "
-        "gradient takes top_color/bottom_color; blender_sky takes zenith_color, "
-        "horizon_color, ground_color and the sun_* angles. The two that ARE "
-        "tuned — the wall and grid's ruling — have their own controls above; "
-        "setting one of those here as well is refused rather than silently "
-        "resolved. Every colour is RGB in [0,1], the same as bg_color and "
-        "mesh_color. Written as a YAML mapping — {floor_color: [0.2, 0.2, "
-        "0.2]} — and rejected, by name, if the generator does not accept a "
-        "key, which is why nothing grid-only is defaulted here: a leftover key "
-        "would refuse the run the moment somebody picked checker. Must be "
-        "empty when background is a path: a loaded image has no parameters to "
-        "take",
+        "Extra generator options as a YAML mapping (colours, divisions, line width)",
     ),
+    # Relative so it still fits when the orbit is auto-framed. Empty puts the
+    # surface at infinity: it tracks camera rotation but not translation, so
+    # no parallax against the subject and no corners on a cube.
     Param(
         "background_radius_scale", float, 3.0,
-        "Backdrop radius as a multiple of the orbit radius, so it still fits when "
-        "the orbit is auto-framed. Must exceed 1.0 — the camera has to end up "
-        "inside. Empty puts the surface at infinity instead, where it tracks "
-        "camera rotation but not translation: no parallax against the subject, "
-        "and no corners on a cube. Superseded by background_radius",
+        "Backdrop radius as a multiple of the orbit radius (must exceed 1.0)",
     ),
     Param(
         "background_radius", float, None,
-        "Backdrop radius in world units. Supersedes background_radius_scale when "
-        "set; empty leaves the scale in charge", advanced=True,
+        "Backdrop radius in world units; overrides the scale when set",
+        advanced=True,
     ),
     Param(
         "background_rotation_deg", float, 0.0,
-        "Turn the environment about the vertical axis — aims a sky's sun, or "
-        "turns a cube's walls relative to the subject", advanced=True,
+        "Turn the backdrop about the vertical axis, in degrees",
+        advanced=True,
     ),
     Param(
         "background_resolution", int, 1024,
-        "Generated texture size: equirect height, or cube face size. Ignored for "
-        "a texture loaded from a path, which keeps its own", advanced=True,
+        "Generated texture size in pixels (ignored for a loaded image)",
+        advanced=True,
     ),
 )
 
@@ -202,89 +185,67 @@ BACKGROUND_PARAMS: Tuple[Param, ...] = (
 #: its silhouette is the real one and there is nothing left to expand into.
 #: Clearing the room around it there would only throw away rotation cue.
 BACKGROUND_FADE_PARAMS: Tuple[Param, ...] = (
+    # With grid lines running right up to the outline, a video model takes
+    # the outline for an occluding edge and won't paint past it, squashing
+    # hair and bulky clothing onto the BARE MESH's shape. Clearing a band
+    # next to the subject keeps the cue in the far field. `smoothstep` is flat
+    # at both ends, so neither edge leaves a visible ring; `linear` leaves a
+    # slope discontinuity, `cosine` is steeper mid-band, `step` is the
+    # hard-edged control; `exponential`/`gaussian`/`inverse_square` take
+    # background_fade_rate and trail off (inverse_square washes the whole
+    # frame). Ignored quietly by a render with no backdrop.
     Param(
         "background_fade", str, "smoothstep",
-        "Fade the room out in a shell around the subject, so the drawing does "
-        "not read as a hard occlusion boundary. The backdrop that carries the "
-        "rotation cue costs something at the silhouette: with grid lines "
-        "running right up to the outline, a video diffusion model takes the "
-        "outline for an occluding edge and refuses to paint past it — bulky "
-        "clothing and hair get squashed back onto the shape of the BARE MESH, "
-        "which is the one thing these frames must not pin down. Clearing a "
-        "band next to the subject keeps the cue in the far field and leaves "
-        "room to expand into. This names the profile the room comes back "
-        "over: `smoothstep` is flat at both ends, so neither the onset nor "
-        "the outer edge leaves a visible ring; `linear` leaves a slope "
-        "discontinuity, `cosine` is steeper through the middle, `step` is the "
-        "hard-edged control, and `exponential`/`gaussian`/`inverse_square` "
-        "take `background_fade_rate` and trail off instead of ending "
-        "(inverse_square's tail is a wash over the whole frame). (none) turns "
-        "the fade off. Ignored, quietly, by a render with no backdrop — "
-        "there is nothing to fade",
+        "Fade profile clearing the room around the subject; empty turns the fade off",
         choices=("smoothstep", "linear", "cosine", "step", "exponential",
                  "gaussian", "inverse_square", ""),
     ),
+    # The shell is fitted to a NAKED SAM-3D-Body mesh, smaller than the
+    # dressed subject, which argues for > 1.0. The cost, measured at `full`
+    # framing 720x1280 as the share of the room's ruling surviving in frame:
+    #
+    #     margin   frontal view   three-quarter view
+    #     1.0          33%            66-72%
+    #     1.5          22%            48-49%
+    #     2.0          22%            44%
+    #
+    # Hence 1.0, which still clears a band at the silhouette. `plain` removes
+    # only the pattern, so the room's shading and corners keep cueing rotation
+    # at any margin. Raise it if hair and clothing come back pinned to the
+    # bare mesh's outline.
     Param(
         "background_fade_margin", float, 1.0,
-        "Inflate the fitted shell by this before the fade is measured. 1.0 is "
-        "the hull that just encloses the mesh, and the argument for going "
-        "past it is real: the ellipsoid is fitted to a NAKED SAM-3D-Body "
-        "mesh, and the subject the denoise is meant to produce is a dressed "
-        "person with hair, bigger than the thing measured in every direction. "
-        "The argument against is what it costs, which was MEASURED on a real "
-        "body at the shipped framing — `full`, 720x1280 — by counting how "
-        "much of the room's ruling survives in frame:\n"
-        "\n"
-        "    margin   frontal view   three-quarter view\n"
-        "    1.0          33%            66-72%\n"
-        "    1.5          22%            48-49%\n"
-        "    2.0          22%            44%\n"
-        "\n"
-        "At 2.0 the ruling is gone from the whole half of the frame around "
-        "the figure and only the far wall keeps any. The backdrop exists to "
-        "carry the rotation cue, so that is a lot to spend on headroom the "
-        "denoise may not need — hence 1.0, which still clears a band against "
-        "the silhouette. What survives at ANY margin is the room's shading: "
-        "`plain` takes out the pattern only, so the lighter ceiling, the dark "
-        "floor and the corners between walls stay put and keep cueing "
-        "rotation where the lines have gone. Raise it if the frames come back "
-        "with hair and clothing pinned to the bare mesh's outline. Must be "
-        "> 0",
+        "Inflate the subject's fitted shell by this factor before fading (> 0)",
         minimum=0.0,
     ),
+    # A multiple rather than pixels because the orbit is auto-framed, so the
+    # subject holds its size in frame and a scale-free band holds its look.
+    # 1.0 reaches full backdrop at twice the margin-inflated extent. For a
+    # hard-edged clear zone use background_fade: step rather than winding
+    # this down.
     Param(
         "background_fade_falloff", float, 1.0,
-        "Width of the band the room fades back in over, as a multiple of the "
-        "subject's own radius in that direction — so 1.0 reaches full "
-        "backdrop at twice the (margin-inflated) subject extent. A multiple "
-        "rather than a pixel count on purpose: the orbit is auto-framed, so "
-        "the subject holds its size IN FRAME and a scale-free band holds its "
-        "look with it. Must be > 0; use `background_fade: step` for a "
-        "hard-edged clear zone instead of winding this down",
+        "Width of the fade band, as a multiple of the subject's radius (> 0)",
         minimum=0.0,
     ),
+    # `plain` re-renders the room with its pattern suppressed (walls, floor,
+    # ceiling and shading kept, no ruling): the only target that removes a
+    # line rather than moving it, but it needs a generated texture (a loaded
+    # image cannot be split, and body2colmap refuses the pair). `color` lays
+    # one flat mean colour, which reads as a patch across a floor/wall seam.
+    # `blur` spreads a bright line into a grey band; the fallback for a loaded
+    # texture, not the fix.
     Param(
         "background_fade_target", str, "plain",
-        "What the room fades TO. `plain` re-renders the same room with its "
-        "PATTERN suppressed — grid's walls, floor and ceiling in their own "
-        "colours and no ruling — so the lines fade out while the wall, its "
-        "shading and the room's corners stay put; it is the only one that "
-        "removes a line rather than moving it, and it needs a generated "
-        "texture (a loaded image cannot be split into pattern and shading, "
-        "and body2colmap refuses the pair outright). `color` lays down one "
-        "flat colour, the texture's mean, which reads as a patch wherever the "
-        "zone crosses a floor/wall seam. `blur` area-averages the room into "
-        "itself, which SPREADS a bright line into a grey band rather than "
-        "removing it — the fallback for a loaded texture, not the fix",
+        "What the room fades to: pattern-free room, flat colour, or blur",
         choices=("plain", "color", "blur"), advanced=True,
     ),
+    # The compact profiles, smoothstep included, reach zero at the end of the
+    # band by construction and ignore this.
     Param(
         "background_fade_rate", float, 4.0,
-        "Shape constant for the three profiles that trail off — "
-        "`exponential`, `gaussian` and `inverse_square`. Larger is tighter. "
-        "Ignored by the compact profiles, `smoothstep` included, which reach "
-        "zero at the end of the band by construction", minimum=0.0,
-        advanced=True,
+        "Tail tightness for exponential/gaussian/inverse_square fades; larger is tighter",
+        minimum=0.0, advanced=True,
     ),
 )
 

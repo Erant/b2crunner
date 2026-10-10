@@ -88,10 +88,12 @@ class ResizeBatchStep(Step):
     PARAMS = (
         Param("width", int, REQUIRED, "Target width in pixels", minimum=1),
         Param("height", int, REQUIRED, "Target height in pixels", minimum=1),
+        # `auto` is cv2 INTER_AREA when shrinking and INTER_LINEAR when
+        # enlarging; the others force one. `nearest` keeps a hard mask hard at
+        # the cost of a jagged edge.
         Param("interpolation", str, "auto",
-              "cv2 filter. `auto` is INTER_AREA when shrinking and "
-              "INTER_LINEAR when enlarging; the others force one. `nearest` "
-              "keeps a hard mask hard at the cost of a jagged edge",
+              "Resize filter; `auto` picks area when shrinking, linear when "
+              "enlarging",
               choices=("auto", "area", "linear", "nearest"), advanced=True),
     )
 

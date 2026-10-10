@@ -294,14 +294,6 @@ class TestRequiredForSteps(unittest.TestCase):
                                     "dinov3_hub", "mediapipe", "wan22",
                                     "wan22_fp8", "wan22_lora", "seedvr2",
                                     "colmap_onnx"},
-            # 2026-09-19: the shell experiment adds no model — its
-            # whole-body pointmap shell runs the heads the face cap
-            # already needs (rmbg, the normal head, the pointmap head).
-            "helical_shell": {"rmbg", "sapiens2", "sapiens2_pointmap",
-                                    "sapiens2_seg", "sam3dbody", "moge2",
-                                    "dinov3_hub", "mediapipe", "wan22",
-                                    "wan22_fp8", "wan22_lora", "seedvr2",
-                                    "colmap_onnx"},
         }
         for workflow, expected in cases.items():
             with self.subTest(workflow=workflow):

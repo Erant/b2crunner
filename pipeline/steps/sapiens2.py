@@ -138,18 +138,19 @@ class Sapiens2LiteStep(Step):
     """
 
     PARAMS = (
-        Param("batch_size", int, 8,
-              "Images per forward pass. Worth lowering at upscaled resolution: "
-              "1080x1920 float32 normal maps are ~2 GB of host RAM for 81 frames",
+        # Worth lowering at upscaled resolution: 1080x1920 float32 normal maps
+        # are ~2 GB of host RAM for 81 frames.
+        Param("batch_size", int, 8, "Images per forward pass",
               minimum=1),
+        # Measured on the 4070 Ti with the 1b checkpoint at 720x1280: 5.74 GiB
+        # of weights, 7.81 GiB peak at batch 1 (1.07 s a frame), OOM at batch 2.
         Param("low_vram", bool, False,
-              "One image per forward, for a 12 GB card. Measured on the 4070 "
-              "Ti with the 1b checkpoint at 720x1280: 5.74 GiB of weights, "
-              "7.81 GiB peak at batch 1 (1.07 s a frame), OOM at batch 2",
+              "One image per forward pass, for 12 GB cards",
               advanced=True),
+        # The family is 0.4b/0.8b/1b/5b; smaller is the lever if a 12 GB card
+        # OOMs.
         Param("checkpoint", str, DEFAULT_CHECKPOINT,
-              "HF repo for the normal-estimation model; the family is "
-              "0.4b/0.8b/1b/5b. Smaller is the lever if a 12 GB card OOMs",
+              "HF repo of the normal-estimation model",
               advanced=True),
         Param("device", str, None, "Torch device; empty means cuda if available",
               advanced=True),
@@ -276,19 +277,21 @@ class Sapiens2SegStep(Step):
     """
 
     PARAMS = (
+        # Presets: face = Face_Neck only (masktest's measured default); head =
+        # + hair, glasses and lips (plausible but unmeasured — hair is where
+        # the pointmap is least reliable); body; all.
         Param("parts", str, "face",
-              "Which body parts the mask covers: a preset (face = Face_Neck "
-              "only, masktest's measured default; head = + hair, glasses and "
-              "lips, plausible but unmeasured — hair is where the pointmap is "
-              "least reliable; body; all) or a comma-separated list of Goliath "
-              "class ids"),
+              "Body parts to mask: face, head, body, all, or comma-separated "
+              "Goliath class ids"),
+        # The family is 0.4b/0.8b/1b/5b.
         Param("checkpoint", str, DEFAULT_SEG_CHECKPOINT,
-              "HF repo for the segmentation head; the family is 0.4b/0.8b/1b/5b",
+              "HF repo of the segmentation model",
               advanced=True),
+        # float32 is the face branch's measured setting; bfloat16 is 4x faster
+        # with 2.5x less VRAM, and the batched label pass runs it.
         Param("dtype", str, "float32",
-              "Weights and activations: float32 (the face branch's measured "
-              "setting) or bfloat16 (4x faster, 2.5x less VRAM; the batched "
-              "label pass runs it)", choices=("float32", "bfloat16"), advanced=True),
+              "Precision of weights and activations",
+              choices=("float32", "bfloat16"), advanced=True),
         Param("device", str, None, "Torch device; empty means cuda if available",
               advanced=True),
     )

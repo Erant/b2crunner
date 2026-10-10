@@ -82,23 +82,24 @@ class PixelOpsStep(Step):
     """
 
     PARAMS = (
+        # 1 caps every highlight at the skin around it. The excess is the
+        # per-pixel min(B,G,R) above `mean + specular_eta * std` of that minimum
+        # over the whole batch's matte, subtracted from all three channels
+        # equally, so chroma and diffuse shading are untouched. Skips the
+        # anchor frame.
         Param("specular_suppress", float, 0.0,
-              "How much of each highlight's specular excess to remove, 0 (off) "
-              "to 1 (every highlight capped at the skin around it). The excess "
-              "is the per-pixel min(B,G,R) above `mean + specular_eta * std` of "
-              "that minimum over the whole batch's matte, subtracted from all "
-              "three channels equally, so chroma and diffuse shading are "
-              "untouched. Needs `masks`; skips the anchor frame",
+              "How much specular highlight to remove, 0 (off) to 1; needs "
+              "`masks`",
               minimum=0.0, maximum=1.0),
+        # Measured on the batch's mean minimum-channel value. Lower catches
+        # more of the skin's sheen, higher only the blown peaks.
         Param("specular_eta", float, 0.5,
-              "How far above the batch's mean minimum-channel value a pixel has "
-              "to sit, in standard deviations, before it counts as a highlight. "
-              "Lower catches more of the skin's sheen, higher only the blown "
-              "peaks", minimum=0.0, advanced=True),
+              "Highlight threshold, in standard deviations above the mean",
+              minimum=0.0, advanced=True),
+        # So a highlight's edge fades out rather than ringing.
         Param("specular_blur", float, 2.0,
-              "Gaussian sigma in pixels applied to the excess map before it is "
-              "subtracted, so a highlight's edge fades out rather than ringing; "
-              "0 subtracts it as measured", minimum=0.0, advanced=True),
+              "Blur (Gaussian sigma, px) of the highlight map; 0 is off",
+              minimum=0.0, advanced=True),
     )
 
     def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:

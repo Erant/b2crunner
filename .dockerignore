@@ -43,8 +43,7 @@ temp/
 # Local fp8 checkpoint experiments
 .fp8-scratch/
 
-# Figures in the research notes (docs/vace-leak-sweep alone is 16 MB of
-# PNGs): nothing in the image reads them, and the code copy is re-pushed with
+# Figures in the docs: nothing in the image reads them, and the code copy is re-pushed with
 # every code change. The markdown stays.
 docs/**/*.png
 docs/**/*.jpg

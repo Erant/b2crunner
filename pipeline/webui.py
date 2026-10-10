@@ -453,9 +453,7 @@ SPLAT_FORMAT_CHOICES = [
     ("PLY (.ply): the bare splat", "ply"),
 ]
 _SPLAT_FORMAT_INFO = (
-    "What ply/ holds in the .zip. The glTF subject file carries everything the "
-    "splat comes with (b2cgltf SPEC.md); the PLY is the trained splat alone. "
-    "Nothing else is packaged beside either."
+    "glTF: the splat with its body, skeleton and cameras. PLY: the splat alone."
 )
 
 
@@ -539,8 +537,7 @@ def _result_summary(
         lines.append("- **`log.txt`** — the log this run wrote")
     if packaged and packaged != fmt:
         lines.append(
-            "\n_This run has no glTF subject file (it predates 2026-09-29, or ran "
-            "without the body refit), so the .zip carries the bare PLY._"
+            "\n_This run has no glTF subject file, so the .zip carries the bare PLY._"
         )
 
     archive = existing_result_zip(
@@ -553,14 +550,10 @@ def _result_summary(
         tail = "\n\n_Still running — package it once it ends._"
     else:
         tail = (
-            "\n\n_No archive built yet, or the one on the volume is stale — "
-            "press **Package .zip**._"
+            "\n\n_Press **Package .zip** to build it._"
         )
     info = (
         f"### `{directory}`\n\nThe .zip {verb}:\n\n" + "\n".join(lines) + tail
-        + "\n\n_The full run directory — the final dataset's frames, the "
-        "point cloud, any intermediate brush training — stays on the volume "
-        "at the path above; only the deliverables are packaged._"
     )
     return info, gallery_images(directory), archive
 
@@ -607,7 +600,6 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
         with gr.Row(equal_height=True):
             run_picker = gr.Dropdown(
                 choices=[], value=None, label="Active run",
-                info="Every run on this volume, in flight first, then most recent.",
                 scale=4,
             )
             cancel_btn = gr.Button("Cancel run", variant="stop", scale=1)
@@ -629,15 +621,8 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
                         file_count="single",
                     )
                     gr.Markdown(
-                        "_Upload **one** of:_\n"
-                        "- _a **`.zip` of `image1.jpg` + `image1.txt` pairs** — one "
-                        "run per pair, fanned across every GPU. Add "
-                        "`image1.yaml` (`settings:` / `step_params:`) beside a "
-                        "pair to run just that one at its own settings;_\n"
-                        "- _a single **image** — a front/back reference sheet or "
-                        "one frontal photo (the Input setting tells them apart) — "
-                        "one run._\n\n"
-                        "_Either shape runs the pipeline picked below._"
+                        "_An image (front/back sheet or frontal photo), or a "
+                        ".zip of `name.jpg` + `name.txt` pairs for one run each._"
                     )
                     # Every workflow file in pipeline/workflows/, the shipped
                     # default selected. One entry today; the picker stays
@@ -650,13 +635,11 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
                         [p.stem for p in available_workflows()],
                         value=default_workflow,
                         label="Pipeline", interactive=True,
-                        info="The params panel and Outputs below follow it.",
                     )
                     prompt_in = gr.Textbox(
                         label="Subject description",
                         placeholder="a woman in a red jacket",
-                        info="Fills $SUBJECT_DESC$ in the denoise prompt. The "
-                             "fallback when a pair's .txt is missing or empty.",
+                        info="Used in the prompt; a .zip pair's .txt overrides it.",
                     )
                     # Only what the user actually changed, in the two
                     # namespaces a run resolves: {"globals": {...},
@@ -737,7 +720,7 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
                                     value=CUSTOM_PROFILE, label="Quality profile",
                                     info=" ".join(
                                         [f"{p.title}: {' '.join(p.help.split())}" for p in spec.profiles]
-                                        + ["Custom: the settings as they are below."]
+                                        + ["Custom: your own settings."]
                                     ),
                                     interactive=True, key=f"{name}:profile",
                                 )
@@ -817,14 +800,7 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
                     # again inside — this is ~300 controls, and the reason
                     # the Settings box exists.
                     with gr.Accordion("Per-step settings", open=False):
-                        gr.Markdown(
-                            "_The knobs the pipeline does not expose. A dot marks "
-                            "one the workflow sets; the rest show the step's own "
-                            "default. A param wired to a pipeline setting is not "
-                            "shown here — its one home is the Settings box. "
-                            "Advanced holds the knobs that exist because the "
-                            "underlying library has them._"
-                        )
+                        gr.Markdown("_Expert knobs. • marks a value the pipeline sets._")
 
                         @gr.render(inputs=[workflow_in])
                         def render_steps(name):
@@ -885,12 +861,7 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
                 autoscroll=True, interactive=False,
             )
             log_file = gr.File(label="Full log", visible=False)
-            gr.Markdown(
-                "_Each run is its own process, pinned to whichever GPU picked it up. "
-                "Closing this tab does not stop it — reopen the page and pick it "
-                "from **Active run** above; this view follows the picker and "
-                "updates on its own while the run is going._"
-            )
+            gr.Markdown("_Closing the page does not stop a run; pick it again from **Active run**._")
 
         with gr.Tab("Results"):
             results_info = gr.Markdown()
@@ -902,9 +873,7 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
                 )
                 results_debug_in = gr.Checkbox(
                     value=False, label="Include debug/", scale=1,
-                    info="Camera dumps, face splats, the intermediate splat "
-                         "(hundreds of MB) and, if the run had Extra debug "
-                         "outputs on, two more COLMAP datasets.",
+                    info="Intermediate files, hundreds of MB.",
                 )
                 # Links, not gr.File: see `_download_links`.
                 results_zip = gr.HTML(label="Result (.zip)", scale=3)
@@ -916,16 +885,10 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
             results_gallery = gr.Gallery(label="Final frames", columns=6, height=400)
 
             gr.Markdown(
-                f"### Per-step frames\n_{PREVIEW_FRAMES} frames spaced evenly "
-                "through the batch, captured after every step, so a step that "
-                "breaks the output can be identified by looking rather than by "
-                "reading the log. One row per step, in run order; a step that "
-                "left these frames exactly as it found them has no row. They "
-                "appear here as the run goes._"
+                f"### Per-step frames\n_{PREVIEW_FRAMES} frames after each step that changed them._"
             )
             preview_step_in = gr.Dropdown(
                 choices=[PREVIEW_ALL], value=PREVIEW_ALL, label="Step",
-                info="Narrow the sheet to one step to see its frames larger.",
             )
             preview_gallery_out = gr.Gallery(
                 label="Per-step frames", columns=PREVIEW_FRAMES, height=600,
@@ -934,13 +897,7 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
 
         with gr.Tab("All results"):
             gr.Markdown(
-                "**Every run on this volume that produced deliverables**, "
-                "packaged in one press. One .zip per run, the same contents "
-                "the Results tab hands back for a single run.\n\n"
-                "_An archive that is already up to date is reused rather than "
-                "rebuilt — the combined .zip included — so a rescan after one "
-                "new run costs one run's worth of copying, not the whole "
-                "volume's, and a rescan after nothing costs nothing._"
+                "_One .zip per finished run, as on the Results tab._"
             )
             with gr.Row():
                 all_refresh = gr.Button(
@@ -951,14 +908,10 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
                 )
                 bundle_in = gr.Checkbox(
                     value=False, label="Also build one combined .zip", scale=1,
-                    info="Every run under its own directory in a single "
-                         "archive — one download instead of N. It is a second "
-                         "full copy of the deliverables on the volume, so it "
-                         "is off unless you ask.",
+                    info="Uses as much disk again as the per-run archives.",
                 )
                 all_debug_in = gr.Checkbox(
                     value=False, label="Include debug/", scale=1,
-                    info="Each run's debug/ directory, as on the Results tab.",
                 )
             all_info = gr.Markdown()
             all_table = gr.Dataframe(
@@ -975,10 +928,7 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
 
         with gr.Tab("Models"):
             gr.Markdown(
-                "Checkpoints are pulled at pod start and cached on the volume, so a "
-                "reused network volume only pays for this once. A run blocks until the "
-                "ones **its own workflow** needs are present — it will not stall "
-                "mid-pipeline waiting for a download."
+                "_Downloaded at startup; a run waits for the ones it needs._"
             )
             models_refresh = gr.Button("Refresh", variant="primary")
             models_out = gr.Dataframe(
@@ -989,9 +939,7 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
 
         with gr.Tab("Doctor"):
             gr.Markdown(
-                "Checks the things that break a run 40 minutes in: EGL (render), "
-                "the per-step venvs, the trainer binaries' flags, the HF token's "
-                "access to the two gated checkpoints, and free space."
+                "_Checks the GPU, rendering, environments, model access and disk space._"
             )
             doctor_btn = gr.Button("Run checks", variant="primary")
             doctor_out = gr.Code(label="Report", lines=30)

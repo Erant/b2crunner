@@ -82,7 +82,7 @@ it disagreed with them, and from which direction it was seen. That is the
 per-Gaussian record of "the training views constrained this", and it is
 what `render_splat`'s `confidence` mode reads to decide, in 3-D and once,
 what `mask_splat` used to guess per pixel per frame from rendered alpha
-alone (see docs/spatial-reinforcement.md). Every other .ply reader ignores
+alone (see docs/design-notes.md#the-confidence-gated-re-render-render_subject--resplat_foreground_masks--mask_splat_fringes). Every other .ply reader ignores
 the extra properties, and the measurement costs seconds, so it is on for
 both trainings — an intermediate splat that carries its evidence needs no
 second pass over the dataset to be gated, and the final .ply is a
@@ -94,7 +94,7 @@ brush on the same export, warm-started from the first run's .ply through an
 past the run's length) and the normal loss on from step 0. It exports over
 the first .ply, so nothing downstream has to know it happened. What it bought
 was not iterations: measured on the intermediate splat (2026-09-05,
-docs/intermediate-splat-guide.md) 9000 of these moved band-limited face
+docs/design-notes.md#the-intermediate-training-train_splat) 9000 of these moved band-limited face
 sharpness from 143 to 161 where 9000 more iterations of one cold run reached
 137 — the restart at full mean learning rate was the effect. It costs one
 dataset reload and, on a 4070 Ti, about 2 minutes.
@@ -118,7 +118,7 @@ measure the optical flow from each frame to its render, smooth and cap it
 (`align_flow_sigma`/`align_flow_cap`, one entry per iteration or one for
 all of them), and Lanczos-warp the frame by it (pipeline/align.py) — and
 the training is resumed on the aligned set with growth off, exactly the way
-the polish resumes. Measured (docs/final-splat-alignment-guide.md): band-limited face
+the polish resumes. Measured (docs/design-notes.md#the-deliverable-training-train_final_splat): band-limited face
 sharpness 21.1 -> 23.8 over four iterations, +1.2/+0.6/+0.5/+0.4, and
 saturating there; novel views gain in the same ratio and fidelity RISES
 with sharpness (27.64 -> 28.41 dB), which is the signature of recovered
@@ -141,7 +141,7 @@ Three things about it are load-bearing:
 - **The alignment invocations pass normal weight 0** regardless of
   `normal_loss_strength`. The warped frames no longer agree with the
   `normals/` sidecar beside them, and normal supervision measured as a
-  straight loss on the deliverable anyway (guide §1: -18% sharpness *and*
+  straight loss on the deliverable anyway (docs/design-notes.md: -18% sharpness *and*
   -1.8 dB fidelity).
 
 What a run leaves behind is a fourth thing worth naming, because these
@@ -289,7 +289,7 @@ _ALPHA_MODES = ("transparent", "masked")
 # settings were measured on — the two agree on PSNR and on the shape of the
 # trajectory, and it is the in-trainer loop that has NOT been through the
 # band-limited sharpness metric the settings were tuned with
-# (docs/final-splat-alignment-guide.md). `auto` asks the binary, which is
+# (docs/design-notes.md#the-deliverable-training-train_final_splat). `auto` asks the binary, which is
 # also what keeps an image whose trainer predates --align-iters working.
 _ALIGN_BACKENDS = ("auto", "trainer", "pipeline")
 
@@ -895,257 +895,240 @@ class BrushStep(Step):
         Param("max_resolution", int, 1920, "Longest edge brush trains at", minimum=1),
         Param("max_splats", int, 10_000_000, "Cap on the number of Gaussians", minimum=1),
         Param("refine_every", int, 200, "Densify/prune interval, in steps", minimum=1),
+        # A second, growth-off warm start after the main training, exported over
+        # the same .ply. On the intermediate splat 9000 of these moved
+        # band-limited face sharpness 143 -> 161 (and every other part with it),
+        # where 9000 extra iterations of one cold run gave a third of that: the
+        # restart at full mean-LR is the effect, not the iteration count. Off by
+        # default for trainings nobody has measured it on
+        # (docs/design-notes.md#the-intermediate-training-train_splat).
         Param("polish_steps", int, 0,
-              "Iterations of a second, growth-off warm start after the main training, "
-              "exported over the same .ply. Measured 2026-09-05 on the intermediate "
-              "splat: 9000 of these moved band-limited face sharpness 143 -> 161 and "
-              "every other part with it, where 9000 extra iterations of ONE cold run "
-              "gave a third of that — the restart at full mean-LR is the effect, not "
-              "the iteration count. 0 is off, which is what a training nobody has "
-              "measured it on should stay at (docs/intermediate-splat-guide.md)",
+              "Extra growth-off refinement iterations after the main training; 0 is off",
               minimum=0),
+        # Each iteration renders the splat at the training cameras, warps each
+        # ORIGINAL frame onto its own render by the smoothed optical flow between
+        # them, and resumes training on the aligned set with growth off: the
+        # answer to a fit that blurs its training data by averaging views that
+        # disagree about where texture sits (see the module docstring). On the
+        # deliverable splat: face sharpness 21.1 -> 23.8 over four iterations
+        # (+1.2, +0.6, +0.5, +0.4), fidelity 27.64 -> 28.41 dB; a fifth and sixth
+        # add ~+0.2 each, so 4 is the saturation point. About a minute an
+        # iteration on a 4070 Ti at 81 views of 1080x1920
+        # (docs/design-notes.md#the-deliverable-training-train_final_splat).
         Param("align_iters", int, 4,
-              "Alignment iterations after the main training: render the splat at "
-              "the training cameras, warp each ORIGINAL frame onto its own render "
-              "by the smoothed optical flow between them, and resume training on "
-              "the aligned set with growth off. This is the answer to a fit that "
-              "blurs its own training data by averaging views that disagree about "
-              "where texture sits (see the module docstring). Measured 2026-09-06 "
-              "on the deliverable splat: band-limited face sharpness 21.1 -> 23.8 "
-              "over four iterations (+1.2, +0.6, +0.5, +0.4) with fidelity rising "
-              "27.64 -> 28.41 dB, and a fifth and sixth worth +0.2 each — 4 is the "
-              "saturation point. Measured on a 4070 Ti at 81 views of 1080x1920: "
-              "9 s to render, 10 s to measure and apply the flow, and the "
-              "fine-tune on top — about a minute an iteration. 0 is off "
-              "(docs/final-splat-alignment-guide.md)",
+              "Flow-alignment passes after training, sharpening texture the views disagree on; 0 is off",
               minimum=0),
+        # 1000 measured identical at the fixed point (47 s -> 15 s per
+        # iteration), but every still-climbing iteration was measured at 3000,
+        # so the trajectory above is made of 3000.
         Param("align_steps", int, 3000,
-              "Iterations of the growth-off fine-tune each alignment pass runs. "
-              "1000 measured identical AT THE FIXED POINT (47 s -> 15 s per "
-              "iteration), but every iteration still climbing was measured at "
-              "3000, so this is what the trajectory above was made of",
+              "Fine-tune iterations per alignment pass",
               minimum=1, advanced=True),
+        # Smoothing is what makes the warp a texture correction rather than a
+        # per-pixel scramble. A single entry holds it for the whole loop (what
+        # the align_iters trajectory was measured with). To sharpen the field
+        # as the render converges: [6, 6, 3, 3] beside a cap of [6, 6, 12, 12].
         Param("align_flow_sigma", list, [6.0],
-              "Gaussian smoothing of the flow field, in pixels — what makes the "
-              "warp a texture correction rather than a per-pixel scramble. One "
-              "entry per alignment iteration, first to last; a single entry (the "
-              "default) holds it at 6 for the whole loop, which is what the "
-              "trajectory above was measured with. Schedule it to sharpen the "
-              "field as the render it is measured against converges: [6, 6, 3, 3] "
-              "beside a cap of [6, 6, 12, 12]",
+              "Flow smoothing per alignment pass, pixels (one entry per pass, or one for all)",
               advanced=True),
+        # Beyond the cap the field is scaled down with its direction kept.
+        # Raising it to 12 alone changed nothing (the residual it would reach is
+        # views disagreeing about hand POSE, which no image warp fixes), but 12
+        # alongside a sigma of 3 is the one combination that read better.
         Param("align_flow_cap", list, [6.0],
-              "Largest displacement the alignment applies, in pixels; beyond it "
-              "the field is scaled down with its direction kept. Same per-iteration "
-              "shape as align_flow_sigma. Raising it to 12 on its own was measured "
-              "to change nothing — the residual it would reach is views disagreeing "
-              "about hand POSE, which no image warp fixes — but 12 alongside a "
-              "sigma of 3 is the one combination that read better",
+              "Largest alignment displacement per pass, pixels (same shape as align_flow_sigma)",
               advanced=True),
+        # trainer: b2ctrain's in-process loop, one invocation, renders/flow/warps
+        # on the GPU, ~0.7 s per pass. pipeline: this step's loop
+        # (brush-splat-render + pipeline/align.py + one invocation per
+        # iteration), trainer-agnostic and the reference the loop's settings were
+        # measured on. auto: trainer when the binary's --help lists --align-iters.
         Param("align_backend", str, "auto",
-              "Where the alignment loop runs: `trainer` (b2ctrain's in-process loop — "
-              "one invocation; renders, flow and warps on the GPU against the frames it "
-              "already holds, refits in the same process; ~0.7 s per pass instead of a "
-              "render process, a Python flow and a re-invocation), `pipeline` (this "
-              "step's loop: brush-splat-render + pipeline/align.py + one invocation per "
-              "iteration — trainer-agnostic, and the reference the loop's settings were "
-              "measured on), or `auto` (trainer when the binary's --help lists "
-              "--align-iters)", advanced=True),
-        Param("align_debug_dir", str, None,
-              "Keep each alignment iteration's evidence here: alignment.json (the "
-              "settings in force, the batch figures and EVERY view's own, rewritten "
-              "after each iteration so it survives a crash in the next one) plus one "
-              "view's warped frame and the render it was warped onto. Everything the "
-              "loop touches is otherwise transient — the warped frames go with the "
-              "COLMAP temp directory and each iteration exports over the same .ply — "
-              "so without this a torn or soft result has nothing behind it but log "
-              "lines, on a run that costs an hour of GPU. A few hundred KB and two "
-              "PNGs an iteration; empty writes nothing",
+              "Where the alignment loop runs: in the trainer, in the pipeline, or auto",
               advanced=True),
+        # Writes alignment.json (settings, batch figures and every view's own,
+        # rewritten after each iteration so it survives a crash in the next)
+        # plus one view's warped frame and its render. Everything else the loop
+        # touches is transient, so without this a bad result has only log lines
+        # behind it. A few hundred KB and two PNGs an iteration.
+        Param("align_debug_dir", str, None,
+              "Directory to keep each alignment pass's diagnostics in; empty writes nothing",
+              advanced=True),
+        # 0.1 is brush's own default; 0.5 measured 17% fewer dark wedges (dark
+        # splats in the concave gaps a flat orbit never sees into) at no cost in
+        # sharpness and -0.003 IoU.
         Param("match_alpha_weight", float, 0.1,
-              "Weight of brush's L1 loss on a transparent view's alpha — how hard the "
-              "silhouette is fitted to the mask. 0.1 is brush's own default; 0.5 "
-              "measured 17% fewer dark wedges (dark splats in the concave gaps a flat "
-              "orbit never sees into) at no cost in sharpness and -0.003 IoU",
+              "How hard the silhouette is fitted to the mask (alpha L1 loss weight)",
               minimum=0.0, advanced=True),
+        # auto lets brush decide per view from the export's layout: a masks/
+        # sidecar means masked ('ignore outside it'), an alpha channel in the
+        # frame means transparent ('nothing is there'). That is what lets
+        # supporting views train alongside the rendered ones; the training views
+        # this step writes are RGBA either way.
         Param("alpha_mode", str, "auto",
-              "Force brush to read EVERY view's alpha channel this way, flattening any "
-              "mix. auto (the default) lets brush decide per view from the export's "
-              "layout — a masks/ sidecar means masked ('ignore outside it'), an alpha "
-              "channel in the frame itself means transparent ('nothing is there') — "
-              "which is what lets supporting views train alongside the rendered ones. "
-              "The training views this step writes are RGBA either way, so auto is what "
-              "the old forced 'transparent' did on a run with no support_* views",
+              "Force how every view's alpha is read (transparent or masked); auto decides per view",
               choices=("auto", "transparent", "masked"), advanced=True),
+        # brush's --normalize-masked-loss. auto is on exactly when the export
+        # carries both alpha modes, the run where the coverage weighting is a
+        # systematic bias rather than a harmless rescale. Exact for a binary
+        # mask, approximate for a soft one.
         Param("normalize_masked_loss", str, "auto",
-              "Divide a masked view's loss by its mask coverage, so it is not weighted "
-              "down by the fraction of the frame its mask covers (brush's "
-              "--normalize-masked-loss). auto: on exactly when the export carries both "
-              "alpha modes, which is the run where the weighting is a systematic bias "
-              "rather than a harmless rescale. Exact for a binary mask, approximate for "
-              "a soft one",
+              "Divide a masked view's loss by its mask coverage; auto turns it on for mixed runs",
               choices=("auto", "on", "off"), advanced=True),
+        # With growth_select_fraction 0.4 and growth_stop_iter 24000, 0.0012 is
+        # the 'dense growth' setting: +40% face sharpness on its own, +2.5 s1 on
+        # top of the alignment loop, but 1.68M splats against 356k (a 424 MB .ply
+        # against 84). A deliberate quality-for-size purchase, hence off
+        # (docs/design-notes.md#the-deliverable-training-train_final_splat).
         Param("growth_grad_threshold", float, None,
-              "brush's densification threshold — lower grows faster. Empty leaves "
-              "brush's own 0.0025. Together with growth_select_fraction 0.4 and "
-              "growth_stop_iter 24000 this is the 'dense growth' setting measured "
-              "2026-09-06 (0.0012): +40% face sharpness on its own, +2.5 s1 on top "
-              "of the alignment loop — and 1.68M splats against 356k, a 424 MB .ply "
-              "against 84. A deliberate quality-for-size purchase, which is why it "
-              "is off (docs/final-splat-alignment-guide.md §2)",
+              "Densification threshold, lower grows more splats; empty keeps the trainer's 0.0025",
               minimum=0.0, advanced=True),
+        # The dense-growth setting is 0.4 (see growth_grad_threshold).
         Param("growth_select_fraction", float, None,
-              "Fraction of the splats above the threshold that actually grow. "
-              "Empty leaves brush's own 0.25; the dense-growth setting is 0.4",
+              "Fraction of splats above the threshold that grow; empty keeps the trainer's 0.25",
               minimum=0.0, maximum=1.0, advanced=True),
+        # The dense-growth setting is 24000. Growth belongs to the cold start,
+        # so the alignment and polish invocations force it to 0 whatever this
+        # says. It does stack with alignment when the flow is measured against a
+        # converged render: 24.7 against 22.5 face sharpness
+        # (docs/design-notes.md#the-deliverable-training-train_final_splat).
         Param("growth_stop_iter", int, None,
-              "Step at which growth stops. Empty leaves brush's own 15000; the "
-              "dense-growth setting is 24000. Growth belongs to the COLD START, "
-              "which is why the alignment and polish invocations force it to 0 "
-              "whatever this says. It does stack with alignment — an earlier "
-              "reading that it did not (21.7 with growth against 22.1 without) "
-              "turned out to be a property of the TARGET the flow was measured "
-              "against, not of resampling: growing on frames aligned to a blurry "
-              "cold-start render amplifies the noise in that flow, where frames "
-              "aligned to a converged one give 24.7 against 22.5 "
-              "(docs/final-splat-alignment-guide.md §2)",
+              "Step at which splat growth stops; empty keeps the trainer's 15000",
               minimum=0, advanced=True),
+        # The normal loss is a second gradient source from
+        # normal_loss_step_start on and growth is gradient-triggered, so the
+        # same threshold grows more: +63k splats on the final training, +147k
+        # with random_background. 0.0035 brings that back to the count without
+        # normals (396k against 389k, b2ctrain docs/random-background.md) and
+        # keeps what the normals are for (arm splats more than 2 cm off the body
+        # 5.9% against 15.0%) at ~3% less sharpness than the full-growth run.
         Param("normals_growth_grad_threshold", float, None,
-              "growth_grad_threshold for a run that trains with normal supervision "
-              "(normal_maps wired and normal_loss_strength > 0), when "
-              "growth_grad_threshold itself is empty. The normal loss is a second "
-              "gradient source from normal_loss_step_start on and growth is "
-              "gradient-triggered, so the same threshold grows more: +63k splats "
-              "on the final training, +147k with random_background. 0.0035 brings "
-              "that back to the count without normals (396k against 389k, "
-              "b2ctrain docs/random-background.md) and keeps what the normals are "
-              "for — arm splats more than 2 cm off the body 5.9% against 15.0% — "
-              "at ~3% less sharpness than the full-growth run. Empty leaves the "
-              "threshold alone", minimum=0.0, advanced=True),
+              "growth_grad_threshold used when training with normals and that one is empty",
+              minimum=0.0, advanced=True),
+        # --background-color 0.5,0.5,0.5 --background-noise-strength 0.5 instead
+        # of b2ctrain's near-black default (0,0,0 with 0.1 noise). Against black
+        # a soft silhouette edge is fitted as well by an opaque DARK splat as by
+        # a semi-transparent one, and the tops of raised arms collect them (dark
+        # streaks seen from above). A background that changes every step leaves
+        # no colour to hide in (b2ctrain docs/random-background.md: streaks gone,
+        # no see-through gaps, sharpness unchanged).
         Param("random_background", bool, False,
-              "Train the transparent views against a uniform random background "
-              "(--background-color 0.5,0.5,0.5 --background-noise-strength 0.5) "
-              "instead of b2ctrain's near-black default (0,0,0 with 0.1 noise). "
-              "Against black, a soft silhouette edge is fitted as well by an "
-              "opaque DARK splat as by a semi-transparent one, and the tops of "
-              "raised arms — silhouette edges in every orbit view — collect them: "
-              "dark streaks seen from above. A background that changes every step "
-              "leaves no colour to hide in (b2ctrain docs/random-background.md: "
-              "the streaks gone, no see-through gaps, sharpness unchanged)"),
+              "Train transparent views against a random background to avoid dark edge streaks"),
         Param("normal_loss_strength", float, 0.05,
               "Weight on the normal-map supervision loss; 0 disables it", minimum=0.0),
         Param("normal_loss_step_start", int, 5000,
               "Step at which normal supervision switches on", minimum=0),
+        # brush scales the sampled loss by N, so the expected gradient is
+        # unchanged and only the extra normal render in between is skipped; 1 is
+        # brush's own default.
         Param("normal_loss_every", int, 1,
-              "Evaluate the normal loss every Nth step instead of every step. brush "
-              "scales the sampled loss by N, so the expected gradient is unchanged "
-              "and only the extra normal render in between is skipped; 1 is brush's "
-              "own default", minimum=1),
+              "Evaluate the normal loss every Nth step", minimum=1),
+        # Written as ev_* vertex properties: what render_splat's `confidence`
+        # mode reads, so that render needs no dataset. Costs ~2 s for 100k
+        # splats x 81 views, and other .ply readers ignore the extra properties.
         Param("export_evidence", bool, True,
-              "Measure each splat's multi-view evidence against every training view "
-              "after the last step and write it into the exported .ply as ev_* vertex "
-              "properties. That is what render_splat's `confidence` mode reads, and "
-              "having it in the .ply is what lets that render need no dataset. Costs "
-              "seconds (~2s for 100k splats x 81 views) and every other .ply reader "
-              "ignores the extra properties, so it is on for both trainings"),
+              "Store each splat's multi-view evidence in the exported .ply"),
+        # Also drops splats no view supported at all; implies the evidence pass.
+        # 0.1-0.3 are sane values. Off by default because it has not been looked
+        # at on a real run, and a splat dropped here is gone from the .ply.
         Param("evidence_prune_inmask", float, None,
-              "Drop splats whose in-mask contribution fraction is below this, and "
-              "those no view supported at all, before the export. Implies the "
-              "evidence pass. 0.1-0.3 are sane values; empty (the default) prunes "
-              "nothing, because this has not been looked at on a real run yet and a "
-              "splat dropped here is gone from the deliverable .ply, not merely "
-              "hidden in one render", advanced=True),
+              "Before export, drop splats whose in-mask contribution fraction is below this; empty is off",
+              advanced=True),
+        # Evidence w_all, in pixel-weights over the training views: such splats
+        # cannot affect any training view. Implies the evidence pass. 5 on the
+        # deliverable training (b2ctrain docs/unsupported-splats-2026-09-28.md).
         Param("evidence_prune_wall", float, None,
-              "Drop splats whose total rendered mass over the training views "
-              "(evidence w_all, pixel-weights) is below this, before the export: "
-              "they cannot affect any training view. Implies the evidence pass. "
-              "Empty (the default) prunes nothing; 5 on the deliverable training "
-              "(b2ctrain docs/unsupported-splats-2026-09-28.md)", advanced=True),
+              "Before export, drop splats whose total rendered mass is below this; empty is off",
+              advanced=True),
+        # Pixel-weights per pass over the training views since the last refine;
+        # the alignment refits prune by it too. What it removes is what the
+        # capture never sees (behind the front surface, inside the body), which
+        # an animated splat exposes as specks and haze. Measured on the
+        # deliverable training (b2ctrain docs/unsupported-splats-2026-09-28.md):
+        # 5 -> never-seen opaque splats 47k -> 0, 46% fewer splats, PSNR
+        # -0.03 dB, sharpness -1%; 1 keeps sharpness and removes the never-seen
+        # only.
         Param("cull_weight", float, 0.0,
-              "b2ctrain's visibility cull: at every refine, prune the splats whose "
-              "rendered mass since the last refine is below this many pixel-weights "
-              "per pass over the training views; the alignment refits prune by it "
-              "too. 0 disables. What it removes is what the capture never sees "
-              "(behind the front surface, inside the body), which an animated splat "
-              "exposes as specks and haze. Measured on the deliverable training "
-              "(b2ctrain docs/unsupported-splats-2026-09-28.md): 5 -> never-seen "
-              "opaque splats 47k -> 0, 46% fewer splats, PSNR -0.03 dB, sharpness "
-              "-1%; 1 keeps sharpness and removes the never-seen only", minimum=0.0),
+              "At each refine, prune splats rendered less than this (pixel-weights); 0 disables",
+              minimum=0.0),
+        # Per training pixel, splat weight arriving from more than hollow_margin
+        # behind the body mesh surface is penalised; the gradient through the
+        # splats in front makes the visible surface opaque instead of a
+        # semi-transparent front with the back showing through. 0.5 on the
+        # deliverable training: weight from behind the body 0.038 -> 0.0025,
+        # -0.1 dB, +5% time. Without a `mesh` input the trainer builds the
+        # surface from points_3d (surfels on the mesh samples), measured within
+        # noise of the mesh.
         Param("hollow_weight", float, 0.0,
-              "Weight of b2ctrain's hollow loss, which needs the `mesh` input: per "
-              "training pixel, the splat weight arriving from more than "
-              "hollow_margin behind the body mesh surface is penalised, and the "
-              "gradient of that weight through the splats in front is what makes "
-              "the visible surface opaque instead of a semi-transparent front with "
-              "the back showing through (the false transparency seen while tilting "
-              "a splat). 0 disables; 0.5 measured on the deliverable training: "
-              "weight from behind the body 0.038 -> 0.0025, -0.1 dB, +5% time. "
-              "Without a `mesh` input the trainer builds the surface from points_3d "
-              "(surfels on the mesh samples), measured within noise of the mesh", minimum=0.0),
+              "Penalise splats seen through the body surface, so it renders opaque; 0 disables",
+              minimum=0.0),
+        # Full strength at twice this. Room for clothing over the body model and
+        # for its fit error, so the real front surface is never penalised.
         Param("hollow_margin", float, 0.05,
-              "Depth behind the mesh surface, in scene units (metres for a SAM-3D-Body "
-              "mesh), where the hollow penalty starts; full strength at twice this. "
-              "Room for clothing over the body model and for its fit error, so the "
-              "real front surface is never what gets penalised", minimum=0.0,
-              advanced=True),
-        Param("hollow_dilate", int, 2,
-              "The reference depth at a pixel is the farthest mesh surface within "
-              "this many pixels, so silhouettes and folds where the mesh is slightly "
-              "off are forgiven rather than penalised", minimum=0, advanced=True),
-        Param("body_rig", bool, True,
-              "Deform the splat per training view with the wired `body_rig` (the refit "
-              "body's joints): the trainer learns a small rotation per view and active "
-              "joint, so the generated frames' per-segment limb motion is explained per "
-              "view instead of averaged into a double limb. Measured on the deliverable "
-              "training: the double limb gone at novel views, hand sharpness +24%, body "
-              "+6%, face +9%. Needs a trainer with --body-rig; silently off otherwise"),
-        Param("body_rig_start_iter", int, 1000,
-              "Iteration of the main run the per-view rotations start learning at; the "
-              "earlier the sharper (1000 > 5000 > 15000 measured)", minimum=0, advanced=True),
-        Param("body_rig_smooth", float, 0.05,
-              "Pull of each view's rotations towards the mean of its two orbit neighbours",
+              "Depth behind the body mesh where the hollow penalty starts, scene units (metres)",
               minimum=0.0, advanced=True),
+        # So silhouettes and folds where the mesh is slightly off are forgiven
+        # rather than penalised.
+        Param("hollow_dilate", int, 2,
+              "Pixels around each pixel to take the farthest mesh depth from", minimum=0,
+              advanced=True),
+        # The trainer learns a small rotation per view and active joint, so the
+        # generated frames' per-segment limb motion is explained per view instead
+        # of averaged into a double limb. Measured on the deliverable training:
+        # double limb gone at novel views, hand sharpness +24%, body +6%, face
+        # +9%. Needs a trainer with --body-rig; silently off otherwise.
+        Param("body_rig", bool, True,
+              "Let limbs move slightly per view, following the body rig, to avoid doubled limbs"),
+        # The earlier the sharper (1000 > 5000 > 15000 measured).
+        Param("body_rig_start_iter", int, 1000,
+              "Iteration the per-view rig rotations start learning at", minimum=0, advanced=True),
+        Param("body_rig_smooth", float, 0.05,
+              "Pull of each view's rotations towards its two orbit neighbours",
+              minimum=0.0, advanced=True),
+        # Keeps joints with little evidence (fingers, a hidden limb) from
+        # wandering.
         Param("body_rig_zero", float, 0.02,
-              "Pull of every per-view rotation towards zero; keeps joints with little "
-              "evidence (fingers, a hidden limb) from wandering", minimum=0.0, advanced=True),
+              "Pull of every per-view rotation towards zero", minimum=0.0, advanced=True),
         Param("body_rig_lr", float, 0.002,
-              "Adam step of the per-view rotations, radians", minimum=0.0, advanced=True),
+              "Learning rate of the per-view rotations, radians", minimum=0.0, advanced=True),
+        # For a dataset that has normals/. Costs one extra render per view and is
+        # untuned; 0 leaves the residual photometric.
         Param("evidence_normal_weight", float, 0.0,
-              "Fold w * the normal-map residual into the evidence residual, for a "
-              "dataset that has normals/. Costs one extra render per view and is "
-              "untuned; 0 leaves the residual photometric", minimum=0.0,
+              "Weight of the normal-map residual in the evidence measure", minimum=0.0,
               advanced=True),
+        # Puts the run under <output_dir>/brush/training_<ms>/, what an
+        # intermediate training wants. Empty falls back to the system temp dir,
+        # where the .ply only survives because Dataset.to_disk copies it at the
+        # end of the run.
         Param("output_dir", str, None,
-              "Puts this training under <output_dir>/brush/training_<ms>/ — what an "
-              "intermediate training wants. Empty falls back to the system temp dir, "
-              "where the .ply only survives because Dataset.to_disk copies it at the "
-              "end of the run"),
+              "Directory to keep this training's files under; empty uses a temp dir"),
+        # For a training whose .ply is a deliverable and needs a predictable path.
         Param("export_dir", str, None,
-              "Export straight into this directory instead, for a training whose .ply "
-              "is a deliverable and needs a predictable path. Wins over output_dir"),
+              "Export straight into this directory; overrides output_dir"),
         Param("export_name", str, "export.ply", "Filename of the exported .ply"),
+        # For a training a later one replaces (the re-upscale's), so the class
+        # vote lands on the last splat only.
         Param("defer_labels", bool, False,
-              "Ignore the wired `labels`: no labels/ sidecar, no seg_label/seg_conf in the .ply. For a "
-              "training a later one replaces (the re-upscale's), so the class vote lands on the last "
-              "splat only"),
+              "Ignore the segmentation labels: none written into this training's .ply"),
+        # E.g. b2ctrain's body_rig_omega.json, so a deliverable export directory
+        # holds only the splat.
         Param("trainer_files_dir", str, None,
-              "Move what the trainer writes beside its export besides the .ply (b2ctrain's "
-              "body_rig_omega.json) into this directory, so a deliverable export directory holds "
-              "only the splat. Empty leaves them where the trainer put them", advanced=True),
-        Param("brush_path", str, "b2ctrain",
-              "The trainer binary, on PATH or as an absolute path. `b2ctrain` is "
-              "what the image ships and this default names; any binary with "
-              "brush's CLI works, including the Erant/brush fork it replaced",
+              "Move the trainer's side files out of the export directory into this one",
               advanced=True),
+        # `b2ctrain` is what the image ships; any binary with brush's CLI works.
+        Param("brush_path", str, "b2ctrain",
+              "Trainer binary, on PATH or an absolute path",
+              advanced=True),
+        # Unused when align_iters is 0 or the loop runs inside the trainer,
+        # which renders with its own.
         Param("render_path", str, _RENDER_BINARY,
-              "The rasteriser the alignment loop renders the current splat with, "
-              "on PATH or as an absolute path. Same convention as brush_path, and "
-              "unused when align_iters is 0 or the loop runs inside the trainer, "
-              "which renders with its own", advanced=True),
+              "Rasteriser binary for the pipeline alignment loop, on PATH or an absolute path",
+              advanced=True),
+        # b2ctrain accepts the flag and ignores it (it has no viewer), so this
+        # does nothing on the shipped trainer; brush itself opens a window and
+        # needs a display.
         Param("with_viewer", bool, False,
-              "Pass --with-viewer, which opened brush's interactive viewer window "
-              "and needs a display. b2ctrain accepts the flag and ignores it — it "
-              "has no viewer — so this does nothing on the shipped trainer",
+              "Pass --with-viewer to the trainer (no effect with b2ctrain)",
               advanced=True),
     )
 

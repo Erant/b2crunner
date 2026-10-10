@@ -19,7 +19,7 @@ one great circle, the fit has nothing to triangulate and smears into
 chalky zero-parallax streaks at any novel elevation — and it is also the
 change most able to make a deliverable worse rather than better, which is
 why it was validated against a captured dataset before landing
-(docs/stage1-support-views-implementation.md; the A/B is that file's §7-E).
+(docs/design-notes.md#dead-ends--do-not-repeat).
 
 Only the **stage-2** training reads them. `train_final_splat` deliberately
 takes no supporting views: by then the dataset is the helical re-render,
@@ -280,43 +280,43 @@ class PointmapElevationViewsStep(PointmapSplatStep):
         tuple(param for param in PointmapSplatStep.PARAMS if param.name != "filepath"),
         align_bin_px=16,
     ) + (
+        # Phased so the anchor frame — the one real photograph in the batch —
+        # is always among them. 81 frames at 5 is 17 shells (16 after the
+        # orbit's duplicate camera is dropped) and so 32 supporting views,
+        # about +40% on the training's view count. This is the cost knob:
+        # shells are ~2 s each to build, one brush-splat-render launch each to
+        # render, and the views they add cost the trainer ~5 min and ~2.5x the
+        # splat count.
         Param("every_n", int, 5,
-              "Build a shell from every Nth denoised frame, phased so the anchor "
-              "frame — the one real photograph in the batch — is always among "
-              "them. 81 frames at 5 is 17 shells (16 after the orbit's duplicate "
-              "camera is dropped) and so 32 supporting views, about +40% on the "
-              "training's view count. This is the cost knob: shells are ~2 s each "
-              "to build, one brush-splat-render launch each to render, and the "
-              "views they add cost brush ~5 min and ~2.5x the splat count",
+              "Build a shell from every Nth denoised frame (lower = more views, slower)",
               minimum=1),
+        # Azimuth and radius are untouched, which is the whole point: a
+        # circular orbit's zero parallax is a missing elevation, not a missing
+        # azimuth. The ring is not near zero elevation — frame 0 sits on the
+        # photographer's camera — so this is e0 +/- M with e0 read from the
+        # source camera. The shell was measured to hold together to about
+        # +/-30 from any azimuth.
         Param("elevation_deg", float, 20.0,
-              "How far above and below the source camera's OWN elevation the two "
-              "renders are taken. Azimuth and radius are untouched, which is the "
-              "whole point: a circular orbit's zero parallax is a missing "
-              "elevation, not a missing azimuth. The ring is not near zero "
-              "elevation — frame 0 sits on the photographer's camera — so this is "
-              "e0 +/- M and e0 is read from the source camera. The shell was "
-              "measured to hold together to about +/-30 from any azimuth",
+              "Degrees above and below each source camera's elevation to render",
               minimum=0.0, maximum=89.0),
+        # Kept after the run so a bad batch can be looked at.
         Param("output_dir", str, REQUIRED,
-              "Where the per-shell .ply files land, one per selected frame. Kept "
-              "after the run so a bad batch can be looked at"),
+              "Where the per-shell .ply files are written, one per selected frame"),
         Param("render_path", str, _RENDER_BINARY,
-              "The brush-splat-render binary; mirrors render_splat's param"),
+              "The rasteriser binary, on PATH or as an absolute path"),
+        # Off by default: on the validation capture the worst per-pair median
+        # was 17-20 mm against a batch median of 10, i.e. nothing near an order
+        # of magnitude out. If you ever want it on, 50 is the number that
+        # capture supports.
         Param("max_pair_residual_mm", float, 0.0,
-              "Drop a shell whose depth disagreement with BOTH its ring "
-              "neighbours exceeds this many mm (median |dz|). 0 disables the "
-              "check, which is the default: on the validation capture the worst "
-              "per-pair median was 17-20 mm against a batch median of 10, i.e. "
-              "nothing near an order of magnitude out. If you ever want it on, "
-              "50 is the number that capture supports",
+              "Drop a shell whose median depth gap to both neighbours exceeds this (mm); 0 = off",
               minimum=0.0, advanced=True),
+        # The knob for a shell's open rim — the silhouette where a 2.5-D shell
+        # has an edge the subject does not. Off by default: the rim is ~9% of
+        # the matte within 4 px and flat in elevation (15 to 30 degrees moves
+        # it under 1%), with no visible rim wall at +/-20 from any azimuth.
         Param("mask_erode_px", int, 0,
-              "Erode the published alpha by this many pixels. The knob for a "
-              "shell's open rim — the silhouette where a 2.5-D shell has an edge "
-              "the subject does not. Off by default: the rim is ~9% of the "
-              "matte within 4 px and flat in elevation (15 to 30 degrees moves it "
-              "under 1%), with no visible rim wall at +/-20 from any azimuth",
+              "Shrink each shell render's mask by this many pixels",
               minimum=0, advanced=True),
     )
 

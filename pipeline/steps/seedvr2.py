@@ -145,11 +145,11 @@ class SeedVR2Step(Step):
     # load() applies it as the fallback.
     PARAMS = (
         Param("resolution", int, 1080,
-              "Target output SHORTEST edge, not a multiplier — asking for less "
-              "than the input's shortest edge downscales", minimum=1),
-        Param("batch_size", int, 5,
-              "Frames per pass. The pipeline's own workflows set 1; raise it once "
-              "a real VRAM budget for this step is known", minimum=1),
+              "Output shortest edge in pixels (not a multiplier; smaller downscales)",
+              minimum=1),
+        # The pipeline's own workflows set 1; raise it once a real VRAM budget
+        # for this step is known.
+        Param("batch_size", int, 5, "Frames per pass", minimum=1),
         Param("seed", int, 42, "Diffusion seed"),
         Param("vae_encode_tiled", bool, False, "Tile the VAE encode to save VRAM"),
         Param("vae_decode_tiled", bool, False, "Tile the VAE decode to save VRAM"),
@@ -211,11 +211,12 @@ class SeedVR2Step(Step):
               advanced=True),
         Param("vae_model", str, None, "VAE checkpoint name; empty means upstream's default",
               advanced=True),
+        # Do NOT make this a relative path: the vendored download_weight()
+        # treats it as its whole cache root and never consults HF_HOME, so a
+        # relative path resolves against the worker's cwd and puts several GB
+        # inside the container.
         Param("model_dir", str, None,
-              "Weight cache root. Empty means B2C's models dir — do NOT make this a "
-              "relative path: the vendored download_weight() treats it as its whole "
-              "cache root and never consults HF_HOME, so a relative path resolves "
-              "against the worker's cwd and puts several GB inside the container",
+              "Weight cache directory (absolute); empty means B2C's models dir",
               advanced=True),
     )
 

@@ -377,12 +377,13 @@ class FitHeadPerViewStep(Step):
     """
 
     PARAMS = (
+        # Beyond it the landmarks are hair and profile guesses.
         Param("max_facing_deg", float, 85.0,
-              "Fit only the views whose camera is within this angle of the face normal; beyond it the landmarks "
-              "are hair and profile guesses", minimum=0.0, maximum=180.0),
+              "Fit only views within this angle of the face normal, in degrees", minimum=0.0, maximum=180.0),
+        # rad^2, against a pixel loss. Unregularised the six rotations counter-rotate into a lateral head shift;
+        # 50 removes it at no residual cost.
         Param("pose_prior", float, 50.0,
-              "L2 on the six neck/head rotations (rad^2, against a pixel loss). Unregularised they counter-rotate "
-              "into a lateral head shift; 50 removes it at no residual cost", minimum=0.0),
+              "Penalty on the neck/head rotations (L2)", minimum=0.0),
         Param("expression_prior", float, 1.0, "L2 on the expression coefficients", minimum=0.0),
         Param("iterations", int, 600, "Adam steps of the pose+expression stage; the pose warm-up runs half as many", minimum=1),
         Param("learning_rate", float, 0.01, "Adam step (radians for the rotations)", advanced=True),
@@ -850,22 +851,23 @@ class PasteEyesStep(Step):
     """
 
     PARAMS = (
+        # The MHR lid ring sits 15.4-20.6 mm from the eye joint and a sphere fitted to its eye surface has
+        # r 15.8-16.4, so 15.5 sits just inside the lids.
         Param("eye_radius_mm", float, 15.5,
-              "Eyeball radius; the MHR lid ring sits 15.4-20.6 mm from the eye joint and a sphere fitted to its eye "
-              "surface has r 15.8-16.4, so this sits just inside the lids", minimum=5.0, maximum=30.0),
+              "Eyeball radius, in mm", minimum=5.0, maximum=30.0),
+        # Clipped to the lid cylinder an eye can barely exceed 1.0 unless the view's head fit is inconsistent
+        # with the frame: measured, the two eyes over 1.0 (1.83, 1.86) were the two pasted onto the cheek, every
+        # other drawn eye was 0.50-0.88.
         Param("max_visible_fraction", float, 1.05,
-              "Skip an eye whose visible part covers more than this fraction of its lid polygon. Clipped to the lid "
-              "cylinder it barely can, unless the view's head fit is inconsistent with the frame — on "
-              "helical-joined_00018 (2026-10-09) the two eyes over 1.0 (1.83, 1.86) were the two pasted onto the "
-              "cheek, every other drawn eye was 0.50-0.88", minimum=0.0),
+              "Skip an eye whose visible part exceeds this fraction of its lid polygon", minimum=0.0),
+        # The far eye peeking past the model's narrower nose is not the frame's eye.
         Param("min_visible_fraction", float, 0.5,
-              "Skip an eye whose visible part covers less than this fraction of its lid polygon: the far eye "
-              "peeking past the model's narrower nose is not the frame's eye", minimum=0.0, maximum=1.0),
+              "Skip an eye whose visible part is under this fraction of its lid polygon", minimum=0.0, maximum=1.0),
+        # Darker = below 0.6x the skin around the lids; a hand in front of the face has no eye to replace.
         Param("dark_min", float, 0.3,
-              "Skip an eye when less than this fraction of the pixels inside the lid polygon is darker than 0.6x "
-              "the skin around it — a hand in front of the face has no eye to replace", minimum=0.0, maximum=1.0),
+              "Skip an eye when less than this fraction of its lid area is dark", minimum=0.0, maximum=1.0),
         Param("iris_deg", float, 26.0, "Angular radius of the iris about the gaze axis", minimum=5.0, maximum=60.0, advanced=True),
-        Param("depth_tolerance_mm", float, 1.0, "The sphere shows where it is within this of the head mesh's depth", minimum=0.1, advanced=True),
+        Param("depth_tolerance_mm", float, 1.0, "Eyeball shows where within this many mm of the head mesh's depth", minimum=0.1, advanced=True),
         Param("supersample", int, 4, "Render the eye region at this multiple of the frame's pixels", minimum=1, maximum=8, advanced=True),
         Param("debug_dir", str, "", "Write eye_colors.npz, the per-view eye masks and a before/after panel here"),
     )

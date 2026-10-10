@@ -2,7 +2,7 @@
 
 The step is mostly a driver for four COLMAP binaries, which no test here
 can run. What it does on its own is the half the measurement in
-docs/camera-pose-refinement.md says is load-bearing:
+docs/design-notes.md#camera-refinement-refine_cameras-refine_cameras_final says is load-bearing:
 
   * reading COLMAP's world-to-camera poses back into body2colmap `Camera`s,
   * the Sim(3) that puts the gauge back (trap 1 — without it the model

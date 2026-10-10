@@ -200,23 +200,24 @@ class SplitReferenceSheetStep(Step):
     """
 
     PARAMS = (
+        # `single` has no back view, so the first denoise runs without a
+        # reference and the second takes its rear view from the first's
+        # output. `auto` counts the figures: two on opposite sides of the
+        # centre are a sheet.
         Param("layout", str, "auto",
-              "What the upload is: `sheet` (front and back panels side by "
-              "side), `single` (one frontal photo — no back view, so the "
-              "first denoise runs without a reference and the second takes "
-              "its rear view from the first's output), or `auto` (count "
-              "the figures: two on opposite sides of the centre are a sheet)",
+              "Input type: front+back `sheet`, one frontal `single` photo, or "
+              "`auto`-detect",
               choices=LAYOUTS),
         Param("front_side", str, "left", "Which half of the sheet holds the front view",
               choices=("left", "right")),
+        # Figures on a plain backdrop measured 0.87-0.96, but photographed
+        # sheets (a room behind the subject, the panel edge cutting a door
+        # frame) only 0.41-0.76 at any resolution. The false positives scored
+        # at most 0.52 but were never taller than 6% of the frame, so
+        # MIN_FIGURE_HEIGHT is what rejects them, not this.
         Param("min_score", float, 0.35,
-              "Detector confidence a `person` box needs to count as a figure "
-              "under `layout: auto`. Figures on a plain backdrop measured "
-              "0.87-0.96, but photographed sheets (a room behind the subject, "
-              "the panel edge cutting a door frame) only 0.41-0.76 at any "
-              "resolution (2026-10-01, five 3072x2720 uploads). The false "
-              "positives scored at most 0.52 but were never taller than 6% of "
-              "the frame, so MIN_FIGURE_HEIGHT is what rejects them, not this",
+              "Detector confidence (0-1) for a person to count as a figure in "
+              "`auto` layout",
               minimum=0.0, maximum=1.0, advanced=True),
     )
 

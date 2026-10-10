@@ -54,7 +54,7 @@ the Lightning LoRA into them, fp8-quantize them with torchao at load time,
 and cache the result under a `fused_cache_dir`. It worked, and it cost
 81 GB per cold load against ~47 GB now, plus minutes of GPU-bound quantize
 work and a cache that could only be a torch.save pickle (see
-docs/fp8-quant-notes.md). The pre-quantized checkpoint is the same model at
+docs/design-notes.md#weights-fp8-experts-unfused-lightning-lora). The pre-quantized checkpoint is the same model at
 half the download and no quantization at all, so there is no case left for
 pulling bf16 weights. `fused_cache_dir` and `quantize` are gone with it —
 nothing reads them, and a workflow still setting them is silently ignored,
@@ -1020,106 +1020,94 @@ class Wan22VaceDenoiseStep(Step):
     PARAMS = (
         Param("width", int, REQUIRED, "Frame width the pipeline generates at", minimum=1),
         Param("height", int, REQUIRED, "Frame height the pipeline generates at", minimum=1),
+        # The opening steps, where the frame's structure is decided. The two
+        # experts' step counts are set separately because that split is the
+        # thing being chosen; their sum is the run's total (2 + 4 = the 6
+        # steps this was calibrated at).
         Param("steps_high", int, 2,
-              "Denoise steps the HIGH-noise expert takes — the opening steps, "
-              "where the frame's structure is decided. The two experts' step "
-              "counts are set separately because that split is the thing being "
-              "chosen; their sum is the run's total (2 + 4 = the 6 steps this "
-              "was calibrated at, and the same steps each expert had then)",
+              "Denoise steps for the high-noise expert (sets overall structure)",
               minimum=0),
+        # The closing steps, where detail is decided, and the ones a
+        # `strength` taper is usually spent on.
         Param("steps_low", int, 4,
-              "Denoise steps the LOW-noise expert takes — the closing steps, "
-              "where detail is decided, and the ones a `strength` taper is "
-              "usually spent on",
+              "Denoise steps for the low-noise expert (sets fine detail)",
               minimum=0),
+        # `beta` is ComfyUI's beta scheduler — Beta(0.6, 0.6) quantiles of the
+        # training index, what the reference graph sampled on; it crowds a
+        # short run into the noisy end (6 steps, shift 8: t = 1000, 988 | 955,
+        # 889, 753, 448). `simple` is ComfyUI's even walk down the same table
+        # and `linspace` is diffusers' own even spacing, the same schedule to
+        # under a timestep in 1000 (1000, 976 | 941, 889, 800, 616). `linspace`
+        # needs neither scipy nor the `sigmas` argument older diffusers lacks.
         Param("sigma_schedule", str, "beta",
-              "How the denoise steps are spaced before the shift. `beta` is "
-              "ComfyUI's beta scheduler — Beta(0.6, 0.6) quantiles of the "
-              "training index, what the reference graph sampled on, and it "
-              "crowds a short run into the noisy end (at 6 steps and shift 8 it "
-              "spends four steps above t=750 and then jumps to 448). `simple` "
-              "is ComfyUI's even walk down the same table and `linspace` is "
-              "diffusers' own even spacing — the same schedule to under a "
-              "timestep in 1000, and what this step ran before 2026-09-07 "
-              "(beta's 1000, 988 | 955, 889, 753, 448 becomes 1000, 976 | 941, "
-              "889, 800, 616). Prefer `linspace`: it needs neither scipy nor the "
-              "`sigmas` argument older diffusers lacks",
+              "How the denoise steps are spaced before the shift",
               choices=("beta", "simple", "linspace")),
+        # 8.0 is what ComfyUI gives a Wan 2.2 model with no ModelSamplingSD3
+        # node, and so what the reference graph ran at; the HF scheduler
+        # config says 3.0. With the beta schedule at 6 steps: 8 -> t = 1000,
+        # 988 | 955, 889, 753, 448; 3 -> 1000, 968 | 888, 751, 534, 233.
         Param("sampler_shift", float, COMFY_WAN_SHIFT,
-              "Flow-matching sigma shift — how far the steps crowd toward the "
-              "noisy end. 8.0 is what ComfyUI gives a Wan 2.2 model with no "
-              "ModelSamplingSD3 node, and so what the reference graph ran at; "
-              "the HF scheduler config's 3.0 is what this step ran before "
-              "2026-09-07. With the beta schedule at 6 steps: 8 -> t = 1000, "
-              "988 | 955, 889, 753, 448; 3 -> 1000, 968 | 888, 751, 534, 233",
+              "Flow-matching sigma shift; higher crowds the steps toward the noisy end",
               minimum=1.0),
+        # `uni_pc` is the reference graph's, a multistep solver that
+        # extrapolates from previous steps; `euler` is the plain first-order
+        # flow-matching step, which reads no history and leaves none — worth
+        # a look on the opening steps, where the multistep history is barely
+        # warm and a wrong extrapolation across the expert hand-off is what
+        # `handoff_reset` exists to undo. Both sample `sigma_schedule`.
         Param("sampler_high", str, "uni_pc",
-              "The sampler the HIGH-noise expert's steps are taken with. "
-              "`uni_pc` is the reference graph's, a multistep solver that "
-              "extrapolates from previous steps; `euler` is the plain "
-              "first-order flow-matching step, which reads no history and "
-              "leaves none — worth a look on the opening steps, where the "
-              "multistep history is barely warm and a wrong extrapolation "
-              "across the expert hand-off is what `handoff_reset` exists to "
-              "undo. Both sample the schedule `sigma_schedule` lays down",
+              "Sampler for the high-noise expert's steps",
               choices=("uni_pc", "euler")),
+        # The closing steps, where UniPC's extrapolation has a full history to
+        # work from and usually earns its keep. Set both samplers the same for
+        # one sampler throughout.
         Param("sampler_low", str, "uni_pc",
-              "The sampler the LOW-noise expert's steps are taken with — the "
-              "closing steps, where UniPC's extrapolation has a full history "
-              "to work from and usually earns its keep. Same choices as "
-              "sampler_high; set both to the same thing for a run with one "
-              "sampler throughout",
+              "Sampler for the low-noise expert's steps",
               choices=("uni_pc", "euler")),
+        # ComfyUI's uni_pc sampler is bh1, which the reference graph ran; the
+        # HF scheduler config says bh2.
         Param("solver_variant", str, "bh1",
-              "UniPC's B(h) variant, for whichever phases run `uni_pc`. "
-              "ComfyUI's uni_pc sampler is bh1, which the reference graph "
-              "ran; the HF scheduler config says bh2",
+              "UniPC's B(h) variant, for phases running `uni_pc`",
               choices=("bh1", "bh2")),
+        # With handoff_reset on, each expert's sampler runs at min(cap, its
+        # steps - 1) as ComfyUI's uni_pc does: 1 for the 2-step high-noise
+        # sampler, 3 for the 4-step low-noise one. The HF scheduler config says
+        # 2, flat. Inert on a phase running `euler`.
         Param("solver_order", int, 3,
-              "UniPC's multistep order cap — how many previous model outputs a "
-              "step may extrapolate from. With handoff_reset on, each expert's "
-              "sampler runs at min(cap, its steps - 1) as ComfyUI's uni_pc does: "
-              "1 for the 2-step high-noise sampler, 3 for the 4-step low-noise "
-              "one. The HF scheduler config says 2, flat. Inert on a phase "
-              "running `euler`, which is first-order by construction",
+              "UniPC's multistep order cap: previous outputs a step may extrapolate from",
               minimum=1, maximum=3),
+        # On, as the reference graph's two KSamplerAdvanced nodes: the
+        # high-noise sampler's last step is first-order, and the low-noise
+        # expert starts with an empty multistep history at its own order. Off,
+        # the run is one continuous loop at the cap and the low-noise expert's
+        # first step is corrected by the high-noise expert's x0 predictions.
         Param("handoff_reset", bool, True,
-              "Run the two experts as the reference graph's two KSamplerAdvanced "
-              "nodes did: the high-noise sampler's last step is first-order, and "
-              "the low-noise expert starts with an empty multistep history at "
-              "its own order. Off, the run is one continuous loop at the cap and "
-              "the low-noise expert's first step is corrected by the high-noise "
-              "expert's x0 predictions — what this step did before 2026-09-08"),
+              "Restart the sampler's multistep history when the low-noise expert takes over"),
+        # `crop` is ComfyUI's common_upscale center: crop to the frame's
+        # aspect, resize to fill. `letterbox` is diffusers' own: fit inside,
+        # pad with white.
         Param("reference_fit", str, "crop",
-              "How the reference image is fitted to the frame. `crop` is "
-              "ComfyUI's common_upscale center: crop to the frame's aspect, "
-              "resize to fill; `letterbox` is diffusers' own: fit inside, pad "
-              "with white — the run before 2026-09-08",
+              "How the reference image is fitted to the frame",
               choices=("crop", "letterbox")),
         Param("cfg", float, 1.0, "Classifier-free guidance scale"),
         Param("seed", int, 0, "Diffusion seed"),
+        # 1.0 generates from the control video, lower values keep more of it.
+        # [1, 1, 0.75, 0.5, 0.25, 0] holds the control video at full scale
+        # while the pose is set and lets go of it before the last step, so the
+        # drawing steers the structure without being painted in.
         Param("strength", list, [1.0],
-              "VACE conditioning scale, one entry per denoise step (`steps` of "
-              "them, first to last); a single entry holds it constant for the "
-              "whole run. 1.0 generates from the control video, lower values keep "
-              "more of it. [1, 1, 0.75, 0.5, 0.25, 0] holds the control video at "
-              "full scale while the pose is set and lets go of it before the last "
-              "step, so the drawing steers the structure without being painted in"),
+              "VACE conditioning scale per denoise step; one entry holds it constant"),
         Param("strength_layers", list, None,
-              "Per-layer multipliers on the scale above, one for each VACE "
-              "injection layer (8 of them, shallow to deep); empty means 1.0 at "
-              "every layer, which is the plain scale"),
+              "Per-layer multipliers on `strength` for the 8 VACE layers; empty = all 1.0"),
+        # Every other step conditions on `control_video_alt` instead — the
+        # same drawing without its skeleton overlay. In effect only when that
+        # input is given, so a workflow can leave it set and gate the whole
+        # thing on whether the stick-free copy was rendered. See
+        # _alt_control_hook.
         Param("skeleton_steps", list, None,
-              "Which denoise steps (1-based, first to last) condition on "
-              "`control_video`; every other step conditions on "
-              "`control_video_alt` instead — the same drawing without its "
-              "skeleton overlay. In effect only when that input is given, so "
-              "a workflow can leave it set and gate the whole thing on "
-              "whether the stick-free copy was rendered. See "
-              "_alt_control_hook"),
+              "Denoise steps (1-based) that see the skeleton overlay; empty = all"),
         Param("prompt", str, "",
-              "Positive prompt. $SUBJECT_DESC$ in it is filled in from the "
-              "`subject_desc` input (dataset.prompt)"),
+              "Positive prompt; $SUBJECT_DESC$ is replaced with the subject description"),
         Param("negative_prompt", str, "", "Negative prompt"),
         Param("length", int, None,
               "Frames to generate; empty means as many as the control video has"),
@@ -1150,21 +1138,21 @@ class Wan22VaceDenoiseStep(Step):
         Param("attention_backend", str, "auto",
               "Attention implementation; auto picks per GPU architecture",
               advanced=True),
+        # Off needs a card that fits a whole expert plus the activations.
         Param("cpu_offload", bool, True,
-              "Stream the weights on and off the card a block at a time instead of "
-              "resident-loading them; off needs a card that fits a whole expert "
-              "plus the activations", advanced=True),
+              "Stream weights onto the GPU a block at a time instead of keeping them resident",
+              advanced=True),
+        # 1 holds the least VRAM; raising it trades VRAM for fewer, larger
+        # transfers.
         Param("offload_blocks_per_group", int, 1,
-              "How many transformer blocks ride onto the card together under "
-              "cpu_offload. 1 holds the least and is the default; raising it "
-              "trades VRAM for fewer, larger transfers", advanced=True,
-              minimum=1),
+              "Transformer blocks moved onto the GPU together under cpu_offload",
+              advanced=True, minimum=1),
+        # VACE hints computed one at a time, per-token work chunked, weights
+        # streamed from the mmap'd checkpoints without host copies, VAE tiled.
+        # Transformer output is bitwise the stock one's.
         Param("low_vram", bool, False,
-              "ComfyUI-style low-VRAM mode for ~12 GB cards: VACE hints computed "
-              "one at a time, per-token work chunked, weights streamed from the "
-              "mmap'd checkpoints without host copies, VAE tiled. Transformer "
-              "output bitwise the stock one's; overrides "
-              "cpu_offload/offload_blocks_per_group", advanced=True),
+              "Low-VRAM mode for ~12 GB GPUs; overrides cpu_offload settings",
+              advanced=True),
         Param("device", str, "cuda", "Torch device", advanced=True),
     )
 

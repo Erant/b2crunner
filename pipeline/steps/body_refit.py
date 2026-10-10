@@ -254,23 +254,24 @@ class SplatSurfaceStep(Step):
     """
 
     PARAMS = (
+        # Its `probe --depth` renders the surface depth.
         Param("trainer_path", str, "b2ctrain",
-              "The trainer binary; its `probe --depth` renders the surface depth", advanced=True),
+              "Path to the trainer binary", advanced=True),
         Param("every", int, 1, "Probe every N-th training camera", minimum=1),
+        # 0.5 is the median surface; 0.1 (the hollow loss's first surface) sits
+        # on the soft front of it.
         Param("tau", float, 0.5,
-              "Accumulated alpha that marks the surface. 0.5 is the median surface; 0.1 "
-              "(the hollow loss's first surface) sits on the soft front of it",
+              "Accumulated alpha (0-1) that marks the surface",
               minimum=0.01, maximum=0.99),
         Param("stride", int, 8, "Keep every N-th pixel in each direction", minimum=1),
         Param("edge_jump", float, 0.02,
-              "A pixel whose depth differs by more than this (metres) from a neighbour is a "
-              "silhouette and is dropped", minimum=0.0),
+              "Drop pixels whose depth jumps more than this (m) from a neighbour", minimum=0.0),
         Param("max_points", int, 300000, "Random subsample cap over all cameras", minimum=1000),
         Param("device", int, 0, "CUDA device index for the probe", advanced=True),
         Param("keep_dir", str, "",
-              "Keep the probe's output (depth maps, probe.json) here for inspection", advanced=True),
+              "Keep the probe's depth maps here for inspection", advanced=True),
         Param("debug_dir", str, "",
-              "Write the sampled surface as surface.ply here (the run's debug bundle)"),
+              "Write the sampled surface (surface.ply) here"),
     )
 
     def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
@@ -392,11 +393,12 @@ class RefitBodyToSplatStep(Step):
     """
 
     PARAMS = (
+        # The rigid+scale warm-up runs half as many.
         Param("iterations", int, 300,
-              "Adam steps of the pose stage and again of the shape stage; the rigid+scale "
-              "warm-up runs half as many", minimum=1),
+              "Optimiser steps per stage (pose, then shape)", minimum=1),
+        # Rotations are in radians, so 0.01 is ~0.6 deg.
         Param("learning_rate", float, 0.01,
-              "Adam step; rotations are in radians, so 0.01 is ~0.6 deg", advanced=True),
+              "Optimiser (Adam) learning rate", advanced=True),
         Param("points_per_step", int, 100000,
               "Surface points re-sampled each step for the correspondences", minimum=1000),
         Param("clothing_allowance", float, 0.01,
@@ -406,14 +408,12 @@ class RefitBodyToSplatStep(Step):
         Param("outside_weight", float, 0.1,
               "Weight of the squared distance (cm) beyond the clothing allowance"),
         Param("coverage_weight", float, 0.1,
-              "Weight of the squared distance (cm) from each body vertex to its nearest "
-              "surface point, within coverage_radius"),
+              "Weight of each body vertex's squared distance (cm) to the nearest surface point"),
         Param("coverage_radius", float, 0.05,
-              "Metres; a vertex farther than this from every surface point is unobserved "
-              "and gets no coverage term"),
+              "Distance (m) beyond which a vertex counts as unobserved"),
+        # Such points are hair, a garment or a floater, not the body.
         Param("outlier_distance", float, 0.15,
-              "Metres; surface points farther than this from SAM-3D-Body's mesh are not "
-              "the body (hair, a garment, a floater) and are dropped before the fit"),
+              "Drop surface points farther than this (m) from the initial body mesh"),
         Param("pose_regularisation", float, 10.0,
               "L2 pull on the body pose deltas (per rad^2, summed) against the fit loss in cm^2"),
         Param("hand_regularisation", float, 100.0, "L2 pull on the hand pose deltas"),
@@ -421,12 +421,11 @@ class RefitBodyToSplatStep(Step):
         Param("shape_regularisation", float, 1.0, "L2 pull on the shape components, per sigma^2"),
         Param("fit_scale", bool, True, "Fit the per-joint scale offsets"),
         Param("fit_shape", bool, True, "Fit the shape components (last stage)"),
-        Param("fit_hands", bool, False,
-              "Fit the hand pose too. Off: the hands keep SAM-3D-Body's pose and their "
-              "vertices take no part in the fit either way (see exclude_hands)"),
-        Param("exclude_hands", bool, True,
-              "Leave the hand vertices out of the fit: the splat's fingers are rarely "
-              "worth fitting to"),
+        # Off: the hands keep SAM-3D-Body's pose and their vertices take no
+        # part in the fit, whatever exclude_hands says.
+        Param("fit_hands", bool, False, "Fit the hand pose too"),
+        # The splat's fingers are rarely worth fitting to.
+        Param("exclude_hands", bool, True, "Leave the hand vertices out of the fit"),
         Param("max_replay_drift", float, 1e-3,
               "Metres; replaying pose_params must reproduce mesh_output to this", advanced=True),
         Param("checkpoint_repo", str, "facebook/sam-3d-body-dinov3",
@@ -439,8 +438,7 @@ class RefitBodyToSplatStep(Step):
         Param("device", str, "cuda", "Torch device", advanced=True),
         Param("seed", int, 0, "Seed of the per-step point subsets", advanced=True),
         Param("debug_dir", str, "",
-              "Write mesh_before.ply, mesh_refit.ply (world frame) and stats.json here "
-              "(the run's debug bundle)"),
+              "Write the before/after body meshes and stats.json here"),
     )
 
     def __init__(self) -> None:

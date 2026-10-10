@@ -1,7 +1,7 @@
 """The alignment loop: warp the training views onto the splat's own consensus.
 
 Measured on the deliverable splat (2026-09-06,
-docs/final-splat-alignment-guide.md): the fit is what destroys the detail,
+docs/design-notes.md#the-deliverable-training-train_final_splat): the fit is what destroys the detail,
 not the upscaler — the generated views disagree with each other about where
 texture sits by 1.7-3.6 px, and a photometric loss averages that into a
 blurred consensus. Four iterations of render -> flow -> warp -> refit moved

@@ -8,7 +8,7 @@ that had its own opinion about where the subject was. So there is
 something real to correct, and correcting it is worth **+0.63 PSNR / +0.0045
 SSIM** on held-out views (30k iters, three seeds per condition, seed spread
 +-0.003 on the baseline). The measurement, and everything else this module
-is a port of, is docs/camera-pose-refinement.md.
+is a port of, is docs/design-notes.md#camera-refinement-refine_cameras-refine_cameras_final.
 
 Anything BUILT from one of the cameras this step moves is stale once it
 has run. The face splat is the case: it is unprojected from the anchor
@@ -380,95 +380,89 @@ class RefineCamerasStep(Step):
     """
 
     PARAMS = (
+        # Built into docker/Dockerfile with CUDA on, which is what puts ALIKED
+        # and LightGlue on the GPU.
         Param("colmap_path", str, DEFAULT_COLMAP_BINARY,
-              "The COLMAP binary. Built into docker/Dockerfile with CUDA on, "
-              "which is what puts ALIKED and LightGlue on the GPU"),
+              "Path to the COLMAP binary"),
+        # Converged by the third on the measured dataset; the reprojection
+        # error is logged per round, so a value doing nothing shows in the log.
         Param("iterations", int, 3,
-              "How many (bundle adjust -> retriangulate) rounds follow the "
-              "first triangulation. Converged by the third on the measured "
-              "dataset; the reprojection error is logged per round, so a "
-              "value that is doing nothing is visible in the log",
+              "Bundle-adjust + retriangulate rounds after the first "
+              "triangulation",
               minimum=1),
+        # ALIKED holds up on a white cyclorama and bare skin where SIFT thins
+        # out.
         Param("feature_type", str, "ALIKED_N32",
-              "COLMAP's --FeatureExtraction.type. ALIKED holds up on a white "
-              "cyclorama and bare skin where SIFT thins out",
+              "COLMAP feature extractor type",
               choices=FEATURE_TYPES),
         Param("matcher_type", str, "ALIKED_LIGHTGLUE",
-              "COLMAP's --FeatureMatching.type; must be the one that goes "
-              "with `feature_type`",
+              "COLMAP matcher type; must match `feature_type`",
               choices=MATCHER_TYPES),
+        # 4096 gave ~747 features per image unmasked and 633 masked on the
+        # measured dataset, so this is a ceiling rather than a target.
         Param("max_num_features", int, 4096,
-              "--AlikedExtraction.max_num_features. 4096 gave ~747 features "
-              "per image unmasked and 633 masked on the measured dataset, so "
-              "this is a ceiling rather than a target",
+              "Maximum features extracted per image",
               minimum=1, advanced=True),
+        # A COLMAP built without CUDA silently falls back to the CPU provider
+        # (~3 min for 81 frames), so this is safe to leave on everywhere.
         Param("use_gpu", bool, True,
-              "Run ALIKED and LightGlue on the ONNX CUDA execution provider. "
-              "A COLMAP built without CUDA silently uses the CPU provider "
-              "instead (~3 min for 81 frames), so this is safe to leave on "
-              "everywhere"),
+              "Run feature extraction and matching on the GPU"),
+        # See the module docstring: 0.089 PSNR behind letting features land on
+        # the backdrop (inside the pipeline's own nondeterminism), and the only
+        # variant whose assumption holds when the background moves or is
+        # generated per frame.
         Param("foreground_only", bool, True,
-              "Mask features to the subject. See the module docstring: it is "
-              "0.089 PSNR behind letting them land on the backdrop, which is "
-              "inside this pipeline's own nondeterminism, and it is the only "
-              "variant whose assumption holds on a capture whose background "
-              "moves or is generated per frame"),
+              "Only use image features on the subject, not the background"),
+        # The assertion for trap 1 (a 15-26% miss). 1% rather than the 0.1%
+        # the doc observed, and not slack: a correction that is not itself a
+        # similarity moves the radius by roughly the SQUARE of its size (a mean
+        # shift of 5% of the radius measures 0.14%), so a tighter gate would
+        # refuse large-but-honest corrections under trap 1's name, while the
+        # centre-shift check is the one that describes them. The observed
+        # drift is logged either way.
         Param("max_scale_drift", float, 0.01,
-              "Refuse a result whose mean camera radius about the scene "
-              "centroid moved by more than this fraction — the assertion for "
-              "trap 1, which is a 15-26% miss. 1% rather than the 0.1% the "
-              "doc observed, and the difference is not slack: a correction "
-              "that is not itself a similarity moves the radius by roughly "
-              "the SQUARE of its size (a mean shift of 5% of the radius "
-              "measures 0.14%), so a tighter gate would start refusing "
-              "large-but-honest corrections under trap 1's name while the "
-              "centre-shift check below is the one that actually describes "
-              "them. The observed drift is logged either way",
+              "Reject the result if the mean camera distance changes by more "
+              "than this fraction",
               minimum=0.0, advanced=True),
+        # Measured at 0.0082; much beyond a few percent means BA re-solved the
+        # scene rather than refining it, so the matches are the suspect.
         Param("max_centre_shift", float, 0.03,
-              "Refuse a result whose MEAN camera centre moved more than this "
-              "fraction of the scene radius. Measured at 0.0082; much beyond "
-              "a few percent means BA re-solved the scene rather than "
-              "refining it, so the matches are the thing to suspect",
+              "Reject the result if the mean camera centre moves more than "
+              "this fraction of the scene radius",
               minimum=0.0, advanced=True),
+        # The shared rotation is the mean removed under trap 4. Measured at
+        # 0.94 deg on the run that found it and 0.2 on two others; several
+        # degrees is BA having lost the scene, not drifted along its valley.
         Param("max_common_mode_rotation_deg", float, 3.0,
-              "Refuse a result whose cameras share a rotation about their own "
-              "centres of more than this many degrees (the mean that is "
-              "removed under trap 4). Measured at 0.94 deg on the run that "
-              "found it and 0.2 on two others; several degrees is BA having "
-              "lost the scene, not drifted along its valley",
+              "Reject the result if all cameras rotate together by more than "
+              "this many degrees",
               minimum=0.0, advanced=True),
+        # Trap 6: the body mesh projected through the given cameras and
+        # triangulated with the refined ones. 3.8 cm of 2.2 m (1.7%) on the run
+        # that found it; a tenth of the radius is not a drift but a solve that
+        # lost the subject.
         Param("max_subject_shift", float, 0.1,
-              "Refuse a result whose subject — the body mesh projected "
-              "through the given cameras and triangulated with the refined "
-              "ones — sits more than this fraction of the scene radius from "
-              "the mesh (trap 6). 3.8 cm of 2.2 m, 1.7%, on the run that "
-              "found it; a tenth of the radius is not a drift but a solve "
-              "that lost the subject. Only applies when `mesh_world` is "
-              "wired",
+              "Reject the result if the subject moves more than this fraction "
+              "of the scene radius; needs `mesh_world`",
               minimum=0.0, advanced=True),
+        # `keep_given` publishes the poses unchanged, the safe end of a long
+        # pod run. Neither choice ever publishes poses that failed a check.
         Param("on_check_failure", str, "keep_given",
-              "What a failed check does. `keep_given` logs the failure and "
-              "publishes the poses unchanged — the behaviour the pipeline had "
-              "before this step existed, and the safe end of a 40-minute pod "
-              "run; `raise` stops the run. Neither ever publishes poses that "
-              "failed a check",
+              "On a failed check: keep the original poses (`keep_given`) or "
+              "stop the run (`raise`)",
               choices=ON_CHECK_FAILURE),
+        # NOT a dataset directory and not under one — see trap 2 in the module
+        # docstring.
         Param("work_dir", str, "",
-              "Keep the COLMAP scratch (database, per-round models, logs) "
-              "here instead of in a temporary directory that is deleted on "
-              "the way out. NOT a dataset directory and not under one — see "
-              "trap 2 in the module docstring",
+              "Keep COLMAP's scratch files here instead of a temporary "
+              "directory",
               advanced=True),
+        # Two COLMAP models (given/, refined/ — cameras.txt + images.txt) plus
+        # stats.json. The workflows point it under <output_root>/debug/ so it
+        # rides into the result .zip and camera questions can be answered after
+        # the pod is gone. NOT a dataset directory — see trap 2.
         Param("debug_dir", str, None,
-              "Write the poses this step was handed and the poses it "
-              "published as two COLMAP models (given/, refined/ — "
-              "cameras.txt + images.txt, the export's own format) plus the "
-              "stats it logged as stats.json. The workflows point it under "
-              "<output_root>/debug/ so it rides into the result .zip: a "
-              "camera question asked after the pod is gone is answered from "
-              "these, not from the log's summary lines. NOT a dataset "
-              "directory — see trap 2",
+              "Write the before/after camera poses and stats here",
               advanced=True),
     )
 

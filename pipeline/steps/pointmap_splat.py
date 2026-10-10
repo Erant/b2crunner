@@ -65,17 +65,8 @@ As `face_pointmap_splat`, twice in `workflows/helical.yaml`:
 and `face_splat_refined` after `refine_cameras` (through the photograph's
 camera moved by the anchor's refinement delta). See that class.
 
-As `pointmap_splat`, the whole subject, in `workflows/helical_shell.yaml`
-(2026-09-19): `shell_splat` builds the shell from the sheet's front half,
-`render_shell_views` renders it along pass 1's helix, and
-`inject_shell_views` (steps/anchor_stub.py) puts those renders into the
-frames at the END of that helix — the same azimuth as the photograph, a
-few degrees above it — as frames the denoise is told to keep. The shell
-is a control-video ingredient there and nothing else: no training reads
-it, no supporting view is cut from it. (The registration first existed for
-the photo-to-splat shell bootstrap of 2026-08-29, whose band of
-substituted frames, `refine_pose_to_splat` and stage-1 shells were retired
-on 2026-09-04; that history is in git.)
+As `pointmap_splat`, the whole subject from the whole photograph, for
+`tools/pointmap_clip.py`.
 
 Coordinate frames
 -----------------
@@ -1317,88 +1308,87 @@ class PointmapSplatStep(Step):
 
     PARAMS = (
         Param("filepath", str, REQUIRED, "The .ply to write"),
+        # Lower trusts the normals more and drifts further from the pointmap; 0
+        # splats the raw pointmap depth, which under-predicts relief badly.
         Param("integration_lambda", float, 0.01,
-              "Weight of the pointmap's data term against the normals in the "
-              "depth solve. Lower trusts the normals more and drifts further "
-              "from the pointmap; 0 disables integration and splats the raw "
-              "pointmap depth, which under-predicts relief badly",
+              "Weight of the pointmap depth against the normals in the depth solve; 0 disables",
               minimum=0.0),
+        # Resolution-dependent: 0.4 is the measured full-body value, 0.5 the
+        # head-crop one.
         Param("splat_scale", float, 0.4,
-              "Tangential Gaussian radius as a multiple of one input pixel's "
-              "world footprint (z/f). Resolution-dependent: 0.4 is the "
-              "measured full-body value, 0.5 the head-crop one",
+              "Gaussian radius, as a multiple of one input pixel's world footprint",
               minimum=0.01),
+        # The cull removes the sheets the pointmap interpolates across
+        # self-occlusions.
         Param("cliff_k", float, 8.0,
-              "Drop a Gaussian whose distance to a masked 4-neighbour exceeds "
-              "this many pixel footprints — the sheets the pointmap "
-              "interpolates across self-occlusions. 0 disables the cull",
+              "Drop Gaussians farther than this many pixel footprints from a neighbour; 0 disables",
               minimum=0.0),
         Param("mask_threshold", float, 0.5,
               "Matte value above which a pixel is foreground", minimum=0.0, maximum=1.0),
         Param("checkpoint", str, DEFAULT_CHECKPOINT,
-              "HF repo for the pointmap head; the family is 0.4b/0.8b/1b",
+              "HF repo for the pointmap model (0.4b/0.8b/1b)",
               advanced=True),
-        Param("dtype", str, "float32", "Inference dtype for the pointmap head. "
-              "bfloat16's ulp at the depth a subject sits at terraces the depth "
-              "map (measured: 23.0 deg of normal disagreement against 5.1 deg "
-              "at float32); float32 falls back to bfloat16 on OOM anyway",
+        # bfloat16's ulp at the depth a subject sits at terraces the depth map
+        # (measured: 23.0 deg of normal disagreement against 5.1 deg at
+        # float32); float32 falls back to bfloat16 on OOM anyway.
+        Param("dtype", str, "float32", "Inference dtype for the pointmap model",
               choices=("float32", "bfloat16"), advanced=True),
         Param("device", str, None, "Torch device; empty means cuda if available",
               advanced=True),
+        # A flat disc, not a sliver.
         Param("splat_thickness", float, 0.15,
-              "Gaussian extent along the normal, as a fraction of splat_scale — "
-              "a flat disc, not a sliver", advanced=True),
+              "Gaussian extent along the normal, as a fraction of splat_scale",
+              advanced=True),
+        # Closes grazing-incidence combing in profile views.
         Param("max_stretch", float, 3.0,
-              "Cap on how far a Gaussian is widened along its foreshortened "
-              "in-plane axis; closes grazing-incidence combing in profile views",
+              "Cap on how far a Gaussian is widened along its foreshortened axis",
               advanced=True),
+        # Denser, smaller primitives, no extra detail.
         Param("supersample", int, 1,
-              "Upsample the depth/normal/colour grid by this factor before "
-              "splatting: denser, smaller primitives, no extra detail",
+              "Upsample factor of the depth/normal/colour grid before splatting",
               minimum=1, advanced=True),
+        # 0 fills nothing: an RMBG matte of a whole body has no holes to fill, so
+        # every one left in it is real background. At 0.05 an arm raised over
+        # the head enclosed 9741 px of it, which then hung behind the subject
+        # in every novel view.
         Param("fill_max_frac", float, 0.0,
-              "Fill mask holes up to this fraction of the subject area. 0 (the "
-              "default) fills nothing: an RMBG matte of a whole body has no "
-              "holes to fill, so every one left in it is real background — at "
-              "masktest's 0.05 an arm raised over the head enclosed 9741 px of "
-              "it, which then hung behind the subject in every novel view",
+              "Fill mask holes up to this fraction of the subject area; 0 fills none",
               advanced=True),
+        # So detached hands and feet survive.
         Param("min_component_frac", float, 0.02,
-              "Keep every mask component at least this large relative to the "
-              "biggest, so detached hands and feet survive", advanced=True),
-        Param("close_iters", int, 4, "binary_closing iterations on the mask",
+              "Keep mask components at least this large relative to the biggest",
+              advanced=True),
+        Param("close_iters", int, 4, "Morphological closing iterations on the mask",
               advanced=True),
         Param("alpha_erode", int, 3,
-              "Pixels of silhouette that keep the matte's soft opacity; inside "
-              "that the alpha is pinned to 1", advanced=True),
+              "Width of the soft-opacity silhouette edge, pixels; inside it alpha is 1",
+              advanced=True),
         Param("grazing_floor", float, 0.05,
-              "Clamp |D| in the integration to this fraction of the focal "
-              "length, and downweight those edges in proportion", advanced=True),
+              "Clamp grazing-angle normals to this fraction of the focal length, and downweight them",
+              advanced=True),
+        # 'pointmap' (default): Sapiens' own depth, scaled onto the mesh.
+        # 'mesh': coarse depth from the SAM-3D-Body mesh, only the pointmap's
+        # fine structure kept; EXPERIMENTAL, deforms hands at the current bin
+        # size (see mesh_depth_prior's docstring). 'mesh_surface': every
+        # Gaussian goes ON the body model's surface along its pixel's ray, as a
+        # disc in the surface's tangent plane; shape from the model's head,
+        # colour from the photograph. The pointmap model is not run and the
+        # normal map is not read.
         Param("depth_prior", str, "pointmap",
-              "Where the depth comes from. 'pointmap' is masktest's behaviour "
-              "and the default: Sapiens' own depth, scaled onto the mesh. "
-              "'mesh' takes the coarse depth from the SAM-3D-Body mesh and keeps "
-              "only the pointmap's fine structure — EXPERIMENTAL, and it deforms "
-              "hands at the current bin size; see mesh_depth_prior's docstring. "
-              "'mesh_surface' takes no depth from the pointmap at all: every "
-              "Gaussian goes ON the body model's surface along its pixel's ray, "
-              "as a disc in that surface's tangent plane — the shape is the "
-              "model's head and the colour the photograph's (the validated face "
-              "cap of b2ctrain out/mesh/FACE_GUIDE.md, `tools/sam_cap.py`). The "
-              "pointmap head is not run; the normal map is not read",
+              "Depth source: the pointmap, the body mesh plus pointmap detail, or the mesh surface",
               choices=("pointmap", "mesh", "mesh_surface"), advanced=True),
+        # Off keeps the pointmap's own metric scale, which has no reason to
+        # agree with the body fit's.
         Param("align_depth", bool, True,
-              "Fit a single scale putting the shell at the SAM-3D-Body mesh's "
-              "distance. Off keeps the pointmap's own metric scale, which has "
-              "no reason to agree with the body fit's", advanced=True),
+              "Scale the depth to sit at the body mesh's distance", advanced=True),
+        # Big enough to hold enough mesh vertices to stand in for a z-buffer.
         Param("align_bin_px", int, 32,
-              "Image-bin size for that fit: big enough to hold enough mesh "
-              "vertices to stand in for a z-buffer", minimum=4, advanced=True),
+              "Image-bin size for the depth-scale fit, pixels", minimum=4, advanced=True),
+        # Also the step's stats (splat_stats, including which camera the shell
+        # was built through) as stats.json. The workflows point it under
+        # <output_root>/debug/ so it rides into the result .zip.
         Param("debug_dir", str, None,
-              "Write mask / alpha / depth / normal visualisations here, plus "
-              "the step's stats (splat_stats, including which camera the "
-              "shell was built through) as stats.json. The workflows point "
-              "it under <output_root>/debug/ so it rides into the result .zip",
+              "Directory for mask/alpha/depth/normal debug images and stats; empty writes nothing",
               advanced=True),
     )
 
@@ -1969,14 +1959,8 @@ class BodyPointmapSplatStep(PointmapSplatStep):
     state the input contract that goes with it: the matte is RMBG-2.0's,
     over the same photo `sam3d_body` was fitted to, at that photo's own
     resolution. What comes out is a 2.5-D shell of the side the photograph
-    saw, exact at the photograph's own camera and usable for a few degrees
-    around it (the retired shell bootstrap measured ~19 before the missing
-    back and the grazing fringes show) — enough for `inject_shell_views` to
-    take a frame or two at the top of a shallow helix from it.
-
-    Registered again on 2026-09-19 for workflows/helical_shell.yaml, after
-    leaving with the shell bootstrap on 2026-09-04. Nothing in the base
-    changed for it.
+    saw, exact at the photograph's own camera and usable for about 19
+    degrees around it before the missing back and the grazing fringes show.
     """
 
 

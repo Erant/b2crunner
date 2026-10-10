@@ -85,27 +85,27 @@ class CropToBoxStep(Step):
     """
 
     PARAMS = (
+        # 3.5 turns a face box into a head against a torso, not a head with a
+        # margin. Deliberately far more than the soft alpha needs: at 0.35 the
+        # crop is mostly face, which no body model was trained to read, and
+        # the pointmap head answers it with a flat card. The face keeps its
+        # own pixels either way (the crop is cut at native resolution); what
+        # it gives up is share of Sapiens2's 768x1024, and the trade came out
+        # in favour of the wider frame.
         Param("padding", float, 3.5,
-              "Grow the box by this fraction of its larger HALF-side before "
-              "cropping — 3.5 turns a face box into a head against a torso, "
-              "not a head with a margin. Far more than the silhouette's soft "
-              "alpha needs, deliberately: at 0.35 the crop is mostly face, "
-              "which is out of anything a body model was trained to read, and "
-              "the pointmap head answers it with a flat card. That is the "
-              "flat face cap of 2026-09-02. The face keeps its own pixels "
-              "either way (the crop is cut at native resolution); what it "
-              "gives up is share of Sapiens2's 768x1024, and the trade came "
-              "out in favour of the wider frame",
+              "Grow the box by this fraction of its larger half-side before "
+              "cropping",
               minimum=0.0),
+        # The default is Sapiens2's own 768/1024 — a crop already at the
+        # network's aspect ratio neither letterboxes nor squashes.
         Param("aspect", float, 0.75,
-              "Width/height the padded box is grown to. 0 keeps the box's own "
-              "shape. The default is Sapiens2's own 768/1024 — a crop already "
-              "at the network's aspect ratio neither letterboxes nor squashes",
+              "Width/height ratio the box is grown to; 0 keeps its own shape",
               minimum=0.0),
+        # A box this small means the detection was wrong, and a 20 px face
+        # makes a splat of nothing.
         Param("min_size", int, 64,
-              "Refuse a crop smaller than this on either side. A box this "
-              "small means the detection was wrong, and a 20 px face makes a "
-              "splat of nothing", minimum=1),
+              "Fail on a crop smaller than this many pixels on either side",
+              minimum=1),
     )
 
     def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:

@@ -1,6 +1,6 @@
 """The polish run — a second, growth-off brush invocation on the same export.
 
-Measured on the intermediate splat (2026-09-05, docs/intermediate-splat-guide.md):
+Measured on the intermediate splat (2026-09-05, docs/design-notes.md#the-intermediate-training-train_splat):
 9000 iterations warm-started from the first run's own .ply moved band-limited
 face sharpness from 143 to 161, where 9000 extra iterations of ONE cold run
 reached 137. The restart at full mean learning rate is the effect, not the

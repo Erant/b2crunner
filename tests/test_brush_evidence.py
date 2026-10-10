@@ -4,7 +4,7 @@
 every training view and writes it into the exported .ply as `ev_*` vertex
 properties. That block is what `brush-splat-render --confidence` reads to
 gate a render in 3-D, which is what replaced `mask_splat`'s per-pixel alpha
-cut (see docs/spatial-reinforcement.md). It is on by default because both
+cut (see docs/design-notes.md#the-confidence-gated-re-render-render_subject--resplat_foreground_masks--mask_splat_fringes). It is on by default because both
 trainings want it: the cost is seconds, and a mismatch degrades loudly
 rather than silently — the renderer warns and falls back to plain alpha.
 

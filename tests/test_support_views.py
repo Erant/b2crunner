@@ -16,7 +16,7 @@ one. (The OUTER edge is the cap's own radius, drawn by the sampler that
 rendered these views — `render_splat` with `pattern: cap` — rather than
 culled here. It used to be a `max_angle_deg` reading `composite_splat_views`'
 per-frame verdict; that step is gone, see
-docs/revert-when-body2colmap-drops-gsplat.md.) And the colour is
+docs/design-notes.md#supporting-views-and-premultiplied-renders.) And the colour is
 un-premultiplied, because brush's masked mode does not premultiply ground
 truth and a `colour*a` frame would ask the model to be dark and
 half-transparent along the silhouette rather than opaque and the right

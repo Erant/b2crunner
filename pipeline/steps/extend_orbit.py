@@ -274,27 +274,29 @@ class ExtendHelicalPathStep(Step):
     """
 
     PARAMS = (
+        # Pass 2's own length, the count the model was calibrated at.
         Param("phase_frames", int, 81,
-              "Frames in each extension pass — pass 2's own length, the count the "
-              "model was calibrated at. Must be 4k+1", minimum=1),
+              "Frames in each extension pass; must be 4k+1", minimum=1),
+        # The BEFORE pass paints phase_frames - this new frames ahead of them at
+        # the helix's own angular step (41 at the defaults, 425 deg on
+        # render_subject's helix at 10.37 deg a frame). Latent-aligned when
+        # phase_frames - this is 4k+1.
         Param("overlap_before", int, 40,
-              "Pass 2's first frames that close the BEFORE pass as its inactive "
-              "frames; it paints phase_frames - this new frames ahead of them at the "
-              "helix's own angular step (41 at the defaults, 425 deg on "
-              "render_subject's helix at 10.37 deg a frame). Latent-aligned when "
-              "phase_frames - this is 4k+1", minimum=1),
+              "Pass 2 frames reused as fixed context at the end of the BEFORE "
+              "pass", minimum=1),
+        # The AFTER pass paints phase_frames - this new frames after them (40 at
+        # the defaults). Latent-aligned when this is 4k+1 — one more than the
+        # BEFORE pass's, because here the inactive block starts the video
+        # rather than ends it.
         Param("overlap_after", int, 41,
-              "Pass 2's last frames that open the AFTER pass as its inactive frames; "
-              "it paints phase_frames - this new frames after them (40 at the "
-              "defaults). Latent-aligned when this is 4k+1 — one more than the "
-              "BEFORE pass's, because here the inactive block starts the video "
-              "rather than ends it", minimum=1),
+              "Pass 2 frames reused as fixed context at the start of the AFTER "
+              "pass", minimum=1),
+        # The BEFORE pass ramps up from -amplitude - this, the AFTER pass up to
+        # +amplitude + this, each at one constant rate (pass_elevation_offsets).
+        # 0 continues the flat leads, which repeats views the orbit already has.
         Param("tilt_deg", float, 0.0,
-              "How far past the helix's elevation band the outermost new frame "
-              "reaches: the BEFORE pass ramps up from -amplitude - this, the AFTER "
-              "pass up to +amplitude + this, each at one constant rate "
-              "(pass_elevation_offsets). 0 = the flat leads continued, which repeats "
-              "views the orbit already has"),
+              "Extra elevation, in degrees, the extension reaches beyond the "
+              "helix's band"),
         Param("n_frames", int, 81, "render_subject's frame count", minimum=1),
         Param("n_loops", int, 2, "render_subject's turns", minimum=1),
         Param("amplitude_deg", float, 30.0, "render_subject's elevation swing"),
@@ -460,14 +462,15 @@ class AssembleExtensionStep(Step):
     """
 
     PARAMS = (
+        # 0.5 is the grey every control frame in this pipeline ends on, and is
+        # zero after the [-1, 1] normalisation.
         Param("bg_color", list, [0.5, 0.5, 0.5],
-              "RGB in [0,1] behind the matted guide. 0.5 is the grey every control "
-              "frame in this pipeline ends on, and is zero after the [-1, 1] "
-              "normalisation"),
+              "Background behind the matted guide, RGB in [0,1]"),
+        # Written as datasets before/ and after/, the VACE flag in the alpha,
+        # like pass 1's denoise_pass1_input/.
         Param("debug_dir", str, None,
-              "Where to dump the two control videos as datasets (before/ and after/, "
-              "the VACE flag in the alpha), like pass 1's denoise_pass1_input/. None "
-              "writes nothing", advanced=True),
+              "Dump the two control videos here; empty writes nothing",
+              advanced=True),
     )
 
     def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
@@ -683,14 +686,16 @@ class SpliceExtensionStep(Step):
     """
 
     PARAMS = (
+        # Measured against the guide render at both sets' cameras. The passes
+        # come back more saturated and contrasty than pass 2 (measured: chroma
+        # +15-20 %, L spread +16-27 %), the same across all their new frames.
         Param("colour_match", bool, True,
-              "Bring each pass's new frames to pass 2's contrast and saturation, "
-              "measured against the guide render at both sets' cameras. The passes "
-              "come back more saturated and contrasty than pass 2 (e9eb3a: chroma "
-              "+15-20 %, L spread +16-27 %), the same across all their new frames"),
+              "Match the extension frames' contrast and saturation to pass 2"),
+        # Feathered over as many pixels; beyond it the pass's grey stays
+        # untouched.
         Param("colour_grow_px", int, 12,
-              "How far past the guide's matte the correction reaches, feathered over "
-              "as many pixels; beyond it the pass's grey stays untouched",
+              "How far past the subject's matte the colour correction reaches, "
+              "in pixels",
               advanced=True),
     )
 

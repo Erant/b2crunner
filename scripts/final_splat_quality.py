@@ -16,7 +16,7 @@ Two renders, two halves of the question (2026-09-08):
     the deliverable, at the views it was fitted to. `splat_s1` and
     `splat_head_s1` are band-limited sharpness (Laplacian variance after a
     sigma-1 blur — the grain-insensitive metric of
-    docs/final-splat-alignment-guide.md) inside the frame's own matte, eroded
+    docs/design-notes.md#the-deliverable-training-train_final_splat) inside the frame's own matte, eroded
     5 px so the silhouette edge does not score; `head` is the top 16% of the
     subject's extent. `psnr` is the render against the frame in the same
     matte — the guide's `fidelity`, the number that RISES when detail is

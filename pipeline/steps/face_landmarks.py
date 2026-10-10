@@ -132,8 +132,8 @@ class DetectFaceLandmarksStep(Step):
               "MediaPipe's face detection / presence confidence floor",
               minimum=0.0, maximum=1.0, advanced=True),
         Param("crop_padding", float, 0.75,
-              "How far to pad the mesh head's projected extent before landmarking "
-              "the crop, as a fraction of that extent on each side",
+              "Padding around the head crop, as a fraction of its size on each "
+              "side",
               minimum=0.0, advanced=True),
     )
 
@@ -326,16 +326,17 @@ class FaceLandmarkMaskStep(Step):
     """
 
     PARAMS = (
+        # MediaPipe's outline sits on the skin at the jaw and the hairline; a
+        # little margin keeps the transition inside the support region rather
+        # than on its edge.
         Param("dilate_frac", float, 0.06,
-              "Grow the landmark hull by this fraction of the face's larger "
-              "side before intersecting. MediaPipe's outline sits on the skin "
-              "at the jaw and the hairline; a little margin keeps the "
-              "transition inside the support region rather than on its edge",
+              "Grow the face outline by this fraction of the face's larger side",
               minimum=0.0),
+        # 0 cuts hard, which hands pointmap_splat a rim of opaque Gaussians —
+        # see the class docstring.
         Param("feather_frac", float, 0.03,
-              "Fall the hull off to zero over this fraction of the face's "
-              "larger side. 0 cuts hard, which hands pointmap_splat a rim of "
-              "opaque Gaussians — see the class docstring", minimum=0.0),
+              "Soft edge width of the face mask, as a fraction of the face's "
+              "larger side", minimum=0.0),
     )
 
     def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:

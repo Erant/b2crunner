@@ -459,7 +459,7 @@ class TestWhatItRefuses(ApiTestCase):
         )
 
     def test_an_unknown_workflow(self):
-        self.assertRefused(self.submit_sheet(workflow="fast_helical_shell"), "No such workflow")
+        self.assertRefused(self.submit_sheet(workflow="no_such_workflow"), "No such workflow")
 
 
 class TestWatching(ApiTestCase):
