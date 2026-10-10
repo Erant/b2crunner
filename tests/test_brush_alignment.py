@@ -545,6 +545,9 @@ class TestTheAlignmentDebugDirectory(unittest.TestCase):
         with tempfile.TemporaryDirectory() as export:
             params = step_class.resolve_params({
                 "export_dir": export, "align_iters": 4,
+                # The pipeline's own loop: under `auto` an image whose
+                # b2ctrain aligns in-process runs brush once, and never dies.
+                "align_backend": "pipeline",
                 "align_debug_dir": str(directory)})
             with self.assertRaises(RuntimeError):
                 # The REAL warp here, not the fake the other tests patch in,

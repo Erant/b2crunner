@@ -290,6 +290,10 @@ class TestEveryRunOnTheVolume(_BundleCase):
     def test_clear_deletes_every_run_that_is_over_and_nothing_in_flight(self):
         from pipeline.gpu_scheduler import GpuScheduler
 
+        # Started first: a scheduler fails, at its start, any status a
+        # previous server left running (2c5979a). This one is in flight now.
+        scheduler = GpuScheduler(gpu_count=1, work_dir=self.jobs,
+                                 spawn=lambda *a: self.fail("nothing was submitted"))
         for name, status in (("done", "done"), ("failed", "failed"),
                              ("cancelled", "cancelled"), ("in-flight", "running")):
             run = _run_dir(self.runs, colmap=True, ply=False, name=name)
@@ -299,8 +303,6 @@ class TestEveryRunOnTheVolume(_BundleCase):
         _run_dir(self.runs, colmap=True, ply=False, name="from-the-cli")
         (self.runs / "done-result.zip").write_bytes(b"zip")
         (self.runs / runs.BUNDLE_NAME).write_bytes(b"zip")
-        scheduler = GpuScheduler(gpu_count=1, work_dir=self.jobs,
-                                 spawn=lambda *a: self.fail("nothing was submitted"))
 
         with unittest.mock.patch.object(runs, "output_dir", lambda: self.runs):
             cleared = runs.clear_finished_runs(scheduler)
