@@ -25,7 +25,7 @@ from typing import Dict, List, Optional
 from unittest import mock
 
 from pipeline.gpu_scheduler import GpuScheduler, detect_gpu_count
-from pipeline.run_state import RunJob, RunState
+from pipeline.run_state import RunJob, RunState, StepRecord
 
 
 class _FakeProcess:
@@ -189,6 +189,31 @@ class TestGpuScheduler(unittest.TestCase):
 
         _wait_until(lambda: self.scheduler.snapshot("a").status == "failed")
         self.assertIn("-9", self.scheduler.snapshot("a").message)
+        # ...and on disk, which is all that is left after a restart.
+        on_disk = RunState.from_dict(json.loads(self.spawner.calls[0]["status_path"].read_text()))
+        self.assertEqual(on_disk.status, "failed")
+
+    def test_a_restart_fails_the_runs_its_predecessor_left_live(self):
+        """A status file still `running` when the server starts has no
+        worker behind it; finished ones are left as they are."""
+        work = Path(self.tmp.name)
+        for name, status in (("lost", "running"), ("waiting", "queued"), ("over", "done")):
+            (work / f"{name}.status.json").write_text(json.dumps(RunState(
+                name=name, status=status, message="[3/9] train",
+                steps=[StepRecord(1, "a", "a", "done"), StepRecord(2, "b", "b", "running")],
+            ).to_dict()))
+
+        GpuScheduler(gpu_count=1, work_dir=work, spawn=self.spawner)
+
+        read = lambda n: RunState.from_dict(json.loads((work / f"{n}.status.json").read_text()))
+        for name in ("lost", "waiting"):
+            state = read(name)
+            self.assertEqual(state.status, "failed")
+            self.assertTrue(state.message.startswith("[3/9] train: "))
+            self.assertGreater(state.finished, 0)
+            self.assertEqual([s.status for s in state.steps], ["done", "failed"])
+        self.assertEqual(read("over").status, "done")
+        self.assertEqual(read("over").steps[1].status, "running")
 
     def test_gpu_status_reports_busy_slots_and_their_run(self):
         self.scheduler.submit(_job("a"))

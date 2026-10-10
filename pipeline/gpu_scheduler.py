@@ -74,6 +74,20 @@ def detect_gpu_count() -> int:
     return max(1, sum(line.startswith("GPU ") for line in result.stdout.splitlines()))
 
 
+def _publish(status_path: Path, state: RunState) -> None:
+    """Write a terminal status the worker never got to, by atomic replace
+    as the worker does. Steps it left `running` died with it."""
+    for step in state.steps:
+        if step.status == "running":
+            step.status = "failed"
+    tmp = status_path.with_suffix(".tmp")
+    try:
+        tmp.write_text(json.dumps(state.to_dict()))
+        os.replace(tmp, status_path)
+    except OSError as error:
+        logger.warning("could not write the status of run '%s': %s", state.name, error)
+
+
 @dataclass
 class _Slot:
     gpu_index: int
@@ -112,6 +126,32 @@ class GpuScheduler:
         self._queue: "deque[RunJob]" = deque()
         self._states: Dict[str, RunState] = {}
         self._order: List[str] = []  # submission order, for the UI's run picker
+        self._reap_orphans()
+
+    def _reap_orphans(self) -> None:
+        """Mark failed every run a status file still calls live.
+
+        This scheduler is the only thing that starts workers into
+        `work_dir`, and it has started none yet, so a `queued` or `running`
+        status file here belongs to a worker the previous server process
+        lost: killed with it, or killed before `_watch` wrote the file (it
+        only did since 2026-10-10). Left alone, those runs show as in
+        flight forever. A worker that did outlive its server republishes
+        its whole state at the next step, so it corrects this itself.
+        """
+        for path in sorted(self._work_dir.glob("*.status.json")):
+            try:
+                state = RunState.from_dict(json.loads(path.read_text()))
+                finished = path.stat().st_mtime
+            except (OSError, ValueError):
+                continue
+            if state.status not in ("queued", "running"):
+                continue
+            state.status = "failed"
+            state.finished = finished
+            state.message = f"{state.message}: the worker was lost (server restarted)".lstrip(": ")
+            _publish(path, state)
+            logger.info("run '%s' had no worker left; marked failed", state.name)
 
     @property
     def gpu_count(self) -> int:
@@ -199,6 +239,9 @@ class GpuScheduler:
                 state.status = "failed"
                 state.finished = time.time()
                 state.message = f"worker exited unexpectedly (code {process.returncode})"
+                # The file too: it is what `discover_runs` reads once this
+                # process has forgotten the run.
+                _publish(status_path, state)
 
             if slot.process is process:
                 slot.process = None
