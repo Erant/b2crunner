@@ -1,170 +1,70 @@
-# b2c_runner
+# b2crunner
 
-Standalone (non-ComfyUI) execution engine for the Body2COLMAP pipeline,
-extracted from `ComfyUI-Body2COLMAP/pipeline`. See [pipeline/README.md](pipeline/README.md)
-for the full design doc, module map, and current status.
+Turns a front/back reference sheet (or a single photo) of a person into a
+Gaussian splat of them, delivered as a glTF subject file (`scene.glb`) plus a
+COLMAP dataset.
 
-Every node in the ComfyUI pack now has a native counterpart. One workflow
-ships:
+## Run
 
-| workflow | starts from | stages |
+Everything ships in one Docker image that serves a web UI and an HTTP API on
+port 7860:
+
+```bash
+export HF_TOKEN=hf_...
+./run.sh [DATA_DIR]        # DATA_DIR is mounted at /data; outputs land in /data/output
+```
+
+Or from a Python environment with the step venvs set up:
+
+```bash
+python -m pipeline.cli doctor                                # what this machine can run
+python -m pipeline.cli run helical --reference-image sheet.png
+python -m pipeline.cli ui                                    # web UI + /api/v1
+```
+
+Set `B2C_API_TOKEN` to guard the UI (login password) and enable the API.
+
+## Model weights
+
+Weights are prefetched at startup, and a run waits only for the ones its
+workflow needs. Hugging Face models go through `huggingface_hub`'s normal
+cache, so any existing cache is reused: outside Docker, `HF_HOME` /
+`HF_HUB_CACHE` are honoured as usual. In Docker, `B2C_WEIGHTS_DIR` points
+the hub cache at a mounted directory, and `./run.sh` already binds your
+`~/.cache/huggingface` there read-only (override the host path with
+`B2C_WEIGHTS_HOST_DIR`). Read-only means a model missing from that cache
+fails instead of downloading; drop the `:ro` in
+`docker/docker-compose.weights.yml` to let it download. Weights that aren't
+on the Hugging Face hub go to `$B2C_MODELS_DIR` (default `/data/models`). See
+[docs/docker.md](docs/docker.md#reusing-weights-you-already-have-2026-09-23).
+
+`helical` needs all of the following, about 79 GB in total. Gated repos need
+an `HF_TOKEN` whose account has accepted the model's licence.
+
+| Model | Used for | Download |
 |---|---|---|
-| `helical` | a front/back reference sheet | a bootstrap prologue — split the sheet, reconstruct a body, nod the craned head back, build a Gaussian splat of the subject's face from a crop of the front half and composite it onto a circular orbit of outline+skeleton renders, warp the photo onto the anchor frame — then the full native port of the ComfyUI `fast helical` pipeline: two denoise passes and two splat trainings around a helical re-render. The first of those trainings also gets *supporting views* — a cap of renders of the face splat, which is what carries the photographed face through two denoise passes (the stage-1 body shells that used to join it were measured to cost more than they bought and left the workflow on 2026-09-06). `--param run_upscale=false` drops the SeedVR2 upscale (the old `fast_helical` workflow) to isolate it when output looks wrong |
-| `helical_shell` | the same sheet or photo | EXPERIMENT (2026-09-19): `helical` with its first denoise on a shallow helix instead of the circle — the drawings start on the photograph and climb ten degrees over one turn, and the last frame (or two) of the control video is a render of a whole-body pointmap *shell* of the photograph, kept by the denoise, with a one-sentence prompt hint that the camera rises. Everything after pass 1 is `helical`'s, verbatim (a test keeps it so); the settings at the top of the file are the A/B arms. No shell render reaches either training |
+| `silveroxides/Wan_2.2-fp8_scaled_hybrid` (two VACE experts) | video denoise | 35.2 GB |
+| `linoyts/Wan2.2-VACE-Fun-14B-diffusers` (VAE, text encoder, scheduler) | video denoise | 11.9 GB |
+| `lightx2v/Wan2.2-Lightning` (distill LoRAs) | video denoise | 1.2 GB |
+| `facebook/sapiens2-pointmap-1b` | pointmap / depth | 6.5 GB |
+| `facebook/sapiens2-seg-1b` | body-part segmentation | 6.5 GB |
+| `facebook/sapiens2-normal-1b` | normal maps | 6.2 GB |
+| SeedVR2 3B fp8 DiT + VAE | upscale | 6.0 GB |
+| `facebook/sam-3d-body-dinov3` (gated) | body reconstruction | 2.8 GB |
+| `Ruicheng/moge-2-vitl-normal` | focal-length estimate | 1.3 GB |
+| `briaai/RMBG-2.0` (gated) | background removal | 0.9 GB |
+| COLMAP ALIKED-N32 + LightGlue ONNX | camera refinement | 70 MB |
+| `facebookresearch/dinov3` (torch.hub source) | SAM 3D Body backbone code | 20 MB |
+| MediaPipe face landmarker + person detector | face / figure detection | 20 MB |
 
-An alternative bootstrap — the photo-to-splat *shell*, a body-wide
-Gaussian shell with a pose refit against it and a band of frames rendered
-off it (`fast_helical_shell.yaml`) — was tried alongside and retired on
-2026-09-04; it lives in git history.
+## More
 
-**`helical` has not been run end-to-end on a pod** — its
-bootstrap prologue has never executed on real hardware. The
-[coverage section](pipeline/README.md#coverage-vs-the-comfyui-node-pack)
-tracks what is verified against what.
-
-Both workflows end by producing whichever deliverables you ask for, under
-the run's output directory:
-
-```
-<run>/colmap/                cameras.txt, images.txt, points3D.txt, images/, normals/
-<run>/ply/                   scene.glb — the subject file (b2cgltf SPEC.md: splat,
-                             refitted body + skeleton, cameras, images) — and
-                             scene.ply, the bare splat; the Results tab packages
-                             one of the two (glTF by default), nothing beside it;
-                             with "Rig splat" on, scene.glb is rigged by b2crig
-                             and rom_tour.clip.glb beside it poses it
-<run>/debug/                 camera dumps, face splat stats,
-                             denoise_pass1_input/ — the control video the
-                             first denoise is handed — and
-                             intermediate_splat.ply — the splat the helical
-                             re-render is built from
-<run>/colmap_intermediate/   debug: what the first brush training was fed
-<run>/colmap_preupscale/     debug: the same, from the pre-upscale frames
-                             (upscale runs only)
-```
-
-The last three ride into the result .zip under `debug/` when you ask for
-it at packaging time (Results tab "Include debug/", `/result?debug=true`).
-The two COLMAP datasets are written only with the "Extra debug outputs"
-setting (`extra_debug`, off by default).
-
-The Results tab's **Open in 3D viewer ↗** opens a run's `scene.glb` in
-[b2cviewer](https://github.com/Erant/b2cviewer) in a browser tab of its own,
-served by the same server at `/viewer/` (`pipeline/viewer.py`). It needs a
-b2cviewer checkout at `B2C_VIEWER_DIR` (default `/opt/b2cviewer`); without
-one there is no button. **`/viewer/` is not behind the UI's login.**
-
-**Rig splat** (an Outputs checkbox, off by default; `--param rig_splat=true`)
-hands the finished subject file to [b2crig](https://github.com/Erant/b2crig)
-(`steps/rig_subject.py` runs its `tools/rig_subject.py`): the cage layers, a
-knuckle split of the hand splats, a minute's pose containment fine-tune
-against `colmap/` (so posed limbs keep their splats inside the figure), the
-binding (b2cgltf SPEC 5), and a `rom_tour` clip through the range-of-motion
-poses so the viewer has something to play. The unrigged file stays in
-`debug/rig/`. It needs the body refit and a b2crig checkout (`/opt/b2crig` in
-the image, `B2CRIG_DIR` elsewhere); `pipeline.cli doctor`'s b2crig check says
-whether it can run.
-
-## Install
-
-```bash
-pip install -r requirements.txt
-```
-
-The Gaussian-splat steps additionally need `plyfile` for PLY I/O, and
-`render_splat` needs the `brush-splat-render` binary on `PATH` — in the
-image that name is a shim over `b2ctrain render`, the CUDA trainer both
-trainings run (`docker/Dockerfile`, docs/docker.md) — see `requirements.txt`.
-Face-landmark detection needs `mediapipe` (CPU-only); no shipped workflow
-uses it any more — `helical`'s face splat replaced it — but the
-step and its `render` params are still there. The `pointmap_splat` family
-needs `scipy`, which arrives anyway as a transitive dependency of
-`body2colmap` (via `pyrender`).
-
-## Quickstart
-
-```bash
-# from a front/back reference sheet (subject facing front on the left, seen
-# from behind on the right) — the workflow splits it and renders its own views
-python -m pipeline.cli run helical --reference-image sheet.png \
-    --prompt "a woman in a red jacket"
-
-# the same thing without the upscaler
-python -m pipeline.cli run helical --reference-image sheet.png \
-    --param run_upscale=false
-
-# just the COLMAP dataset — skips a 30,000-iteration brush training
-python -m pipeline.cli run helical --reference-image sheet.png \
-    --param export_ply=false
-
-# the form the pipeline declares — its settings and its outputs — then
-# every step's own params (add --all for the ones nothing overrides)
-python -m pipeline.cli params helical
-
-# with the two debug COLMAP datasets — including the one the first brush
-# training is handed, which is what to look at when the helical re-render
-# comes out wrong
-python -m pipeline.cli run helical --reference-image sheet.png \
-    --param extra_debug=true
-
-# what can this machine actually run? (GPU, Vulkan, EGL, venvs, HF access)
-python -m pipeline.cli doctor
-
-# the web UI: upload a reference sheet, or a .zip of image/prompt pairs (one
-# run per pair, fanned across every GPU — and an optional image1.yaml beside
-# a pair runs that one at its own settings); watch progress, pull the result
-# back as one .zip. Its Settings box is the workflow's own `settings:`
-# block plus the switches in `outputs:`; the ~300 per-step knobs are still all
-# there, behind the "Per-step settings" fold.
-#
-# The same command also serves an HTTP API at /api/v1 on the same port —
-# submit, poll, download, cancel — for everything a browser is the wrong
-# tool for. Both need B2C_API_TOKEN set: the API takes it as a bearer
-# token, the UI as its login password. Without it neither is guarded and
-# the API is not served at all. See docs/runpod.md, "Automating it".
-python -m pipeline.cli ui            # needs the `ui` extra (gradio, fastapi, uvicorn)
-
-# ...and a client for it. No gradio, no fastapi, no torch — the plain
-# `requirements.txt` install is enough, so it runs from a laptop that
-# could not host the pipeline. `api run` does the whole job:
-# submit, print each stage as it finishes with what it cost, download the
-# result .zip. One subcommand per route besides.
-export B2C_API_URL=https://<pod-id>-7860.proxy.runpod.net B2C_API_TOKEN=...
-python -m pipeline.cli api run sheet.png --prompt "a woman in a red jacket" \
-    --param run_upscale=false -o results/
-python -m pipeline.cli api runs
-python -m pipeline.cli api follow <run>
-
-# ...and stop paying for it. The container knows how to stop itself; what
-# the HOST should do about that comes from B2C_SHUTDOWN_COMMAND on the
-# template (`runpodctl stop pod $RUNPOD_POD_ID`, `shutdown -h now`, a
-# webhook), because this image is not a RunPod image. Refused while a run
-# is still going unless you force it.
-python -m pipeline.cli api run sheet.png -o results/ --shutdown-when-done
-python -m pipeline.cli api shutdown
-
-python -m pipeline.cli workflows     # what's available
-python -m pipeline.cli steps
-```
-
-Runs write to `$B2C_OUTPUT_DIR` (default `/data/output`, falling back to a
-repo-local directory when there's no volume), and each one leaves a
-timestamped log under `$B2C_LOG_DIR`. See [pipeline/paths.py](pipeline/paths.py).
-
-## Deploying
-
-One image holds every step's venv plus the `b2ctrain` binary (the splat
-trainer, and the rasteriser through a `brush-splat-render` shim), and serves the
-web UI and the HTTP API by default, on one port. [docs/runpod.md](docs/runpod.md)
-has the pod template settings, the `B2C_API_TOKEN` both are guarded by, the
-curl recipes under **Automating it**, and the debugging recipes;
-[docs/docker.md](docs/docker.md) has the design rationale.
+- [docs/runpod.md](docs/runpod.md) — deploying on a pod, API usage
+- [docs/docker.md](docs/docker.md) — the image
+- [pipeline/README.md](pipeline/README.md) — design and module map
 
 ## Tests
-
-Stdlib `unittest`, no pytest dependency:
 
 ```bash
 python -m unittest discover -s tests -t .
 ```
-
