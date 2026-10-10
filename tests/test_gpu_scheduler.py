@@ -215,6 +215,66 @@ class TestGpuScheduler(unittest.TestCase):
         self.assertEqual(read("over").status, "done")
         self.assertEqual(read("over").steps[1].status, "running")
 
+    def test_a_queued_run_is_on_disk_the_moment_it_is_submitted(self):
+        """Before a slot takes it, the files are the only copy that outlives
+        the server — 2026-10-10 a host freeze lost two queued runs' prompts."""
+        scheduler = GpuScheduler(gpu_count=1, work_dir=Path(self.tmp.name), spawn=self.spawner)
+        scheduler.submit(_job("running"))
+        job = _job("waiting")
+        job.prompt = "a prompt nobody wrote down"
+        scheduler.submit(job)
+
+        work = Path(self.tmp.name)
+        self.assertEqual(RunJob.from_dict(json.loads((work / "waiting.job.json").read_text())), job)
+        state = RunState.from_dict(json.loads((work / "waiting.status.json").read_text()))
+        self.assertEqual(state.status, "queued")
+
+    def test_a_restart_queues_again_what_its_predecessor_left_waiting(self):
+        """In submission order, and dispatched; the run that was running
+        is failed, not started over."""
+        work = Path(self.tmp.name)
+        first = GpuScheduler(gpu_count=1, work_dir=work, spawn=self.spawner)
+        for name in ("running", "w-2", "w-1", "w-3"):
+            first.submit(_job(name))
+        # The server dies here: no shutdown, nothing written.
+
+        spawner = _FakeSpawner()
+        second = GpuScheduler(gpu_count=1, work_dir=work, spawn=spawner)
+
+        read = lambda n: RunState.from_dict(json.loads((work / f"{n}.status.json").read_text()))
+        self.assertEqual(read("running").status, "failed")
+        self.assertEqual([call["run_name"] for call in spawner.calls], ["w-2"])
+        self.assertEqual([s.name for s in second.list_runs()], ["w-2", "w-1", "w-3"])
+        self.assertEqual(second.queued_count(), 2)
+        spawner.complete("w-2")
+        _wait_until(lambda: [c["run_name"] for c in spawner.calls] == ["w-2", "w-1"])
+
+    def test_a_restart_after_shutdown_queues_the_dropped_runs_again(self):
+        work = Path(self.tmp.name)
+        first = GpuScheduler(gpu_count=1, work_dir=work, spawn=self.spawner)
+        first.submit(_job("running"))
+        first.submit(_job("waiting"))
+        first.shutdown()
+
+        spawner = _FakeSpawner()
+        GpuScheduler(gpu_count=1, work_dir=work, spawn=spawner)
+        self.assertEqual([call["run_name"] for call in spawner.calls], ["waiting"])
+
+    def test_a_cancelled_queued_run_stays_cancelled_after_a_restart(self):
+        work = Path(self.tmp.name)
+        first = GpuScheduler(gpu_count=1, work_dir=work, spawn=self.spawner)
+        for name in ("running", "cancel-one", "cancel-all"):
+            first.submit(_job(name))
+        first.cancel("cancel-one")
+        first.cancel_all()
+
+        spawner = _FakeSpawner()
+        GpuScheduler(gpu_count=1, work_dir=work, spawn=spawner)
+        self.assertEqual(spawner.calls, [])
+        for name in ("cancel-one", "cancel-all"):
+            state = RunState.from_dict(json.loads((work / f"{name}.status.json").read_text()))
+            self.assertEqual(state.status, "cancelled")
+
     def test_gpu_status_reports_busy_slots_and_their_run(self):
         self.scheduler.submit(_job("a"))
         _wait_until(lambda: len(self.spawner.calls) == 1)

@@ -1,10 +1,15 @@
 """Fans submitted runs out across every GPU on the box, one `pipeline.run_worker`
 process per physical GPU at a time, first-free assignment, FIFO beyond that.
 
-No queue file, socket, or database: this is in-memory state inside the
-single Gradio process (see `pipeline.webui`), the same shape the old
-single-run `RunManager` used — a lock, some state, a background thread —
-just N slots wide instead of one. A run crosses into its own OS process
+No socket or database: this is in-memory state inside the single Gradio
+process (see `pipeline.webui`), the same shape the old single-run
+`RunManager` used — a lock, some state, a background thread — just N slots
+wide instead of one. The queue is backed by files, though: a run's
+`<name>.job.json` and a `queued` status are written the moment it is
+submitted, and a restarted server picks those runs up again in submission
+order (`_recover`). Before 2026-10-10 the job file was only written when a
+slot took the run, so a crash or restart lost every queued run, prompt and
+all. A run crosses into its own OS process
 because CUDA context isolation between two GPUs is a property of the OS
 process boundary (`CUDA_VISIBLE_DEVICES`), not something achievable by
 juggling `torch.cuda.set_device` inside one interpreter across N cards and
@@ -74,18 +79,23 @@ def detect_gpu_count() -> int:
     return max(1, sum(line.startswith("GPU ") for line in result.stdout.splitlines()))
 
 
+def _write_json(path: Path, data: Dict, run_name: str) -> None:
+    """By atomic replace, as the worker writes its status."""
+    tmp = path.with_suffix(".tmp")
+    try:
+        tmp.write_text(json.dumps(data))
+        os.replace(tmp, path)
+    except OSError as error:
+        logger.warning("could not write %s of run '%s': %s", path.name, run_name, error)
+
+
 def _publish(status_path: Path, state: RunState) -> None:
-    """Write a terminal status the worker never got to, by atomic replace
-    as the worker does. Steps it left `running` died with it."""
+    """Write a status the worker never got to. Steps it left `running`
+    died with it."""
     for step in state.steps:
         if step.status == "running":
             step.status = "failed"
-    tmp = status_path.with_suffix(".tmp")
-    try:
-        tmp.write_text(json.dumps(state.to_dict()))
-        os.replace(tmp, status_path)
-    except OSError as error:
-        logger.warning("could not write the status of run '%s': %s", state.name, error)
+    _write_json(status_path, state.to_dict(), state.name)
 
 
 @dataclass
@@ -126,19 +136,29 @@ class GpuScheduler:
         self._queue: "deque[RunJob]" = deque()
         self._states: Dict[str, RunState] = {}
         self._order: List[str] = []  # submission order, for the UI's run picker
-        self._reap_orphans()
+        self._recover()
 
-    def _reap_orphans(self) -> None:
-        """Mark failed every run a status file still calls live.
+    def _paths(self, run_name: str):
+        return (self._work_dir / f"{run_name}.job.json",
+                self._work_dir / f"{run_name}.status.json")
+
+    def _recover(self) -> None:
+        """Take back the runs the previous server process left queued, and
+        fail the ones it left running.
 
         This scheduler is the only thing that starts workers into
-        `work_dir`, and it has started none yet, so a `queued` or `running`
-        status file here belongs to a worker the previous server process
-        lost: killed with it, or killed before `_watch` wrote the file (it
-        only did since 2026-10-10). Left alone, those runs show as in
-        flight forever. A worker that did outlive its server republishes
-        its whole state at the next step, so it corrects this itself.
+        `work_dir`, and it has started none yet. A `queued` status that
+        never started, with its job file beside it, is a run that was
+        waiting for a slot: it goes back on the queue, in the order the
+        job files were written (submission order). A `running` status (or
+        a `queued` one with no job file, from before job files were written
+        at submit) belongs to a worker the previous server lost: killed
+        with it, or killed before `_watch` wrote the file. Left alone, those
+        show as in flight forever. A worker that did outlive its server
+        republishes its whole state at the next step, so it corrects this
+        itself.
         """
+        requeue = []
         for path in sorted(self._work_dir.glob("*.status.json")):
             try:
                 state = RunState.from_dict(json.loads(path.read_text()))
@@ -147,11 +167,32 @@ class GpuScheduler:
                 continue
             if state.status not in ("queued", "running"):
                 continue
+            job_path = self._work_dir / path.name.replace(".status.json", ".job.json")
+            if state.status == "queued" and not state.started:
+                try:
+                    job = RunJob.from_dict(json.loads(job_path.read_text()))
+                    requeue.append((job_path.stat().st_mtime_ns, job.run_name, job, state))
+                    continue
+                except (OSError, ValueError, KeyError) as error:
+                    logger.warning("run '%s' was queued but its job file is unreadable: %s",
+                                   state.name, error)
             state.status = "failed"
             state.finished = finished
             state.message = f"{state.message}: the worker was lost (server restarted)".lstrip(": ")
             _publish(path, state)
             logger.info("run '%s' had no worker left; marked failed", state.name)
+
+        if not requeue:
+            return
+        requeue.sort(key=lambda item: item[:2])
+        with self._lock:
+            for _, name, job, state in requeue:
+                self._states[name] = state
+                self._order.append(name)
+                self._queue.append(job)
+            self._dispatch_locked()
+        logger.info("re-queued %d run(s) the previous server left waiting: %s",
+                    len(requeue), ", ".join(item[1] for item in requeue))
 
     @property
     def gpu_count(self) -> int:
@@ -165,10 +206,16 @@ class GpuScheduler:
                 raise RuntimeError(
                     "this scheduler is shutting down and is not accepting work"
                 )
-            self._states[job.run_name] = RunState(
+            state = RunState(
                 name=job.run_name, workflow=job.workflow_name, status="queued",
                 output_dir=Path(job.output_dir),
             )
+            # On disk before anything else: until a slot takes it, this is
+            # the only copy of the run that would survive the server.
+            job_path, status_path = self._paths(job.run_name)
+            _write_json(job_path, job.to_dict(), job.run_name)
+            _write_json(status_path, state.to_dict(), job.run_name)
+            self._states[job.run_name] = state
             self._order.append(job.run_name)
             self._queue.append(job)
             self._dispatch_locked()
@@ -190,28 +237,30 @@ class GpuScheduler:
             if slot.busy or not self._queue:
                 continue
             job = self._queue.popleft()
-            job_path = self._work_dir / f"{job.run_name}.job.json"
-            status_path = self._work_dir / f"{job.run_name}.status.json"
-            job_path.write_text(json.dumps(job.to_dict()))
+            job_path, status_path = self._paths(job.run_name)
+            _write_json(job_path, job.to_dict(), job.run_name)
+            # `running` before the worker exists, so a crash between here
+            # and its first status reads as a lost worker, not a queued run
+            # to start over.
+            state = self._states[job.run_name]
+            state.status = "running"
+            state.started = time.time()
+            state.gpu_index = slot.gpu_index
+            _write_json(status_path, state.to_dict(), job.run_name)
 
             try:
                 process = self._spawn(job, slot.gpu_index, job_path, status_path)
             except Exception:
                 logger.exception("failed to start a worker for run '%s'", job.run_name)
-                state = self._states[job.run_name]
                 state.status = "failed"
                 state.finished = time.time()
                 state.message = "failed to start a GPU worker process"
+                _publish(status_path, state)
                 continue
 
             slot.process = process
             slot.run_name = job.run_name
             slot.status_path = status_path
-
-            state = self._states[job.run_name]
-            state.status = "running"
-            state.started = time.time()
-            state.gpu_index = slot.gpu_index
 
             threading.Thread(
                 target=self._watch, args=(slot,), daemon=True,
@@ -298,11 +347,7 @@ class GpuScheduler:
             for job in list(self._queue):
                 if job.run_name == run_name:
                     self._queue.remove(job)
-                    state = self._states.get(run_name)
-                    if state is not None:
-                        state.status = "cancelled"
-                        state.message = "cancelled before it started"
-                        state.finished = time.time()
+                    self._cancel_queued_locked(run_name)
                     return
             for slot in self._slots:
                 if slot.run_name == run_name and slot.process is not None:
@@ -321,16 +366,23 @@ class GpuScheduler:
             names = [job.run_name for job in self._queue]
             self._queue.clear()
             for name in names:
-                state = self._states.get(name)
-                if state is not None:
-                    state.status = "cancelled"
-                    state.message = "cancelled before it started"
-                    state.finished = time.time()
+                self._cancel_queued_locked(name)
             for slot in self._slots:
                 if slot.process is not None:
                     slot.process.terminate()
                     names.append(slot.run_name)
         return names
+
+    def _cancel_queued_locked(self, run_name: str) -> None:
+        """Mark a run taken off the queue cancelled, in memory and on disk
+        (or the next server start would queue it again)."""
+        state = self._states.get(run_name)
+        if state is None:
+            return
+        state.status = "cancelled"
+        state.message = "cancelled before it started"
+        state.finished = time.time()
+        _publish(self._paths(run_name)[1], state)
 
     def forget(self, run_names: List[str]) -> None:
         """Drop these runs from the list, if they are over.
@@ -356,7 +408,9 @@ class GpuScheduler:
         signal to children it spawned unless this does it explicitly. It
         also drops whatever is still queued and latches `_stopping`, so a
         terminated worker's watcher cannot start the next job on the slot
-        it just freed.
+        it just freed. The dropped runs are cancelled in memory only: their
+        files still say `queued`, so the next server start queues them
+        again (`_recover`).
 
         `timeout` waits for the children to actually go. That matters when
         something is going to happen *after* this returns — a
@@ -375,7 +429,7 @@ class GpuScheduler:
                 state = self._states.get(name)
                 if state is not None and state.status in ("queued", "running"):
                     state.status = "cancelled"
-                    state.message = "cancelled: the server was shutting down"
+                    state.message = "stopped: the server was shutting down (queued again at its next start)"
                     state.finished = time.time()
             slots = [
                 (slot.run_name, slot.process)
