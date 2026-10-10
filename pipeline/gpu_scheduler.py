@@ -52,15 +52,26 @@ def _default_spawn(job: RunJob, gpu_index: int, job_path: Path, status_path: Pat
 
 
 def detect_gpu_count() -> int:
-    """`torch.cuda.device_count()`, falling back to 1 (today's behaviour)
-    on a machine with no GPU visible at all — a dev laptop, most CI."""
+    """The GPUs this process can see, falling back to 1 (today's behaviour)
+    on a machine with no GPU visible at all — a dev laptop, most CI.
+
+    `nvidia-smi -L` rather than `torch.cuda.device_count()`: importing torch
+    only to count cards cost the UI ~12 s of its start in a fresh container.
+    `nvidia-smi` ignores `CUDA_VISIBLE_DEVICES`, so a set one is counted
+    here instead, the way torch would have.
+    """
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if visible is not None:
+        return max(1, len([d for d in visible.split(",") if d.strip()]))
     try:
-        import torch
-        if torch.cuda.is_available():
-            return max(1, torch.cuda.device_count())
-    except ImportError:
-        pass
-    return 1
+        result = subprocess.run(
+            ["nvidia-smi", "-L"], capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return 1
+    if result.returncode != 0:
+        return 1
+    return max(1, sum(line.startswith("GPU ") for line in result.stdout.splitlines()))
 
 
 @dataclass

@@ -646,12 +646,21 @@ print('sageattention', md.version('sageattention'), '| diffusers accepts it:', _
 assert _CAN_USE_SAGE_ATTN, 'diffusers still refuses the installed sageattention'" \
     && rm -rf /tmp/SageAttention /tmp/sagewheel
 
-# Strip build leftovers that would otherwise be copied into the runtime
-# image: pip caches, and the compiled-object trees left by the source
-# builds above.
-RUN find /opt/venv_* -type d -name '__pycache__' -prune -exec rm -rf {} + \
-    && find /opt/venv_* -type f -name '*.pyc' -delete \
-    && rm -rf /root/.cache
+# Strip pip's caches, then compile the venvs: without .pyc in the image,
+# every new container wrote ~2,500 of them into its overlay layer on the
+# first imports, and that write, not the compile, held the UI's start for
+# ~2 minutes (torch 12 s, gradio 22 s on a warm page cache). unchecked-hash:
+# the venvs never change after this, so skip the per-import mtime check.
+# -f rewrites the timestamp .pyc pip left in place (compileall keeps them
+# otherwise); deleting them first instead cost minutes of per-file overlay
+# whiteouts, and the runtime stage copies only this final tree anyway.
+# `|| true`: compileall exits 1 on any file it cannot parse (test fixtures
+# and py2 leftovers ship in some wheels); those were never importable.
+RUN rm -rf /root/.cache \
+    && for v in /opt/venv_*; do \
+        "$v/bin/python" -m compileall -q -f -j 0 \
+            --invalidation-mode unchecked-hash "$v" > /dev/null || true; \
+    done
 
 
 # =============================================================================
@@ -1035,7 +1044,8 @@ COPY docker/envs.docker.yaml /opt/b2c_runner/pipeline/envs/envs.yaml
 # so it is re-pushed with every code change: PYTHONDONTWRITEBYTECODE and
 # --no-compile keep it to the editable-install files (~0.1 MB). Without them
 # pip's own modules and the smoke import's left ~22 MB of .pyc in the venvs
-# (python-builder prunes __pycache__, so nothing was already there).
+# (from before python-builder precompiled them; harmless now, kept for the
+# application's own modules, which are not in the venvs).
 RUN export PYTHONDONTWRITEBYTECODE=1; \
     for v in main wan22 seedvr2 sam3dbody; do \
         /opt/venv_${v}/bin/pip install --no-deps --no-compile -e . || exit 1; \

@@ -15,14 +15,16 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import tempfile
 import threading
 import time
 import unittest
 from pathlib import Path
 from typing import Dict, List, Optional
+from unittest import mock
 
-from pipeline.gpu_scheduler import GpuScheduler
+from pipeline.gpu_scheduler import GpuScheduler, detect_gpu_count
 from pipeline.run_state import RunJob, RunState
 
 
@@ -281,6 +283,40 @@ class TestGpuScheduler(unittest.TestCase):
 
         self.assertEqual(scheduler.snapshot("a").status, "failed")
         self.assertEqual(scheduler.gpu_status()[0]["busy"], False)
+
+
+class DetectGpuCountTest(unittest.TestCase):
+    """`nvidia-smi -L`, with `CUDA_VISIBLE_DEVICES` taking precedence the
+    way it would for torch, and 1 whenever nothing can be counted."""
+
+    def _run(self, stdout="", returncode=0, env=None, side_effect=None):
+        result = subprocess.CompletedProcess([], returncode, stdout=stdout, stderr="")
+        with mock.patch.dict(os.environ, env or {}, clear=False), \
+                mock.patch("pipeline.gpu_scheduler.subprocess.run",
+                           return_value=result, side_effect=side_effect) as run:
+            if env is None:
+                os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+            return detect_gpu_count(), run
+
+    def test_counts_the_gpu_lines(self):
+        stdout = ("GPU 0: NVIDIA GeForce RTX 5090 (UUID: GPU-a)\n"
+                  "GPU 1: NVIDIA GeForce RTX 5090 (UUID: GPU-b)\n")
+        self.assertEqual(self._run(stdout)[0], 2)
+
+    def test_mig_lines_are_not_counted_as_gpus(self):
+        stdout = ("GPU 0: NVIDIA A100 (UUID: GPU-a)\n"
+                  "  MIG 1g.10gb Device 0: (UUID: MIG-a)\n")
+        self.assertEqual(self._run(stdout)[0], 1)
+
+    def test_cuda_visible_devices_wins_and_skips_nvidia_smi(self):
+        count, run = self._run(env={"CUDA_VISIBLE_DEVICES": "2,3,5"})
+        self.assertEqual(count, 3)
+        run.assert_not_called()
+
+    def test_falls_back_to_one(self):
+        self.assertEqual(self._run(returncode=9)[0], 1)
+        self.assertEqual(self._run(side_effect=FileNotFoundError())[0], 1)
+        self.assertEqual(self._run(env={"CUDA_VISIBLE_DEVICES": ""})[0], 1)
 
 
 if __name__ == "__main__":
