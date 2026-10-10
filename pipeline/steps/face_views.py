@@ -361,7 +361,7 @@ def anchor_camera_pnp(object_points: np.ndarray, image_points: np.ndarray, K: np
 class FitHeadPerViewStep(Step):
     """The MHR head fitted to every landmarked frame: neck/head pose and expression, per view.
 
-    inputs:  {"mesh_output": dict — the refit body (vertices raw, pose_params, focal_length, faces),
+    inputs:  {"pose_params", "focal_length", "vertices" (raw), "faces": the refit body's,
               "world_from_raw": {...}, "face_correspondence": map_face_to_mesh's output,
               "face_views": detect_face_views' output,
               "face_landmarks": detect_face_landmarks' output on the anchor photograph,
@@ -413,10 +413,9 @@ class FitHeadPerViewStep(Step):
     def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
         import torch
 
-        mesh = inputs["mesh_output"]
-        if not isinstance(mesh, dict) or mesh.get("pose_params") is None:
-            raise KeyError("fit_head_per_view needs 'pose_params' inside mesh_output (the refit body's)")
-        pose_params = mesh["pose_params"]
+        pose_params = inputs.get("pose_params")
+        if pose_params is None:
+            raise KeyError("fit_head_per_view needs 'pose_params' (the refit body's)")
         if hasattr(pose_params, "item") and not isinstance(pose_params, dict):
             pose_params = pose_params.item()
         wfr = _check_world_from_raw(inputs, "fit_head_per_view")
@@ -443,7 +442,7 @@ class FitHeadPerViewStep(Step):
             raise ValueError(f"fit_head_per_view: the anchor's face_landmarks were detected on a {a_lw}x{a_lh} image "
                              f"but the photograph is {a_w}x{a_h}")
         anchor_px = np.asarray(lm["landmarks"], np.float64)[:, :2] * np.array([a_w, a_h])
-        focal = float(mesh["focal_length"])
+        focal = float(inputs["focal_length"])
         K_anchor = np.array([[focal, 0.0, a_w / 2.0], [0.0, focal, a_h / 2.0], [0.0, 0.0, 1.0]])
 
         # --- the views ----------------------------------------------------------
@@ -486,10 +485,10 @@ class FitHeadPerViewStep(Step):
         with torch.no_grad():
             v0, j0 = forward(torch.zeros(1, n_pose, device=device), torch.zeros(1, n_expr, device=device))
             raw0 = ((v0[0] - tw) @ Rw) / sw
-        drift = float(np.abs(raw0.cpu().numpy() - np.asarray(mesh["vertices"])).max())
+        drift = float(np.abs(raw0.cpu().numpy() - np.asarray(inputs["vertices"])).max())
         if drift > 1e-3:
             raise RuntimeError(f"fit_head_per_view: replaying the pose parameters does not reproduce the body "
-                               f"({drift * 1000:.2f} mm off); mesh_output and pose_params are from different fits")
+                               f"({drift * 1000:.2f} mm off); vertices and pose_params are from different fits")
         V0 = v0[0].cpu().numpy().astype(np.float64)
 
         R_a, t_a, pnp_rms = anchor_camera_pnp(V0[vf_np], anchor_px[lm_idx], K_anchor)
@@ -600,7 +599,7 @@ class FitHeadPerViewStep(Step):
             "anchor": {"R": R_anchor, "t": t_anchor, "K": K_anchor, "image_size": (int(a_w), int(a_h)),
                        "verts_world": verts_world[-1], "rms_px": float(r2n[-1]), "pnp_rms_px": pnp_rms},
             "expression_motion": expression_motion,
-            "faces": np.asarray(mesh["faces"], np.int32),
+            "faces": np.asarray(inputs["faces"], np.int32),
             "stats": stats,
         }}
 

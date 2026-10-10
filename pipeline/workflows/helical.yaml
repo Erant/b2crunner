@@ -3990,7 +3990,9 @@ steps:
   #    MHR model (sam3dbody env, the same checkpoint fit_head_to_face and
   #    refit_body loaded). The anchor photograph joins the batch through a
   #    PnP camera so its lids are fitted too — the eye texture below is
-  #    taken through them. 6.4 -> 2.1 px rms; ~20 s on a 4070 Ti.
+  #    taken through them. 6.4 -> 2.1 px rms; ~20 s on a 4070 Ti. Only the
+  #    refit body's four keys go in: the whole scene was a 7 GB pickle on
+  #    an extended orbit, and froze a 29 GB host on top of the worker.
   - id: fit_head_per_view
     step: fit_head_per_view
     dispatch: subprocess
@@ -4000,7 +4002,10 @@ steps:
       - ${globals.refit_body}
       - ${globals.export_ply}
     inputs:
-      mesh_output: scene
+      pose_params: scene.pose_params
+      focal_length: scene.focal_length
+      vertices: scene.vertices
+      faces: scene.faces
       world_from_raw: scene.world_from_raw
       face_correspondence: scene.face_correspondence
       face_views: scene.face_views
