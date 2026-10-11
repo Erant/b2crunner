@@ -121,6 +121,19 @@ class TestAltControlHook(unittest.TestCase):
             _alt_control_hook(step)(None, (), {"timestep": _Timestep(TIMESTEPS[1])})
 
 
+class _Embeds:
+    """Stands in for the T5 embedding batch: rows by slice, `.to` a no-op."""
+
+    def __init__(self, texts):
+        self.texts = list(texts)
+
+    def __getitem__(self, index):
+        return _Embeds(self.texts[index])
+
+    def to(self, *args, **kwargs):
+        return self
+
+
 class _Generator:
     def __init__(self):
         self.state = 0
@@ -194,8 +207,13 @@ class TestRunWiresTheAlternateControl(unittest.TestCase):
                 timesteps=list(TIMESTEPS),
             )
 
+            _execution_device = "cpu"
+
             def register_to_config(self, **kwargs):
                 pass
+
+            def encode_prompt(self, prompt, **kwargs):
+                return _Embeds(prompt), None
 
             def preprocess_conditions(self, video, mask, reference_images, *a, **k):
                 return video, mask, reference_images

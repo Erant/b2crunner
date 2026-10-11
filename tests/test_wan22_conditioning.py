@@ -147,6 +147,19 @@ class _FakeScheduler:
         return (sample,) if not return_dict else types.SimpleNamespace(prev_sample=sample)
 
 
+class _Embeds:
+    """Stands in for the T5 embedding batch: rows by slice, `.to` a no-op."""
+
+    def __init__(self, texts):
+        self.texts = list(texts)
+
+    def __getitem__(self, index):
+        return _Embeds(self.texts[index])
+
+    def to(self, *args, **kwargs):
+        return self
+
+
 def _conditioning_scale(*args):
     from pipeline.steps.wan22_vace_denoise import _conditioning_scale as fn
 
@@ -389,8 +402,14 @@ class _RunsTheStep:
             )
             transformer_2 = transformer
 
+            _execution_device = "cpu"
+
             def __init__(self):
                 self.scheduler = _FakeScheduler()
+
+            def encode_prompt(self, prompt, **kwargs):
+                calls.setdefault("encoded", []).append(list(prompt))
+                return _Embeds(prompt), None
 
             def register_to_config(self, **kwargs):
                 # What diffusers' ConfigMixin does, reduced to the one key
@@ -1102,6 +1121,95 @@ class TestSamplerPerExpert(_RunsTheStep, unittest.TestCase):
         line = next(m for m in caught.output if "sampler:" in m)
         self.assertIn("Euler high", line)
         self.assertIn("UniPC bh1", line)
+
+
+class TestStartStep(_RunsTheStep, unittest.TestCase):
+    """`start_step`: SDEdit, skipping the schedule's opening steps.
+
+    The schedule is trimmed where the loop reads it (`scheduler.timesteps`)
+    but every step NUMBER stays the full run's — the strength schedule, the
+    expert split and `skeleton_steps` are all written against steps 1..n, so
+    a pass starting at step 3 must call its first step 3, not 1. The latent
+    mix itself needs torch and is exercised by a real denoise.
+    """
+
+    def _scheduler(self, skip):
+        from pipeline.steps.wan22_vace_denoise import Wan22VaceDenoiseStep, _install_sigma_schedule
+
+        step = Wan22VaceDenoiseStep()
+        scheduler = _FakeScheduler()
+        _install_sigma_schedule(step, scheduler)
+        step._skip_steps = skip
+        scheduler.set_timesteps(6)
+        return step, scheduler
+
+    def test_the_loop_sees_only_the_steps_taken(self):
+        _, full = self._scheduler(0)
+        _, trimmed = self._scheduler(2)
+        self.assertEqual(len(full.timesteps), 6)
+        self.assertEqual(trimmed.timesteps, full.timesteps[2:])
+        self.assertEqual(trimmed.sigmas, full.sigmas[2:])
+        self.assertEqual(trimmed._b2c_full_timesteps, full.timesteps)
+
+    def test_step_numbers_stay_the_full_runs(self):
+        from pipeline.steps.wan22_vace_denoise import _nearest_step
+
+        step, scheduler = self._scheduler(2)
+        step._steps_high, step._steps_low = 2, 4
+        step._sampler_high, step._sampler_low = "euler", "uni_pc"
+        first = scheduler.timesteps[0]
+        self.assertEqual(_nearest_step(scheduler, first), 2)
+        self.assertEqual(step._sampler_at(scheduler, first), "uni_pc")
+
+    def test_a_start_past_the_last_step_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "start_step 7"):
+            self._run(start_step=7)
+
+    def test_the_default_is_the_full_run(self):
+        step, _ = self._run()
+        self.assertEqual(step._skip_steps, 0)
+
+
+class TestPromptCache(_RunsTheStep, unittest.TestCase):
+    """The T5 encode: once per distinct prompt per loaded pipeline, every
+    prompt of the run on the first pass, one prompt per call, and no
+    negative prompt at cfg 1."""
+
+    def test_the_bank_is_encoded_with_the_prompt_on_the_first_pass(self):
+        step, calls = self._run(prompt="a $SUBJECT_DESC$", prompt_bank=["a $SUBJECT_DESC$", "b"])
+        self.assertEqual(calls["encoded"], [["a $SUBJECT_DESC$"], ["b"]])
+        self.assertEqual(calls["prompt_embeds"].texts, ["a $SUBJECT_DESC$"])
+        self.assertNotIn("prompt", calls)
+
+    def test_a_cached_prompt_is_not_encoded_again(self):
+        from pipeline.steps.wan22_vace_denoise import Wan22VaceDenoiseStep
+
+        step = Wan22VaceDenoiseStep()
+        encoded = []
+        pipe = types.SimpleNamespace(
+            _execution_device="cpu",
+            encode_prompt=lambda prompt, **kwargs: (encoded.append(list(prompt)) or _Embeds(prompt), None),
+        )
+        step._encode_prompts(pipe, ["a", "b"])
+        step._encode_prompts(pipe, ["b", "a"])
+        step._encode_prompts(pipe, ["a", "c"])
+        self.assertEqual(encoded, [["a"], ["b"], ["c"]])
+
+    def test_no_negative_prompt_is_encoded_at_cfg_one(self):
+        _, calls = self._run(prompt="p", negative_prompt="ugly", cfg=1.0)
+        self.assertEqual(calls["encoded"], [["p"]])
+        self.assertIsNone(calls["negative_prompt_embeds"])
+
+    def test_under_guidance_the_negative_is_encoded_too(self):
+        _, calls = self._run(prompt="p", negative_prompt="ugly", cfg=3.0)
+        self.assertEqual(calls["encoded"], [["p"], ["ugly"]])
+        self.assertEqual(calls["negative_prompt_embeds"].texts, ["ugly"])
+
+    def test_unload_forgets_the_embeddings(self):
+        step, _ = self._run(prompt="p")
+        self.assertIn("p", step._prompt_cache)
+        step.unload()
+        self.assertEqual(step._prompt_cache, {})
 
 
 class TestReferenceFit(_RunsTheStep, unittest.TestCase):

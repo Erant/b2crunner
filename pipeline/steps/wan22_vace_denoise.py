@@ -585,6 +585,18 @@ def _install_sigma_schedule(step: "Wan22VaceDenoiseStep", scheduler) -> None:
             # directly, and a list raises there. Verified against 0.41.
             kwargs["sigmas"] = np.asarray(sigmas, dtype=np.float64)
         result = original(num_inference_steps, device=device, **kwargs)
+        # The whole schedule, before any trim: every hook that turns a
+        # timestep into a step number reads this (`_schedule`), so step
+        # numbers stay those of the full run when `start_step` skips its head.
+        scheduler._b2c_full_timesteps = [float(value) for value in scheduler.timesteps]
+        skip = step._skip_steps
+        if skip:
+            # What img2img pipelines do with `strength`: the loop walks
+            # `scheduler.timesteps`, so the run starts at the first one left.
+            # `sigmas` keeps its terminal entry; the step index initialises
+            # from the timestep, against the trimmed list.
+            scheduler.timesteps = scheduler.timesteps[skip:]
+            scheduler.sigmas = scheduler.sigmas[skip:]
         # ComfyUI's terminal-sigma substitution, for the variant that
         # needs it — see COMFY_TERMINAL_SIGMA. The timesteps are untouched:
         # only where the last step lands changes, from 0 to 0.001.
@@ -735,12 +747,22 @@ def _install_sampler(step: "Wan22VaceDenoiseStep", scheduler) -> None:
     scheduler.step = sampler_step
 
 
+def _schedule(scheduler) -> list:
+    """The run's whole schedule, as step numbers count it: what the last
+    `set_timesteps` laid down before a `start_step` trimmed its head, so
+    the first step taken is still step `start_step`, not step 1."""
+    full = getattr(scheduler, "_b2c_full_timesteps", None)
+    if full is not None:
+        return list(full)
+    return [float(value) for value in scheduler.timesteps]
+
+
 def _nearest_step(scheduler, timestep) -> Optional[int]:
-    """Which step of the live schedule `timestep` is, by nearest value —
+    """Which step of the run's schedule `timestep` is, by nearest value —
     the lookup `_step_index` does, without its plan bookkeeping."""
     if timestep is None:
         return None
-    timesteps = [float(value) for value in scheduler.timesteps]
+    timesteps = _schedule(scheduler)
     if not timesteps:
         return None
     value = _timestep_value(timestep)
@@ -807,6 +829,68 @@ def _handoff_hook(step: "Wan22VaceDenoiseStep"):
         return None
 
     return hook
+
+
+def _start_from_control(step: "Wan22VaceDenoiseStep", pipe) -> list:
+    """Make the next pipe() call start from the control video's own latents,
+    noised to the sigma of the first step it takes (`start_step`).
+
+    SDEdit on the video model. `prepare_video_latents` is wrapped to also
+    encode the control video whole — the mask splits it into inactive and
+    reactive halves for VACE, which is not the picture — and the reference
+    image's latent is kept in the leading slot(s) VACE gives it, so the
+    shapes are the ones the loop expects. `prepare_latents` then mixes that
+    with the noise the stock call would have drawn: flow matching's
+    x_sigma = sigma * noise + (1 - sigma) * x_0, at the first sigma left
+    after `set_timesteps` trimmed the schedule. Returns the names installed,
+    as _encode_alt_control does.
+    """
+    import torch
+
+    from diffusers.pipelines.wan.pipeline_wan_vace import retrieve_latents
+    from diffusers.utils.torch_utils import randn_tensor
+
+    state = {}
+    original_latents = pipe.prepare_video_latents
+    original_prepare = pipe.prepare_latents
+
+    def prepare_video_latents(video, mask, reference_images, generator=None, *args, **kwargs):
+        main = original_latents(video, mask, reference_images, generator, *args, **kwargs)
+        started = time.time()
+        vae = pipe.vae
+        encoded = retrieve_latents(vae.encode(video.to(dtype=vae.dtype)), generator,
+                                   sample_mode="argmax")
+        shape = (1, vae.config.z_dim, 1, 1, 1)
+        mean = torch.tensor(vae.config.latents_mean, device=encoded.device,
+                            dtype=torch.float32).view(shape)
+        inv_std = 1.0 / torch.tensor(vae.config.latents_std, device=encoded.device,
+                                     dtype=torch.float32).view(shape)
+        encoded = (encoded.float() - mean) * inv_std
+        leading = main.shape[2] - encoded.shape[2]  # the reference image's slot(s)
+        x0 = torch.cat([main[:, : encoded.shape[1], :leading].float().to(encoded.device), encoded],
+                       dim=2)
+        state["x0"] = x0
+        _sync()
+        logger.info("  start_step: control video encoded as the starting picture in %.1fs",
+                    time.time() - started)
+        return main
+
+    def prepare_latents(batch_size, num_channels_latents=16, height=480, width=832,
+                        num_frames=81, dtype=None, device=None, generator=None, latents=None):
+        if latents is not None or "x0" not in state:
+            return original_prepare(batch_size, num_channels_latents, height, width,
+                                    num_frames, dtype, device, generator, latents)
+        x0 = state.pop("x0").to(device=device, dtype=torch.float32)
+        noise = randn_tensor(tuple(x0.shape), generator=generator, device=device,
+                             dtype=torch.float32)
+        sigma = float(pipe.scheduler.sigmas[0])
+        logger.info("  start_step: starting at t=%.0f, sigma %.3f",
+                    float(pipe.scheduler.timesteps[0]), sigma)
+        return (sigma * noise + (1.0 - sigma) * x0).to(dtype=dtype or torch.float32)
+
+    pipe.prepare_video_latents = prepare_video_latents
+    pipe.prepare_latents = prepare_latents
+    return ["prepare_video_latents", "prepare_latents"]
 
 
 def _fit_reference(image: np.ndarray, width: int, height: int) -> np.ndarray:
@@ -955,7 +1039,7 @@ def _alt_control_hook(step: "Wan22VaceDenoiseStep"):
                 "control_hidden_states/timestep, so there is nothing to swap "
                 "or no way to tell which step this is"
             )
-        timesteps = [float(value) for value in step._pipe.scheduler.timesteps]
+        timesteps = _schedule(step._pipe.scheduler)
         value = float(timestep.flatten()[0])
         index = min(range(len(timesteps)), key=lambda i: abs(timesteps[i] - value))
         if index + 1 in step._skeleton_steps:
@@ -1032,6 +1116,14 @@ class Wan22VaceDenoiseStep(Step):
         Param("steps_low", int, 4,
               "Denoise steps for the low-noise expert (sets fine detail)",
               minimum=0),
+        # SDEdit for a pass whose control video is already the picture (a
+        # splat render): skip the opening steps and start from the control's
+        # own latents, noised to the first step taken. 3 on the default 2/4
+        # split is "the low-noise expert only", from t~868. 1 is the full run
+        # from pure noise, exactly as before.
+        Param("start_step", int, 1,
+              "Denoise step to start at; above 1, start from the control video "
+              "noised to that step instead of pure noise", minimum=1),
         # `beta` is ComfyUI's beta scheduler — Beta(0.6, 0.6) quantiles of the
         # training index, what the reference graph sampled on; it crowds a
         # short run into the noisy end (6 steps, shift 8: t = 1000, 988 | 955,
@@ -1108,7 +1200,17 @@ class Wan22VaceDenoiseStep(Step):
               "Denoise steps (1-based) that see the skeleton overlay; empty = all"),
         Param("prompt", str, "",
               "Positive prompt; $SUBJECT_DESC$ is replaced with the subject description"),
-        Param("negative_prompt", str, "", "Negative prompt"),
+        Param("negative_prompt", str, "",
+              "Negative prompt; only encoded when cfg is above 1 (at 1 it is never used)"),
+        # Every prompt the run's denoise passes will use, as the workflow
+        # knows them up front. The first pass encodes all of them in one
+        # text-encoder pass and the resident worker keeps the embeddings
+        # (~2 MB each), so T5 (11 GB, streamed over PCIe under low_vram) runs
+        # once per run rather than once per pass. Without it, each distinct
+        # prompt is still encoded only once.
+        Param("prompt_bank", list, None,
+              "All the prompts this run's denoise passes use ($SUBJECT_DESC$ "
+              "allowed); encoded together on the first pass", advanced=True),
         Param("length", int, None,
               "Frames to generate; empty means as many as the control video has"),
 
@@ -1200,6 +1302,10 @@ class Wan22VaceDenoiseStep(Step):
         # scheduler object that wrapper is on, so it goes on once.
         self._sigma_schedule = "beta"
         self._scheduled = None
+        # How many of the schedule's opening steps this pass skips
+        # (`start_step` - 1); read by the set_timesteps wrapper, so it is set
+        # only around the pipe() call and 0 otherwise.
+        self._skip_steps = 0
         # The hand-off plan: armed by _configure_sampler when
         # `handoff_reset` is on and both experts take steps, disarmed by the
         # low-noise expert's pre-hook the first time it fires — see
@@ -1221,6 +1327,10 @@ class Wan22VaceDenoiseStep(Step):
         # asked for it — see _alt_control_hook.
         self._alt_latents = None
         self._skeleton_steps = ()
+        # Prompt text (after $SUBJECT_DESC$) -> its T5 embedding, on the CPU.
+        # Lives as long as the loaded pipeline: a resident worker serves
+        # every pass of a run, so a prompt is encoded once per run.
+        self._prompt_cache: Dict[str, Any] = {}
 
     def load(self, params: Dict[str, Any]) -> None:
         """Build the pipeline around the pre-quantized fp8 transformers.
@@ -1235,6 +1345,8 @@ class Wan22VaceDenoiseStep(Step):
         correctly-shaped output. See pipeline/wan_fp8.py for how the key
         naming and the per-tensor scales are handled.
         """
+        # A new pipeline can mean a new text encoder.
+        self._prompt_cache = {}
         import torch
         from diffusers import WanVACEPipeline
 
@@ -1582,6 +1694,7 @@ class Wan22VaceDenoiseStep(Step):
 
     def unload(self) -> None:
         self._pipe = None
+        self._prompt_cache = {}
         import torch
 
         if torch.cuda.is_available():
@@ -1653,8 +1766,7 @@ class Wan22VaceDenoiseStep(Step):
                 "the wrong strength."
             )
         if self._timesteps is None:
-            timesteps = self._pipe.scheduler.timesteps
-            self._timesteps = [float(value) for value in timesteps]
+            self._timesteps = _schedule(self._pipe.scheduler)
             planned = len(self._scales)
             if len(self._timesteps) != planned:
                 raise RuntimeError(
@@ -1670,6 +1782,32 @@ class Wan22VaceDenoiseStep(Step):
             range(len(self._timesteps)),
             key=lambda index: abs(self._timesteps[index] - value),
         )
+
+    def _encode_prompts(self, pipe, texts) -> None:
+        """Put every one of `texts` in `_prompt_cache`, encoding the missing
+        ones back to back while the text encoder is on the card.
+
+        Under low_vram T5's 11 GB stream in over PCIe for the first encode
+        (~13 s) and the ones right after it take ~0.6 s, so a run's two
+        distinct prompts cost one load, not one per pass. One prompt per
+        call rather than a batch: a batched row differs from the prompt's
+        own encoding in bf16 (max 1.17, measured 2026-10-11), and one at a
+        time is exactly the call pipe() used to make itself."""
+        missing = [text for text in dict.fromkeys(texts) if text not in self._prompt_cache]
+        if not missing:
+            logger.info("  prompts: %d from the cache, no text-encoder pass",
+                        len(set(texts)))
+            return
+        started = time.time()
+        for text in missing:
+            embeds, _ = pipe.encode_prompt(
+                prompt=[text], do_classifier_free_guidance=False,
+                num_videos_per_prompt=1, device=pipe._execution_device,
+            )
+            self._prompt_cache[text] = embeds.to("cpu")
+        _sync()
+        logger.info("  prompts: encoded %d in %.1fs (%d cached for later passes)",
+                    len(missing), time.time() - started, len(self._prompt_cache))
 
     def _sampler_at(self, scheduler, timestep) -> str:
         """Which sampler this step belongs to: the high-noise expert's up to
@@ -1847,10 +1985,20 @@ class Wan22VaceDenoiseStep(Step):
         generator = torch.Generator(device=params["device"])
         generator.manual_seed(params["seed"])
 
-        prompt = params["prompt"]
         subject_desc = inputs.get("subject_desc")
-        if subject_desc and "$SUBJECT_DESC$" in prompt:
-            prompt = prompt.replace("$SUBJECT_DESC$", subject_desc)
+
+        def resolve(text: str) -> str:
+            if subject_desc and "$SUBJECT_DESC$" in text:
+                return text.replace("$SUBJECT_DESC$", subject_desc)
+            return text
+
+        prompt = resolve(params["prompt"])
+        # The negative prompt only matters under guidance: diffusers encodes
+        # it only when cfg > 1, and so does this.
+        negative = (params["negative_prompt"] or "") if params["cfg"] > 1.0 else None
+        wanted = [prompt] + [resolve(text) for text in params["prompt_bank"] or ()]
+        if negative is not None:
+            wanted.append(negative)
 
         # How hard the control video pushes, per denoise step and per VACE
         # injection layer. `vace_layers` is read off the model rather than
@@ -1899,7 +2047,14 @@ class Wan22VaceDenoiseStep(Step):
         # The sampler first: the split is placed against the timesteps the
         # scheduler will actually take, which the schedule and shift decide.
         self._configure_sampler(pipe, params)
+        self._skip_steps = 0
         self._set_expert_split(pipe, params["steps_high"], n_steps)
+        start_step = int(params["start_step"])
+        if not 1 <= start_step <= n_steps:
+            raise ValueError(
+                f"wan22_vace_denoise: start_step {start_step} is outside this run's "
+                f"1..{n_steps} denoise steps"
+            )
 
         # Weak skeleton: the stick-free copy of the drawing on every step
         # skeleton_steps does not name. Encoded inside the same call as the
@@ -1924,12 +2079,28 @@ class Wan22VaceDenoiseStep(Step):
                 )
             self._skeleton_steps = {int(s) for s in skeleton_steps}
             alt_video = [Image.fromarray(_bgr_to_rgb(frame)) for frame in alt_frames]
-            installed = _encode_alt_control(self, pipe, alt_video)
+            installed = list(_encode_alt_control(self, pipe, alt_video))
             logger.info(
                 "  weak skeleton: skeleton drawing on step(s) %s, stick-free "
                 "drawing on %s", sorted(self._skeleton_steps),
                 [s for s in range(1, n_steps + 1) if s not in self._skeleton_steps],
             )
+
+        # Last, after everything that can refuse the run: no text-encoder
+        # pass for a run that was never going to denoise.
+        self._encode_prompts(pipe, wanted)
+        device = pipe._execution_device
+        prompt_embeds = self._prompt_cache[prompt].to(device)
+        negative_embeds = (
+            self._prompt_cache[negative].to(device) if negative is not None else None
+        )
+
+        if start_step > 1:
+            # After the alt-control wrapper, so this one wraps it and the
+            # starting picture is the main control video, not the stick-free one.
+            installed += _start_from_control(self, pipe)
+            self._skip_steps = start_step - 1
+            logger.info("  start_step %d: steps 1-%d skipped", start_step, start_step - 1)
 
         # Timings, not just a call. Everything up to the progress bar's
         # "0%" is silent otherwise, which on a resident worker's second
@@ -1938,8 +2109,8 @@ class Wan22VaceDenoiseStep(Step):
         try:
             with _timed_phases(pipe):
                 result = pipe(
-                    prompt=prompt,
-                    negative_prompt=params["negative_prompt"],
+                    prompt_embeds=prompt_embeds,
+                    negative_prompt_embeds=negative_embeds,
                     video=video,
                     mask=masks,
                     reference_images=reference_images,
@@ -1959,6 +2130,7 @@ class Wan22VaceDenoiseStep(Step):
                 pipe.__dict__.pop(name, None)
             self._alt_latents = None
             self._skeleton_steps = ()
+            self._skip_steps = 0
         # Total minus the phases above minus the progress bar's own total
         # is the VAE *decode* of the finished latents, which is inline in
         # __call__ rather than a method and so cannot be wrapped.
