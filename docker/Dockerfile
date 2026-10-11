@@ -480,9 +480,14 @@ RUN make-child-venv /opt/venv_main \
 # 1.0.6 (Nov 2024), because 2.x was never published there. It is also
 # deliberately not in THIS layer, which sits upstream of the detectron2
 # compile — see the sage layer's own comment for why.
+#
+# diffusers is PINNED too. 2026-10-10 a rebuild floated it 0.40.0 -> 0.41.0
+# and the low_vram denoise died in the T5 prompt encode ("index is on cpu,
+# ... cuda:0" in the embedding): the same image with 0.40.0 encodes fine.
+# Move it only with a real denoise run on the new version.
 RUN make-child-venv /opt/venv_wan22 \
     && /opt/venv_wan22/bin/pip install \
-        'diffusers>=0.38.0' \
+        'diffusers==0.40.0' \
         'accelerate>=1.0.0' \
         'peft>=0.13.0' \
         ftfy \
