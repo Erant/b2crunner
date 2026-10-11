@@ -1,0 +1,743 @@
+# The DEPENDENCY image: CUDA runtime, the apt packages, every step's venv,
+# the vendored code and COLMAP. docker/Dockerfile builds the application on
+# top of it (`FROM` its digest), so a code change pushes the application
+# layers (a few MB) and never this.
+#
+# Why a separate image and not just careful layer order: a dependency layer
+# that is RE-EXECUTED gets a new digest even when its contents are the same
+# (RUN output is not byte-reproducible, and a COPY --from of a rebuilt stage
+# is a new blob), so any lost build cache, a floating pip resolve or one
+# edited line in a builder stage used to re-push ~9 GB with the next code
+# change (2026-10-11: cb9ce8b..7acdd7e did exactly that). With the split, the
+# app build never runs these steps; it pulls the pinned base.
+#
+# Bump it deliberately, as a release of its own:
+#   docker build -f docker/Dockerfile.base -t erantimus/b2crunner:base-YYYYMMDD .
+#   docker push erantimus/b2crunner:base-YYYYMMDD
+# then put the pushed digest (`docker buildx imagetools inspect` prints it)
+# in docker/Dockerfile's BASE_IMAGE, rebuild the app and run doctor. Base
+# tags, like release tags, are never re-pushed. Context is the repo root:
+# python-builder copies docker/make-child-venv.sh and the sam3dbody
+# requirements.txt.
+#
+# base-20261011 was NOT built from this file. It was assembled on the
+# registry from :stable's (05723f8) own dependency layers, so the split cost
+# no upload: the CUDA base, the /data skeleton, the runtime apt layer, the
+# five venvs, /opt/vendor, the COLMAP apt layer and /opt/colmap — the same
+# steps this file runs, in this order. Two edits here are NOT in it yet and
+# land with the next base build: python-builder's venv precompile
+# (d571eb3, ~2 min off the UI start) and the diffusers==0.40.0 pin (dab42eb;
+# base-20261011 already HAS 0.40.0, with transformers 5.17.0).
+#
+# Venv sharing: /opt/venv_base holds one copy of torch and the other heavy
+# packages. Each per-step venv gets a .pth file pointing at venv_base's
+# site-packages, which is enough for both imports and pip's "already
+# satisfied" resolution, so no child ever installs its own torch (~3GB
+# saved per venv). A child that genuinely needs a different version still
+# installs it locally, and its own site-packages is searched first, so it
+# shadows the base — the isolation is preserved, only the duplication is
+# gone.
+#
+# NOT `python -m venv --system-site-packages`: that resolves `home` to the
+# real base interpreter, not to venv_base, so the child would inherit
+# /usr/lib/python3's packages and see nothing of venv_base. Tested; it does
+# not work. The .pth is the mechanism that does.
+#
+# Three stages:
+#   colmap-builder  CUDA *devel* base -> the `colmap` binary, for the camera
+#                   refinement (pipeline/steps/refine_cameras.py).
+#   python-builder  CUDA *devel* base. Compiles detectron2's CUDA kernels,
+#                   which is the only reason nvcc is needed at all.
+#   runtime-base    CUDA *runtime* base. Receives the finished venvs and
+#                   COLMAP; carries no nvcc and no C++ compiler, but does
+#                   carry gcc (see the runtime apt layer for why).
+
+# =============================================================================
+# Stage 1: colmap
+# =============================================================================
+# Upstream COLMAP — https://github.com/colmap/colmap, no fork and no patches.
+# It is here for exactly one step, `refine_cameras`
+# (pipeline/steps/refine_cameras.py), which bundle-adjusts the generated
+# orbit against the frames before each brush training: +0.63 PSNR / +0.0045
+# SSIM on held-out views (docs/design-notes.md#camera-refinement-refine_cameras-refine_cameras_final).
+#
+# WHY CUDA IS ON, since nothing in this pipeline runs COLMAP's SIFT or its
+# dense MVS. The refinement's cost is ALIKED feature extraction and LightGlue
+# matching, both of which are ONNX graphs, and COLMAP picks their execution
+# provider from a compile-time flag: `SelectONNXExecutionProvider` returns
+# CUDA when COLMAP_CUDA_ENABLED is defined and CPU otherwise
+# (src/colmap/feature/onnx_utils.cc). A CPU build is not an error, it is just
+# the slow path, and `pipeline/doctor.py`'s colmap check WARNs when it sees
+# one. Measured on this stage's own binary against the 81-frame dataset in
+# docs/design-notes.md#camera-refinement-refine_cameras-refine_cameras_final, CPU vs the CUDA provider on an RTX 4070 Ti:
+# extraction 32.6 s -> 2.8 s, exhaustive matching 176 s -> 24.3 s. So 209 s
+# of the refinement becomes 27 s, twice per run; the bundle adjustment behind
+# it is Ceres on the CPU either way.
+#
+# AND WHY THE ONNX RUNTIME IS OVERRIDDEN, which is the sharp edge of turning
+# CUDA on. COLMAP's FETCH_ONNX (on by default) downloads a prebuilt ONNX
+# Runtime, and with CUDA enabled it takes the **gpu_cuda12** tarball —
+# cmake/FindDependencies.cmake says so in as many words. That build's
+# provider links libcudart.so.12 / libcublas.so.12 / libcudnn.so.9, and this
+# image is CUDA **13** end to end: the CUDA 12 libraries are not in the
+# runtime base, are not in torch's bundled nvidia-* wheels, and there is no
+# fallback to catch it. ORT throws when the provider will not load and only
+# the CoreML path has a CPU fallback (onnx_utils.cc's InitializeSession), so
+# the failure would be a hard crash inside the step, on the pod, at the
+# point where the first BA round starts.
+#
+# Microsoft ship a gpu_cuda13 tarball of the same release. FetchContent
+# honours FETCHCONTENT_SOURCE_DIR_<NAME> to mean "this is already
+# downloaded, use it", so pointing that at an extracted gpu_cuda13 keeps
+# every other line of COLMAP's ONNX handling — including the install() rules
+# that put libonnxruntime.so* and libonnxruntime_providers_cuda.so* into the
+# install prefix — and changes only which CUDA major version they were
+# built against. ONNX_VERSION must stay in step with FindDependencies.cmake's
+# (1.27.1 at COLMAP_REF below); a mismatch is a compile error against the
+# headers, not a silent one.
+FROM nvidia/cuda:13.0.2-cudnn-devel-ubuntu24.04 AS colmap-builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# COLMAP's own docker/Dockerfile's build list, minus the parts this image
+# has no use for: no qt6 (GUI_ENABLED=OFF), no gtest/gmock
+# (TESTS_ENABLED=OFF), and no libmkl-full-dev — that is ~2 GB of builder to
+# hand Ceres a faster dense solver for a problem with 81 cameras, so Ceres
+# gets the reference BLAS/LAPACK instead.
+#
+# `openimageio-tools` is NOT a trimmable extra, and dropping it was the
+# first thing that broke this stage. `libopenimageio-dev`'s CMake package
+# declares imported targets for OpenImageIO's *command-line tools* —
+# `OpenImageIO::iconvert` and friends — and those binaries ship in
+# `openimageio-tools`, a separate package that `--no-install-recommends`
+# does not pull in. `find_package(OpenImageIO)` then fails outright with
+# "The imported target OpenImageIO::iconvert references the file
+# /usr/bin/iconvert but this file does not exist", at
+# FindDependencies.cmake:75, long before anything is compiled. COLMAP
+# builds nothing against those tools; it is the config file that insists.
+#
+# libcurl4-openssl-dev + libssl-dev are NOT optional here either, even
+# though the ONNX weights are fetched by pipeline/models.py rather than by
+# COLMAP: DOWNLOAD_ENABLED is what compiles `MaybeDownloadAndCacheFile`,
+# which is also the function that passes a local path straight through.
+# With it off, the `--AlikedExtraction.n32_model_path` the step hands over
+# would be a path COLMAP cannot even accept.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git ca-certificates cmake ninja-build build-essential \
+        libboost-program-options-dev libboost-graph-dev libboost-system-dev \
+        libeigen3-dev libopenimageio-dev openimageio-tools libmetis-dev \
+        libgoogle-glog-dev libsqlite3-dev libcgal-dev libceres-dev \
+        libblas-dev liblapack-dev libglew-dev \
+        libcurl4-openssl-dev libssl-dev curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# COLMAP's own Dockerfile does this: its openimageio CMake config requires
+# the OpenCV include directory to exist even though nothing here uses
+# openimageio's OpenCV half.
+RUN mkdir -p /usr/include/opencv4
+
+# The ONNX Runtime, CUDA 13 build. Pinned by digest for the same reason
+# COLMAP pins its own: a silently different tarball is a runtime crash, not
+# a build failure. The digest below is the one published with v1.27.1's
+# onnxruntime-linux-x64-gpu_cuda13 asset.
+ARG ONNX_VERSION=1.27.1
+ARG ONNX_SHA256=33ef9d3136914455fc5232acff80703245b464c7cb5b1666edbdf98d0caf257c
+RUN curl -fsSL -o /tmp/onnxruntime.tgz \
+        "https://github.com/microsoft/onnxruntime/releases/download/v${ONNX_VERSION}/onnxruntime-linux-x64-gpu_cuda13-${ONNX_VERSION}.tgz" \
+    && echo "${ONNX_SHA256}  /tmp/onnxruntime.tgz" | sha256sum -c - \
+    && mkdir -p /opt/onnxruntime-src \
+    && tar -xzf /tmp/onnxruntime.tgz --strip-components=1 -C /opt/onnxruntime-src \
+    && rm /tmp/onnxruntime.tgz
+
+# Pinned by SHA, and fetched BY that SHA rather than by branch. This is the
+# same cache hazard BRUSH_REF above describes — `git clone --branch X` bakes
+# no remote state into the RUN text, so Docker serves an old cached layer
+# however far the branch has moved — but it needs no separate check here:
+# `git fetch --depth 1 origin <sha>` either gets that commit or fails, and
+# the SHA is in the RUN text, so moving the pin invalidates the layer.
+# (It is also a one-commit fetch rather than COLMAP's full history.)
+#
+# 921c0006 is the 4.2.0 release commit, and it is the exact tree
+# docs/design-notes.md#camera-refinement-refine_cameras-refine_cameras_final's +0.63 PSNR was measured on — the
+# workstation build there reports `COLMAP 4.2.0.dev0 (Commit 921c0006 ...)`.
+# Moving it means re-checking the option names steps/refine_cameras.py
+# passes; COLMAP renamed several of them in the 3.x -> 4.x window
+# (SiftExtraction.* -> FeatureExtraction.*), and an unknown --Option is a
+# hard error from the option manager rather than something ignored.
+ARG COLMAP_REF=921c0006cbe80e16e600b6f04c3c746c2c412907
+RUN mkdir -p /src/colmap && cd /src/colmap \
+    && git init -q \
+    && git remote add origin https://github.com/colmap/colmap.git \
+    && git fetch -q --depth 1 origin ${COLMAP_REF} \
+    && git checkout -q FETCH_HEAD
+
+# Installed under /opt/colmap rather than /usr/local, with an
+# $ORIGIN/../lib RPATH. Not tidiness — this is the failure the workstation
+# build hit: COLMAP installs its bundled libonnxruntime.so beside the
+# binary, and a binary whose loader cannot find it dies with
+#   error while loading shared libraries: libonnxruntime.so.1
+# at every invocation, `colmap version` included. Scattering the libraries
+# into /usr/local/lib would work too, after an ldconfig, at the cost of
+# putting an ONNX Runtime on the global loader path for every venv in the
+# image. The RPATH keeps it to this binary.
+#
+# Three directories in it because GNUInstallDirs picks the leaf — lib,
+# lib64 or lib/x86_64-linux-gnu — from the distro and the install prefix,
+# and COLMAP's own ONNX handling patches for lib-vs-lib64 explicitly, so it
+# is not a constant. Naming all three costs nothing and removes a way for
+# this to break on a base-image bump.
+#
+# ~340 MB of it is the ONNX Runtime (256 MB CUDA provider plus three
+# hardlink-less copies of the 27 MB core, which is what COLMAP's
+# install(FILES) rules make of its .so symlink chain). The single biggest
+# binary in the image, and worth knowing before wondering where it grew.
+#
+# CMAKE_CUDA_ARCHITECTURES has to be explicit: there is no GPU during a
+# docker build, so COLMAP's default cannot be detected. The list mirrors
+# python-builder's TORCH_CUDA_ARCH_LIST (Ada, datacenter Blackwell,
+# consumer Blackwell). It only governs COLMAP's *own* CUDA kernels — SIFT
+# and dense MVS, neither of which this pipeline runs — so it is nearly free
+# here; what CUDA_ENABLED actually buys is the ONNX provider above.
+#
+# This is the slowest stage in the file after python-builder: COLMAP's
+# defaults consume PoseLib and faiss through FetchContent, so they are
+# downloaded and compiled here too. Left at their defaults deliberately —
+# this is the configuration COLMAP itself builds and tests, and the
+# refinement is not the place to find out what turning a dependency off
+# breaks. Nothing else in this stage is cached across builds, so a moved
+# COLMAP_REF pays for all of it.
+#
+# nvcc/gcc: Ubuntu 24.04 is gcc 13 and CUDA 13's nvcc accepts up to 14, so
+# CUDA compiles here. That is the one thing the workstation build in
+# docs/design-notes.md#camera-refinement-refine_cameras-refine_cameras_final could not do — its host gcc is 15, which
+# is why the measurement was taken on a CPU-only COLMAP.
+ARG COLMAP_CUDA_ARCHITECTURES="89;100;120"
+RUN cmake -S /src/colmap -B /build -GNinja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/opt/colmap \
+        -DCMAKE_INSTALL_RPATH='$ORIGIN/../lib:$ORIGIN/../lib64:$ORIGIN/../lib/x86_64-linux-gnu' \
+        -DCUDA_ENABLED=ON \
+        -DCMAKE_CUDA_ARCHITECTURES=${COLMAP_CUDA_ARCHITECTURES} \
+        -DGUI_ENABLED=OFF \
+        -DTESTS_ENABLED=OFF \
+        -DFETCHCONTENT_SOURCE_DIR_ONNXRUNTIME=/opt/onnxruntime-src \
+    && cmake --build /build --target install \
+    && rm -rf /build /src/colmap
+
+# Fail the build rather than ship a CPU-only COLMAP by accident. The banner
+# is generated from COLMAP_CUDA_ENABLED at compile time
+# (src/colmap/util/version.cc), so this is the binary's own account of
+# itself — and it doubles as a check that it starts at all, i.e. that the
+# RPATH above found the ONNX Runtime.
+RUN /opt/colmap/bin/colmap version | tee /dev/stderr | grep -q "with CUDA"
+
+
+# =============================================================================
+# Stage 2: python-builder (CUDA devel — nvcc lives here and only here)
+# =============================================================================
+FROM nvidia/cuda:13.0.2-cudnn-devel-ubuntu24.04 AS python-builder
+
+# There is no GPU during `docker build`, so the arch list cannot be
+# autodetected and MUST be set or detectron2 guesses badly. This ONLY
+# affects detectron2's own nvcc-compiled kernels (the one CUDA extension
+# actually built from source in this image) — torch's own prebuilt cu130
+# wheel already ships SASS for sm_75/80/86/90/100/120 plus compute_120 PTX
+# regardless of this ARG (confirmed via torch.cuda.get_arch_list() in the
+# built image), so nothing else here needs widening for a new GPU
+# generation, only this.
+#
+# Default covers Ada and Blackwell, consumer and server, in one image —
+# confirmed RunPod is the deploy target and the next verification round is
+# explicitly "an Ada or Blackwell pod, consumer or server":
+#   8.9  = Ada:       RTX 40-series (consumer) / L40, L40S (server) —
+#          the 4070 Ti this was built and GPU-verified on
+#   10.0 = Blackwell:  B100, B200, GB200 (server/datacenter)
+#   12.0 = Blackwell:  RTX 50-series (consumer)
+# Hopper (9.0 — H100/H200) isn't in the default since it wasn't asked for,
+# but widens the same way if it comes up.
+#
+# Each additional arch is a real cost: detectron2's nvcc compile scales
+# with the arch count (the 8.9-only build took ~2 min — see
+# docs/docker-build-notes.md's detectron2 probe RESULT). Override for a
+# single-arch build if compile time matters more than portability:
+#   --build-arg TORCH_CUDA_ARCH_LIST="8.9"
+ARG TORCH_CUDA_ARCH_LIST="8.9;10.0;12.0"
+ENV TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST}
+
+# detectron2's setup.py compiles its CUDA kernels only if
+# `torch.cuda.is_available() or FORCE_CUDA=1`. A docker build has no GPU,
+# so without this it builds CPU-only, installs cleanly, and then fails at
+# inference — the single nastiest trap in this file.
+ENV FORCE_CUDA=1
+
+ARG TORCH_VERSION=2.13.0
+ARG TORCHVISION_VERSION=0.28.0
+ARG CUDA_WHEEL_INDEX=https://download.pytorch.org/whl/cu130
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PIP_NO_CACHE_DIR=1
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# The last four are for `import cv2`, not for compiling anything. venv_base
+# installs opencv-python (not -headless), whose cv2.abi3.so links against
+# libGL/libglib/libgthread/libxcb; without them the sam3dbody layer's own
+# `from sam_3d_body import ...` verification dies on
+# `ImportError: libxcb.so.1` *after* detectron2 has already compiled
+# successfully, which is a maximally misleading place to fail. This stage
+# is not shipped, so the extra packages cost nothing in the final image.
+# (The runtime stage gets libGL and glib explicitly and libxcb1 transitively
+# via libxext6 -> libx11-6.)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3 python3-venv python3-dev python3-pip \
+        git curl ca-certificates build-essential \
+        libgl1 libglib2.0-0 libxcb1 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /opt/b2c_runner
+
+# -----------------------------------------------------------------------------
+# venv_base — the one copy of every heavy shared package
+# -----------------------------------------------------------------------------
+# NOT pinned by any step: every requirements.txt in pipeline/envs/ says
+# `torch>=2.4.0` or bare `torch`. The old cu128 pin existed only to match a
+# specific pod's pre-installed toolkit for detectron2's native build; here
+# we own the toolkit, so one CUDA line serves all four venvs.
+#
+# The version check is deliberate: asking the cu130 index has previously
+# returned a differently-tagged build, and the symptom would otherwise be a
+# detectron2 compile error several layers later.
+RUN python3 -m venv /opt/venv_base \
+    && /opt/venv_base/bin/pip install --upgrade pip setuptools wheel \
+    && /opt/venv_base/bin/pip install \
+        torch==${TORCH_VERSION} torchvision==${TORCHVISION_VERSION} \
+        --index-url ${CUDA_WHEEL_INDEX} \
+    && /opt/venv_base/bin/python -c "\
+import torch, sys; \
+print('torch', torch.__version__, 'cuda', torch.version.cuda); \
+sys.exit(0 if torch.version.cuda and torch.version.cuda.startswith('13') else 1)"
+
+# The rest of the shared set. The transformers floor satisfies every step
+# that asks for it (rmbg/wan22 want >=4.46, sapiens2 wants >=4.56).
+#
+# The <6 ceiling is the same defence as gradio's below, and it is not
+# hypothetical here: this constraint was written as a bare `>=4.56.0` and
+# had already floated to transformers **5.15.1** by the time anyone looked.
+# It happens to work, so the pin records where it landed rather than
+# dragging it back — but a rebuild months from now silently picking up
+# transformers 6 is exactly the class of surprise that costs a pod-hour,
+# and this image is meant to be built once and left alone. It is also the
+# same failure mode that already bit torchao (see venv_wan22 below), where
+# an unpinned floor floated onto a release built for a different torch and
+# took `import diffusers` down with it.
+#
+# opencv-python (not -headless) to match pyproject.toml's declared
+# dependency — pip treats the two as different distributions, so mixing
+# them installs both.
+RUN /opt/venv_base/bin/pip install \
+        numpy \
+        opencv-python \
+        Pillow \
+        'transformers>=4.56.0,<6' \
+        huggingface_hub>=0.25.0 \
+        hf_transfer \
+        safetensors \
+        einops \
+        tqdm \
+        psutil \
+        PyYAML \
+        requests \
+        'body2colmap @ git+https://github.com/Erant/body2colmap.git'
+
+# Every child venv gets this: a plain venv plus a .pth naming venv_base's
+# site-packages. See the header for why --system-site-packages is not it.
+COPY docker/make-child-venv.sh /usr/local/bin/make-child-venv
+RUN chmod +x /usr/local/bin/make-child-venv
+
+# venv_main: runs the orchestrator and every in_process step (rmbg,
+# sapiens2_lite, render, render_splat, views, mask_splat, colmap_export,
+# face_landmarks, brush). InProcessDispatcher runs a step in the calling
+# process, so these deps must live in whatever env runs
+# `python -m pipeline.cli`.
+#
+# gsplat is deliberately NOT installed. It was the only reason this image
+# needed nvcc at runtime: it publishes no wheel past torch 2.4/cu124, so on
+# a modern stack it JIT-compiles its CUDA kernels on first use.
+# render_splat now shells out to the brush-splat-render binary instead —
+# which is b2ctrain's `render` subcommand behind a shim (see the
+# b2ctrain-builder stage above), so it is CUDA on the driver this image
+# already requires, with no graphics userspace of its own.
+#
+# plyfile stays: load_splat/save_splat need it, and the trainer emits .ply.
+RUN make-child-venv /opt/venv_main \
+    && /opt/venv_main/bin/pip install \
+        kornia timm \
+        plyfile \
+        mediapipe
+
+# venv_wan22: wan22_vace_denoise (subprocess dispatch).
+#
+# torchao is PINNED, and the pin must move IN LOCKSTEP with
+# TORCH_VERSION — this is a hard version coupling, not a preference. The
+# failure mode is severe and non-obvious: a torchao built for a newer torch
+# than the one installed dies on import with
+#   ImportError: cannot import name 'ScalingType' from 'torch.nn.functional'
+# and transformers' modeling_utils imports quantizer_torchao
+# unconditionally, so a torchao that is *installed but unimportable* takes
+# `import diffusers` down with it. The whole wan22_vace_denoise step — the
+# single most expensive thing in the pipeline — then cannot import at all.
+# An absent torchao would be fine (the step guards for that); a broken one
+# is not. This actually happened at torch 2.9.1 with an unpinned
+# 'torchao>=0.16.0' floating up to 0.18.0.
+#
+# 0.18.0 pairs with torch 2.13.0. (For the record: 0.15.0 was the last
+# release that worked on the old torch 2.9.1 floor, and 0.14.1 pairs with
+# 2.9.0.) Re-check this pin whenever TORCH_VERSION moves.
+#
+# torchao >= 0.16 is also what resolves the "version triangle" that used to
+# make the fp8 path unusable — LoRA onto quantized weights, and safetensors
+# serialization of quantized weights, both of which diffusers gates on
+# exactly that version. See docs/design-notes.md#weights-fp8-experts-unfused-lightning-lora.
+#
+# sageattention is NOT installed here — it is built from source in its own
+# layer near the end of this stage (search for SAGE_REF). It cannot come
+# from PyPI at all: the requirements ask for >=2.1.1 and PyPI stops at
+# 1.0.6 (Nov 2024), because 2.x was never published there. It is also
+# deliberately not in THIS layer, which sits upstream of the detectron2
+# compile — see the sage layer's own comment for why.
+#
+# diffusers is PINNED too. 2026-10-10 a rebuild floated it 0.40.0 -> 0.41.0
+# and the low_vram denoise died in the T5 prompt encode ("index is on cpu,
+# ... cuda:0" in the embedding): the same image with 0.40.0 encodes fine.
+# Move it only with a real denoise run on the new version.
+RUN make-child-venv /opt/venv_wan22 \
+    && /opt/venv_wan22/bin/pip install \
+        'diffusers==0.40.0' \
+        'accelerate>=1.0.0' \
+        'peft>=0.13.0' \
+        ftfy \
+        'torchao==0.18.0' \
+        'kernels>=0.4.0'
+
+# venv_seedvr2: seedvr2 (subprocess dispatch).
+# The vendored numz/ComfyUI-SeedVR2_VideoUpscaler must be importable — the
+# step imports that repo's inference_cli.py as a module (see
+# steps/seedvr2.py). flash-attn/apex are NOT needed: they are optional
+# accelerators behind non-default attention_mode values; the default sdpa
+# is pure PyTorch.
+RUN make-child-venv /opt/venv_seedvr2 \
+    && /opt/venv_seedvr2/bin/pip install \
+        'omegaconf>=2.3.0' \
+        'diffusers>=0.33.1' \
+        'peft>=0.17.0' \
+        'rotary_embedding_torch>=0.5.3' \
+        gguf \
+        matplotlib \
+    && git clone --depth 1 https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler \
+        /opt/vendor/seedvr2
+
+# venv_sam3dbody: sam3d_body (subprocess dispatch). THE LAYER MOST LIKELY
+# TO FAIL — see docs/docker-build-notes.md for the fallback ladder.
+#
+# The ordering is load-bearing and was established the hard way on a real
+# pod — see pipeline/envs/sam3dbody/requirements.txt. In short:
+#   - cython first, and the bulk install with --no-build-isolation:
+#     xtcocotools's legacy setup.py imports numpy at build time without
+#     declaring it as a PEP 517 build dep, so pip's per-package isolated
+#     build env lacks it even when the venv has it.
+#   - detectron2 last, --no-build-isolation --no-deps, per
+#     facebookresearch/sam-3d-body's own INSTALL.md.
+#   - MoGe (sam3d_body's FOV / focal-length estimator, INSTALL.md step 5)
+#     PINNED to b942f00 + --no-deps: `main` is now MoGe-3, whose deps drag
+#     in an nvcc-built extension, gradio>=6, and a git package named
+#     `pipeline` that would shadow this repo's own. Only moge.model.v2 is
+#     on the inference path; it needs utils3d (also pinned) + torch/scipy.
+#     steps/sam3d_body.py re-implements upstream's tools/build_fov_estimator
+#     rather than importing it — detectron2 ships its own top-level `tools`
+#     package here, which wins over the vendored repo's (only .pth-appended).
+#   - sam-3d-body itself is vendored, not pip-installed: it has no
+#     setup.py/pyproject.toml at all.
+#
+# The old cu128 torch pin is gone: it matched a specific pod's toolkit,
+# and here detectron2 compiles against venv_base's torch and this stage's
+# CUDA 13 toolkit, which agree by construction.
+#
+# This stage never receives the repo (only docker/Dockerfile does a
+# `COPY .`), so the one repo file this layer reads has to be copied in
+# explicitly. Copied on its own, not as part of the tree, so editing
+# pipeline code does not invalidate this very expensive layer.
+COPY pipeline/envs/sam3dbody/requirements.txt \
+     /opt/b2c_runner/pipeline/envs/sam3dbody/requirements.txt
+
+RUN make-child-venv /opt/venv_sam3dbody \
+    && /opt/venv_sam3dbody/bin/pip install cython \
+    && /opt/venv_sam3dbody/bin/pip install --no-build-isolation \
+        -r pipeline/envs/sam3dbody/requirements.txt \
+    && /opt/venv_sam3dbody/bin/pip install --no-build-isolation --no-deps \
+        'git+https://github.com/facebookresearch/detectron2.git@a1ce2f9' \
+    && /opt/venv_sam3dbody/bin/pip install --no-deps \
+        'moge @ git+https://github.com/microsoft/MoGe.git@b942f00' \
+    && /opt/venv_sam3dbody/bin/pip install \
+        'utils3d @ git+https://github.com/EasternJournalist/utils3d.git@3fab839f0be9931dac7c8488eb0e1600c236e183' \
+    && git clone --depth 1 https://github.com/facebookresearch/sam-3d-body.git \
+        /opt/vendor/sam3dbody \
+    && echo /opt/vendor/sam3dbody > \
+        $(/opt/venv_sam3dbody/bin/python -c "import site; print(site.getsitepackages()[0])")/sam3dbody_vendor.pth \
+    && /opt/venv_sam3dbody/bin/python -c "from sam_3d_body import SAM3DBodyEstimator, load_sam_3d_body" \
+    && /opt/venv_sam3dbody/bin/python -c "from moge.model.v2 import MoGeModel; print('moge v2 import OK')" \
+    && /opt/venv_sam3dbody/bin/python -c "\
+from detectron2 import _C; print('detectron2 native extension OK')"
+
+# gradio, for pipeline/webui.py — the web UI the container serves by
+# default, and the reason the image can be built once and then driven
+# entirely over HTTP. Its fastapi/uvicorn are also what pipeline/api.py
+# runs on: the server is one FastAPI app with the API registered on it and
+# the UI mounted under it, so one install covers both.
+#
+# Installed HERE, in its own layer at the end of the stage, rather than up
+# in the venv_main block where it belongs logically. Docker's layer cache is
+# linear: venv_main is built before venv_wan22/venv_seedvr2/venv_sam3dbody,
+# so touching its RUN invalidates all three, including the detectron2 layer
+# that costs several minutes of nvcc. Putting a UI dependency at the front
+# of that queue would mean every UI tweak pays for a detectron2 rebuild.
+#
+# In venv_main specifically because that is the venv the entrypoint runs the
+# orchestrator with; the isolated step venvs have no use for it.
+#
+# Pinned to a major version: gradio's component API moves between majors
+# (`gr.Timer`, `queue()` arguments and `Dataframe` datatypes have all
+# changed), and this image is meant to be built once and left alone — a
+# rebuild months from now silently picking up gradio 7 is exactly the class
+# of surprise that costs a pod-hour. fastapi and uvicorn are capped for the
+# same reason and not because of anything they have done: pipeline/api.py
+# imports them directly, so a 1.0 arriving between two builds of this image
+# would break it at build time, on a pod.
+RUN /opt/venv_main/bin/pip install 'gradio>=5.0,<7.0' 'fastapi>=0.110,<1.0' 'uvicorn>=0.27,<1.0' \
+    && /opt/venv_main/bin/python -c "import gradio; print('gradio', gradio.__version__)" \
+    && /opt/venv_main/bin/python -c "import fastapi, uvicorn; print('fastapi', fastapi.__version__)"
+
+# -----------------------------------------------------------------------------
+# sageattention — built from source, because there is no other way to get it
+# -----------------------------------------------------------------------------
+# diffusers' attention dispatcher requires sageattention >= 2.1.1 for ANY
+# sage backend variant, and PyPI's newest is 1.0.6: 2.x was never published
+# there, only tagged on GitHub. So `pip install sageattention` can never
+# satisfy the constraint, and the package was simply absent from the image —
+# every sage backend raised, the step's try/except swallowed it, and the
+# most expensive step in the pipeline quietly ran on plain SDPA.
+#
+# Measured on an RTX 4070 Ti (SM89), 40 heads x 128 dim, vs PyTorch SDPA:
+#
+#   seq    SDPA     triton int8+fp16      CUDA int8+fp8
+#   1024   0.37ms   0.26ms (cos .99992)   0.29ms (cos .99930)
+#   4096   4.80ms   2.98ms (cos .99991)   2.51ms (cos .99928)
+#   9216  22.32ms  12.75ms (cos .99991)   9.40ms (cos .99926)
+#
+# i.e. ~1.75x on the Triton kernel the step selects for SM89, ~2.4x on the
+# fp8 CUDA one. Both track SDPA closely. See pipeline/steps/
+# wan22_vace_denoise.py's _select_sage_backend for which is chosen and why.
+#
+# LAST IN THE STAGE, like the gradio layer above and for the same reason:
+# Docker's layer cache is linear, so putting a 4-minute nvcc build ahead of
+# venv_sam3dbody would make every touch of it re-pay detectron2's compile.
+#
+# Arch list is NOT the stage-wide TORCH_CUDA_ARCH_LIST. SageAttention 2.2.0
+# supports {8.0, 8.6, 8.9, 9.0, 12.0} and handles anything else by silently
+# emitting no gencode for it (its SUPPORTED_ARCHS set is declared and then
+# never used, so there is no error to catch — the kernels just aren't
+# there). 10.0 — datacenter Blackwell, B100/B200/GB200 — is in this image's
+# default arch list and is NOT supported, so it is dropped here explicitly
+# rather than silently. On such a pod the sage backends have no kernel and
+# the step falls back to SDPA, which is the pre-existing behaviour.
+# Installed into BOTH venvs that can use it: wan22 dispatches sage through
+# diffusers, and seedvr2's vendored inference_cli probes for it at import
+# time ("SageAttention ❌" in its optimizations banner when absent). The
+# wheel is compiled once and installed twice rather than built per venv.
+ARG SAGE_REF=v2.2.0
+ARG SAGE_CUDA_ARCH_LIST="8.9;12.0"
+# NOTE the deliberate absence of `cd /tmp/SageAttention`: pip is given the
+# source path instead. With the checkout as the working directory, a later
+# `import sageattention` resolves to the SOURCE TREE rather than the
+# installed package, and the source tree has no compiled `_fused`, so the
+# verification below fails with a bogus "cannot import name '_fused' ...
+# most likely due to a circular import" and the whole layer errors out on a
+# perfectly good build. Cost an image build to find; keep pip path-based.
+RUN git clone --depth 1 --branch ${SAGE_REF} \
+        https://github.com/thu-ml/SageAttention.git /tmp/SageAttention \
+    && TORCH_CUDA_ARCH_LIST="${SAGE_CUDA_ARCH_LIST}" MAX_JOBS="$(nproc)" \
+       /opt/venv_wan22/bin/pip wheel --no-build-isolation --no-deps \
+       -w /tmp/sagewheel /tmp/SageAttention \
+    && /opt/venv_wan22/bin/pip install --no-deps /tmp/sagewheel/sageattention-*.whl \
+    && /opt/venv_seedvr2/bin/pip install --no-deps /tmp/sagewheel/sageattention-*.whl \
+    && /opt/venv_wan22/bin/python -c "\
+from diffusers.models.attention_dispatch import _CAN_USE_SAGE_ATTN; \
+import importlib.metadata as md; \
+print('sageattention', md.version('sageattention'), '| diffusers accepts it:', _CAN_USE_SAGE_ATTN); \
+assert _CAN_USE_SAGE_ATTN, 'diffusers still refuses the installed sageattention'" \
+    && rm -rf /tmp/SageAttention /tmp/sagewheel
+
+# Strip pip's caches, then compile the venvs: without .pyc in the image,
+# every new container wrote ~2,500 of them into its overlay layer on the
+# first imports, and that write, not the compile, held the UI's start for
+# ~2 minutes (torch 12 s, gradio 22 s on a warm page cache). unchecked-hash:
+# the venvs never change after this, so skip the per-import mtime check.
+# -f rewrites the timestamp .pyc pip left in place (compileall keeps them
+# otherwise); deleting them first instead cost minutes of per-file overlay
+# whiteouts, and the runtime stage copies only this final tree anyway.
+# `|| true`: compileall exits 1 on any file it cannot parse (test fixtures
+# and py2 leftovers ship in some wheels); those were never importable.
+RUN rm -rf /root/.cache \
+    && for v in /opt/venv_*; do \
+        "$v/bin/python" -m compileall -q -f -j 0 \
+            --invalidation-mode unchecked-hash "$v" > /dev/null || true; \
+    done
+
+# =============================================================================
+# Stage 3: runtime-base (CUDA runtime — no nvcc, no compilers)
+# =============================================================================
+# The torch wheels bundle their own CUDA libraries (the nvidia-* packages
+# in venv_base), so almost nothing is needed from the base image itself;
+# the cudnn-runtime variant is belt and braces for anything that dlopen's a
+# system cudnn.
+#
+# The venvs are copied wholesale. That works because both stages are
+# ubuntu24.04, so /usr/bin/python3 is 3.12 in both and the venvs' interpreter
+# symlinks and pyvenv.cfg `home` entries stay valid.
+#
+# Only what the BUILD of either image reads is set here (DEBIAN_FRONTEND,
+# PIP_*, PYTHONPATH for the app's step-registry smoke test). Everything a
+# running container reads is docker/Dockerfile's ENV block.
+FROM nvidia/cuda:13.0.2-cudnn-runtime-ubuntu24.04 AS runtime-base
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PIP_NO_CACHE_DIR=1
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# The /data skeleton. Stays HERE, above the apt layer, rather than moving
+# down with the ENVs that name these paths: a container run with no volume
+# mounted still needs somewhere to write, and this is a filesystem layer, not
+# metadata — moving it would rebuild everything below for no benefit.
+RUN mkdir -p /data/output /data/logs /data/uploads /data/tmp /data/hf_cache /data/models \
+        /data/caches/triton /data/caches/nv /data/caches/torch /data/caches/xdg /data/caches/mpl
+# NOT "...:${PYTHONPATH}": nothing defines PYTHONPATH in the base image, so
+# that expanded to a trailing colon, which BuildKit flags
+# (UndefinedVar, the build's only warning) and which Python reads as an
+# empty entry meaning the working directory:
+#   PYTHONPATH="/opt/vendor/seedvr2:"  ->  ['/tmp/probe', '/opt/vendor/seedvr2',
+#                                           '/tmp/probe', ...]
+#   PYTHONPATH="/opt/vendor/seedvr2"   ->  ['/tmp/probe', '/opt/vendor/seedvr2',
+#                                           '/usr/lib/python312.zip', ...]
+# i.e. a duplicate CWD entry, not a shadowing-the-stdlib hazard — sys.path[0]
+# is the script/CWD either way. Tidiness and a clean build, not a security fix.
+ENV PYTHONPATH=/opt/vendor/seedvr2
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3 \
+        # gcc + python3-dev: a deliberate exception to this stage's "no
+        # compiler" rule, and it is load-bearing, not convenience. EVERY
+        # SageAttention backend routes its per-block int8 quantization
+        # through Triton, and Triton JIT-builds a small `cuda_utils` CPython
+        # extension on first use. With no compiler that dies with
+        #   RuntimeError: Failed to find C compiler
+        # the step's try/except swallows it, and the most expensive step in
+        # the pipeline silently runs on plain SDPA — i.e. the whole
+        # sageattention layer in the builder stage buys exactly nothing.
+        # Verified: all sage backends fail in this image without these and
+        # work with them.
+        #
+        # Cost is ~276 MB (~5% of the image) against ~1.75x on attention in
+        # wan22_vace_denoise. gcc alone is NOT enough: Triton's generated
+        # source needs libc headers (fatal error: stdlib.h) and Python.h,
+        # which is what python3-dev pulls in. There is no build-time
+        # prewarm alternative — that compile needs a live GPU, which a
+        # docker build does not have.
+        gcc python3-dev \
+        ca-certificates \
+        # GL/EGL loaders for pyrender (the `render` step). The image
+        # supplies only the loaders; the driver ICD comes from
+        # nvidia-container-toolkit. An earlier version of this file shipped
+        # the Vulkan loader but not this one, so `render` could never have
+        # worked — it tries libEGL.so.1, falls back to OSMesa, and neither
+        # was present. libosmesa6 is that software fallback. (The Vulkan
+        # loader that sat here went with brush on 2026-09-07: b2ctrain and
+        # its rasteriser are CUDA, and nothing else in the image is a
+        # Vulkan client.)
+        libegl1 libgl1 libglvnd0 libgles2 libosmesa6 \
+        libglib2.0-0 libsm6 libxext6 libxrender1 libgomp1 \
+        ffmpeg \
+        # ---------------------------------------------------------------
+        # Debugging surface. This image is meant to be built once and then
+        # left alone for the whole verification round, so anything you
+        # might need *while diagnosing a failed run* has to already be
+        # here — discovering that `git` is missing is itself a rebuild.
+        #
+        # git:      lets you `git pull` a fix into /opt/b2c_runner and
+        #           re-run without rebuilding (the package is installed
+        #           editable, so a pulled change takes effect immediately),
+        #           and lets pip install from a git URL at all.
+        # curl/wget/ca-certificates: fetching a checkpoint or poking an
+        #           endpoint by hand.
+        # procps/htop: `ps`, `top` — is the step running or wedged?
+        # lsof:     which process is holding the GPU or a stuck file.
+        # less/nano/vim-tiny: reading and patching a file in place.
+        # rsync/openssh-client: getting results off the pod.
+        # openssh-server: getting *into* the pod at all; a custom image
+        #           has no sshd unless it ships one (see entrypoint.sh).
+        # unzip/zip: the UI's dataset-archive path, by hand.
+        # jq:       metadata.json is the pipeline's own manifest format.
+        # tree:     seeing what a run actually wrote.
+        # ---------------------------------------------------------------
+        git curl wget \
+        procps htop lsof \
+        less nano vim-tiny \
+        rsync openssh-client openssh-server \
+        unzip zip jq tree \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=python-builder /opt/venv_base /opt/venv_base
+COPY --from=python-builder /opt/venv_main /opt/venv_main
+COPY --from=python-builder /opt/venv_wan22 /opt/venv_wan22
+COPY --from=python-builder /opt/venv_seedvr2 /opt/venv_seedvr2
+COPY --from=python-builder /opt/venv_sam3dbody /opt/venv_sam3dbody
+COPY --from=python-builder /opt/vendor /opt/vendor
+
+# COLMAP's runtime dependencies, in a layer of their OWN and deliberately
+# not in the big apt layer at the top of this stage. That is where they
+# started, and it cost a 15-minute push to learn why it was wrong: layer
+# invalidation cascades forward within a stage, so adding one package up
+# there re-ran all six `COPY --from=python-builder /opt/venv_*` lines, the
+# body2colmap layer and the application copy behind it, and the re-executed
+# RUN layers' output is not byte-reproducible, so the 1.25 GB apt layer went
+# up the wire as a new blob. Here, changing this list costs this layer and
+# COLMAP's copy, nothing else.
+#
+# The list is COLMAP's own docker/Dockerfile runtime stage, minus the qt6
+# entries the GUI would want (GUI_ENABLED=OFF) — same ubuntu24.04 as the
+# colmap-builder stage, so these are the same package versions it linked
+# against. Everything CUDA the ONNX provider needs (libcudart.so.13,
+# libcublas*.so.13, libcufft, libcurand, libnvrtc, libcudnn.so.9) is
+# already in this base image, which is the whole reason the builder
+# overrides ONNX to the CUDA 13 tarball.
+#
+# libglew2.2 IS needed despite GUI_ENABLED=OFF, and leaving it out was the
+# second thing that broke this stage: `colmap` links libGLEW regardless of
+# the GUI, so the binary dies with exit 127 and `error while loading shared
+# libraries: libGLEW.so.2.2` on every invocation. It cost a full image
+# build to find because the colmap-builder stage cannot show it — that
+# stage has libglew-dev installed, so the binary runs fine right up until
+# it is copied somewhere that does not. `doctor`'s colmap check is what
+# caught it; that is the check earning its place on the first build it
+# existed for.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libboost-program-options1.83.0 libmetis5 libceres4t64 \
+        libopenimageio2.4t64 libgoogle-glog0v6t64 libcurl4 libssl3t64 \
+        libomp5 libopengl0 libglew2.2 \
+    && rm -rf /var/lib/apt/lists/*
+
+# COLMAP, whole prefix (~440 MB).
+#
+# The prefix moves as a unit rather than the binary alone — /opt/colmap/bin/
+# colmap finds its bundled ONNX Runtime through an $ORIGIN/../lib RPATH (see
+# the colmap-builder stage), so splitting the two apart is exactly the
+# failure that RPATH exists to prevent. It is reached through PATH, set in
+# docker/Dockerfile's ENV block.
+COPY --from=colmap-builder /opt/colmap /opt/colmap

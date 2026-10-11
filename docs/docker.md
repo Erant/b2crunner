@@ -24,7 +24,14 @@ Real, buildable artifacts live in `docker/`:
   serves all four (~10 GB saved) while each venv can still shadow anything
   it needs a different version of. b2ctrain is built in a separate CUDA
   devel stage and only the binary is copied, so the toolchain is not
-  shipped.
+  shipped. Still one image at run time, but since 2026-10-11 it is BUILT in
+  two: this file is the application (code, in-house pins, runtime config)
+  `FROM` a dependency image pinned by digest in its `BASE_IMAGE`.
+- `docker/Dockerfile.base` — that dependency image: the CUDA runtime, apt,
+  every venv, the vendored code and COLMAP (tags `erantimus/b2crunner:base-*`).
+  A code change never re-runs or re-pushes it; a dependency change is a
+  deliberate base bump (build, push, update `BASE_IMAGE`'s digest), steps in
+  its header.
 - `docker/envs.docker.yaml` — the container's env registry, copied over
   `pipeline/envs/envs.yaml` during the build. The repo's own copy keeps
   describing a bare pod; the two named different paths before, which would
