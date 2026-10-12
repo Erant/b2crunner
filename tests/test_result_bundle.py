@@ -315,6 +315,38 @@ class TestEveryRunOnTheVolume(_BundleCase):
         self.assertEqual(sorted(p.name for p in self.jobs.iterdir()),
                          ["in-flight.job.json", "in-flight.status.json"])
 
+    def test_clear_leaves_a_live_cli_run_and_takes_a_killed_one(self):
+        """A CLI run names its process: alive, it is in flight like any
+        other; gone, it is reported failed, so it does not sit `running`
+        for ever."""
+        import json
+        import subprocess
+        import sys
+
+        from pipeline.gpu_scheduler import GpuScheduler
+        from pipeline.run_state import process_token
+
+        dead = subprocess.run(
+            [sys.executable, "-c", "from pipeline.run_state import process_token; print(process_token())"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        scheduler = GpuScheduler(gpu_count=1, work_dir=self.jobs,
+                                 spawn=lambda *a: self.fail("nothing was submitted"))
+        for name, owner in (("cli-live", process_token()), ("cli-killed", dead)):
+            run = _run_dir(self.runs, colmap=True, ply=False, name=name)
+            (self.jobs / f"{name}.status.json").write_text(json.dumps({
+                "name": name, "status": "running", "started": 90.0,
+                "output_dir": str(run), "owner": owner,
+            }))
+
+        with unittest.mock.patch.object(runs, "output_dir", lambda: self.runs):
+            found = {s.name: s.status for s in runs.discover_runs()}
+            cleared = runs.clear_finished_runs(scheduler)
+
+        self.assertEqual(found, {"cli-live": "running", "cli-killed": "failed"})
+        self.assertEqual(cleared, ["cli-killed"])
+        self.assertEqual(sorted(p.name for p in self.runs.iterdir()), ["cli-live"])
+
     def test_clear_leaves_a_status_file_pointing_outside_the_volume_alone(self):
         from pipeline.gpu_scheduler import GpuScheduler
 

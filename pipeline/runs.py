@@ -38,7 +38,7 @@ from . import steps  # noqa: F401  registers every Step; the registry must be wh
 from .gpu_scheduler import GpuScheduler
 from .logging_setup import timestamped_run_name
 from .paths import log_dir, output_dir, run_jobs_dir, upload_dir
-from .run_state import RunJob, RunState
+from .run_state import RunJob, RunState, owner_alive
 from .step import Param
 from .workflow import (
     RETIRED_GLOBALS, Output, WorkflowSpec, apply_ui_overrides, retired_globals,
@@ -1349,18 +1349,28 @@ def discover_runs() -> List[RunState]:
         worker writes it by atomic replace, and it outlives both the
         worker and the UI process that spawned it.
       * a directory in the output root nobody published a status for — a
-        `pipeline.cli` run, or one whose status file has been pruned.
-        Nothing is known about it beyond what is on disk, so it is
-        reported as `unknown` and packaged against the union of every
-        shipped workflow's deliverables (see `result_subdirs`).
+        run from before `pipeline.cli` published one, or one whose status
+        file has been pruned. Nothing is known about it beyond what is on
+        disk, so it is reported as `unknown` and packaged against the
+        union of every shipped workflow's deliverables (see
+        `result_subdirs`).
+
+    A `pipeline.cli` run that still says queued or running but whose
+    process is gone (`RunState.owner`) is reported failed: killed outright,
+    it never got to say so itself, and nothing else would.
     """
     states: Dict[str, RunState] = {}
     for path in sorted(run_jobs_dir().glob("*.status.json")):
         try:
             data = json.loads(path.read_text())
+            mtime = path.stat().st_mtime
         except (OSError, ValueError):
             continue  # caught a worker mid-write, or a truncated file
         state = RunState.from_dict(data)
+        if state.status in ("queued", "running") and state.owner and owner_alive(state.owner) is False:
+            state.status = "failed"
+            state.finished = state.finished or mtime
+            state.message = f"{state.message}: its process is gone".lstrip(": ")
         if state.name:
             states[state.name] = state
     for directory in sorted(p for p in output_dir().iterdir() if p.is_dir()):
@@ -1450,7 +1460,8 @@ def clear_finished_runs(scheduler: GpuScheduler) -> List[str]:
     "Over" is done, failed, cancelled, or `unknown` (an output directory
     nobody published a status for). A run whose status says queued or
     running is left alone even if no worker here owns it: that is also
-    what a `pipeline.cli` run from an SSH shell looks like while it works.
+    what a `pipeline.cli` run from an SSH shell looks like while it works
+    (it publishes its status as a worker does, see `cli.run_workflow`).
 
     Everything the run left is removed: its output directory, its
     `<run>-result.zip`, its log, and its job/status files — and the

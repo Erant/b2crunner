@@ -10,6 +10,7 @@ process.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -89,6 +90,10 @@ class RunState:
     # as true), so a client can see what a run was asked for. Packaging
     # does not read it: a switched-off output's directory is simply absent.
     outputs: Dict[str, bool] = field(default_factory=dict)
+    # The process running this run when no scheduler watches it — a
+    # `pipeline.cli` run — as `process_token()` stamps it; empty for a
+    # worker the scheduler spawned. See `owner_alive`.
+    owner: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -99,7 +104,7 @@ class RunState:
             "output_dir": str(self.output_dir) if self.output_dir else None,
             "log_path": str(self.log_path) if self.log_path else None,
             "error": self.error, "gpu_index": self.gpu_index,
-            "outputs": dict(self.outputs),
+            "outputs": dict(self.outputs), "owner": self.owner,
         }
 
     @classmethod
@@ -114,7 +119,66 @@ class RunState:
             log_path=Path(data["log_path"]) if data.get("log_path") else None,
             error=data.get("error", ""), gpu_index=data.get("gpu_index"),
             outputs=dict(data.get("outputs") or {}),
+            owner=data.get("owner", ""),
         )
+
+
+def _read(path: str) -> str:
+    try:
+        return Path(path).read_text().strip()
+    except OSError:
+        return ""
+
+
+def _start_ticks(pid: int) -> str:
+    """When `pid` started, in clock ticks since boot (/proc/<pid>/stat
+    field 22), or "" when there is no such process. After the last `)`:
+    the command name in between may itself hold spaces and parentheses."""
+    stat = _read(f"/proc/{pid}/stat")
+    return stat.rsplit(")", 1)[1].split()[19] if stat else ""
+
+
+def _pid_namespace() -> str:
+    try:
+        return os.readlink("/proc/self/ns/pid")
+    except OSError:
+        return ""
+
+
+def process_token() -> str:
+    """This process, as `RunState.owner` records it: boot, PID namespace,
+    pid and start time. A pid alone is reused — after a reboot, in a
+    recreated container — and a run whose process died must not look
+    alive because something else now has its number."""
+    pid = os.getpid()
+    return "|".join((_read("/proc/sys/kernel/random/boot_id"), _pid_namespace(),
+                     str(pid), _start_ticks(pid)))
+
+
+def owner_alive(token: str) -> Optional[bool]:
+    """Whether the process a `process_token()` names is still running, or
+    None when this process cannot tell: no owner recorded, or one in
+    another PID namespace (another container on this machine), whose pids
+    mean nothing here. A different boot is a dead process: the machine it
+    ran on has restarted since, or the volume has moved to another one."""
+    try:
+        boot, namespace, pid, ticks = token.split("|")
+        pid_number = int(pid)
+    except ValueError:
+        return None
+    if not boot:  # no /proc where it ran: the pid is all there is
+        try:
+            os.kill(pid_number, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+    if boot != _read("/proc/sys/kernel/random/boot_id"):
+        return False
+    if namespace != _pid_namespace():
+        return None
+    return _start_ticks(pid_number) == ticks
 
 
 @dataclass

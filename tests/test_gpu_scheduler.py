@@ -215,6 +215,21 @@ class TestGpuScheduler(unittest.TestCase):
         self.assertEqual(read("over").status, "done")
         self.assertEqual(read("over").steps[1].status, "running")
 
+    def test_a_restart_leaves_a_live_cli_run_alone(self):
+        """A `pipeline.cli` run is no server's: while its process lives, a
+        restarting server must not fail it."""
+        from pipeline.run_state import process_token
+
+        work = Path(self.tmp.name)
+        (work / "cli.status.json").write_text(json.dumps(RunState(
+            name="cli", status="running", started=1.0, owner=process_token(),
+        ).to_dict()))
+
+        GpuScheduler(gpu_count=1, work_dir=work, spawn=self.spawner)
+
+        state = RunState.from_dict(json.loads((work / "cli.status.json").read_text()))
+        self.assertEqual(state.status, "running")
+
     def test_a_queued_run_is_on_disk_the_moment_it_is_submitted(self):
         """Before a slot takes it, the files are the only copy that outlives
         the server — 2026-10-10 a host freeze lost two queued runs' prompts."""

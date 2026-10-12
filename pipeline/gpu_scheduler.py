@@ -36,7 +36,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
-from .run_state import RunJob, RunState, tail_lines
+from .run_state import RunJob, RunState, owner_alive, tail_lines
 
 logger = logging.getLogger(__name__)
 
@@ -157,6 +157,10 @@ class GpuScheduler:
         show as in flight forever. A worker that did outlive its server
         republishes its whole state at the next step, so it corrects this
         itself.
+
+        A `pipeline.cli` run is not any server's: it names its own process
+        (`RunState.owner`), and is left alone unless that is known to be
+        gone.
         """
         requeue = []
         for path in sorted(self._work_dir.glob("*.status.json")):
@@ -166,6 +170,8 @@ class GpuScheduler:
             except (OSError, ValueError):
                 continue
             if state.status not in ("queued", "running"):
+                continue
+            if state.owner and owner_alive(state.owner) is not False:
                 continue
             job_path = self._work_dir / path.name.replace(".status.json", ".job.json")
             if state.status == "queued" and not state.started:

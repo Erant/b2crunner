@@ -30,6 +30,8 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+import time
+import traceback
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -38,7 +40,8 @@ import yaml
 from . import steps  # noqa: F401  registers all Step subclasses
 from .dataset import Dataset
 from .logging_setup import setup_logging, timestamped_run_name
-from .paths import REPO_ROOT, configure_tmpdir, output_dir
+from .paths import REPO_ROOT, configure_tmpdir, output_dir, run_jobs_dir
+from .run_state import RunState, StepRecord, process_token
 from .runner import WorkflowRunner
 from .step import ParamError
 from .workflow import RETIRED_GLOBALS, WorkflowSpec, load_envs, retired_globals
@@ -163,13 +166,49 @@ def apply_param_overrides(
 
 
 def run_workflow(args: argparse.Namespace) -> int:
-    from .doctor import log_machine_banner
+    """Run a workflow from this shell, publishing its status as a web-UI
+    run's worker does: `run_jobs/<run>.status.json`, from the moment the
+    run is named to however it ends. Without one the run is an `unknown`
+    directory, which the UI lists as over — and Clear runs deletes it while
+    it works. `owner` lets a reader tell a killed run from a live one."""
+    from .run_worker import _StatusWriter
 
     workflow_path = resolve_workflow(args.workflow)
     spec = WorkflowSpec.from_yaml(workflow_path)
 
     run_name = args.run_name or timestamped_run_name(spec.name)
     log_path = setup_logging(verbose=not args.quiet, log_file=args.log_file, run_name=run_name)
+    out = Path(args.out) if args.out else output_dir() / run_name
+
+    writer = _StatusWriter(
+        RunState(
+            name=run_name, workflow=spec.name, status="running", started=time.time(),
+            output_dir=out, log_path=log_path, owner=process_token(),
+        ),
+        run_jobs_dir() / f"{run_name}.status.json",
+    )
+    writer.publish()
+    try:
+        code = _run_workflow(args, spec, workflow_path, run_name, log_path, out, writer)
+    except KeyboardInterrupt:
+        writer.finish("cancelled", message="interrupted")
+        raise
+    except BaseException as exc:
+        # SystemExit too: a bad --param ends the run as surely as a crash.
+        writer.finish("failed", message=f"{type(exc).__name__}: {exc}",
+                      error=traceback.format_exc())
+        raise
+    if writer.state.status == "running":
+        writer.finish("done" if code == 0 else "failed")
+    return code
+
+
+def _run_workflow(
+    args: argparse.Namespace, spec: WorkflowSpec, workflow_path: Path, run_name: str,
+    log_path: Optional[Path], out: Path, writer,
+) -> int:
+    from .doctor import log_machine_banner
+
     tmp = configure_tmpdir()
 
     logger.info("run '%s'", run_name)
@@ -222,6 +261,7 @@ def run_workflow(args: argparse.Namespace) -> int:
                 wait_until_ready(needed)
             except ModelsUnavailable as exc:
                 logger.error("%s", exc)
+                writer.finish("failed", message=str(exc))
                 return 1
             logger.info("all required models present")
 
@@ -240,8 +280,6 @@ def run_workflow(args: argparse.Namespace) -> int:
         if args.prompt:
             dataset.prompt = args.prompt
 
-    out = Path(args.out) if args.out else output_dir() / run_name
-
     # Repoint the workflow's own disk writes (brush's .ply, the COLMAP
     # export, any save_dataset checkpoint) into this run's output directory.
     # The literal in the YAML is a relative path, which on a pod resolves
@@ -251,19 +289,33 @@ def run_workflow(args: argparse.Namespace) -> int:
         spec.globals["output_root"] = str(out)
         logger.info("output_root: %s", out)
 
-    runner = WorkflowRunner(spec, envs=envs)
+    writer.state.outputs = {
+        output.name: output.always or bool(spec.globals.get(output.name))
+        for output in spec.outputs
+    }
+    writer.state.total = len(spec.steps)
+    writer.state.steps = [
+        StepRecord(i, s.id, s.step, status="pending")
+        for i, s in enumerate(spec.steps, start=1)
+    ]
+    writer.publish()
+
+    runner = WorkflowRunner(spec, envs=envs, on_event=writer)
 
     try:
         ctx = runner.run({"dataset": dataset}, keep=("dataset",))
-    except Exception:
+    except Exception as exc:
         logger.exception("run '%s' failed", run_name)
         if log_path:
             logger.error("full log: %s", log_path)
+        writer.finish("failed", message=f"{type(exc).__name__}: {exc}",
+                      error=traceback.format_exc())
         return 1
 
     final: Dataset = ctx.get("dataset")
     saved = final.to_disk(out)
     logger.info("saved final dataset to %s (%d frames)", saved, len(final.images))
+    writer.finish("done", message=f"complete — {len(final.images)} frames in {saved}")
     if final.splat_path:
         logger.info("splat: %s", final.splat_path)
     if log_path:
