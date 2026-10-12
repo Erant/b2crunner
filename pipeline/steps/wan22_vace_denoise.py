@@ -1792,19 +1792,29 @@ class Wan22VaceDenoiseStep(Step):
         distinct prompts cost one load, not one per pass. One prompt per
         call rather than a batch: a batched row differs from the prompt's
         own encoding in bf16 (max 1.17, measured 2026-10-11), and one at a
-        time is exactly the call pipe() used to make itself."""
+        time is exactly the call pipe() used to make itself.
+
+        Under no_grad, as inside pipe(): `encode_prompt` is not decorated
+        and the group-offloaded T5 keeps `requires_grad`, so a graded
+        encode's cached embedding held the graph — and through it the
+        weights' GPU copies after offload, ~11 GB for the whole run (the
+        5090 OOM in reoutline_denoise, 2026-10-11). low_vram's streamed
+        weights are requires_grad=False, which is why it never showed."""
+        import torch
+
         missing = [text for text in dict.fromkeys(texts) if text not in self._prompt_cache]
         if not missing:
             logger.info("  prompts: %d from the cache, no text-encoder pass",
                         len(set(texts)))
             return
         started = time.time()
-        for text in missing:
-            embeds, _ = pipe.encode_prompt(
-                prompt=[text], do_classifier_free_guidance=False,
-                num_videos_per_prompt=1, device=pipe._execution_device,
-            )
-            self._prompt_cache[text] = embeds.to("cpu")
+        with torch.no_grad():
+            for text in missing:
+                embeds, _ = pipe.encode_prompt(
+                    prompt=[text], do_classifier_free_guidance=False,
+                    num_videos_per_prompt=1, device=pipe._execution_device,
+                )
+                self._prompt_cache[text] = embeds.to("cpu")
         _sync()
         logger.info("  prompts: encoded %d in %.1fs (%d cached for later passes)",
                     len(missing), time.time() - started, len(self._prompt_cache))

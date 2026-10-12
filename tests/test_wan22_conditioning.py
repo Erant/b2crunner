@@ -160,6 +160,20 @@ class _Embeds:
         return self
 
 
+# Grad mode for the stub torch: `encode_prompt` is not decorated no_grad in
+# diffusers, so the step has to turn it off itself — see _encode_prompts.
+_FAKE_GRAD = {"on": True}
+
+
+class _fake_no_grad:
+    def __enter__(self):
+        self._was = _FAKE_GRAD["on"]
+        _FAKE_GRAD["on"] = False
+
+    def __exit__(self, *exc):
+        _FAKE_GRAD["on"] = self._was
+
+
 def _conditioning_scale(*args):
     from pipeline.steps.wan22_vace_denoise import _conditioning_scale as fn
 
@@ -409,6 +423,7 @@ class _RunsTheStep:
 
             def encode_prompt(self, prompt, **kwargs):
                 calls.setdefault("encoded", []).append(list(prompt))
+                calls.setdefault("encoded_with_grad", []).append(_FAKE_GRAD["on"])
                 return _Embeds(prompt), None
 
             def register_to_config(self, **kwargs):
@@ -438,6 +453,7 @@ class _RunsTheStep:
                 return self
 
         torch.Generator = _Generator
+        torch.no_grad = _fake_no_grad
 
         step = Wan22VaceDenoiseStep()
         step._pipe = _Pipe()
@@ -1182,6 +1198,9 @@ class TestPromptCache(_RunsTheStep, unittest.TestCase):
         self.assertNotIn("prompt", calls)
 
     def test_a_cached_prompt_is_not_encoded_again(self):
+        import sys
+        from unittest.mock import patch
+
         from pipeline.steps.wan22_vace_denoise import Wan22VaceDenoiseStep
 
         step = Wan22VaceDenoiseStep()
@@ -1190,10 +1209,20 @@ class TestPromptCache(_RunsTheStep, unittest.TestCase):
             _execution_device="cpu",
             encode_prompt=lambda prompt, **kwargs: (encoded.append(list(prompt)) or _Embeds(prompt), None),
         )
-        step._encode_prompts(pipe, ["a", "b"])
-        step._encode_prompts(pipe, ["b", "a"])
-        step._encode_prompts(pipe, ["a", "c"])
+        torch = types.ModuleType("torch")
+        torch.no_grad = _fake_no_grad
+        torch.cuda = types.SimpleNamespace(is_available=lambda: False)
+        with patch.dict(sys.modules, {"torch": torch}):
+            step._encode_prompts(pipe, ["a", "b"])
+            step._encode_prompts(pipe, ["b", "a"])
+            step._encode_prompts(pipe, ["a", "c"])
         self.assertEqual(encoded, [["a"], ["b"], ["c"]])
+
+    def test_the_encode_runs_without_grad(self):
+        # A graded encode's cached embedding held the T5 graph, and through
+        # it ~11 GB of the group-offloaded weights' GPU copies (5090 OOM).
+        _, calls = self._run(prompt="p", prompt_bank=["p", "q"])
+        self.assertEqual(calls["encoded_with_grad"], [False, False])
 
     def test_no_negative_prompt_is_encoded_at_cfg_one(self):
         _, calls = self._run(prompt="p", negative_prompt="ugly", cfg=1.0)

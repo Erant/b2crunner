@@ -22,6 +22,7 @@ that carry a list of channel labels: slicing, `torch.cat` along channels and
 
 from __future__ import annotations
 
+import contextlib
 import sys
 import types
 import unittest
@@ -233,6 +234,7 @@ class TestRunWiresTheAlternateControl(unittest.TestCase):
         torch.cuda = types.SimpleNamespace(is_available=lambda: False)
         torch.Tensor = type("Tensor", (), {})
         torch.Generator = lambda device=None: types.SimpleNamespace(manual_seed=lambda s: None)
+        torch.no_grad = contextlib.nullcontext
 
         step = Wan22VaceDenoiseStep()
         step._pipe = _Pipe()
