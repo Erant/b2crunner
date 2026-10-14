@@ -662,6 +662,22 @@ def _feathered(mask: np.ndarray, grow_px: int) -> np.ndarray:
     return cv2.GaussianBlur(grown, (0, 0), max(grow_px / 2.0, 0.5))
 
 
+@register_step("pass_through")
+class PassThroughStep(Step):
+    """Its inputs, unchanged, under the names its outputs give them.
+
+    For a gated branch whose two arms must leave the same keys behind: the
+    orbit extension's guide training reads pass 2's frames and cameras from
+    scene.extended.pass2, where the early upscale puts them, and with the
+    upscale off this puts pass 2's own there instead.
+    """
+
+    PARAMS = ()
+
+    def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+        return dict(inputs)
+
+
 @register_step("splice_extension")
 class SpliceExtensionStep(Step):
     """The extended dataset: each pass's new frames around pass 2's own.

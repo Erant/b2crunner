@@ -132,6 +132,42 @@ def _fit_cameras_to_images(cameras: List[Any], images: List[np.ndarray]) -> tupl
     return rescaled, resolution
 
 
+def _precomputed(inputs: Dict[str, Any], count: int) -> tuple:
+    """The optional `upscaled` block: (frames, offset), or (None, 0) without one.
+
+    `upscaled` is a run of frames this step already upscaled earlier in the
+    run, standing for `images[upscaled_offset:upscaled_offset + len]` — the
+    orbit extension upscales pass 2's 81 frames for its guide training, and
+    the final upscale takes them back rather than running them twice.
+    """
+    done = inputs.get("upscaled")
+    if done is None:
+        return None, 0
+    done = list(done)
+    offset = int(inputs.get("upscaled_offset") or 0)
+    if not done or offset < 0 or offset + len(done) > count:
+        raise ValueError(
+            f"seedvr2: {len(done)} already-upscaled frames at offset {offset} do not fit "
+            f"inside the {count} frames handed in"
+        )
+    return done, offset
+
+
+def _check_sizes(images: List[np.ndarray], covered: range) -> None:
+    """The reused frames the size the fresh ones came out.
+
+    A reused frame from an upscale at another `resolution` would otherwise
+    reach the cameras' rescale as a dataset of two sizes.
+    """
+    sizes = {tuple(image.shape[:2]) for image in images}
+    if len(sizes) != 1:
+        reused = {tuple(images[i].shape[:2]) for i in covered}
+        raise ValueError(
+            f"seedvr2: the already-upscaled frames are {sorted(reused)} (h, w) and this "
+            f"upscale made {sorted(sizes - reused)} — they were not made by the same upscale"
+        )
+
+
 @register_step("seedvr2")
 class SeedVR2Step(Step):
     # Almost all of these are inference_cli.py's own argparse knobs, mirrored
@@ -268,15 +304,34 @@ class SeedVR2Step(Step):
             torch.cuda.empty_cache()
 
     def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+        if self._dit_model is None:
+            self.load(params)
+
+        frames = list(inputs["images"])
+        done, offset = _precomputed(inputs, len(frames))
+        if done is None:
+            images = self._upscale(frames, params)
+        else:
+            covered = range(offset, offset + len(done))
+            todo = [i for i in range(len(frames)) if i not in covered]
+            upscaled = iter(self._upscale([frames[i] for i in todo], params) if todo else [])
+            images = [done[i - offset] if i in covered else next(upscaled)
+                      for i in range(len(frames))]
+            _check_sizes(images, covered)
+            logger.info(
+                "seedvr2: upscaled %d of %d frames; frames %d-%d were upscaled earlier "
+                "and are taken as they are", len(todo), len(frames), offset,
+                offset + len(done) - 1,
+            )
+        cameras, resolution = _fit_cameras_to_images(inputs["cameras"], images)
+        return {"images": images, "cameras": cameras, "resolution": resolution}
+
+    def _upscale(self, frames: List[np.ndarray], params: Dict[str, Any]) -> List[np.ndarray]:
         import argparse
 
         import torch
         import inference_cli
 
-        if self._dit_model is None:
-            self.load(params)
-
-        frames = inputs["images"]
         rgb = np.stack([cv2.cvtColor(f, cv2.COLOR_BGR2RGB) for f in frames]).astype(np.float32) / 255.0
         frames_tensor = torch.from_numpy(rgb)  # [T, H, W, C], float32 [0,1]
 
@@ -364,5 +419,4 @@ class SeedVR2Step(Step):
         result = result.numpy()
         images = [cv2.cvtColor(frame, cv2.COLOR_RGB2BGR) for frame in result]
         del result
-        cameras, resolution = _fit_cameras_to_images(inputs["cameras"], images)
-        return {"images": images, "cameras": cameras, "resolution": resolution}
+        return images
