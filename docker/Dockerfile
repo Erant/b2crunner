@@ -301,7 +301,7 @@ RUN b2ctrain --help > /dev/null && brush-splat-render --help > /dev/null
 # source rather than a RUN git clone: no git needed in this stage, and
 # BuildKit caches it by the commit. Pinned by commit, as b2cgltf is: the
 # page reads b2cgltf's files, so the two move together.
-ARG B2CVIEWER_REF=e55bd9de76be6602a30b7a679fa921947d44f4e6
+ARG B2CVIEWER_REF=82b22edfdf01752f9d9eac187f4355e85520d472
 ADD --keep-git-dir=false https://github.com/Erant/b2cviewer.git#${B2CVIEWER_REF} /opt/b2cviewer
 
 # b2crig (Erant/b2crig): the rig behind the "Rig splat" output
