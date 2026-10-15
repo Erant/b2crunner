@@ -808,9 +808,10 @@ globals:
 # Each is ~780 T5 tokens before the subject (~200 more); the denoise encodes
 # up to 1024 (wan22_vace_denoise.PROMPT_TOKENS). From 2026-10-10 to 10-15 only
 # the first 226 reached the model — none of the subject, the English half
-# or the lighting sentences — so the full text, read since then, also
-# changes the room (a pale softbox studio; experiments/backpack_prompt arm
-# U). TODO revisit: move the lighting/room sentences into their own
+# or the Chinese lighting sentences (before that, pipe()'s 512 read the
+# whole Chinese block but not the English lighting, which sits past token
+# ~680) — so the full text also changes the room (a pale softbox studio;
+# experiments/backpack_prompt arm U). TODO revisit: move the lighting/room sentences into their own
 # placeholder (e.g. $LIGHTING_DESC$) so they can be tuned on their own.
 prompts:
   orbit: &prompt_orbit "人工光、柔光、低对比度、均匀照明、环绕运镜。时间静止，人物完全静止。身体如雕塑般僵硬，胸口没有起伏，头部与身体保持固定，面部肌肉完全不动，维持单一的中\
