@@ -311,7 +311,7 @@ ADD --keep-git-dir=false https://github.com/Erant/b2cviewer.git#${B2CVIEWER_REF}
 # plyfile, opencv, b2cgltf), and they find b2ctrain on PATH. Pinned by commit,
 # as b2cgltf is, and bumped with it: b2crig writes its half of the subject file
 # through that package. The doctor's b2crig check proves the imports at start.
-ARG B2CRIG_REF=e548f14ae9e22144c35ca5c82b8da7c74f6dfbb9
+ARG B2CRIG_REF=d1fcf73c11719b9b82ad86f9f76240a6567f7d56
 ADD --keep-git-dir=false https://github.com/Erant/b2crig.git#${B2CRIG_REF} /opt/b2crig
 
 # NOT /workspace/b2c_runner, which is where this used to live. RunPod's
