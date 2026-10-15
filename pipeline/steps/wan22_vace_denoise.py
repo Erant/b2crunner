@@ -295,6 +295,16 @@ DEFAULT_LORA_SUBFOLDER = "Wan2.2-T2V-A14B-4steps-lora-rank64-Seko-V1.1"
 DEFAULT_LORA_HIGH = "high_noise_model.safetensors"
 DEFAULT_LORA_LOW = "low_noise_model.safetensors"
 
+# T5 tokens a prompt is encoded to (longer ones are cut, shorter padded).
+# `encode_prompt` defaults to 226 and pipe() to 512; helical.yaml's orbit
+# prompt with a typical subject is ~980 tokens, with $SUBJECT_DESC$ from
+# token ~477. At 226 (2026-10-10 to 10-15, the prompt cache's call left it
+# at the default) the model never read the subject or any of the English
+# half: Lara's backpack came out flat and her braid gone. The full prompt at
+# 1024 gives both back (experiments/backpack_prompt, arm U); Wan was trained
+# on 512, but nothing broke past it.
+PROMPT_TOKENS = 1024
+
 # ComfyUI's `beta` scheduler (comfy/samplers.py, `beta_scheduler`): the
 # denoise steps are Beta(alpha, beta) quantiles of the training index.
 COMFY_BETA_ALPHA = 0.6
@@ -1810,9 +1820,14 @@ class Wan22VaceDenoiseStep(Step):
         started = time.time()
         with torch.no_grad():
             for text in missing:
+                tokens = len(pipe.tokenizer(text).input_ids)
+                if tokens > PROMPT_TOKENS:
+                    logger.warning("  prompt is %d tokens; only the first %d reach the model",
+                                   tokens, PROMPT_TOKENS)
                 embeds, _ = pipe.encode_prompt(
                     prompt=[text], do_classifier_free_guidance=False,
                     num_videos_per_prompt=1, device=pipe._execution_device,
+                    max_sequence_length=PROMPT_TOKENS,
                 )
                 self._prompt_cache[text] = embeds.to("cpu")
         _sync()

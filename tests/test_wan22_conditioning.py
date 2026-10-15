@@ -147,6 +147,11 @@ class _FakeScheduler:
         return (sample,) if not return_dict else types.SimpleNamespace(prev_sample=sample)
 
 
+def _word_tokenizer(text):
+    """A stand-in for the T5 tokenizer: one token per word."""
+    return types.SimpleNamespace(input_ids=text.split())
+
+
 class _Embeds:
     """Stands in for the T5 embedding batch: rows by slice, `.to` a no-op."""
 
@@ -421,8 +426,11 @@ class _RunsTheStep:
             def __init__(self):
                 self.scheduler = _FakeScheduler()
 
+            tokenizer = staticmethod(_word_tokenizer)
+
             def encode_prompt(self, prompt, **kwargs):
                 calls.setdefault("encoded", []).append(list(prompt))
+                calls.setdefault("max_sequence_length", []).append(kwargs.get("max_sequence_length"))
                 calls.setdefault("encoded_with_grad", []).append(_FAKE_GRAD["on"])
                 return _Embeds(prompt), None
 
@@ -1207,6 +1215,7 @@ class TestPromptCache(_RunsTheStep, unittest.TestCase):
         encoded = []
         pipe = types.SimpleNamespace(
             _execution_device="cpu",
+            tokenizer=_word_tokenizer,
             encode_prompt=lambda prompt, **kwargs: (encoded.append(list(prompt)) or _Embeds(prompt), None),
         )
         torch = types.ModuleType("torch")
@@ -1217,6 +1226,23 @@ class TestPromptCache(_RunsTheStep, unittest.TestCase):
             step._encode_prompts(pipe, ["b", "a"])
             step._encode_prompts(pipe, ["a", "c"])
         self.assertEqual(encoded, [["a"], ["b"], ["c"]])
+
+    def test_the_whole_prompt_is_encoded(self):
+        # encode_prompt's own default is 226 tokens: helical.yaml's prompt
+        # is ~980 with the subject from ~477, so the model never read it.
+        from pipeline.steps.wan22_vace_denoise import PROMPT_TOKENS
+
+        _, calls = self._run(prompt="p", prompt_bank=["p", "q"])
+        self.assertEqual(calls["max_sequence_length"], [PROMPT_TOKENS, PROMPT_TOKENS])
+        self.assertGreaterEqual(PROMPT_TOKENS, 1000)
+
+    def test_a_prompt_past_the_limit_is_logged(self):
+        from pipeline.steps.wan22_vace_denoise import PROMPT_TOKENS
+
+        long_prompt = " ".join(["w"] * (PROMPT_TOKENS + 5))
+        with self.assertLogs("pipeline.steps.wan22_vace_denoise", "WARNING") as logged:
+            self._run(prompt=long_prompt)
+        self.assertIn(f"{PROMPT_TOKENS + 5} tokens", "\n".join(logged.output))
 
     def test_the_encode_runs_without_grad(self):
         # A graded encode's cached embedding held the T5 graph, and through

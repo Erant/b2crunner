@@ -213,6 +213,9 @@ class TestRunWiresTheAlternateControl(unittest.TestCase):
             def register_to_config(self, **kwargs):
                 pass
 
+            def tokenizer(self, text):
+                return types.SimpleNamespace(input_ids=text.split())
+
             def encode_prompt(self, prompt, **kwargs):
                 return _Embeds(prompt), None
 

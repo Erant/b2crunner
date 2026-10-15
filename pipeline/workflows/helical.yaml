@@ -804,6 +804,14 @@ globals:
 # `prompt_bank`: whichever pass runs first encodes the two in one
 # text-encoder pass and the resident worker reuses them. Not read by the
 # workflow loader itself — it is only where the anchors live.
+#
+# Each is ~780 T5 tokens before the subject (~200 more); the denoise encodes
+# up to 1024 (wan22_vace_denoise.PROMPT_TOKENS). From 2026-10-10 to 10-15 only
+# the first 226 reached the model — none of the subject, the English half
+# or the lighting sentences — so the full text, read since then, also
+# changes the room (a pale softbox studio; experiments/backpack_prompt arm
+# U). TODO revisit: move the lighting/room sentences into their own
+# placeholder (e.g. $LIGHTING_DESC$) so they can be tuned on their own.
 prompts:
   orbit: &prompt_orbit "人工光、柔光、低对比度、均匀照明、环绕运镜。时间静止，人物完全静止。身体如雕塑般僵硬，胸口没有起伏，头部与身体保持固定，面部肌肉完全不动，维持单一的中\
         性表情。双眼一眨不眨，眼睑保持张开且稳定，目光空洞而固定，锁定远处墙面上的一个点，对镜头毫无察觉、毫无反应。人物站在一间空房间里：灰色墙面上有均匀的网\
