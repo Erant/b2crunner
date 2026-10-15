@@ -620,7 +620,7 @@ settings:
   - name: outline_strength
     label: Outline strength
     type: float
-    default: 6.25
+    default: 2.5
     minimum: 0.0
     maximum: 100.0
     advanced: true
@@ -805,59 +805,61 @@ globals:
 # text-encoder pass and the resident worker reuses them. Not read by the
 # workflow loader itself — it is only where the anchors live.
 prompts:
-  orbit: &prompt_orbit "人工光、柔光、低对比度、均匀照明、环绕运镜。时间静止，人物完全静止。身体如雕塑般僵硬，胸口没有起伏，头部保持固定角度，面部肌\
-        肉完全不动，维持单一的中性表情。双眼一眨不眨，眼睑保持张开且稳定，目光空洞而固定，锁定远处墙面上的一个点，对镜头毫无察觉、毫无反应。人物站\
-        在一间空房间里：灰色墙面上有均匀的网格线，深色地板，浅色天花板，墙面相交处有清晰的墙角。房间本身固定不动，镜头以匀速、固定焦距围绕主体平滑\
-        移动，墙角依次从画面中掠过。灯光属于房间本身，位置固定：大面积柔光从四周和上方均匀地包围人物，像一个固定在房间里的大型柔光罩，四面八方的光\
-        线同样柔和。人物全身的亮度均匀一致，每一帧完全相同；镜头环绕时，从任何角度看到的皮肤和衣物都同样明亮，身体两侧受光相同。房间里的明暗同样固\
-        定：墙面上柔和的明暗过渡、以及人物脚下淡淡的影子，始终落在房间中的同一位置，不随镜头移动。 Time is frozen and \
-        only the camera moves. The gaze stays anchored to that point on the \
-        wall as the camera passes, so the eyes slide across the frame, \
-        always aimed past the lens at the wall behind it. Eyelids stay open \
-        and steady, the expression holds without a single micro-movement, \
-        and the head keeps its exact angle throughout. The frozen subject is \
-        $SUBJECT_DESC$, standing in an empty room: grey walls ruled with an \
-        even grid, a dark floor and a lighter ceiling, meeting at clear \
-        corners. The camera pans slowly around the subject in a 360 degree \
-        orbit, moving smoothly around the subject in a continuous arc. The \
-        room is fixed in place and the camera travels through it, so the \
-        walls and their corners sweep past the frame while the room itself \
-        never turns. Soft, even, low-contrast light fills the room from \
-        every side and from above, like a large softbox dome fixed in place, \
-        wrapping the subject in the same gentle brightness all the way \
-        round. Skin and cloth hold one even brightness from every angle and \
-        in every frame while the camera arcs around, and both sides of the \
-        body are equally lit. The room's shading is just as fixed: the soft \
-        gradients on the walls and the faint shadow at the subject's feet \
-        stay in the same place in the room in every frame, and do not swing \
-        round with the camera. Matte skin, matte cloth, photorealistic, \
-        sharp focus, identical face, clothing and lighting in every frame."
-  render: &prompt_render "人工光、柔光、低对比度、均匀照明、环绕运镜。时间静止，人物完全静止。身体如雕塑般僵硬，胸口没有起伏，头部保持固定角度，面部肌\
-        肉完全不动，维持单一的中性表情。双眼一眨不眨，眼睑保持张开且稳定，目光空洞而固定，锁定远处墙面上的一个点，对镜头毫无察觉、毫无反应。人物站\
-        在一间空房间里：灰色墙面上有均匀的网格线，深色地板，浅色天花板，墙面相交处有清晰的墙角。房间本身固定不动，镜头以匀速、固定焦距围绕主体平滑\
-        移动，墙角依次从画面中掠过。灯光属于房间本身，位置固定：大面积柔光从四周和上方均匀地包围人物，像一个固定在房间里的大型柔光罩，四面八方的光\
-        线同样柔和。人物全身的亮度均匀一致，每一帧完全相同；镜头环绕时，从任何角度看到的皮肤和衣物都同样明亮，身体两侧受光相同。房间里的明暗同样固\
-        定：墙面上柔和的明暗过渡、以及人物脚下淡淡的影子，始终落在房间中的同一位置，不随镜头移动。 Time is frozen and \
-        only the camera moves. The gaze stays anchored to that point on the \
-        wall as the camera passes, so the eyes slide across the frame, \
-        always aimed past the lens at the wall behind it. Eyelids stay open \
-        and steady, the expression holds without a single micro-movement, \
-        and the head keeps its exact angle throughout. The frozen subject is \
-        $SUBJECT_DESC$, standing in an empty room: grey walls ruled with an \
-        even grid, a dark floor and a lighter ceiling, meeting at clear \
-        corners. The room is fixed in place and the camera travels through \
-        it, so the walls and their corners sweep past the frame while the \
-        room itself never turns. Soft, even, low-contrast light fills the \
-        room from every side and from above, like a large softbox dome fixed \
-        in place, wrapping the subject in the same gentle brightness all the \
-        way round. Skin and cloth hold one even brightness from every angle \
-        and in every frame while the camera arcs around, and both sides of \
-        the body are equally lit. The room's shading is just as fixed: the \
-        soft gradients on the walls and the faint shadow at the subject's \
-        feet stay in the same place in the room in every frame, and do not \
-        swing round with the camera. Matte skin, matte cloth, \
-        photorealistic, sharp focus, identical face, clothing and lighting \
-        in every frame."
+  orbit: &prompt_orbit "人工光、柔光、低对比度、均匀照明、环绕运镜。时间静止，人物完全静止。身体如雕塑般僵硬，胸口没有起伏，头部与身体保持固定，面部肌肉完全不动，维持单一的中\
+        性表情。双眼一眨不眨，眼睑保持张开且稳定，目光空洞而固定，锁定远处墙面上的一个点，对镜头毫无察觉、毫无反应。人物站在一间空房间里：灰色墙面上有均匀的网\
+        格线，深色地板，浅色天花板，墙面相交处有清晰的墙角。房间本身固定不动，镜头以匀速、固定焦距围绕主体平滑移动，墙角依次从画面中掠过。从镜头看去，人物作为\
+        一个整体完整地转过一圈：头部始终和身体一起转动，从不单独转向镜头，依次露出正面、侧面、后脑勺和背部、另一侧面。灯光属于房间本身，位置固定：大面积柔光从\
+        四周和上方均匀地包围人物，像一个固定在房间里的大型柔光罩，四面八方的光线同样柔和。人物全身的亮度均匀一致，每一帧完全相同；镜头环绕时，从任何角度看到的\
+        皮肤和衣物都同样明亮，身体两侧受光相同。房间里的明暗同样固定：墙面上柔和的明暗过渡、以及人物脚下淡淡的影子，始终落在房间中的同一位置，不随镜头移动。 \
+        Time is frozen and only the camera moves. The gaze stays anchored to that \
+        point on the wall as the camera passes, so the eyes never follow the lens. \
+        Eyelids stay open and steady, the expression holds without a single micro-movement, \
+        and the head stays fixed on the body. The frozen subject is $SUBJECT_DESC$, \
+        standing in an empty room: grey walls ruled with an even grid, a dark \
+        floor and a lighter ceiling, meeting at clear corners. The camera pans \
+        slowly around the subject in a 360 degree orbit, moving smoothly around \
+        the subject in a continuous arc. Seen from the camera, the subject turns \
+        through a full circle as one rigid piece: the head turns together with \
+        the body, never on its own, so the front, one side, the back of the head \
+        and the back of the body, then the other side come into view in turn. \
+        The room is fixed in place and the camera travels through it, so the walls \
+        and their corners sweep past the frame while the room itself never turns. \
+        Soft, even, low-contrast light fills the room from every side and from \
+        above, like a large softbox dome fixed in place, wrapping the subject \
+        in the same gentle brightness all the way round. Skin and cloth hold one \
+        even brightness from every angle and in every frame while the camera arcs \
+        around, and both sides of the body are equally lit. The room's shading \
+        is just as fixed: the soft gradients on the walls and the faint shadow \
+        at the subject's feet stay in the same place in the room in every frame, \
+        and do not swing round with the camera. Matte skin, matte cloth, photorealistic, \
+        sharp focus, identical clothing and lighting in every frame."
+  render: &prompt_render "人工光、柔光、低对比度、均匀照明、环绕运镜。时间静止，人物完全静止。身体如雕塑般僵硬，胸口没有起伏，头部与身体保持固定，面部肌肉完全不动，维持单一的中\
+        性表情。双眼一眨不眨，眼睑保持张开且稳定，目光空洞而固定，锁定远处墙面上的一个点，对镜头毫无察觉、毫无反应。人物站在一间空房间里：灰色墙面上有均匀的网\
+        格线，深色地板，浅色天花板，墙面相交处有清晰的墙角。房间本身固定不动，镜头以匀速、固定焦距围绕主体平滑移动，墙角依次从画面中掠过。从镜头看去，人物作为\
+        一个整体完整地转过一圈：头部始终和身体一起转动，从不单独转向镜头，依次露出正面、侧面、后脑勺和背部、另一侧面。灯光属于房间本身，位置固定：大面积柔光从\
+        四周和上方均匀地包围人物，像一个固定在房间里的大型柔光罩，四面八方的光线同样柔和。人物全身的亮度均匀一致，每一帧完全相同；镜头环绕时，从任何角度看到的\
+        皮肤和衣物都同样明亮，身体两侧受光相同。房间里的明暗同样固定：墙面上柔和的明暗过渡、以及人物脚下淡淡的影子，始终落在房间中的同一位置，不随镜头移动。 \
+        Time is frozen and only the camera moves. The gaze stays anchored to that \
+        point on the wall as the camera passes, so the eyes never follow the lens. \
+        Eyelids stay open and steady, the expression holds without a single micro-movement, \
+        and the head stays fixed on the body. The frozen subject is $SUBJECT_DESC$, \
+        standing in an empty room: grey walls ruled with an even grid, a dark \
+        floor and a lighter ceiling, meeting at clear corners. Seen from the camera, \
+        the subject turns through a full circle as one rigid piece: the head turns \
+        together with the body, never on its own, so the front, one side, the \
+        back of the head and the back of the body, then the other side come into \
+        view in turn. The room is fixed in place and the camera travels through \
+        it, so the walls and their corners sweep past the frame while the room \
+        itself never turns. Soft, even, low-contrast light fills the room from \
+        every side and from above, like a large softbox dome fixed in place, wrapping \
+        the subject in the same gentle brightness all the way round. Skin and \
+        cloth hold one even brightness from every angle and in every frame while \
+        the camera arcs around, and both sides of the body are equally lit. The \
+        room's shading is just as fixed: the soft gradients on the walls and the \
+        faint shadow at the subject's feet stay in the same place in the room \
+        in every frame, and do not swing round with the camera. Matte skin, matte \
+        cloth, photorealistic, sharp focus, identical clothing and lighting in \
+        every frame."
 
 steps:
   # ================================================================ bootstrap
@@ -2166,6 +2168,27 @@ steps:
       # NOT name the sides or describe the rear view, which is what the
       # reverted text above did. tests/test_workflows.py pins both
       # strings (DRAWING_PROMPT here, DENOISE_PROMPT on pass 2).
+      #
+      # 2026-10-14: the head turned to face the camera on the back views
+      # of the 480p re-outline pass (korra, mirrorsedge; the VACE reference
+      # is the front photo, and dropping it fixed the head but lost the
+      # costume). Two changes, in BOTH prompts (user's call), measured on
+      # the re-outline pass only:
+      # - the clauses that tied the head to the camera, not the body:
+      #   头部保持固定角度 -> 头部与身体保持固定, "the head keeps its exact
+      #   angle" -> "stays fixed on the body", the gaze "always aimed past
+      #   the lens" -> "never follow the lens", and no "identical face" in
+      #   every frame. Alone, these changed nothing.
+      # - one sentence in each language that head and body turn through
+      #   the full circle together (从镜头看去，人物作为一个整体完整地转过一圈…
+      #   / "Seen from the camera, the subject turns through a full circle
+      #   as one rigid piece…"). English only did nothing; with the Chinese
+      #   it showed the back of the head on both subjects with the costume
+      #   kept (the reoutline_high_only experiment, arm Q2).
+      # This sentence names the sides and the back of the head, the same
+      # kind of text the 2026-09-13 revert above blamed for lost clothing in
+      # THIS pass. Untested at full resolution and on pass 2: if a run comes
+      # back with painted-on clothes, this is the first suspect.
       prompt: *prompt_orbit
       prompt_bank: [*prompt_orbit, *prompt_render]
       negative_prompt: "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静\

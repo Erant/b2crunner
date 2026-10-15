@@ -45,36 +45,40 @@ VALID_DISPATCH = {"in_process", "subprocess", "service", "docker"}
 # the prompt still loads, still runs, and is not the one intended.
 DENOISE_PROMPT = (
     "人工光、柔光、低对比度、均匀照明、环绕运镜。时间静止，人物完全静止。身体"
-    "如雕塑般僵硬，胸口没有起伏，头部保持固定角度，面部肌肉完全不动，维持单一"
-    "的中性表情。双眼一眨不眨，眼睑保持张开且稳定，目光空洞而固定，锁定远处墙"
-    "面上的一个点，对镜头毫无察觉、毫无反应。人物站在一间空房间里：灰色墙面上"
-    "有均匀的网格线，深色地板，浅色天花板，墙面相交处有清晰的墙角。房间本身固"
-    "定不动，镜头以匀速、固定焦距围绕主体平滑移动，墙角依次从画面中掠过。灯光"
-    "属于房间本身，位置固定：大面积柔光从四周和上方均匀地包围人物，像一个固定"
-    "在房间里的大型柔光罩，四面八方的光线同样柔和。人物全身的亮度均匀一致，每"
-    "一帧完全相同；镜头环绕时，从任何角度看到的皮肤和衣物都同样明亮，身体两侧"
-    "受光相同。房间里的明暗同样固定：墙面上柔和的明暗过渡、以及人物脚下淡淡的"
-    "影子，始终落在房间中的同一位置，不随镜头移动。 Time is "
-    "frozen and only the camera moves. The gaze stays anchored to that "
-    "point on the wall as the camera passes, so the eyes slide across the "
-    "frame, always aimed past the lens at the wall behind it. Eyelids stay "
-    "open and steady, the expression holds without a single "
-    "micro-movement, and the head keeps its exact angle throughout. The "
-    "frozen subject is $SUBJECT_DESC$, standing in an empty room: grey "
-    "walls ruled with an even grid, a dark floor and a lighter ceiling, "
-    "meeting at clear corners. The room is fixed in place and the camera "
+    "如雕塑般僵硬，胸口没有起伏，头部与身体保持固定，面部肌肉完全不动，维持单"
+    "一的中性表情。双眼一眨不眨，眼睑保持张开且稳定，目光空洞而固定，锁定远处"
+    "墙面上的一个点，对镜头毫无察觉、毫无反应。人物站在一间空房间里：灰色墙面"
+    "上有均匀的网格线，深色地板，浅色天花板，墙面相交处有清晰的墙角。房间本身"
+    "固定不动，镜头以匀速、固定焦距围绕主体平滑移动，墙角依次从画面中掠过。从"
+    "镜头看去，人物作为一个整体完整地转过一圈：头部始终和身体一起转动，从不单"
+    "独转向镜头，依次露出正面、侧面、后脑勺和背部、另一侧面。灯光属于房间本身"
+    "，位置固定：大面积柔光从四周和上方均匀地包围人物，像一个固定在房间里的大"
+    "型柔光罩，四面八方的光线同样柔和。人物全身的亮度均匀一致，每一帧完全相同"
+    "；镜头环绕时，从任何角度看到的皮肤和衣物都同样明亮，身体两侧受光相同。房"
+    "间里的明暗同样固定：墙面上柔和的明暗过渡、以及人物脚下淡淡的影子，始终落"
+    "在房间中的同一位置，不随镜头移动。 Time is frozen and only the camera moves. The gaze "
+    "stays anchored to that point on the wall as the camera passes, so "
+    "the eyes never follow the lens. Eyelids stay open and steady, the "
+    "expression holds without a single micro-movement, and the head stays "
+    "fixed on the body. The frozen subject is $SUBJECT_DESC$, standing "
+    "in an empty room: grey walls ruled with an even grid, a dark floor "
+    "and a lighter ceiling, meeting at clear corners. Seen from the camera, "
+    "the subject turns through a full circle as one rigid piece: the head "
+    "turns together with the body, never on its own, so the front, one "
+    "side, the back of the head and the back of the body, then the other "
+    "side come into view in turn. The room is fixed in place and the camera "
     "travels through it, so the walls and their corners sweep past the "
     "frame while the room itself never turns. Soft, even, low-contrast "
     "light fills the room from every side and from above, like a large "
     "softbox dome fixed in place, wrapping the subject in the same gentle "
     "brightness all the way round. Skin and cloth hold one even brightness "
-    "from every angle and in every frame while the camera arcs around, and "
-    "both sides of the body are equally lit. The room's shading is just as "
-    "fixed: the soft gradients on the walls and the faint shadow at the "
-    "subject's feet stay in the same place in the room in every frame, and "
-    "do not swing round with the camera. Matte skin, matte cloth, "
-    "photorealistic, sharp focus, identical face, clothing and lighting in "
-    "every frame."
+    "from every angle and in every frame while the camera arcs around, "
+    "and both sides of the body are equally lit. The room's shading is "
+    "just as fixed: the soft gradients on the walls and the faint shadow "
+    "at the subject's feet stay in the same place in the room in every "
+    "frame, and do not swing round with the camera. Matte skin, matte cloth, "
+    "photorealistic, sharp focus, identical clothing and lighting in every "
+    "frame."
 )
 
 DENOISE_NEGATIVE_PROMPT = (
@@ -143,9 +147,9 @@ BOOTSTRAPS = {
 #: The one sentence pass 1 and the re-outline pass carry that pass 2 does
 #: not, since 2026-09-20: their control is a drawing, whose silhouette and
 #: skeleton read the same from the front and from behind, and this says the
-#: orbit is whole. It names no side and describes no rear view — the route
-#: text that was tried and reverted on 2026-09-13 (see the comment above
-#: denoise_pass1's prompt in helical.yaml). Pass 2's control is a render.
+#: orbit is whole. Pass 2's control is a render. (Since 2026-10-14 BOTH
+#: prompts also carry the head-turns-with-the-body sentence, which does name
+#: the sides — see the comment above denoise_pass1's prompt in helical.yaml.)
 ORBIT_SENTENCE = (
     "The camera pans slowly around the subject in a 360 degree orbit, "
     "moving smoothly around the subject in a continuous arc. "
@@ -2130,7 +2134,7 @@ class TestTheReoutlineBranch(unittest.TestCase):
         spec = self._spec()
         by_name = {p.name: p for p in spec.settings}
         plain, reoutlined = by_name["outline_strength"], by_name["reoutlined_strength"]
-        self.assertEqual((plain.type, plain.default, plain.requires), (float, 6.25, ""))
+        self.assertEqual((plain.type, plain.default, plain.requires), (float, 2.5, ""))
         self.assertEqual((reoutlined.type, reoutlined.default, reoutlined.requires),
                          (float, 20.0, "re_outline"))
         readers = {}

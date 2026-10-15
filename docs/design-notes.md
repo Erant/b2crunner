@@ -67,8 +67,10 @@ one extra VAE encode of the control video.
 **outline_strength** — how dark the flat silhouette fill in the body-model
 drawing is, as a percentage from the #7F7F7F ground (0, no silhouette) to
 black (100). The body model's outline is wrong wherever hair and clothing
-extend past it, so the fill is kept faint (6.25 ≈ #777777): a hint under the
-skeleton rather than a shape to trace. With `re_outline` off, this drawing is
+extend past it, so the fill is kept faint (2.5 ≈ #7C7C7C): a hint under the
+skeleton rather than a shape to trace. It was 6.25 until 2026-10-14: in the
+re-outline pass that fill pulled clothing in to the body, so loose trousers
+came out as leggings; 3 kept the costume on korra and the user had 2.5 working. With `re_outline` off, this drawing is
 what pass 1 sees. With it on, this is what the 480p re-outline pass sees,
 and pass 1 gets the re-outlined drawing at `reoutlined_strength`.
 
@@ -102,9 +104,11 @@ depth.
 
 **outline_relief_amplitude** — how far the relief's near and far ends sit
 on either side of the fill strength, on the same percentage ramp. 6.25 is
-8 grey levels each way. At `outline_strength` 6.25 the nearest level then
+8 grey levels each way. At `outline_strength` 6.25 the nearest level
 lands on the ground colour, which only a point 40 cm nearer than the
-orbit target reaches.
+orbit target reaches; at the 2.5 default the near end clips to the ground
+colour, so the nearest levels merge with it. Relief is off by default;
+lower the amplitude if you turn it on.
 
 **skeleton_occlusion_m** — hides every skeleton joint that the body model
 hides from the camera, and every bone ending on one. For example, the far
@@ -624,7 +628,7 @@ Setting `re_outline` (default on). The first denoise conditions on a flat silhou
 - Why a splat and not the per-frame mattes: each 480p frame has its own idea of the hem and hair, so per-frame mattes jitter. A splat fitted to all 81 mattes outvotes single-frame bulges and keeps what they agree on.
 - The batch is resized in b2crunner on purpose. diffusers' `WanVACEPipeline.preprocess_conditions` fits by area and floors to /16, so a 720x1280 batch asked for 480x832 runs at 464x832 with the reference letterboxed. The 0.667/0.65 anisotropy cancels because the same plain resize is inverted.
 - `outline_mask_clean_px: 9` (opening then closing before the blur) removes horizontal "hairs" at the silhouette. These are low-opacity discs straddling the edge, drawn as streaks because every ray on a single-elevation ring is horizontal. Thin structure went 0.78% -> 0.00% and IoU against the mattes 0.9425 -> 0.9489. Dead ends: a trainer scale-ratio cap (8/4/2) and an export in-mask prune (0.8) both left the hairs, and the prune shrank the body. Raising `outline_mask_threshold` does nothing.
-- Two fill strengths: `outline_strength` 6.25 (mesh outline, kept faint because it is wrong off the body) and `reoutlined_strength` 20 (`requires: re_outline`, drawn darker because it is the subject's agreed shape).
+- Two fill strengths: `outline_strength` 2.5 (mesh outline, kept faint; 6.25 until 2026-10-14 because it is wrong off the body) and `reoutlined_strength` 20 (`requires: re_outline`, drawn darker because it is the subject's agreed shape).
 - No `refine_cameras` for this splat (the only brush training without one; tests/test_workflows.py exempts it by name). `dataset.cameras` must stay the ideal orbit. A uniform denoiser raise or offset survives into the outline anyway, because refinement removes the common mode. If the outline sits visibly high, shift the coverage in the drawing rather than correcting the poses.
 - The Dockerfile asserts body2colmap has `render_outline(mask=...)`. An older body2colmap silently ignores the mask and draws the mesh outline.
 - Reading a run: `debug/reoutline/frame_*.png` / `matte_*.png`, `debug/reoutline_splat.ply`, `debug/denoise_pass1_input/`.
