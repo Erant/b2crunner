@@ -94,7 +94,6 @@ class TestWiring(unittest.TestCase):
             by_id = {s.id: s for s in spec.steps}
             with self.subTest(workflow=path.name):
                 pre, fix = by_id["relight_pretrain"], by_id["relight_frames"]
-                self.assertLess(ids.index("refine_cameras_final"), ids.index("relight_pretrain"))
                 self.assertLess(ids.index("segment_views"), ids.index("relight_frames"))
                 self.assertLess(ids.index("relight_pretrain"), ids.index("relight_frames"))
                 self.assertLess(ids.index("relight_frames"), ids.index("export_colmap"))

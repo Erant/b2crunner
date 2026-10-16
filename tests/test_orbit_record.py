@@ -219,7 +219,7 @@ class TestTheWiring(unittest.TestCase):
                 order = [s.id for s in spec.steps]
                 self.assertEqual(order.index("snapshot_orbit"), order.index("extend_splice") + 1)
                 self.assertLess(order.index("snapshot_orbit"), order.index("upscale"))
-                self.assertLess(order.index("snapshot_orbit"), order.index("refine_cameras_final"))
+                self.assertNotIn("refine_cameras_final", order)
                 # rig_subject (the Rig splat switch) rigs the subject file in place.
                 self.assertEqual(order[-1], "rig_subject")
                 self.assertEqual(order[-2], "export_subject")

@@ -3,9 +3,8 @@
 Two steps around pipeline/orbit_record.py, so that the orbit extension
 can run after the fact on a splat that turned out worth extending. The
 snapshot is taken when the orbit is final (after `extend_splice`, if one
-ran) and before stage 5 and 6 change what the dataset holds:
-`refine_cameras_final` moves the cameras, and the upscale rescales their
-intrinsics. The embed runs after `train_final_splat`, since each brush
+ran) and before stage 5 changes what the dataset holds: the upscale
+rescales the cameras' intrinsics. The embed runs after `train_final_splat`, since each brush
 export rewrites the .ply from scratch.
 """
 

@@ -26,8 +26,7 @@ What the record holds, one comment line per key:
     one denoise pass's length.
   * `anchor_frame_index`: the photograph's frame on that path.
   * `orbit_cameras.*`: every camera of that path verbatim, as the frames
-    were denoised on it: before `refine_cameras_final`, at the render
-    resolution. `rotation` (N,3,3) is camera-to-world and `position` (N,3)
+    were denoised on it, at the render resolution. `rotation` (N,3,3) is camera-to-world and `position` (N,3)
     the centre in the splat's world, as body2colmap.Camera holds them.
     `intrinsics` (N,4) is fx fy cx cy in pixels at `image_size` (w h).
   * `final_cameras.*`: the same for the cameras the splat was trained on,

@@ -266,7 +266,7 @@
 # "The dataset's anchor camera is NOT the photograph's camera".
 #
 # WHAT CHANGED (2026-09-04, later): **the result .zip carries a `debug/`
-# directory.** `refine_cameras` and `refine_cameras_final` write the poses
+# directory.** `refine_cameras` (and `refine_cameras_final`, until 2026-10-16) write the poses
 # they were given and the poses they published as two COLMAP models plus
 # stats.json; `face_splat` and `face_splat_refined` write their stats and
 # depth/mask visualisations; the face .ply files ride along too
@@ -555,7 +555,7 @@ settings:
     type: bool
     default: true
     advanced: true
-    help: Bundle-adjust the camera poses against the frames before each training.
+    help: Bundle-adjust the camera poses against the frames before the intermediate training.
 
   - name: refit_body
     label: Refit the body model to the intermediate splat
@@ -2419,10 +2419,8 @@ steps:
       # republishes both keys for the helix it builds, because a position
       # match has to be against the path the frames were rendered along, and
       # this refinement's ~62 mm move would miss it by ~10x the tolerance.
-      # refine_cameras_final, after that, publishes no anchor_position —
-      # moving the helix's anchor off the pose its own frames were rendered
-      # from is exactly the mistake above. (It does take the frame index,
-      # so its log line and stats describe the photograph's frame.)
+      # Nothing after that moves the helix's anchor off the pose its own
+      # frames were rendered from, which is exactly the mistake above.
       anchor_position: dataset.extras.anchor_position
 
   # --------------------------- the face splat, rebuilt on the refined poses
@@ -3599,8 +3597,7 @@ steps:
   # the evidence the render's gate reads. No solve of its own, like the
   # re-outline training: its render has to land exactly on the analytic
   # extension of the path the frames were made on, and refining the
-  # middle would move the very cameras the extension continues (the
-  # final solve, refine_cameras_final, covers all 162 frames afterwards).
+  # middle would move the very cameras the extension continues.
   # No photograph copies or face views either: the frames it fits already
   # carry the anchor as pass 2 painted it. Mesh and rig as the final
   # training takes them — the refit body when export_ply and refit_body
@@ -3900,8 +3897,8 @@ steps:
   # were made on, the anchor, the extras the anchor solver reads, the prompt
   # and the conditioning images. Taken here because this is the last point
   # the dataset still holds them: the orbit is final (extended above, if
-  # extend_orbit ran), and next come the upscale, which rescales the
-  # intrinsics, and refine_cameras_final, which moves the cameras. The helix
+  # extend_orbit ran), and next comes the upscale, which rescales the
+  # intrinsics. The helix
   # params are render_subject's, copied as extend_path's are. The record
   # waits in scene.orbit_record until export_subject writes it into the
   # subject file (scene.glb).
@@ -4044,57 +4041,13 @@ steps:
   # trains on them — the stage-2 maps do not describe these frames: the
   # orbit was replaced, extended and upscaled since.
 
-  # ------------------------------------------- refining the cameras (stage 6)
-  # The same refinement again, and it is needed again for the same reason:
-  # render_subject replaced the dataset wholesale with a NEW generated path
-  # — a longer helical orbit, 81 fresh poses solved from a pattern rather
-  # than measured — so the corrections made back in stage 2 do not describe
-  # these cameras at all. The frames have also been through a second
-  # diffusion pass and an upscale since, which is more of the disagreement
-  # this exists to absorb, not less.
-  #
-  # Placed here, after export_masks and export_normals, so both stage-6
-  # consumers below read the same corrected poses: the COLMAP dataset a run
-  # hands back and the deliverable .ply trained from it. It reads
-  # export_masks' mattes, which is why it cannot sit any earlier than this —
-  # dataset.masks between mask_splat_fringes and here is the all-1.0 VACE
-  # batch, and a solve masked to "everything" is the unmasked variant under
-  # a different name.
-  #
-  # It does NOT cover export_colmap_preupscale (stage 4b), which is the one
-  # export that necessarily sees the given poses. That export exists to
-  # measure what SeedVR2 does to splat quality by comparison with colmap/,
-  # and refining it would have to be its own solve against its own frames —
-  # a second three-minute run for a debug artefact. Worth knowing when
-  # comparing the two, which is why it is written down rather than left to
-  # be discovered.
-  #
-  # Same defaults as the stage-2 instance. `train_final_splat` is gated on
-  # export_ply and this is not: export_colmap wants the corrected poses too,
-  # and the two switches are independent.
-  - id: refine_cameras_final
-    step: refine_cameras
-    dispatch: in_process
-    when: ${globals.refine_cameras}
-    inputs:
-      cameras: dataset.cameras
-      image_names: dataset.image_names
-      images: dataset.images
-      masks: dataset.masks
-      # The helix's anchor (37), as render_subject published it — so the
-      # "anchor frame is left N deg" line and stats.json's anchor_residual
-      # are about the photograph, not frame 0. Until 2026-09-08 this was
-      # unwired and both described a synthetic frame.
-      anchor_frame_index: dataset.extras.anchor_frame_index?
-      # The subject's gauge again (trap 6, see the stage-2 instance). The
-      # mesh here is the refit body, which is where the helix frames'
-      # subject is by construction: the helix was rendered around it.
-      mesh_world: scene.mesh_world?
-    params:
-      debug_dir: ${globals.output_root}/debug/refine_cameras_final
-    outputs:
-      cameras: dataset.cameras
-      stats: scene.camera_refinement_final
+  # ------------------------------------------- no final camera refinement
+  # Stage 6 had a second refine_cameras over all 162 frames
+  # (refine_cameras_final) until 2026-10-16. Removed: on 6692a0 it moved
+  # the cameras 10-20 mm / 0.35 deg but the subject only 1.6 px (pass 2) to
+  # 2.9 px (extensions) on screen, reprojection 1.62 -> 1.60 px — the given
+  # poses already fit the frames' features as well as the frames allow.
+  # The final training and colmap/ take the poses the frames were made on.
 
   # ------------------------------------------- the face per view (stage 6)
   # steps/face_views.py, docs/design-notes.md#face-per-view-and-the-anchors-eyes. After the refinement, so the

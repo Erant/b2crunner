@@ -1191,18 +1191,22 @@ class TestWorkflowFiles(unittest.TestCase):
         # The orbit extension's guide training is the other: its render has
         # to land on the analytic continuation of the path the frames were
         # made on, and a solve would move the middle cameras that
-        # continuation is anchored to. refine_cameras_final covers all of
-        # its frames afterwards (steps/extend_orbit.py).
+        # continuation is anchored to (steps/extend_orbit.py).
         #
         # The lighting correction's pre-train is not a different dataset at
-        # all: it is train_final_splat's frames and cameras, after
-        # refine_cameras_final, trained briefly for their geometry
-        # (steps/relight.py). The final solve covers it.
+        # all: it is train_final_splat's frames and cameras, trained
+        # briefly for their geometry (steps/relight.py).
         #
         # The re-upscale's retraining (steps/reupscale.py) trains on renders
         # of the final splat at those same solved cameras: registered by
         # construction, nothing to solve.
-        unrefined = {"reoutline_train_splat", "extend_train_splat", "relight_pretrain", "reupscale_train"}
+        #
+        # And the deliverable training itself, since 2026-10-16: its solve
+        # (refine_cameras_final) moved the subject 1.6-2.9 px on screen at
+        # 1080x1920 for 1.62 -> 1.60 px of reprojection on 6692a0, so it
+        # trains on the poses the frames were made on.
+        unrefined = {"reoutline_train_splat", "extend_train_splat", "relight_pretrain", "reupscale_train",
+                     "train_final_splat"}
         for path in _workflows():
             spec = WorkflowSpec.from_yaml(str(path))
             ids = [s.id for s in spec.steps]
