@@ -675,6 +675,22 @@ settings:
     advanced: true
     help: Add two more denoise passes above and below the orbit (162 views instead of 81).
 
+  - name: extend_before
+    label: Extend below (BEFORE pass)
+    type: bool
+    default: true
+    advanced: true
+    requires: extend_orbit
+    help: The pass that continues the orbit backwards, ramping down below the ±30° band.
+
+  - name: extend_after
+    label: Extend above (AFTER pass)
+    type: bool
+    default: true
+    advanced: true
+    requires: extend_orbit
+    help: The pass that continues the orbit forwards, ramping up above the ±30° band.
+
   - name: extend_tilt_deg
     label: Extension tilt (deg past the band)
     type: float
@@ -3429,7 +3445,11 @@ steps:
   # inactive frames included (see extend_tilt_deg). `phase_frames` is
   # pass 2's own length: each
   # extension pass is a video the model was calibrated for, and 4k+1 for
-  # the temporal VAE.
+  # the temporal VAE. `extend_before` / `extend_after` switch each pass on
+  # its own (2026-10-15: from -70 deg the BEFORE pass drew an upright figure
+  # over its guide — a view from under the floor the video model has not
+  # seen); a pass that is off publishes 0 new frames and 0 overlap, its
+  # denoise is gated off and the splice reads its output as missing.
   - id: extend_path
     step: extend_helical_path
     dispatch: in_process
@@ -3442,6 +3462,8 @@ steps:
       overlap_before: ${globals.extend_overlap_before}
       overlap_after: ${globals.extend_overlap_after}
       tilt_deg: ${globals.extend_tilt_deg}
+      before_pass: ${globals.extend_before}
+      after_pass: ${globals.extend_after}
       n_frames: 81
       n_loops: 2
       amplitude_deg: 30.0
@@ -3628,7 +3650,9 @@ steps:
     dispatch: subprocess
     env: wan22
     keep_loaded: true
-    when: ${globals.extend_orbit}
+    when:
+      - ${globals.extend_orbit}
+      - ${globals.extend_before}
     inputs:
       control_video: scene.extended.before_phase.images
       control_masks: scene.extended.before_phase.masks
@@ -3662,7 +3686,9 @@ steps:
     dispatch: subprocess
     env: wan22
     keep_loaded: true
-    when: ${globals.extend_orbit}
+    when:
+      - ${globals.extend_orbit}
+      - ${globals.extend_after}
     inputs:
       control_video: scene.extended.after_phase.images
       control_masks: scene.extended.after_phase.masks
@@ -3710,8 +3736,8 @@ steps:
     when: ${globals.extend_orbit}
     inputs:
       dataset: dataset
-      before_denoised: scene.extended.before_phase.denoised
-      after_denoised: scene.extended.after_phase.denoised
+      before_denoised: scene.extended.before_phase.denoised?
+      after_denoised: scene.extended.after_phase.denoised?
       cameras: scene.extended.cameras
       image_names: scene.extended.image_names
       before: scene.extended.before

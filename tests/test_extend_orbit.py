@@ -243,6 +243,33 @@ class TestExtendHelicalPath(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "more frames than pass 2"):
             self._extend(self.source, phase_frames=101, overlap_before=90)
 
+    def test_one_side_alone(self):
+        """A pass that is off adds nothing: 0 new frames, 0 overlap, no
+        cameras of its own; the other side is exactly what it is with both."""
+        both = self._extend(self.source, tilt_deg=10.0)
+        after = self._extend(self.source, tilt_deg=10.0, before_pass=False)
+        self.assertEqual((after["before"], after["overlap_before"]), (0, 0))
+        self.assertEqual((after["after"], after["overlap_after"]), (40, 41))
+        self.assertEqual(len(after["cameras"]), 121)
+        self.assertEqual(after["image_names"][-1], "frame_00121_.png")
+        for got, want in zip(after["cameras"][:81], self.source):
+            self.assertIs(got, want)
+        self.assertEqual(len(after["pass_cameras"]), 81)
+        for got, want in zip(after["cameras"][81:] + after["pass_cameras"],
+                             both["cameras"][122:] + both["pass_cameras"][81:]):
+            np.testing.assert_allclose(got.position, want.position, atol=1e-9)
+        before = self._extend(self.source, tilt_deg=10.0, after_pass=False)
+        self.assertEqual((before["before"], before["overlap_before"]), (41, 40))
+        self.assertEqual((before["after"], before["overlap_after"]), (0, 0))
+        self.assertEqual(len(before["cameras"]), 122)
+        for got, want in zip(before["cameras"][41:], self.source):
+            self.assertIs(got, want)
+        for got, want in zip(before["cameras"][:41] + before["pass_cameras"],
+                             both["cameras"][:41] + both["pass_cameras"][:81]):
+            np.testing.assert_allclose(got.position, want.position, atol=1e-9)
+        with self.assertRaisesRegex(ValueError, "both the BEFORE and the AFTER pass are off"):
+            self._extend(self.source, before_pass=False, after_pass=False)
+
     def test_a_misaligned_overlap_runs_with_a_warning(self):
         with self.assertLogs("pipeline.steps.extend_orbit", level="WARNING") as logs:
             out = self._extend(self.source, overlap_after=40)
@@ -365,6 +392,32 @@ class TestAssembleExtension(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "differ in length"):
             run_step("assemble_extension", inputs, {})
 
+    def test_one_pass_alone(self):
+        """A pass that is off (0 new, 0 overlap) has no cameras, no render,
+        no video: None for its images and masks, and no dump."""
+        import tempfile
+
+        _, inputs = self._inputs()
+        guide = inputs["guide_images"]
+        inputs.update(before=0, overlap_before=0, pass_cameras=inputs["pass_cameras"][5:],
+                      guide_images=guide[5:], guide_masks=inputs["guide_masks"][5:],
+                      image_names=inputs["image_names"][:6])
+        with tempfile.TemporaryDirectory() as tmp:
+            out = run_step("assemble_extension", inputs, {"debug_dir": tmp})
+            self.assertEqual(sorted(p.name for p in __import__("pathlib").Path(tmp).iterdir()),
+                             ["after"])
+        self.assertIsNone(out["before_images"])
+        self.assertIsNone(out["before_masks"])
+        self.assertEqual(self._flat(out["after_images"]), [105, 106, 107, 108, 109])
+        self.assertEqual([float(m[0, 0]) for m in out["after_masks"]], [0, 0, 0, 0, 1])
+        _, inputs = self._inputs()
+        inputs.update(after=0, overlap_after=0, pass_cameras=inputs["pass_cameras"][:5],
+                      guide_images=guide[:5], guide_masks=inputs["guide_masks"][:5],
+                      image_names=inputs["image_names"][:7])
+        out = run_step("assemble_extension", inputs, {})
+        self.assertIsNone(out["after_images"])
+        self.assertEqual(self._flat(out["before_images"]), [100, 101, 102, 103, 104])
+
     def test_the_control_videos_are_dumped_as_datasets(self):
         import tempfile
 
@@ -416,6 +469,18 @@ class TestSpliceExtension(unittest.TestCase):
         self.assertEqual(len(out["cameras"]), 8)
         self.assertEqual(out["image_names"][-1], "frame_00008_.png")
         self.assertEqual(out["anchor_frame_index"], 3)
+
+    def test_one_pass_alone(self):
+        source = [_frame(10 + i) for i in range(self.N)]
+        after_out = [_frame(70 + i) for i in range(5)]
+        out = run_step("splice_extension", {
+            "dataset": _dataset(source), "before_denoised": None, "after_denoised": after_out,
+            "cameras": [object()] * 6, "image_names": [f"frame_{i + 1:05d}_.png" for i in range(6)],
+            "before": 0, "overlap_before": 0, "after": 1, "overlap_after": 4,
+            "anchor_frame_index": 1,
+        }, {"colour_match": False})
+        self.assertEqual([int(f[0, 0, 0]) for f in out["images"]], [10, 11, 12, 13, 14, 74])
+        self.assertEqual(out["anchor_frame_index"], 1)
 
     def test_no_anchor_index_publishes_none(self):
         _, _, _, out = self._splice()

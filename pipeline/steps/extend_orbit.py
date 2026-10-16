@@ -153,7 +153,10 @@ def pass_elevation_offsets(before: int, overlap_before: int, overlap_after: int,
     they carry the guide render, not pass 2's pixels, and what the pass
     returns for them is dropped — so they can sit anywhere, and on the ramp
     the pass is one uniform helix with no bend. On pass 2's cameras it
-    would climb, stop on the lead-in or lead-out, and climb again."""
+    would climb, stop on the lead-in or lead-out, and climb again.
+
+    A pass that is switched off (its new frames and overlap both 0) gets no
+    offsets."""
     tilt = float(tilt_deg)
     return ([tilt * (i - before) / before for i in range(before + overlap_before)],
             [tilt * (m - (overlap_after - 1)) / after for m in range(overlap_after + after)])
@@ -266,7 +269,9 @@ class ExtendHelicalPathStep(Step):
               phase_frames then the AFTER pass's — what the guide is
               rendered at (pass_elevation_offsets). Their new frames are
               `cameras`' new frames; their inactive frames sit on the ramp,
-              beside pass 2's cameras rather than on them}
+              beside pass 2's cameras rather than on them. A pass that is
+              off (`before_pass` / `after_pass`) has no cameras here and
+              0 new frames and 0 overlap above}
 
     The helix params here MUST be render_subject's: the source path is
     rebuilt from them and compared against the live cameras, and a mismatch
@@ -297,6 +302,14 @@ class ExtendHelicalPathStep(Step):
         Param("tilt_deg", float, 0.0,
               "Extra elevation, in degrees, the extension reaches beyond the "
               "helix's band"),
+        # Each side on its own. A side that is off adds nothing: its new-frame
+        # count and overlap are published as 0, which is how assemble_extension
+        # and splice_extension (and the stage-5 offsets) know there is no such
+        # pass. At least one has to be on.
+        Param("before_pass", bool, True,
+              "Run the BEFORE pass (the helix continued backwards, ramping below the band)"),
+        Param("after_pass", bool, True,
+              "Run the AFTER pass (the helix continued forwards, ramping above the band)"),
         Param("n_frames", int, 81, "render_subject's frame count", minimum=1),
         Param("n_loops", int, 2, "render_subject's turns", minimum=1),
         Param("amplitude_deg", float, 30.0, "render_subject's elevation swing"),
@@ -312,9 +325,15 @@ class ExtendHelicalPathStep(Step):
         extras: Dict[str, Any] = dict(inputs["extras"] or {})
         n = int(params["n_frames"])
         phase = int(params["phase_frames"])
-        overlap_before, overlap_after = int(params["overlap_before"]), int(params["overlap_after"])
-        before = new_frames(phase, overlap_before)
-        after = new_frames(phase, overlap_after)
+        if not (params["before_pass"] or params["after_pass"]):
+            raise ValueError(
+                "extend_helical_path: both the BEFORE and the AFTER pass are off — switch one "
+                "on, or turn the extension itself off"
+            )
+        overlap_before = int(params["overlap_before"]) if params["before_pass"] else 0
+        overlap_after = int(params["overlap_after"]) if params["after_pass"] else 0
+        before = new_frames(phase, overlap_before) if params["before_pass"] else 0
+        after = new_frames(phase, overlap_after) if params["after_pass"] else 0
 
         if len(live) != n:
             raise ValueError(
@@ -330,7 +349,7 @@ class ExtendHelicalPathStep(Step):
         # warning, not a refusal: the aligned counts are the defaults, and
         # the misaligned pair is a legitimate thing to measure against them.
         for name, boundary in (("BEFORE", before), ("AFTER", overlap_after)):
-            if not latent_aligned(boundary):
+            if boundary and not latent_aligned(boundary):
                 logger.warning(
                     "extend_helical_path: the %s pass's mask changes at frame %d, inside a "
                     "latent frame (the edges fall at 4k+1: %d or %d). One latent then "
@@ -399,14 +418,15 @@ class ExtendHelicalPathStep(Step):
         image_names = [f"frame_{i + 1:05d}_.png" for i in range(len(cameras))]
 
         step = helix_step_deg(n, params["n_loops"], params["lead_in_deg"], params["lead_out_deg"])
+        passes = [f"BEFORE sharing pass 2's first {overlap_before}"] if before else []
+        passes += [f"AFTER sharing pass 2's last {overlap_after}"] if after else []
         logger.info(
             "extend_helical_path: %d + %d + %d = %d cameras at %.3f deg a frame — %.1f deg "
             "ahead, %.1f deg after, tilting %.1f deg past the lead-in and lead-out "
-            "elevations at the ends (two %d-frame "
-            "passes sharing pass 2's first %d and last %d frames); the anchor moves from "
+            "elevations at the ends (%d-frame passes: %s); the anchor moves from "
             "frame %d to %d; the source path carried %.3f deg / %.1f mm off the solver's",
             before, n, after, len(cameras), step, before * step, after * step, tilt,
-            phase, overlap_before, overlap_after, anchor, anchor + before,
+            phase, ", ".join(passes), anchor, anchor + before,
             rotation_angle_deg(rotation), float(np.linalg.norm(translation)) * 1000.0,
         )
         return {"cameras": cameras, "image_names": image_names, "before": before,
@@ -447,7 +467,8 @@ class AssembleExtensionStep(Step):
               pass 2's first); "after_images", "after_masks": the AFTER pass
               — `overlap_after` inactive frames (beside pass 2's last) then
               `after` reactive ones. Masks are the VACE per-frame flag, 0.0
-              inactive / 1.0 reactive}
+              inactive / 1.0 reactive. A pass that is off (0 new frames, 0
+              overlap) publishes None for both}
 
     Every frame is the matted render over `bg_color`, inactive ones
     included. With `novel_images` the reactive frames are that render's
@@ -484,34 +505,39 @@ class AssembleExtensionStep(Step):
         overlap_before, overlap_after = int(inputs["overlap_before"]), int(inputs["overlap_after"])
         n = len(source)
         total = before + n + after
-        phase = before + overlap_before
-        if (phase != overlap_after + after
-                or not 1 <= min(overlap_before, overlap_after)
+        # Each pass's length; 0 for a pass that is off (extend_helical_path
+        # publishes 0 new frames and 0 overlap for it).
+        phase_before, phase_after = before + overlap_before, overlap_after + after
+        phases = [p for p in (phase_before, phase_after) if p]
+        if (not phases or len(set(phases)) != 1
+                or any(p and not 1 <= o for p, o in ((phase_before, overlap_before),
+                                                     (phase_after, overlap_after)))
                 or max(overlap_before, overlap_after) > n):
             raise ValueError(
                 f"assemble_extension: before={before}, after={after}, overlap_before="
                 f"{overlap_before}, overlap_after={overlap_after} on {n} frames is not what "
                 f"extend_helical_path publishes (the two passes would differ in length)"
             )
-        if len(pass_cameras) != 2 * phase or len(image_names) != total:
+        cams = phase_before + phase_after
+        if len(pass_cameras) != cams or len(image_names) != total:
             raise ValueError(
                 f"assemble_extension: {len(pass_cameras)} pass cameras / {len(image_names)} "
-                f"names against two {phase}-frame passes around {n} frames — "
+                f"names against {len(phases)} {phases[0]}-frame pass(es) around {n} frames — "
                 f"extend_helical_path was run on a different batch than the one arriving here"
             )
         guide_images, guide_masks = inputs["guide_images"], inputs["guide_masks"]
-        if len(guide_images) != 2 * phase or len(guide_masks) != 2 * phase:
+        if len(guide_images) != cams or len(guide_masks) != cams:
             raise ValueError(
                 f"assemble_extension: the guide render has {len(guide_images)} frames / "
-                f"{len(guide_masks)} mattes against the two passes' {2 * phase} cameras"
+                f"{len(guide_masks)} mattes against the passes' {cams} cameras"
             )
         novel_images, novel_masks = inputs.get("novel_images"), inputs.get("novel_masks")
         if (novel_images is None) != (novel_masks is None):
             raise ValueError("assemble_extension: novel_images and novel_masks come together or not at all")
-        if novel_images is not None and (len(novel_images) != 2 * phase or len(novel_masks) != 2 * phase):
+        if novel_images is not None and (len(novel_images) != cams or len(novel_masks) != cams):
             raise ValueError(
                 f"assemble_extension: the novel-view render has {len(novel_images)} frames / "
-                f"{len(novel_masks)} mattes against the two passes' {2 * phase} cameras"
+                f"{len(novel_masks)} mattes against the passes' {cams} cameras"
             )
 
         height, width = source[0].shape[:2]
@@ -522,7 +548,7 @@ class AssembleExtensionStep(Step):
         video = [_composite_one(img, mask, bg) for img, mask in zip(guide_images, guide_masks)]
         if novel_images is not None:
             # The reactive frames: the BEFORE pass's first `before`, the AFTER pass's last `after`.
-            for i in list(range(before)) + list(range(phase + overlap_after, 2 * phase)):
+            for i in list(range(before)) + list(range(phase_before + overlap_after, cams)):
                 video[i] = _composite_one(novel_images[i], novel_masks[i], bg)
         for frame in video:
             if tuple(frame.shape[:2]) != (height, width):
@@ -536,26 +562,35 @@ class AssembleExtensionStep(Step):
         zero = np.zeros((height, width), dtype=np.float32)
         before_flags = [one] * before + [zero] * overlap_before
         after_flags = [zero] * overlap_after + [one] * after
+        # A pass that is off publishes None: its denoise step is gated off
+        # and the splice reads it as optional.
         result: Dict[str, Any] = {
-            "before_images": video[:phase], "before_masks": before_flags,
-            "after_images": video[phase:], "after_masks": after_flags,
+            "before_images": video[:phase_before] or None,
+            "before_masks": before_flags or None,
+            "after_images": video[phase_before:] or None,
+            "after_masks": after_flags or None,
         }
 
         debug_dir = params["debug_dir"]
         if debug_dir:
             # Named as the extended dataset names the views they sit beside.
-            names = {"before": image_names[:phase], "after": image_names[total - phase:]}
-            for name, cut, flags in (("before", slice(0, phase), before_flags),
-                                     ("after", slice(phase, 2 * phase), after_flags)):
-                _phase_dataset(dataset, video[cut], flags, pass_cameras[cut], names[name]) \
-                    .to_disk(Path(debug_dir) / name)
-            logger.info("assemble_extension: both control videos written under %s", debug_dir)
+            dumps = (("before", slice(0, phase_before), before_flags,
+                      image_names[:phase_before]),
+                     ("after", slice(phase_before, cams), after_flags,
+                      image_names[total - phase_after:]))
+            for name, cut, flags, names in dumps:
+                if flags:
+                    _phase_dataset(dataset, video[cut], flags, pass_cameras[cut], names) \
+                        .to_disk(Path(debug_dir) / name)
+            logger.info("assemble_extension: the control videos written under %s", debug_dir)
 
         logger.info(
-            "assemble_extension: two %d-frame passes of the guide's matted render over grey — "
-            "BEFORE: %d reactive then %d inactive (beside pass 2's first %d); AFTER: %d "
-            "inactive (beside pass 2's last %d) then %d reactive; reactive frames from %s",
-            phase, before, overlap_before, overlap_before, overlap_after, overlap_after, after,
+            "assemble_extension: %d-frame passes of the guide's matted render over grey — "
+            "BEFORE: %s; AFTER: %s; reactive frames from %s", phases[0],
+            f"{before} reactive then {overlap_before} inactive (beside pass 2's first "
+            f"{overlap_before})" if phase_before else "off",
+            f"{overlap_after} inactive (beside pass 2's last {overlap_after}) then {after} "
+            f"reactive" if phase_after else "off",
             "the novel-view render" if novel_images is not None else "the same render",
         )
         return result
@@ -702,8 +737,9 @@ class SpliceExtensionStep(Step):
     def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
         dataset = inputs["dataset"]
         source: List[np.ndarray] = list(dataset.images)
-        before_out: List[np.ndarray] = list(inputs["before_denoised"])
-        after_out: List[np.ndarray] = list(inputs["after_denoised"])
+        # None (the input is optional) for a pass that is off; its counts are 0.
+        before_out: List[np.ndarray] = list(inputs.get("before_denoised") or [])
+        after_out: List[np.ndarray] = list(inputs.get("after_denoised") or [])
         cameras = list(inputs["cameras"])
         image_names = list(inputs["image_names"])
         before, after = int(inputs["before"]), int(inputs["after"])
@@ -754,15 +790,16 @@ class SpliceExtensionStep(Step):
         guides, guide_masks = inputs.get("guide_images"), inputs.get("guide_masks")
         before, n, after = len(new_before), len(source), len(new_after)
         phase = before + overlap_before
+        cams = phase + overlap_after + after
         if guides is None or guide_masks is None:
             raise ValueError(
                 "splice_extension: colour_match needs the guide render and its matte "
                 "(assemble_extension's guide_images / guide_masks)"
             )
-        if len(guides) != 2 * phase or len(guide_masks) != 2 * phase:
+        if len(guides) != cams or len(guide_masks) != cams:
             raise ValueError(
                 f"splice_extension: the guide render has {len(guides)} frames / "
-                f"{len(guide_masks)} mattes against the two passes' {2 * phase} cameras"
+                f"{len(guide_masks)} mattes against the passes' {cams} cameras"
             )
         # Indices into the guide render (the BEFORE pass's frames then the
         # AFTER pass's): each pass's new frames, and its inactive frames
@@ -773,11 +810,14 @@ class SpliceExtensionStep(Step):
         phases = (
             ("BEFORE", new_before, range(0, before),
              list(zip(range(before, phase), range(0, overlap_before)))),
-            ("AFTER", new_after, range(phase + overlap_after, 2 * phase),
+            ("AFTER", new_after, range(phase + overlap_after, cams),
              list(zip(range(phase, phase + overlap_after), range(n - overlap_after, n)))),
         )
         corrected = []
         for name, frames, new_idx, ref_pairs in phases:
+            if not frames:  # a pass that is off
+                corrected.append(frames)
+                continue
             match = fit_colour_match(
                 frames, [guides[i] for i in new_idx], [guide_masks[i] for i in new_idx],
                 [source[j] for _, j in ref_pairs], [guides[i] for i, _ in ref_pairs],

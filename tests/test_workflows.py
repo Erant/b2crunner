@@ -2274,12 +2274,20 @@ class TestTheOrbitExtension(unittest.TestCase):
         self.assertEqual(settings["extend_overlap_before"].default, 40)
         self.assertEqual(settings["extend_overlap_after"].default, 41)
         self.assertEqual(settings["extend_tilt_deg"].default, 40.0)
+        self.assertIs(settings["extend_before"].default, True)
+        self.assertIs(settings["extend_after"].default, True)
         for name in ("extend_overlap_before", "extend_overlap_after", "extend_tilt_deg",
-                     "extend_guide_sh", "extend_novel_sh"):
+                     "extend_guide_sh", "extend_novel_sh", "extend_before", "extend_after"):
             self.assertEqual(settings[name].requires, "extend_orbit")
+        # Each pass's denoise also has a switch of its own.
+        side_gates = {
+            "denoise_extension_before": ["${globals.extend_orbit}", "${globals.extend_before}"],
+            "denoise_extension_after": ["${globals.extend_orbit}", "${globals.extend_after}"],
+        }
         for step_id in self.BRANCH:
             with self.subTest(step=step_id):
-                self.assertEqual(self._step(spec, step_id).when, "${globals.extend_orbit}")
+                self.assertEqual(self._step(spec, step_id).when,
+                                 side_gates.get(step_id, "${globals.extend_orbit}"))
         # Off, the branch is inert: nothing in it is enabled.
         spec.globals["extend_orbit"] = False
         enabled = {s.id for s in spec.enabled_steps()}
@@ -2288,6 +2296,12 @@ class TestTheOrbitExtension(unittest.TestCase):
         spec.globals["extend_orbit"] = True
         enabled = {s.id for s in spec.enabled_steps()}
         self.assertEqual(enabled & set(self.BRANCH), set(self.BRANCH))
+        # One side off drops that side's denoise and nothing else.
+        for side, other in (("before", "after"), ("after", "before")):
+            spec.globals[f"extend_{side}"], spec.globals[f"extend_{other}"] = False, True
+            enabled = {s.id for s in spec.enabled_steps()}
+            self.assertEqual(enabled & set(self.BRANCH),
+                             set(self.BRANCH) - {f"denoise_extension_{side}"})
 
     def test_the_dataset_is_pass_2s_until_the_splice(self):
         """The guide is trained and rendered from pass 2's frames as pass 2
@@ -2326,6 +2340,8 @@ class TestTheOrbitExtension(unittest.TestCase):
         self.assertEqual(path.params["overlap_before"], "${globals.extend_overlap_before}")
         self.assertEqual(path.params["overlap_after"], "${globals.extend_overlap_after}")
         self.assertEqual(path.params["tilt_deg"], "${globals.extend_tilt_deg}")
+        self.assertEqual(path.params["before_pass"], "${globals.extend_before}")
+        self.assertEqual(path.params["after_pass"], "${globals.extend_after}")
         from pipeline.steps.extend_orbit import latent_aligned
         before = spec.globals["extend_overlap_before"]
         after = spec.globals["extend_overlap_after"]
@@ -2453,8 +2469,9 @@ class TestTheOrbitExtension(unittest.TestCase):
         self.assertEqual(splice.step, "splice_extension")
         self.assertEqual(splice.inputs, {
             "dataset": "dataset",
-            "before_denoised": "scene.extended.before_phase.denoised",
-            "after_denoised": "scene.extended.after_phase.denoised",
+            # Optional: a pass that is off (extend_before / extend_after) never runs.
+            "before_denoised": "scene.extended.before_phase.denoised?",
+            "after_denoised": "scene.extended.after_phase.denoised?",
             "cameras": "scene.extended.cameras",
             "image_names": "scene.extended.image_names",
             "before": "scene.extended.before",
