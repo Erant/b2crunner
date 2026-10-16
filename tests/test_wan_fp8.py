@@ -153,6 +153,58 @@ class TestFloat8Reconstruction(unittest.TestCase):
         )
 
 
+class TestFp8Matmul(unittest.TestCase):
+    """enable_fp8_matmul: fp8 x fp8 matches the weight-only path up to the
+    activation's fp8 rounding, and touches only fp8-weight Linears."""
+
+    def setUp(self):
+        _require_diffusers()
+        try:
+            import torchao  # noqa: F401
+        except Exception as exc:
+            raise unittest.SkipTest(f"torchao unusable here: {exc}")
+        import torch
+
+        from pipeline.wan_fp8 import fp8_matmul_supported
+
+        if not fp8_matmul_supported("cuda"):
+            raise unittest.SkipTest("fp8 x fp8 needs an SM89+ GPU")
+
+    def test_matches_the_weight_only_linear(self):
+        import torch
+
+        from pipeline.wan_fp8 import _build_float8, enable_fp8_matmul
+
+        torch.manual_seed(0)
+        weight = torch.randn(384, 256, device="cuda") * 0.02
+        scale = (weight.abs().max() / 448).reshape(1)
+        fp8 = torch.nn.Linear(256, 384, device="cuda", dtype=torch.bfloat16)
+        fp8.weight = torch.nn.Parameter(
+            _build_float8((weight / scale).to(torch.float8_e4m3fn), scale),
+            requires_grad=False,
+        )
+        plain = torch.nn.Linear(256, 128, device="cuda", dtype=torch.bfloat16)
+        model = torch.nn.Sequential(fp8, torch.nn.Linear(384, 256, device="cuda",
+                                                         dtype=torch.bfloat16), plain)
+        # 3-D like a transformer's (batch, tokens, dim), odd token count.
+        x = torch.randn(2, 37, 256, device="cuda", dtype=torch.bfloat16)
+        with torch.no_grad():
+            expected = fp8(x)
+            self.assertEqual(enable_fp8_matmul(model), 1)
+            got = fp8(x)
+
+        self.assertEqual(got.shape, expected.shape)
+        self.assertEqual(got.dtype, torch.bfloat16)
+        rel = ((got.float() - expected.float()).norm() / expected.float().norm()).item()
+        self.assertLess(rel, 0.05)
+        self.assertNotIn("forward", vars(plain))
+
+    def test_cpu_is_not_supported(self):
+        from pipeline.wan_fp8 import fp8_matmul_supported
+
+        self.assertFalse(fp8_matmul_supported("cpu"))
+
+
 class TestCheckpointResolution(unittest.TestCase):
     """Where the two fp8 expert files come from when nobody says.
 

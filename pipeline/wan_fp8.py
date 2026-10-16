@@ -78,6 +78,90 @@ def _build_float8(qdata, scale):
     )
 
 
+# fp8 x fp8 compute. The Float8Tensors `_build_float8` makes are weight-only:
+# with no `act_quant_kwargs`, torchao's linear dequantizes the weight and runs a
+# bf16 matmul, so the fp8 halves memory and transfer but buys no compute.
+# Quantizing the activation per row as well lets `torch._scaled_mm` run on the
+# fp8 tensor cores (SM89+), ~2x the bf16 GEMM rate. torchao can do that itself
+# (act_quant_kwargs + mm_config), but its eager activation quantization is a
+# chain of separate kernels that cost as much as the GEMM saves (5-13 ms per
+# matmul at 16k tokens on the 4070 Ti, vs 0.6-1.6 ms compiled) — so the
+# quantization is a small torch.compile'd function and the GEMM is called
+# directly. Measured 2026-10-16 on run 1d1e93's pass 1 (720x1280x81, 4070 Ti,
+# low_vram): 99.9 s -> 83.1 s per high-noise step, warm (1.20x); predicted x0
+# 34 dB from the weight-only one.
+_FP8_MAX = 448.0
+_quantize_rows = None
+
+
+def _quantize_rows_fn():
+    global _quantize_rows
+    if _quantize_rows is None:
+        import torch
+
+        # dynamic: the low_vram forward chunks tokens, so the row count varies.
+        @torch.compile(dynamic=True)
+        def quantize_rows(x):
+            scale = (x.abs().amax(dim=1, keepdim=True).float() / _FP8_MAX).clamp(min=1e-12)
+            return (x.float() / scale).to(torch.float8_e4m3fn), scale
+
+        _quantize_rows = quantize_rows
+    return _quantize_rows
+
+
+def _fp8_linear_forward(self, x):
+    """nn.Linear.forward for a Float8Tensor weight: fp8 activations x fp8 weight.
+
+    Reads `self.weight` per call, so the offload / weight-streaming hooks that
+    swap a device copy in before the block runs are honoured.
+    """
+    import torch
+
+    weight = self.weight
+    shape = x.shape
+    xq, x_scale = _quantize_rows_fn()(x.reshape(-1, shape[-1]))
+    out = torch._scaled_mm(
+        xq,
+        weight.qdata.t(),
+        scale_a=x_scale,
+        scale_b=weight.scale.reshape(1, -1).float(),
+        out_dtype=torch.bfloat16,
+        use_fast_accum=True,
+    )
+    if self.bias is not None:
+        out = out + self.bias.to(out.dtype)
+    return out.reshape(*shape[:-1], out.shape[-1]).to(x.dtype)
+
+
+def enable_fp8_matmul(model) -> int:
+    """Run every fp8-weight Linear in `model` as fp8 x fp8. Returns how many.
+
+    Only the base Linears change; a peft LoRA wrapped around one keeps its
+    adapter matmuls in bf16 on the unquantized input.
+    """
+    import types
+
+    import torch
+    from torchao.quantization import Float8Tensor
+
+    count = 0
+    for module in model.modules():
+        if isinstance(module, torch.nn.Linear) and isinstance(module.weight, Float8Tensor):
+            module.forward = types.MethodType(_fp8_linear_forward, module)
+            count += 1
+    return count
+
+
+def fp8_matmul_supported(device) -> bool:
+    """fp8 tensor cores: Ada (SM89), Hopper and later."""
+    import torch
+
+    device = torch.device(device)
+    if device.type != "cuda" or not torch.cuda.is_available():
+        return False
+    return torch.cuda.get_device_capability(device) >= (8, 9)
+
+
 def convert_fp8_state_dict(raw: Dict[str, Any]) -> Dict[str, Any]:
     """ComfyUI-format fp8 state dict -> a diffusers-named one, still fp8.
 

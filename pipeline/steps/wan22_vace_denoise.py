@@ -1265,6 +1265,11 @@ class Wan22VaceDenoiseStep(Step):
         Param("low_vram", bool, False,
               "Low-VRAM mode for ~12 GB GPUs; overrides cpu_offload settings",
               advanced=True),
+        # See wan_fp8.enable_fp8_matmul. Ignored below SM89 (no fp8 tensor
+        # cores), where the weights stay weight-only.
+        Param("fp8_matmul", bool, True,
+              "Run the experts' fp8 Linears as fp8 x fp8 (activations quantized per row)",
+              advanced=True),
         Param("device", str, "cuda", "Torch device", advanced=True),
     )
 
@@ -1288,7 +1293,7 @@ class Wan22VaceDenoiseStep(Step):
         "fp8_config", "use_lora", "lora_repo", "lora_subfolder",
         "lora_high", "lora_low", "lora_strength_high", "lora_strength_low",
         "attention_backend", "cpu_offload", "offload_blocks_per_group", "low_vram",
-        "device",
+        "fp8_matmul", "device",
     )
 
     def __init__(self) -> None:
@@ -1393,6 +1398,16 @@ class Wan22VaceDenoiseStep(Step):
 
         if params["use_lora"]:
             self._load_lora_unfused(pipe, params)
+
+        if params["fp8_matmul"]:
+            from ..wan_fp8 import enable_fp8_matmul, fp8_matmul_supported
+
+            if fp8_matmul_supported(device):
+                for transformer in (pipe.transformer, pipe.transformer_2):
+                    count = enable_fp8_matmul(transformer)
+                logger.info("fp8 x fp8 matmul on %d Linears per expert", count)
+            else:
+                logger.info("fp8_matmul: no fp8 tensor cores on %s, weight-only fp8", device)
 
         self._finish_load(pipe, params, device)
 

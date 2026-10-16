@@ -355,6 +355,13 @@ ones that measured worse.
   fail with "data pointer on an invalid python storage". Only a model quantized via
   `TorchAoConfig` at `from_pretrained` can fuse and save. Cost of unfused: one
   low-rank matmul per adapted Linear per step.
+- **fp8 x fp8 compute** (`fp8_matmul`, default on, SM89+ only): the Float8Tensors
+  are weight-only (torchao dequantizes, bf16 GEMM), so `wan_fp8.enable_fp8_matmul`
+  swaps each fp8 base Linear's forward for a per-row activation quant
+  (`torch.compile`d; torchao's eager one costs as much as the GEMM saves) +
+  `torch._scaled_mm`. LoRA adapters stay bf16. 2026-10-16, run 1d1e93 pass 1 step 1,
+  4070 Ti low_vram: 99.9 -> 83.1 s warm (1.20x), same peak VRAM, predicted x0 34 dB
+  from the weight-only one; full-pass quality and the 5090 not measured yet.
 - Untaken idea: publish a diffusers-format fp8 checkpoint with the LoRA fused
   (quantize through `TorchAoConfig`, fuse, `safe_serialization=True`). None exists
   on the Hub (all fp8 quants are ComfyUI-format).
