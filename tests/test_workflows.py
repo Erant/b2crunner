@@ -2243,7 +2243,8 @@ class TestTheOrbitExtension(unittest.TestCase):
     """
 
     BRANCH = [
-        "extend_path", "extend_masks", "extend_train_splat", "extend_render_guide",
+        "extend_path", "extend_upscale", "extend_native", "extend_masks", "extend_normal_maps",
+        "extend_train_splat", "extend_render_guide",
         "extend_guide_masks", "extend_render_novel", "extend_novel_masks", "extend_render_alpha",
         "extend_assemble",
         "denoise_extension_before", "denoise_extension_after", "extend_splice",
@@ -2284,12 +2285,15 @@ class TestTheOrbitExtension(unittest.TestCase):
                      "extend_guide_sh", "extend_novel_sh", "extend_before", "extend_after",
                      "extend_figure_mask", "extend_tele_distance", "extend_tele_zoom"):
             self.assertEqual(settings[name].requires, "extend_orbit")
-        # Each pass's denoise also has a switch of its own, and the plain
-        # alpha is only rendered for the figure mask.
+        # Each pass's denoise also has a switch of its own, the plain alpha
+        # is only rendered for the figure mask, and run_upscale picks the
+        # guide's upscale arm.
         side_gates = {
             "denoise_extension_before": ["${globals.extend_orbit}", "${globals.extend_before}"],
             "denoise_extension_after": ["${globals.extend_orbit}", "${globals.extend_after}"],
             "extend_render_alpha": ["${globals.extend_orbit}", "${globals.extend_figure_mask}"],
+            "extend_upscale": ["${globals.extend_orbit}", "${globals.run_upscale}"],
+            "extend_native": ["${globals.extend_orbit}", {"not": "${globals.run_upscale}"}],
         }
         for step_id in self.BRANCH:
             with self.subTest(step=step_id):
@@ -2299,16 +2303,19 @@ class TestTheOrbitExtension(unittest.TestCase):
         spec.globals["extend_orbit"] = False
         enabled = {s.id for s in spec.enabled_steps()}
         self.assertFalse(enabled & set(self.BRANCH))
-        # On, all of it.
+        # On, all of it but the upscale arm run_upscale does not pick.
         spec.globals["extend_orbit"] = True
-        enabled = {s.id for s in spec.enabled_steps()}
-        self.assertEqual(enabled & set(self.BRANCH), set(self.BRANCH))
+        for upscale, idle in ((True, "extend_native"), (False, "extend_upscale")):
+            spec.globals["run_upscale"] = upscale
+            enabled = {s.id for s in spec.enabled_steps()}
+            self.assertEqual(enabled & set(self.BRANCH), set(self.BRANCH) - {idle})
+        spec.globals["run_upscale"] = True
         # One side off drops that side's denoise and nothing else.
         for side, other in (("before", "after"), ("after", "before")):
             spec.globals[f"extend_{side}"], spec.globals[f"extend_{other}"] = False, True
             enabled = {s.id for s in spec.enabled_steps()}
             self.assertEqual(enabled & set(self.BRANCH),
-                             set(self.BRANCH) - {f"denoise_extension_{side}"})
+                             set(self.BRANCH) - {f"denoise_extension_{side}", "extend_native"})
 
     def test_the_dataset_is_pass_2s_until_the_splice(self):
         """The guide is trained and rendered from pass 2's frames as pass 2
@@ -2403,21 +2410,53 @@ class TestTheOrbitExtension(unittest.TestCase):
         train = self._step(spec, "extend_train_splat")
         matte = self._step(spec, "extend_masks")
         self.assertEqual(matte.step, "rmbg")
-        self.assertEqual(matte.inputs, {"images": "dataset.images"})
-        self.assertEqual(matte.outputs, {"masks": "dataset.masks"})
+        self.assertEqual(matte.inputs, {"images": "scene.extended.pass2.images"})
+        self.assertEqual(matte.outputs, {"masks": "scene.extended.pass2.masks"})
         self.assertEqual(train.step, "brush")
         self.assertEqual(train.inputs, {
-            "cameras": "dataset.cameras", "image_names": "dataset.image_names",
-            "points_3d": "dataset.points_3d", "images": "dataset.images",
-            "masks": "dataset.masks", "mesh": "scene.mesh_world?", "body_rig": "scene.body_rig?",
+            "cameras": "scene.extended.pass2.cameras", "image_names": "dataset.image_names",
+            "points_3d": "dataset.points_3d", "images": "scene.extended.pass2.images",
+            "masks": "scene.extended.pass2.masks",
+            "normal_maps": "scene.extended.pass2.normal_maps",
+            "mesh": "scene.mesh_world?", "body_rig": "scene.body_rig?",
         })
         intermediate = self._step(spec, "train_splat")
         for key in ("total_steps", "polish_steps", "align_iters", "hollow_weight",
                     "match_alpha_weight", "export_evidence", "export_dir"):
             with self.subTest(param=key):
                 self.assertEqual(train.params[key], intermediate.params[key])
+        # Normal supervision as the deliverable has it.
+        final = self._step(spec, "train_final_splat")
+        for key in ("normal_loss_strength", "normal_loss_step_start",
+                    "normals_growth_grad_threshold", "random_background"):
+            with self.subTest(param=key):
+                self.assertEqual(train.params[key], final.params[key])
         self.assertEqual(train.params["export_name"], "extension_splat.ply")
         self.assertEqual(train.outputs, {"splat_path": "scene.extended.splat_path"})
+
+    def test_pass_2s_frames_are_upscaled_and_normal_mapped_once(self):
+        """Stage 4a upscales pass 2's frames and estimates their normals as
+        stage 5 would, and stage 5 takes them back at the offset the splice
+        puts pass 2's frames at, doing only the extension's new frames."""
+        spec = self._spec()
+        early, final = self._step(spec, "extend_upscale"), self._step(spec, "upscale")
+        self.assertEqual(early.params, final.params)
+        self.assertEqual((early.step, early.env), (final.step, final.env))
+        self.assertEqual(early.inputs, {"images": "dataset.images", "cameras": "dataset.cameras"})
+        native = self._step(spec, "extend_native")
+        self.assertEqual(native.inputs, early.inputs)
+        self.assertEqual(native.outputs, early.outputs)
+        self.assertEqual(early.outputs, {"images": "scene.extended.pass2.images",
+                                         "cameras": "scene.extended.pass2.cameras"})
+        self.assertEqual(final.inputs["upscaled"], "scene.extended.pass2.images?")
+        self.assertEqual(final.inputs["upscaled_offset"], "scene.extended.before?")
+
+        normals, final_normals = (self._step(spec, "extend_normal_maps"),
+                                  self._step(spec, "final_normal_maps"))
+        self.assertEqual((normals.step, normals.params), (final_normals.step, final_normals.params))
+        self.assertEqual(normals.inputs, {"images": "scene.extended.pass2.images"})
+        self.assertEqual(final_normals.inputs["normal_maps"], "scene.extended.pass2.normal_maps?")
+        self.assertEqual(final_normals.inputs["normal_maps_offset"], "scene.extended.before?")
 
     def test_the_two_control_videos_are_the_guide_at_the_passes_cameras(self):
         from pipeline.templating import resolve

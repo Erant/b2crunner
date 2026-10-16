@@ -128,11 +128,41 @@ def parse_parts(spec: str) -> "frozenset[int]":
     return parts
 
 
+def _precomputed_normals(inputs: Dict[str, Any], images: List[np.ndarray]) -> tuple:
+    """The optional `normal_maps` block: (maps, offset), or ([], 0) without one.
+
+    The orbit extension estimates pass 2's 81 frames' maps for its guide
+    training; the final maps take them back rather than estimating them
+    twice. Each must be the size of the frame it stands for.
+    """
+    done = inputs.get("normal_maps")
+    if done is None:
+        return [], 0
+    done = list(done)
+    offset = int(inputs.get("normal_maps_offset") or 0)
+    if not done or offset < 0 or offset + len(done) > len(images):
+        raise ValueError(
+            f"sapiens2_lite: {len(done)} earlier normal maps at offset {offset} do not fit "
+            f"inside the {len(images)} frames handed in"
+        )
+    for k, normal in enumerate(done):
+        if tuple(normal.shape[:2]) != tuple(images[offset + k].shape[:2]):
+            raise ValueError(
+                f"sapiens2_lite: the earlier normal map for frame {offset + k} is "
+                f"{normal.shape[1]}x{normal.shape[0]} against the frame's "
+                f"{images[offset + k].shape[1]}x{images[offset + k].shape[0]}"
+            )
+    return done, offset
+
+
 @register_step("sapiens2_lite")
 class Sapiens2LiteStep(Step):
     """Sapiens2 normal-map estimation.
 
-    inputs: {"image": np.ndarray BGR} or {"images": List[np.ndarray] BGR}
+    inputs: {"image": np.ndarray BGR} or {"images": List[np.ndarray] BGR},
+            the batched path optionally with "normal_maps": maps made earlier
+            for `images[normal_maps_offset:normal_maps_offset + len]`, which
+            are taken as they are instead of estimated again
     outputs: {"normal_map": np.ndarray HxWx3 float32 in [-1,1]}
              or {"normal_maps": List[np.ndarray]} for the batched path
     """
@@ -185,10 +215,20 @@ class Sapiens2LiteStep(Step):
 
         if "images" in inputs:
             batch_size = 1 if params["low_vram"] else params["batch_size"]
-            images = inputs["images"]
-            normals = []
-            for i in range(0, len(images), batch_size):
-                normals.extend(self._run_batch(images[i : i + batch_size]))
+            images = list(inputs["images"])
+            done, offset = _precomputed_normals(inputs, images)
+            todo = [i for i in range(len(images)) if not offset <= i < offset + len(done)]
+            fresh = []
+            for i in range(0, len(todo), batch_size):
+                fresh.extend(self._run_batch([images[j] for j in todo[i : i + batch_size]]))
+            by_index = dict(zip(todo, fresh))
+            normals = [done[i - offset] if offset <= i < offset + len(done) else by_index[i]
+                       for i in range(len(images))]
+            if done:
+                logger.info(
+                    "sapiens2_lite: estimated %d of %d normal maps; frames %d-%d had theirs "
+                    "already", len(todo), len(images), offset, offset + len(done) - 1,
+                )
             return {"normal_maps": normals}
 
         return {"normal_map": self._run_batch([inputs["image"]])[0]}
