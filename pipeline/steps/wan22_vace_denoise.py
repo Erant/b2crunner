@@ -1266,9 +1266,12 @@ class Wan22VaceDenoiseStep(Step):
               "Low-VRAM mode for ~12 GB GPUs; overrides cpu_offload settings",
               advanced=True),
         # See wan_fp8.enable_fp8_matmul. Ignored below SM89 (no fp8 tensor
-        # cores), where the weights stay weight-only.
-        Param("fp8_matmul", bool, True,
-              "Run the experts' fp8 Linears as fp8 x fp8 (activations quantized per row)",
+        # cores), where the weights stay weight-only. Unset (None) it follows
+        # the process's --wan-matmul / $B2C_WAN_MATMUL (wan_fp8.wan_matmul_bits,
+        # default 8), read in load() where the worker runs.
+        Param("fp8_matmul", bool, None,
+              "Run the experts' fp8 Linears as fp8 x fp8 (activations quantized per row); "
+              "unset: --wan-matmul (default 8 = on)",
               advanced=True),
         Param("device", str, "cuda", "Torch device", advanced=True),
     )
@@ -1399,7 +1402,14 @@ class Wan22VaceDenoiseStep(Step):
         if params["use_lora"]:
             self._load_lora_unfused(pipe, params)
 
-        if params["fp8_matmul"]:
+        fp8_matmul = params["fp8_matmul"]
+        if fp8_matmul is None:
+            from ..wan_fp8 import wan_matmul_bits
+
+            fp8_matmul = wan_matmul_bits() == 8
+        if not fp8_matmul:
+            logger.info("Wan matmul: bf16 activations against the fp8 weights (--wan-matmul 16)")
+        else:
             from ..wan_fp8 import enable_fp8_matmul, fp8_matmul_supported
 
             if fp8_matmul_supported(device):

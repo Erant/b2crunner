@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -131,6 +132,24 @@ def _fp8_linear_forward(self, x):
     if self.bias is not None:
         out = out + self.bias.to(out.dtype)
     return out.reshape(*shape[:-1], out.shape[-1]).to(x.dtype)
+
+
+WAN_MATMUL_ENV = "B2C_WAN_MATMUL"
+WAN_MATMUL_CHOICES = (8, 16)
+
+
+def wan_matmul_bits() -> int:
+    """The Wan experts' matmul precision for this process: 8 (fp8 x fp8, the
+    default) or 16 (bf16 activations against the fp8 weights, the path before
+    f1468e2). From $B2C_WAN_MATMUL, which `pipeline.cli run/ui --wan-matmul`
+    and run.sh set; wan22_vace_denoise's `fp8_matmul` param, when given,
+    overrides it per step."""
+    raw = os.environ.get(WAN_MATMUL_ENV, "").strip()
+    if not raw:
+        return 8
+    if raw not in {str(b) for b in WAN_MATMUL_CHOICES}:
+        raise ValueError(f"{WAN_MATMUL_ENV}={raw!r}: expected one of {', '.join(map(str, WAN_MATMUL_CHOICES))}")
+    return int(raw)
 
 
 def enable_fp8_matmul(model) -> int:

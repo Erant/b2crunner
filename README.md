@@ -12,6 +12,7 @@ port 7860:
 ```bash
 export HF_TOKEN=hf_...
 ./run.sh [DATA_DIR]        # DATA_DIR is mounted at /data; outputs land in /data/output
+./run.sh --wan-matmul 16   # Wan 2.2 denoise in bf16 activations instead of fp8 x fp8 (8, the default)
 ```
 
 Or from a Python environment with the step venvs set up:

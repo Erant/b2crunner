@@ -325,5 +325,48 @@ class TestTheBf16PathIsGone(unittest.TestCase):
                 self.assertIn(kept, read)
 
 
+class TestWanMatmulSwitch(unittest.TestCase):
+    """--wan-matmul 8|16 (run.sh, pipeline.cli run / ui) -> $B2C_WAN_MATMUL ->
+    the denoise's fp8_matmul when the step is not given one; 8 by default."""
+
+    def test_the_environment_picks_the_precision_and_8_is_the_default(self):
+        from pipeline.wan_fp8 import WAN_MATMUL_ENV, wan_matmul_bits
+
+        for value, bits in (("", 8), ("8", 8), ("16", 16), (" 16 ", 16)):
+            with self.subTest(value=value), mock.patch.dict("os.environ", {WAN_MATMUL_ENV: value}):
+                self.assertEqual(wan_matmul_bits(), bits)
+        with mock.patch.dict("os.environ", {}, clear=True):
+            self.assertEqual(wan_matmul_bits(), 8)
+        with mock.patch.dict("os.environ", {WAN_MATMUL_ENV: "32"}), self.assertRaises(ValueError):
+            wan_matmul_bits()
+
+    def test_the_step_leaves_it_to_the_process_unless_told(self):
+        from pipeline.steps.wan22_vace_denoise import Wan22VaceDenoiseStep
+
+        size = {"width": 720, "height": 1280}
+        self.assertIsNone(Wan22VaceDenoiseStep.resolve_params(size)["fp8_matmul"])
+        self.assertIs(Wan22VaceDenoiseStep.resolve_params({**size, "fp8_matmul": "false"})["fp8_matmul"], False)
+
+    def test_the_cli_flag_sets_the_environment_for_run_and_ui(self):
+        from pipeline.cli import apply_wan_matmul, build_parser
+        from pipeline.wan_fp8 import WAN_MATMUL_ENV
+
+        parser = build_parser()
+        for argv in (["run", "helical", "--reference-image", "x.png", "--wan-matmul", "16"],
+                     ["ui", "--wan-matmul", "16"]):
+            with self.subTest(argv=argv[0]), mock.patch.dict("os.environ", {}, clear=True):
+                import os
+
+                apply_wan_matmul(parser.parse_args(argv))
+                self.assertEqual(os.environ[WAN_MATMUL_ENV], "16")
+        with mock.patch.dict("os.environ", {WAN_MATMUL_ENV: "16"}):
+            import os
+
+            apply_wan_matmul(parser.parse_args(["ui"]))   # no flag: the container's value stands
+            self.assertEqual(os.environ[WAN_MATMUL_ENV], "16")
+        with self.assertRaises(SystemExit), mock.patch("sys.stderr"):
+            parser.parse_args(["ui", "--wan-matmul", "12"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -471,6 +471,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     def add_common(p: argparse.ArgumentParser) -> None:
         p.add_argument("--envs", default=DEFAULT_ENVS, help="Path to the envs registry YAML")
+
+    def add_wan_matmul(p: argparse.ArgumentParser) -> None:
+        from .wan_fp8 import WAN_MATMUL_CHOICES, WAN_MATMUL_ENV
+
+        p.add_argument(
+            "--wan-matmul", type=int, choices=WAN_MATMUL_CHOICES, default=None,
+            help="Wan 2.2 denoise matmul precision: 8 = fp8 x fp8 (default, SM89+), "
+                 "16 = bf16 activations against the fp8 weights. Sets $" + WAN_MATMUL_ENV +
+                 " for every step this process starts; a step's own fp8_matmul param wins",
+        )
         p.add_argument(
             "--log-file", default=None,
             help="Write the run's log here (default: a timestamped file under B2C_LOG_DIR; "
@@ -508,6 +518,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Accepted for compatibility; INFO is the default now",
     )
     add_common(run_p)
+    add_wan_matmul(run_p)
     run_p.set_defaults(func=run_workflow)
 
     doctor_p = sub.add_parser("doctor", help="Check that this machine can run the pipeline")
@@ -573,13 +584,27 @@ def build_parser() -> argparse.ArgumentParser:
              "or 1 with no GPU visible). Lower this to reserve a card for something else.",
     )
     add_common(ui_p)
+    add_wan_matmul(ui_p)
     ui_p.set_defaults(func=launch_ui)
 
     return parser
 
 
+def apply_wan_matmul(args: argparse.Namespace) -> None:
+    """--wan-matmul into the environment every worker inherits (wan_fp8.wan_matmul_bits)."""
+    import os
+
+    from .wan_fp8 import WAN_MATMUL_ENV, wan_matmul_bits
+
+    if args.wan_matmul is not None:
+        os.environ[WAN_MATMUL_ENV] = str(args.wan_matmul)
+    wan_matmul_bits()   # a bad $B2C_WAN_MATMUL refuses here, not an hour in at the denoise
+
+
 def main() -> None:
     args = build_parser().parse_args()
+    if hasattr(args, "wan_matmul"):
+        apply_wan_matmul(args)
     if args.command == "api":
         # Its own dispatcher: a refusal from a pod is a sentence to print,
         # not a traceback, and an interrupted watch is not a failed run.
