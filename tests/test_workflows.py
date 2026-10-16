@@ -2244,7 +2244,8 @@ class TestTheOrbitExtension(unittest.TestCase):
 
     BRANCH = [
         "extend_path", "extend_masks", "extend_train_splat", "extend_render_guide",
-        "extend_guide_masks", "extend_render_novel", "extend_novel_masks", "extend_assemble",
+        "extend_guide_masks", "extend_render_novel", "extend_novel_masks", "extend_render_alpha",
+        "extend_assemble",
         "denoise_extension_before", "denoise_extension_after", "extend_splice",
     ]
 
@@ -2276,13 +2277,19 @@ class TestTheOrbitExtension(unittest.TestCase):
         self.assertEqual(settings["extend_tilt_deg"].default, 40.0)
         self.assertIs(settings["extend_before"].default, True)
         self.assertIs(settings["extend_after"].default, True)
+        self.assertIs(settings["extend_figure_mask"].default, True)
+        self.assertEqual(settings["extend_tele_distance"].default, 2.0)
+        self.assertEqual(settings["extend_tele_zoom"].default, 1.3)
         for name in ("extend_overlap_before", "extend_overlap_after", "extend_tilt_deg",
-                     "extend_guide_sh", "extend_novel_sh", "extend_before", "extend_after"):
+                     "extend_guide_sh", "extend_novel_sh", "extend_before", "extend_after",
+                     "extend_figure_mask", "extend_tele_distance", "extend_tele_zoom"):
             self.assertEqual(settings[name].requires, "extend_orbit")
-        # Each pass's denoise also has a switch of its own.
+        # Each pass's denoise also has a switch of its own, and the plain
+        # alpha is only rendered for the figure mask.
         side_gates = {
             "denoise_extension_before": ["${globals.extend_orbit}", "${globals.extend_before}"],
             "denoise_extension_after": ["${globals.extend_orbit}", "${globals.extend_after}"],
+            "extend_render_alpha": ["${globals.extend_orbit}", "${globals.extend_figure_mask}"],
         }
         for step_id in self.BRANCH:
             with self.subTest(step=step_id):
@@ -2429,12 +2436,27 @@ class TestTheOrbitExtension(unittest.TestCase):
             "guide_masks": "scene.extended.guide_masks",
             "novel_images": "scene.extended.novel_images",
             "novel_masks": "scene.extended.novel_masks",
+            "figure_alphas": "scene.extended.figure_alphas?",
         })
         scope = {"globals": dict(spec.globals, output_root="/out")}
         self.assertEqual(resolve(assemble.params, scope), {
             "bg_color": [0.5, 0.5, 0.5],
+            "figure_mask": True,
+            "figure_dilate_px": 3,
             "debug_dir": "/out/debug/extension_input",
         })
+        # The figure's plain alpha: the guide splat at the same cameras,
+        # confidence gate off, at the frames' resolution.
+        alpha = self._step(spec, "extend_render_alpha")
+        guide = self._step(spec, "extend_render_guide")
+        self.assertEqual(alpha.inputs, guide.inputs)
+        self.assertEqual(alpha.params["confidence"], False)
+        self.assertEqual((alpha.params["width"], alpha.params["height"]),
+                         (guide.params["width"], guide.params["height"]))
+        self.assertEqual(alpha.outputs, {"masks": "scene.extended.figure_alphas"})
+        path = self._step(spec, "extend_path")
+        self.assertEqual((path.params["tele_distance"], path.params["tele_zoom"]),
+                         ("${globals.extend_tele_distance}", "${globals.extend_tele_zoom}"))
         # The composite colour is pass 2's control's.
         self.assertEqual(assemble.params["bg_color"],
                          self._step(spec, "mask_splat_fringes").params["bg_color"])

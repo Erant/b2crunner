@@ -47,6 +47,27 @@ of the video. That is free because the inactive frames carry the guide
 render, never pass 2's pixels, and what the pass returns for them is
 dropped.
 
+**The lens.** Past the band the new frames look up the legs or down onto
+the crown, and at the default reach (-70 / +70 deg) the head is a small,
+far-off patch of the frame — about 98 px across at 720 wide from below,
+against 170 at +30. `tele_distance` and `tele_zoom` turn those cameras
+into a telephoto: each is pulled back from the orbit target by
+`tele_distance` and its focal length multiplied by `tele_distance *
+tele_zoom`, both ramping from 1 at the pass's lead (the band's edge) to
+their full value at the outermost frame (`tele_factors`). Pulling back flattens the
+foreshortening (head/feet 0.21 -> 0.31 from below at x2) and the zoom
+fills the frame (x1.3 crops nothing at any azimuth): the BEFORE pass's
+head goes from about 98 px to about 145 (1d1e93's geometry). Every frame
+inside the band keeps the orbit's own lens and distance, so the frames
+each pass shares with pass 2 are untouched and so is any orbit run without
+it. The extended dataset then mixes focal lengths, which every consumer
+takes per camera: body2colmap's ColmapExporter writes one CAMERA_ID per
+lens (d92ebc7), refine_cameras gives each image its own camera row, and
+b2ctrain reads each image's camera. Measured on 1d1e93's BEFORE pass at
+480p (2026-10-16, experiments/extension_before): with the figure-only
+mask the telephoto head is coherent where the orbit's lens leaves the
+eyes as dark smudges.
+
 **The control videos.** `assemble_extension` builds the two 81-frame
 videos from a render of one splat along the two passes' own paths
 (`render_splat` on `pass_cameras`, matted by rmbg and laid over 0.5 grey
@@ -162,20 +183,43 @@ def pass_elevation_offsets(before: int, overlap_before: int, overlap_after: int,
             [tilt * (m - (overlap_after - 1)) / after for m in range(overlap_after + after)])
 
 
-def _at_elevation(camera: Any, target: np.ndarray, elevation_deg: float):
+def tele_factors(past_lead_deg: float, tilt_deg: float,
+                 distance: float, zoom: float) -> Tuple[float, float]:
+    """How far a camera `past_lead_deg` beyond its pass's lead (outward:
+    below the lead-in for the BEFORE pass, above the lead-out for the
+    AFTER) is pulled back, as a multiple of the orbit radius, and how much
+    its focal length grows: 1 and 1 at the lead and inside it, `distance`
+    and `distance * zoom` at `tilt_deg` past it, linear in between. From
+    the lead rather than from +/-amplitude: the anchored helix's leads sit
+    off the nominal band (-29.6 / +30.4 on the test orbit). With no tilt
+    nothing goes past, so nothing changes."""
+    # On the lead to floating point is still the lead, or a frame shared with
+    # pass 2 could pick up a lens a part in 1e9 off the orbit's and export as
+    # a camera of its own.
+    if tilt_deg <= 0.0 or past_lead_deg <= 1e-6:
+        return 1.0, 1.0
+    s = min(float(past_lead_deg) / float(tilt_deg), 1.0)
+    pull = 1.0 + (float(distance) - 1.0) * s
+    return pull, pull * (1.0 + (float(zoom) - 1.0) * s)
+
+
+def _at_elevation(camera: Any, target: np.ndarray, elevation_deg: float,
+                  pull: float = 1.0, focal_scale: float = 1.0):
     """`camera` moved to `elevation_deg` about `target`, at the same radius
     and azimuth, and turned back onto the target — the helix's own
-    construction (OrbitPath.helical), at an elevation it does not make."""
+    construction (OrbitPath.helical), at an elevation it does not make.
+    `pull` multiplies the radius and `focal_scale` the focal length
+    (`tele_factors`); the principal point stays put."""
     from body2colmap import coordinates
     from body2colmap.camera import Camera
 
     radius, azimuth, _ = coordinates.cartesian_to_spherical(
         np.asarray(camera.position, dtype=np.float64) - target)
     moved = Camera(
-        focal_length=(camera.fx, camera.fy),
+        focal_length=(camera.fx * focal_scale, camera.fy * focal_scale),
         image_size=(camera.width, camera.height),
         principal_point=(camera.cx, camera.cy),
-        position=target + coordinates.spherical_to_cartesian(radius, azimuth, elevation_deg),
+        position=target + coordinates.spherical_to_cartesian(radius * pull, azimuth, elevation_deg),
     )
     moved.look_at(target, coordinates.WorldCoordinates.UP_AXIS)
     return moved
@@ -271,7 +315,9 @@ class ExtendHelicalPathStep(Step):
               `cameras`' new frames; their inactive frames sit on the ramp,
               beside pass 2's cameras rather than on them. A pass that is
               off (`before_pass` / `after_pass`) has no cameras here and
-              0 new frames and 0 overlap above}
+              0 new frames and 0 overlap above. Past the band the new
+              cameras are pulled back and zoomed (`tele_distance`,
+              `tele_zoom`), so their intrinsics differ from the orbit's}
 
     The helix params here MUST be render_subject's: the source path is
     rebuilt from them and compared against the live cameras, and a mismatch
@@ -306,6 +352,15 @@ class ExtendHelicalPathStep(Step):
         # count and overlap are published as 0, which is how assemble_extension
         # and splice_extension (and the stage-5 offsets) know there is no such
         # pass. At least one has to be on.
+        # The telephoto past the band (see the module docstring): 1 and 1
+        # leave every camera on the orbit's radius and lens. Both ramp in
+        # from the band's edge, so the frames shared with pass 2 never move.
+        Param("tele_distance", float, 1.0,
+              "How far the outermost extension cameras pull back from the orbit "
+              "target, as a multiple of the orbit radius (1 = no pull-back)"),
+        Param("tele_zoom", float, 1.0,
+              "Extra zoom on the outermost extension cameras, on top of the "
+              "pull-back's matching focal length (1 = none)"),
         Param("before_pass", bool, True,
               "Run the BEFORE pass (the helix continued backwards, ramping below the band)"),
         Param("after_pass", bool, True,
@@ -366,6 +421,13 @@ class ExtendHelicalPathStep(Step):
                 f"past that look_at's up vector degenerates"
             )
 
+        distance, zoom = float(params["tele_distance"]), float(params["tele_zoom"])
+        if distance <= 0.0 or zoom <= 0.0:
+            raise ValueError(
+                f"extend_helical_path: tele_distance={distance} and tele_zoom={zoom} must be "
+                f"positive (1 and 1 leave the orbit's lens alone)"
+            )
+
         effective_mm = float(extras.get("focal_length_mm", 0.0) or 0.0)
         template = _camera_template(live[0])
         source = {key: params[key] for key in
@@ -400,9 +462,12 @@ class ExtendHelicalPathStep(Step):
         ramp_before, ramp_after = pass_elevation_offsets(
             before, overlap_before, overlap_after, after, tilt)
         after_start = before + n - overlap_after
-        before_pass = [_at_elevation(extended[i], target, lead_in + d)
-                       for i, d in enumerate(ramp_before)]
-        after_pass = [_at_elevation(extended[after_start + m], target, lead_out + d)
+        def placed(camera, lead, offset, outward):
+            return _at_elevation(camera, target, lead + offset,
+                                 *tele_factors(outward * offset, tilt, distance, zoom))
+
+        before_pass = [placed(extended[i], lead_in, d, -1.0) for i, d in enumerate(ramp_before)]
+        after_pass = [placed(extended[after_start + m], lead_out, d, 1.0)
                       for m, d in enumerate(ramp_after)]
         drift = _worst_gap_m(carried, live)
         if drift > _SAME_PATH_TOLERANCE_M:
@@ -429,6 +494,16 @@ class ExtendHelicalPathStep(Step):
             phase, ", ".join(passes), anchor, anchor + before,
             rotation_angle_deg(rotation), float(np.linalg.norm(translation)) * 1000.0,
         )
+        if (distance, zoom) != (1.0, 1.0):
+            pull, focal = tele_factors(tilt, tilt, distance, zoom)
+            lenses = len({(round(c.fx, 6), round(c.fy, 6)) for c in cameras})
+            logger.info(
+                "extend_helical_path: telephoto past the band — the outermost frames sit "
+                "x%.2f the orbit radius out at x%.2f the focal length (%.1f px), ramping from "
+                "x1 at the lead-in (%.1f deg) and the lead-out (%.1f deg); %d distinct lenses "
+                "across the %d cameras",
+                pull, focal, float(live[0].fx) * focal, lead_in, lead_out, lenses, len(cameras),
+            )
         return {"cameras": cameras, "image_names": image_names, "before": before,
                 "after": after, "overlap_before": overlap_before, "overlap_after": overlap_after,
                 "tilt_deg": tilt, "pass_cameras": before_pass + after_pass}
@@ -461,14 +536,18 @@ class AssembleExtensionStep(Step):
               optional "novel_images", "novel_masks": a second render of the
               same cameras (and its matte) that the REACTIVE frames take
               instead — the workflow renders it at fewer SH bands than the
-              inactive frames' render}
+              inactive frames' render;
+              optional "figure_alphas": the guide splat's plain accumulated
+              alpha at the same cameras (confidence gate off), which
+              `figure_mask` adds to the matte}
     outputs: {"before_images", "before_masks": the BEFORE pass — `before`
               reactive frames then `overlap_before` inactive ones (beside
               pass 2's first); "after_images", "after_masks": the AFTER pass
               — `overlap_after` inactive frames (beside pass 2's last) then
-              `after` reactive ones. Masks are the VACE per-frame flag, 0.0
-              inactive / 1.0 reactive. A pass that is off (0 new frames, 0
-              overlap) publishes None for both}
+              `after` reactive ones. Masks are the VACE flag, 0.0 inactive
+              / 1.0 reactive: whole frames, or with `figure_mask` 1.0 only
+              on the figure in a reactive frame. A pass that is off (0 new
+              frames, 0 overlap) publishes None for both}
 
     Every frame is the matted render over `bg_color`, inactive ones
     included. With `novel_images` the reactive frames are that render's
@@ -480,6 +559,23 @@ class AssembleExtensionStep(Step):
     context out, a pale leotard from above). Both passes are phase_frames long by construction (before +
     overlap_before = overlap_after + after). The dataset itself is not
     touched.
+
+    **The figure mask.** A reactive frame flagged whole lets the model paint
+    anywhere in it, and below the band it does: it keeps the guide's legs
+    and draws an upright torso and a level head above them, and the guide's
+    own foreshortened head turns into a face printed on the shirt (1d1e93's
+    BEFORE pass; not the prompt, not the framing — the 2026-10-15/16
+    harness arms, experiments/extension_before). With `figure_mask` the
+    reactive frames are flagged on the figure only — the matte the frame
+    is composited with, OR the splat's plain alpha (`figure_alphas`, so the
+    Gaussians the confidence gate culls to grey stay paintable: soles, the
+    gap between the legs), grown by `figure_dilate_px` — and the grey
+    around it is inactive, kept. VACE's mask is per pixel (diffusers'
+    prepare_masks folds each 8x8 block into 64 channels, so a few pixels of
+    growth survive as such). Measured at 480p: guide-silhouette IoU 0.78 ->
+    0.94, figure drawn outside the guide 13.9 % -> 1.0 %, no second head;
+    inside the figure the model still repaints (22 dB from the guide,
+    sharper than it).
     """
 
     PARAMS = (
@@ -492,6 +588,14 @@ class AssembleExtensionStep(Step):
         Param("debug_dir", str, None,
               "Dump the two control videos here; empty writes nothing",
               advanced=True),
+        Param("figure_mask", bool, False,
+              "Flag only the figure in each reactive frame for repainting; the grey "
+              "around it is kept"),
+        # At the frames' own resolution. Enough for the matte's soft edge and
+        # a little drift; not enough room to draw a head beside the figure.
+        Param("figure_dilate_px", int, 3,
+              "How far the figure mask grows past the figure, in pixels",
+              minimum=0, advanced=True),
     )
 
     def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
@@ -560,8 +664,15 @@ class AssembleExtensionStep(Step):
 
         one = np.ones((height, width), dtype=np.float32)
         zero = np.zeros((height, width), dtype=np.float32)
-        before_flags = [one] * before + [zero] * overlap_before
-        after_flags = [zero] * overlap_after + [one] * after
+        reactive = list(range(before)) + list(range(phase_before + overlap_after, cams))
+        flags = {i: one for i in reactive}
+        if params["figure_mask"]:
+            flags = self._figure_flags(
+                reactive, novel_masks if novel_masks is not None else guide_masks,
+                inputs.get("figure_alphas"), cams, (height, width),
+                int(params["figure_dilate_px"]))
+        before_flags = [flags[i] for i in range(before)] + [zero] * overlap_before
+        after_flags = [zero] * overlap_after + [flags[i] for i in range(phase_before + overlap_after, cams)]
         # A pass that is off publishes None: its denoise step is gated off
         # and the splice reads it as optional.
         result: Dict[str, Any] = {
@@ -594,6 +705,47 @@ class AssembleExtensionStep(Step):
             "the novel-view render" if novel_images is not None else "the same render",
         )
         return result
+
+    @staticmethod
+    def _figure_flags(reactive, mattes, alphas, cams, size, dilate_px):
+        """The reactive frames' per-pixel flags: the matte OR the plain
+        alpha, at 0.5, grown by `dilate_px`."""
+        import cv2
+
+        if alphas is None:
+            logger.warning(
+                "assemble_extension: figure_mask without figure_alphas — the flag follows the "
+                "matte alone, and whatever the confidence gate culled to grey is kept as grey")
+        elif len(alphas) != cams:
+            raise ValueError(
+                f"assemble_extension: figure_alphas has {len(alphas)} frames against the "
+                f"passes' {cams} cameras")
+        kernel = (cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * dilate_px + 1,) * 2)
+                  if dilate_px else None)
+        flags, shares, alpha_only = {}, [], []
+        for i in reactive:
+            matte = np.asarray(mattes[i], dtype=np.float32) > 0.5
+            figure = matte.copy()
+            if alphas is not None:
+                alpha = np.asarray(alphas[i], dtype=np.float32) > 0.5
+                alpha_only.append(float((alpha & ~matte).mean()))
+                figure |= alpha
+            if figure.shape != size:
+                raise ValueError(
+                    f"assemble_extension: a figure mask is {figure.shape[1]}x{figure.shape[0]} "
+                    f"against the frames' {size[1]}x{size[0]}")
+            grown = figure.astype(np.uint8)
+            if kernel is not None:
+                grown = cv2.dilate(grown, kernel)
+            flags[i] = grown.astype(np.float32)
+            shares.append(float(flags[i].mean()))
+        if shares:
+            logger.info(
+                "assemble_extension: figure-only flags on %d reactive frames — %.1f %% of the "
+                "frame on average (%.1f-%.1f), %.2f %% of it from the plain alpha alone, grown "
+                "%d px", len(shares), 100 * np.mean(shares), 100 * min(shares),
+                100 * max(shares), 100 * (np.mean(alpha_only) if alpha_only else 0.0), dilate_px)
+        return flags
 
 
 # The colour match's guard rails. The factors measured on e9eb3a were

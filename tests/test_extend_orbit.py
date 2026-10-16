@@ -20,6 +20,7 @@ from pipeline.dataset import Dataset
 from pipeline.registry import get_step_class
 from pipeline.steps.extend_orbit import (
     extended_helix_params, helix_step_deg, latent_aligned, new_frames, pass_elevation_offsets,
+    tele_factors,
 )
 from pipeline.steps.splat import _resolve_cameras, _transform_camera
 from tests.helpers import orbit_dataset, run_step
@@ -100,6 +101,23 @@ class TestTheTilt(unittest.TestCase):
     def test_no_tilt_is_the_flat_leads(self):
         before, after = pass_elevation_offsets(41, 40, 41, 40, 0.0)
         self.assertEqual(set(before) | set(after), {0.0})
+
+
+class TestTheTeleFactors(unittest.TestCase):
+    def test_at_and_inside_the_lead_nothing_changes(self):
+        for past in (-20.0, -1.0, 0.0, 1e-9):
+            self.assertEqual(tele_factors(past, 40.0, 2.0, 1.3), (1.0, 1.0))
+
+    def test_the_ramp_reaches_the_full_factors_at_the_outermost_frame(self):
+        pull, focal = tele_factors(40.0, 40.0, 2.0, 1.3)
+        self.assertAlmostEqual(pull, 2.0)
+        self.assertAlmostEqual(focal, 2.6)
+        pull, focal = tele_factors(20.0, 40.0, 2.0, 1.3)
+        self.assertAlmostEqual(pull, 1.5)
+        self.assertAlmostEqual(focal, 1.5 * 1.15)
+
+    def test_no_tilt_leaves_nothing_past_the_lead(self):
+        self.assertEqual(tele_factors(15.0, 0.0, 2.0, 1.3), (1.0, 1.0))
 
 
 class TestExtendHelicalPath(unittest.TestCase):
@@ -211,6 +229,51 @@ class TestExtendHelicalPath(unittest.TestCase):
         for camera in out["cameras"]:
             self.assertEqual((camera.fx, camera.fy, camera.cx, camera.cy, camera.width, camera.height),
                              (first.fx, first.fy, first.cx, first.cy, first.width, first.height))
+
+    def test_the_telephoto_pulls_back_and_zooms_past_the_band_only(self):
+        plain = self._extend(self.source, tilt_deg=40.0)
+        tele = self._extend(self.source, tilt_deg=40.0, tele_distance=2.0, tele_zoom=1.3)
+        target = np.asarray(self.ds.extras["orbit_target"], dtype=np.float64)
+        first = self.source[0]
+        for got, want in zip(tele["cameras"][41:122], self.source):
+            self.assertIs(got, want)
+        # Every frame a pass shares with pass 2 is on the ramp INSIDE the
+        # band: the orbit's own distance and lens, exactly the plain path's.
+        for i in list(range(41, 81)) + list(range(81, 122)):
+            a, b = tele["pass_cameras"][i], plain["pass_cameras"][i]
+            np.testing.assert_allclose(a.position, b.position, atol=1e-9)
+            self.assertEqual((a.fx, a.fy, a.cx, a.cy), (b.fx, b.fy, b.cx, b.cy))
+        # The new frames: same direction from the target, pulled back and
+        # zoomed by the ramp of their elevation past the band.
+        lead_in = _spherical(self.source[0], target)[2]
+        lead_out = _spherical(self.source[-1], target)[2]
+        for got, flat, outward in zip(tele["cameras"][:41] + tele["cameras"][122:],
+                                      plain["cameras"][:41] + plain["cameras"][122:],
+                                      [lambda e: lead_in - e] * 41 + [lambda e: e - lead_out] * 40):
+            r, az, el = _spherical(got, target)
+            r0, az0, el0 = _spherical(flat, target)
+            pull, focal = tele_factors(outward(el0), 40.0, 2.0, 1.3)
+            self.assertAlmostEqual(el, el0, places=4)
+            self.assertAlmostEqual((az - az0 + 180.0) % 360.0 - 180.0, 0.0, places=4)
+            self.assertAlmostEqual(r / r0, pull, places=4)
+            self.assertAlmostEqual(got.fx / first.fx, focal, places=6)
+            self.assertAlmostEqual(got.fy / first.fy, focal, places=6)
+            self.assertEqual((got.cx, got.cy), (first.cx, first.cy))
+            to_target = target - np.asarray(got.position, dtype=np.float64)
+            forward = np.asarray(got.rotation, dtype=np.float64) @ np.array([0.0, 0.0, -1.0])
+            self.assertGreater(forward @ to_target / np.linalg.norm(to_target), 1.0 - 1e-6)
+        # The outermost frames get the whole of it.
+        for index in (0, 161):
+            r, _, _ = _spherical(tele["cameras"][index], target)
+            r0, _, _ = _spherical(plain["cameras"][index], target)
+            self.assertAlmostEqual(r / r0, 2.0, places=3)
+            self.assertAlmostEqual(tele["cameras"][index].fx / first.fx, 2.6, places=3)
+
+    def test_a_non_positive_telephoto_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "tele_distance"):
+            self._extend(self.source, tilt_deg=40.0, tele_distance=0.0)
+        with self.assertRaisesRegex(ValueError, "tele_zoom"):
+            self._extend(self.source, tilt_deg=40.0, tele_zoom=-1.0)
 
     def test_a_carried_source_path_carries_its_extension(self):
         """render_subject moves the whole path rigidly by the anchor's
@@ -364,6 +427,62 @@ class TestAssembleExtension(unittest.TestCase):
         self.assertEqual(self._flat(out["after_images"]), [105, 106, 107, 108, 209])
         self.assertEqual([float(m[0, 0]) for m in out["before_masks"]], [1, 1, 0, 0, 0])
         self.assertEqual([float(m[0, 0]) for m in out["after_masks"]], [0, 0, 0, 0, 1])
+
+    def _figure_inputs(self):
+        _, inputs = self._inputs()
+        # A 2x2 figure in the matte, one more pixel only the plain alpha has.
+        matte = np.zeros((8, 6), np.float32)
+        matte[3:5, 2:4] = 1.0
+        alpha = matte.copy()
+        alpha[5, 2] = 1.0
+        inputs["guide_masks"] = [matte] * (2 * self.PHASE)
+        inputs["figure_alphas"] = [alpha] * (2 * self.PHASE)
+        return inputs, matte, alpha
+
+    def test_the_figure_mask_flags_the_figure_and_keeps_the_grey(self):
+        import cv2
+
+        inputs, _, alpha = self._figure_inputs()
+        out = run_step("assemble_extension", inputs, {"figure_mask": True, "figure_dilate_px": 1})
+        grown = cv2.dilate(alpha.astype(np.uint8),
+                           cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))).astype(np.float32)
+        reactive = out["before_masks"][:2] + out["after_masks"][4:]
+        inactive = out["before_masks"][2:] + out["after_masks"][:4]
+        for flag in reactive:
+            np.testing.assert_array_equal(flag, grown)
+            self.assertEqual(flag.dtype, np.float32)
+        self.assertEqual(float(grown[0, 0]), 0.0)
+        for flag in inactive:
+            self.assertEqual(float(flag.max()), 0.0)
+        # The control video itself is unchanged by the mask.
+        plain = run_step("assemble_extension", inputs, {})
+        for a, b in zip(out["before_images"] + out["after_images"],
+                        plain["before_images"] + plain["after_images"]):
+            np.testing.assert_array_equal(a, b)
+
+    def test_without_the_plain_alpha_the_figure_is_the_matte(self):
+        inputs, matte, _ = self._figure_inputs()
+        del inputs["figure_alphas"]
+        with self.assertLogs("pipeline.steps.extend_orbit", level="WARNING"):
+            out = run_step("assemble_extension", inputs, {"figure_mask": True, "figure_dilate_px": 0})
+        np.testing.assert_array_equal(out["before_masks"][0], matte)
+
+    def test_the_figure_mask_follows_the_novel_render_s_matte(self):
+        inputs, _, _ = self._figure_inputs()
+        inputs["novel_images"] = [_frame(200 + i) for i in range(2 * self.PHASE)]
+        novel = np.zeros((8, 6), np.float32)
+        novel[0, 0] = 1.0
+        inputs["novel_masks"] = [novel] * (2 * self.PHASE)
+        del inputs["figure_alphas"]
+        with self.assertLogs("pipeline.steps.extend_orbit", level="WARNING"):
+            out = run_step("assemble_extension", inputs, {"figure_mask": True, "figure_dilate_px": 0})
+        np.testing.assert_array_equal(out["before_masks"][0], novel)
+
+    def test_a_plain_alpha_for_another_path_is_refused(self):
+        inputs, _, _ = self._figure_inputs()
+        inputs["figure_alphas"] = inputs["figure_alphas"][:3]
+        with self.assertRaisesRegex(ValueError, "figure_alphas"):
+            run_step("assemble_extension", inputs, {"figure_mask": True})
 
     def test_a_novel_render_needs_its_matte_and_every_camera(self):
         _, inputs = self._inputs()

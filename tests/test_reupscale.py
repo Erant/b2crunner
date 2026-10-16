@@ -64,6 +64,21 @@ class TestCameras(unittest.TestCase):
         steps = [ang[i, i + 1] for i in range(len(band) - 1)]
         self.assertLess(np.median(steps), 1.2 * np.median(nearest))
 
+    def test_an_extended_orbit_s_telephoto_frames_do_not_set_the_lens(self):
+        """The first camera of an extended orbit is its most telephoto one:
+        twice as far out through a 2.6x lens. The band keeps the orbit's own."""
+        from body2colmap.camera import Camera
+
+        cams = _orbit()
+        first = cams[0]
+        tele = Camera(focal_length=(first.fx * 2.6, first.fy * 2.6), image_size=(first.width, first.height),
+                      principal_point=(first.cx, first.cy), position=first.position * 2.0, rotation=first.rotation)
+        band = band_cameras([tele] + cams, 20, -70.0, 70.0, 720, 1280)
+        for c in band:
+            self.assertAlmostEqual(c.fx, first.fx * 720 / 1080, places=3)
+            self.assertAlmostEqual(float(np.linalg.norm(c.position)),
+                                   float(np.median([np.linalg.norm(c.position) for c in cams])), delta=0.02)
+
     def test_more_views_at_the_equator_than_the_poles(self):
         _, band = self._band()
         el = np.round(self._elevations(band), 1)

@@ -35,7 +35,7 @@ from __future__ import annotations
 import logging
 import shutil
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Sequence
 
 import cv2
 import numpy as np
@@ -67,8 +67,13 @@ def band_cameras(cameras: List[Any], n_views: int, min_elevation_deg: float, max
     if not -90.0 < lo <= hi < 90.0:
         raise ValueError(f"band_cameras: elevations {lo}..{hi} must lie inside (-90, 90), low first")
     center = orbit_frame(cameras)[0].astype(np.float64)
+    # The orbit's own lens and distance: the most common lens among the
+    # training cameras. An extended orbit's telephoto frames (extend_orbit's
+    # `tele_distance`) sit further out through longer lenses, and the first
+    # camera is the most telephoto of them all.
+    orbit = _orbit_lens_cameras(cameras)
     radius = float(np.median([np.linalg.norm(np.asarray(c.position, np.float64).reshape(3) - center)
-                              for c in cameras]))
+                              for c in orbit]))
     up = np.asarray(coordinates.WorldCoordinates.UP_AXIS, np.float64)
 
     # Rings: band area / n_views is the area per view; its square root the spacing.
@@ -86,7 +91,7 @@ def band_cameras(cameras: List[Any], n_views: int, min_elevation_deg: float, max
     offset = np.asarray(cameras[0].position, np.float64).reshape(3) - center
     start = float(np.degrees(np.arctan2(offset[0], offset[2])))
 
-    ref = cameras[0]
+    ref = orbit[0]
     sx, sy = width / float(ref.width), height / float(ref.height)
     out = []
     for ring, (elevation, count) in enumerate(zip(elevations, counts)):
@@ -104,6 +109,18 @@ def band_cameras(cameras: List[Any], n_views: int, min_elevation_deg: float, max
             cam.look_at(center.astype(np.float32), up.astype(np.float32))
             out.append(cam)
     return out
+
+
+def _orbit_lens_cameras(cameras: Sequence[Any]) -> List[Any]:
+    """The cameras sharing the most common lens (fx, fy, cx, cy, size), in order."""
+    from collections import Counter
+
+    def lens(c):
+        return (round(float(c.fx), 6), round(float(c.fy), 6), round(float(c.cx), 6),
+                round(float(c.cy), 6), int(c.width), int(c.height))
+
+    common = Counter(lens(c) for c in cameras).most_common(1)[0][0]
+    return [c for c in cameras if lens(c) == common]
 
 
 @register_step("reupscale_inputs")

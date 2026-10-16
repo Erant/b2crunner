@@ -831,3 +831,107 @@ class TestTheDebugDump(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestOneCameraPerLens(unittest.TestCase):
+    """An extended orbit's telephoto frames carry their own lenses: the
+    extractor runs once per lens, and the input model's camera ids are
+    renumbered to the database's."""
+
+    def _mixed(self):
+        cameras = _orbit(6)
+        for i in (0, 1):
+            c = cameras[i]
+            cameras[i] = Camera(focal_length=(c.fx * 2.6, c.fy * 2.6), image_size=(c.width, c.height),
+                                principal_point=(c.cx, c.cy), position=np.asarray(c.position) * 2.0,
+                                rotation=c.rotation)
+        return cameras, [f"frame_{i + 1:05d}_.png" for i in range(6)]
+
+    def test_lenses_group_in_first_seen_order(self):
+        from pipeline.steps.refine_cameras import _lens_groups
+
+        cameras, _ = self._mixed()
+        self.assertEqual(list(_lens_groups(cameras).values()), [[0, 1], [2, 3, 4, 5]])
+        self.assertEqual(list(_lens_groups(_orbit(4)).values()), [[0, 1, 2, 3]])
+
+    def test_one_extractor_run_per_lens(self):
+        import tempfile
+
+        cameras, names = self._mixed()
+        commands = []
+
+        class Recording(RefineCamerasStep):
+            def _run(self, cmd, label, **kwargs):
+                commands.append(cmd)
+                return []
+
+        params = RefineCamerasStep.resolve_params({"feature_type": "SIFT"})
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            Recording()._extract("colmap", work, work / "images", None, cameras, names, params)
+            lists = [(work / f"lens_{k}.txt").read_text().split() for k in (1, 2)]
+        self.assertEqual(len(commands), 2)
+        self.assertEqual(lists, [names[:2], names[2:]])
+        for cmd, camera in zip(commands, (cameras[0], cameras[2])):
+            params_arg = cmd[cmd.index("--ImageReader.camera_params") + 1]
+            self.assertAlmostEqual(float(params_arg.split(",")[0]), camera.fx, places=4)
+            self.assertIn("--image_list_path", cmd)
+
+        commands.clear()
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            Recording()._extract("colmap", work, work / "images", None, _orbit(3), names[:3], params)
+        self.assertEqual(len(commands), 1)
+        self.assertNotIn("--image_list_path", commands[0])
+
+    def _database(self, path, cameras_by_id, image_cameras):
+        import sqlite3
+
+        with sqlite3.connect(path) as connection:
+            connection.execute("CREATE TABLE cameras (camera_id INTEGER, params BLOB)")
+            connection.execute("CREATE TABLE images (image_id INTEGER, name TEXT, camera_id INTEGER)")
+            for cid, params in cameras_by_id.items():
+                connection.execute("INSERT INTO cameras VALUES (?, ?)",
+                                   (cid, np.asarray(params, np.float64).tobytes()))
+            for i, (name, cid) in enumerate(image_cameras, start=1):
+                connection.execute("INSERT INTO images VALUES (?, ?, ?)", (i, name, cid))
+        connection.close()
+
+    def test_the_model_s_cameras_are_renumbered_as_the_database_s(self):
+        import tempfile
+
+        cameras, names = self._mixed()
+        tele, orbit = cameras[0], cameras[2]
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            sparse = work / "sparse_in"
+            sparse.mkdir()
+            RefineCamerasStep._write_input_model(cameras, names, sparse)
+            # The database numbered the lenses the other way round.
+            lens = lambda c: [c.fx, c.fy, c.cx, c.cy]
+            self._database(work / "database.db", {1: lens(orbit), 2: lens(tele)},
+                           [(n, 2 if i < 2 else 1) for i, n in enumerate(names)])
+            RefineCamerasStep._bind_model_cameras(sparse, work / "database.db", "test")
+            rows = [l.split() for l in (sparse / "cameras.txt").read_text().splitlines()
+                    if l.strip() and not l.startswith("#")]
+            images = [l.split() for l in (sparse / "images.txt").read_text().splitlines()
+                      if len(l.split()) == 10 and not l.startswith("#")]
+        self.assertEqual(sorted((r[0], round(float(r[4]), 2)) for r in rows),
+                         [("1", round(orbit.fx, 2)), ("2", round(tele.fx, 2))])
+        self.assertEqual([(r[9], r[8]) for r in images],
+                         [(n, "2" if i < 2 else "1") for i, n in enumerate(names)])
+
+    def test_an_image_on_another_camera_in_the_database_is_refused(self):
+        import tempfile
+
+        cameras, names = self._mixed()
+        lens = lambda c: [c.fx, c.fy, c.cx, c.cy]
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            sparse = work / "sparse_in"
+            sparse.mkdir()
+            RefineCamerasStep._write_input_model(cameras, names, sparse)
+            self._database(work / "database.db", {1: lens(cameras[0]), 2: lens(cameras[2])},
+                           [(n, 1) for n in names])
+            with self.assertRaisesRegex(BadSolve, "sits on camera"):
+                RefineCamerasStep._bind_model_cameras(sparse, work / "database.db", "test")

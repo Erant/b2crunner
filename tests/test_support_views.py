@@ -531,11 +531,12 @@ class TestTheDebugExportRecordsThem(unittest.TestCase):
                 )
         self.assertIn("masks/", str(caught.exception))
 
-    def test_a_supporting_view_with_a_different_lens_is_called_out(self):
-        """ColmapExporter writes one camera line for the whole model, so a
-        supporting view rendered through a different lens is exported as
-        though it had the training one — and lands wherever that puts it."""
+    def test_a_supporting_view_with_a_different_lens_exports_as_its_own_camera(self):
+        """body2colmap's ColmapExporter writes one camera line per lens
+        (d92ebc7), so a supporting view through a different lens keeps it:
+        nothing to warn about, and the export says which camera it is."""
         import tempfile
+        from pathlib import Path
 
         from body2colmap.camera import Camera
 
@@ -545,14 +546,37 @@ class TestTheDebugExportRecordsThem(unittest.TestCase):
                          position=np.array([0.0, 0.0, 3.0], dtype=np.float32),
                          rotation=np.eye(3, dtype=np.float32))]
         with tempfile.TemporaryDirectory() as tmp:
-            with self.assertLogs("pipeline.steps.brush", level="WARNING") as logs:
+            with self.assertNoLogs("pipeline.steps.brush", level="WARNING"):
                 self._export(
                     tmp,
                     support_images=out["images"],
                     support_masks=out["masks"],
                     support_cameras=zoomed,
                 )
-        self.assertIn("wrong place", "\n".join(logs.output))
+            cameras_txt = next(Path(tmp).rglob("cameras.txt")).read_text()
+        rows = [l.split() for l in cameras_txt.splitlines() if l.strip() and not l.startswith("#")]
+        self.assertEqual(len(rows), 2)
+        self.assertIn(32.0, [float(r[4]) for r in rows])
+
+    def test_a_supporting_view_of_another_size_is_called_out(self):
+        import tempfile
+
+        from body2colmap.camera import Camera
+
+        out = _run({**_batch(1)})
+        bigger = [Camera(focal_length=(32.0, 32.0), image_size=(16, 16),
+                         principal_point=(8.0, 8.0),
+                         position=np.array([0.0, 0.0, 3.0], dtype=np.float32),
+                         rotation=np.eye(3, dtype=np.float32))]
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertLogs("pipeline.steps.brush", level="WARNING") as logs:
+                self._export(
+                    tmp,
+                    support_images=[np.zeros((16, 16, 3), np.uint8)],
+                    support_masks=[np.ones((16, 16), np.float32)],
+                    support_cameras=bigger,
+                )
+        self.assertIn("16x16", "\n".join(logs.output))
 
 
 if __name__ == "__main__":

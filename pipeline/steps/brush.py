@@ -495,46 +495,32 @@ class _SupportViews:
         )
 
     def check_intrinsics(self, train_cameras: Sequence[Any]) -> None:
-        """Warn if a supporting view's lens is not the training views'.
+        """Warn if a supporting view is not the training views' size.
 
-        `ColmapExporter._export_cameras` writes ONE camera line — read off
-        `cameras[0]`, which is a training view — and stamps `CAMERA_ID 1` on
-        every image, supporting views included. A supporting view rendered
-        through a different focal length or at a different size is therefore
-        exported as though it had the training lens, and brush places it
-        wherever that lie puts it: the view lands in the wrong part of the
-        model, and nothing in the export says so.
+        Lenses may differ: body2colmap's ColmapExporter writes one camera
+        line per distinct lens (since d92ebc7) and b2ctrain reads each
+        image's own, so a supporting view — or a telephoto stretch of the
+        orbit itself (extend_orbit's `tele_distance`) — trains through its
+        own focal length. Until then it wrote one line from `cameras[0]` and
+        a view through any other lens was silently trained through the
+        training lens, which is what this check used to name.
 
-        Nothing in the shipped wiring should trip this — `render_splat`'s
-        `bounds_source: splat` dollies in rather than zooming, and
-        `pointmap_elevation_views` copies the source camera's intrinsics
-        outright, both for exactly this reason. It is here because the
-        failure is invisible in the output and cheap to name here.
-
-        A warning rather than a raise: this is a fact about the exporter,
-        not about the caller, and a run that has already spent an hour of
-        GPU should say so and finish rather than die on it.
+        What is still worth naming is a different image SIZE: everything
+        downstream of the export (the upscale's rescale, the per-view
+        sidecars) assumes one frame size for the batch. A warning rather
+        than a raise: a run that has already spent an hour of GPU should
+        say so and finish rather than die on it.
         """
         if not self or not train_cameras:
             return
         reference = train_cameras[0]
-        expected = (float(reference.fx), float(reference.fy),
-                    float(reference.cx), float(reference.cy),
-                    int(reference.width), int(reference.height))
+        expected = (int(reference.width), int(reference.height))
         for name, camera in zip(self.image_names, self.cameras):
-            actual = (float(camera.fx), float(camera.fy),
-                      float(camera.cx), float(camera.cy),
-                      int(camera.width), int(camera.height))
-            if not np.allclose(actual[:4], expected[:4], rtol=1e-5, atol=1e-3) \
-                    or actual[4:] != expected[4:]:
+            actual = (int(camera.width), int(camera.height))
+            if actual != expected:
                 logger.warning(
-                    "brush: supporting view %s has intrinsics "
-                    "fx/fy/cx/cy=%.3f/%.3f/%.3f/%.3f at %dx%d but the training "
-                    "views are %.3f/%.3f/%.3f/%.3f at %dx%d. COLMAP export "
-                    "writes a single camera line taken from the training views "
-                    "and stamps it on every image, so this view will be trained "
-                    "as though it had the training lens and will land in the "
-                    "wrong place.", name, *actual, *expected,
+                    "brush: supporting view %s is %dx%d but the training views are %dx%d",
+                    name, *actual, *expected,
                 )
                 return
 

@@ -434,7 +434,11 @@ def _anchor(inputs: Dict[str, Any], cameras: Sequence[Any]) -> Tuple[Optional[in
     if position is not None:
         from body2colmap.camera import Camera
 
-        first = cameras[0]
+        from .reupscale import _orbit_lens_cameras
+
+        # The orbit's own lens, not the first camera's: on an extended orbit
+        # that is the BEFORE pass's most telephoto frame.
+        first = _orbit_lens_cameras(cameras)[0]
         camera = Camera(focal_length=(first.fx, first.fy), image_size=(first.width, first.height),
                         principal_point=(first.cx, first.cy), position=np.asarray(position, np.float32),
                         rotation=np.asarray(first.rotation, np.float32))

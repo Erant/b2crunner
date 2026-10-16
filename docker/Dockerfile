@@ -193,11 +193,19 @@ FROM ${BASE_IMAGE} AS runtime
 # denoise and change nothing, with no error to say so. The assert below is
 # what turns that into a failed build.
 #
+# d92ebc7 ("ColmapExporter: one CAMERA_ID per distinct lens", 2026-10-16)
+# writes a camera line per lens instead of stamping cameras[0]'s on every
+# image. The extended orbit's telephoto frames (extend_orbit's
+# tele_distance / tele_zoom) carry their own focal lengths into the final
+# training; an older commit trains them through the orbit's lens and puts
+# every one in the wrong place with no error. The `_camera_table` assert
+# below is what fails the build instead.
+#
 # Failing the build is deliberate: an image built against an older commit
 # would install cleanly and then raise on the first render_splat of a real
 # run, an hour into a pod booking. The last five asserts below are what stop it.
 RUN /opt/venv_base/bin/pip install --force-reinstall --no-deps \
-        'body2colmap @ git+https://github.com/Erant/body2colmap.git@4c98a532e45bc27cfc5ec4faaab621c2e34320e8' \
+        'body2colmap @ git+https://github.com/Erant/body2colmap.git@d92ebc7966287a397bc4471422eee84f013d723a' \
     && /opt/venv_base/bin/python -c "\
 import inspect; \
 import body2colmap.face as f; \
@@ -211,6 +219,9 @@ assert 'on_fault' in inspect.signature(sr.SplatRenderer.__init__).parameters, \
     'bump the body2colmap pin: steps/splat.py needs on_fault/on_output/ply_path'; \
 assert 'sh_degree' in inspect.signature(sr.SplatRenderer.__init__).parameters, \
     'bump the body2colmap pin: render_splat needs SplatRenderer(sh_degree=...)'; \
+from body2colmap.exporter import ColmapExporter; \
+assert hasattr(ColmapExporter, '_camera_table'), \
+    'bump the body2colmap pin: mixed focal lengths need one CAMERA_ID per lens'; \
 assert 'grid' in TEXTURE_GENERATORS, sorted(TEXTURE_GENERATORS); \
 assert 'background' in inspect.signature(Renderer.__init__).parameters, \
     'bump the body2colmap pin: steps/backdrop.py needs Renderer(background=...)'; \

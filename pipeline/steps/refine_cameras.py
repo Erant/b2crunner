@@ -348,6 +348,19 @@ def onnx_options_for(feature_type: str, matcher_type: str) -> List[str]:
         list(_MATCHER_MODELS.get(matcher_type, ()))
 
 
+def _lens_groups(cameras: Sequence[Any]) -> Dict[Tuple, List[int]]:
+    """Frame indices by lens, in first-seen order: model, size and
+    parameters to the 6 decimals cameras.txt is written at — the same
+    grouping body2colmap's ColmapExporter numbers its CAMERA_IDs by."""
+    groups: Dict[Tuple, List[int]] = {}
+    for i, camera in enumerate(cameras):
+        model, params = camera.get_colmap_intrinsics()
+        key = (model, int(camera.width), int(camera.height),
+               tuple(round(float(p), 6) for p in params))
+        groups.setdefault(key, []).append(i)
+    return groups
+
+
 @register_step("refine_cameras")
 class RefineCamerasStep(Step):
     """Bundle-adjust a dataset's camera poses, in place, gauge preserved.
@@ -558,7 +571,13 @@ class RefineCamerasStep(Step):
         images_dir.mkdir()
         sparse_in.mkdir()
 
-        self._warn_on_mixed_intrinsics(cameras, label)
+        lenses = _lens_groups(cameras)
+        if len(lenses) > 1:
+            logger.info(
+                "%s: %d distinct lenses across %d frames (%s) — each extracted under a "
+                "camera of its own", label, len(lenses), len(cameras),
+                ", ".join(f"fx {cameras[members[0]].fx:.1f} x{len(members)}"
+                          for members in lenses.values()))
         self._write_images(images, image_names, images_dir)
 
         mask_dir: Optional[Path] = None
@@ -575,7 +594,7 @@ class RefineCamerasStep(Step):
             self._write_masks(masks, image_names, mask_dir)
 
         try:
-            self._extract(colmap, work, images_dir, mask_dir, cameras[0], params)
+            self._extract(colmap, work, images_dir, mask_dir, cameras, image_names, params)
             # The input model is written AFTER the extractor, in the order the
             # database numbered the images — trap 5. Written first, in the
             # dataset's order, it aborts point_triangulator whenever the
@@ -583,6 +602,8 @@ class RefineCamerasStep(Step):
             order = self._database_image_order(work / "database.db", image_names, label)
             self._write_input_model([cameras[i] for i in order],
                                     [image_names[i] for i in order], sparse_in)
+            if len(lenses) > 1:
+                self._bind_model_cameras(sparse_in, work / "database.db", label)
             self._match(colmap, work, params)
             model, reprojection = self._triangulate_and_adjust(
                 colmap, work, images_dir, params, label)
@@ -703,28 +724,57 @@ class RefineCamerasStep(Step):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _warn_on_mixed_intrinsics(cameras: Sequence[Any], label: str) -> None:
-        """One camera model covers the whole dataset, here and in the export.
+    def _bind_model_cameras(sparse_in: Path, database: Path, label: str) -> None:
+        """Renumber the input model's cameras as the database numbered them.
 
-        `ColmapExporter` writes a single cameras.txt line from `cameras[0]`
-        and gives every image CAMERA_ID 1, and the solve below is set up the
-        same way (`--ImageReader.single_camera 1`). Every orbit this
-        pipeline generates satisfies that. A dataset that did not would
-        already be exporting a cameras.txt disagreeing with its own
-        images — a pre-existing problem, not this step's to enforce — but
-        it would be refined against the wrong intrinsics here, so say so.
+        With more than one lens the extractor ran once per lens
+        (`_extract`), and each run created a camera of its own; the
+        exporter numbered the same lenses in its own first-seen order.
+        `point_triangulator` reads image poses from the model and cameras by
+        id, so the two numberings have to be one: each model camera is
+        matched to the database camera with its parameters, and every image
+        is then checked to sit on the camera the database put it on.
         """
-        first = cameras[0]
-        key = (first.fx, first.fy, first.cx, first.cy, first.width, first.height)
-        odd = [i for i, cam in enumerate(cameras)
-               if (cam.fx, cam.fy, cam.cx, cam.cy, cam.width, cam.height) != key]
-        if odd:
-            logger.warning(
-                "%s: %d of %d frames do not share the first camera's intrinsics "
-                "(first differs at frame %d). The solve treats the batch as one "
-                "camera, so those frames are being refined against the wrong "
-                "focal length.", label, len(odd), len(cameras), odd[0],
-            )
+        with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as connection:
+            db_cameras = [(int(cid), np.frombuffer(blob, dtype=np.float64))
+                          for cid, blob in connection.execute(
+                              "SELECT camera_id, params FROM cameras ORDER BY camera_id")]
+            db_images = dict(connection.execute("SELECT name, camera_id FROM images"))
+        connection.close()
+
+        cameras_txt, images_txt = sparse_in / "cameras.txt", sparse_in / "images.txt"
+        mapping: Dict[str, str] = {}
+        lines = []
+        for line in cameras_txt.read_text().splitlines():
+            if not line.strip() or line.startswith("#"):
+                lines.append(line)
+                continue
+            fields = line.split()
+            params = np.array([float(v) for v in fields[4:]])
+            match = [cid for cid, db_params in db_cameras
+                     if db_params.shape == params.shape
+                     and np.allclose(db_params, params, rtol=0.0, atol=1e-4)]
+            if len(match) != 1:
+                raise BadSolve(
+                    f"{label}: the input model's camera {fields[0]} ({' '.join(fields[4:])}) "
+                    f"matches {len(match)} of the database's {len(db_cameras)} cameras")
+            mapping[fields[0]] = str(match[0])
+            lines.append(" ".join([str(match[0])] + fields[1:]))
+        cameras_txt.write_text("\n".join(lines) + "\n")
+
+        lines = []
+        for line in images_txt.read_text().splitlines():
+            fields = line.split()
+            if len(fields) == 10 and not line.startswith("#"):
+                camera_id = mapping[fields[8]]
+                if int(camera_id) != int(db_images.get(fields[9], -1)):
+                    raise BadSolve(
+                        f"{label}: {fields[9]} sits on camera {camera_id} in the input model "
+                        f"but on {db_images.get(fields[9])} in the database")
+                fields[8] = camera_id
+                line = " ".join(fields)
+            lines.append(line)
+        images_txt.write_text("\n".join(lines) + "\n")
 
     @staticmethod
     def _write_images(images, image_names, images_dir: Path) -> None:
@@ -831,23 +881,39 @@ class RefineCamerasStep(Step):
         return flags
 
     def _extract(self, colmap: str, work: Path, images_dir: Path,
-                 mask_dir: Optional[Path], camera, params: Dict[str, Any]) -> None:
-        model, intrinsics = camera.get_colmap_intrinsics()
-        cmd = [
-            colmap, "feature_extractor",
-            "--database_path", str(work / "database.db"),
-            "--image_path", str(images_dir),
-            "--ImageReader.camera_model", model,
-            "--ImageReader.single_camera", "1",
-            "--ImageReader.camera_params", ",".join(f"{p:.6f}" for p in intrinsics),
-            "--FeatureExtraction.type", params["feature_type"],
-            "--FeatureExtraction.use_gpu", _flag(params["use_gpu"]),
-            "--AlikedExtraction.max_num_features", str(params["max_num_features"]),
-        ]
-        if mask_dir is not None:
-            cmd += ["--ImageReader.mask_path", str(mask_dir)]
-        cmd += self._model_flags(_EXTRACTOR_MODELS, params["feature_type"])
-        self._run(cmd, "colmap.feature_extractor")
+                 mask_dir: Optional[Path], cameras, image_names,
+                 params: Dict[str, Any]) -> None:
+        """Features into the database, one camera per lens.
+
+        Intrinsics are known and frozen (trap 3), so they are handed to the
+        reader. One lens — every orbit without the extension's telephoto —
+        is one run over the folder with `single_camera`, as it always was.
+        Several lenses are one run per lens over that lens's frames
+        (`--image_list_path`), each run creating its own camera; the input
+        model is renumbered to match afterwards (`_bind_model_cameras`).
+        """
+        lenses = _lens_groups(cameras)
+        for k, members in enumerate(lenses.values()):
+            model, intrinsics = cameras[members[0]].get_colmap_intrinsics()
+            cmd = [
+                colmap, "feature_extractor",
+                "--database_path", str(work / "database.db"),
+                "--image_path", str(images_dir),
+                "--ImageReader.camera_model", model,
+                "--ImageReader.single_camera", "1",
+                "--ImageReader.camera_params", ",".join(f"{p:.6f}" for p in intrinsics),
+                "--FeatureExtraction.type", params["feature_type"],
+                "--FeatureExtraction.use_gpu", _flag(params["use_gpu"]),
+                "--AlikedExtraction.max_num_features", str(params["max_num_features"]),
+            ]
+            if len(lenses) > 1:
+                image_list = work / f"lens_{k + 1}.txt"
+                image_list.write_text("".join(f"{image_names[i]}\n" for i in members))
+                cmd += ["--image_list_path", str(image_list)]
+            if mask_dir is not None:
+                cmd += ["--ImageReader.mask_path", str(mask_dir)]
+            cmd += self._model_flags(_EXTRACTOR_MODELS, params["feature_type"])
+            self._run(cmd, "colmap.feature_extractor")
 
     def _match(self, colmap: str, work: Path, params: Dict[str, Any]) -> None:
         cmd = [

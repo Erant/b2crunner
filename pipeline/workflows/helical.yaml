@@ -701,6 +701,34 @@ settings:
     requires: extend_orbit
     help: How far past the orbit's ±30° band the extension reaches, in degrees.
 
+  - name: extend_figure_mask
+    label: Extension paints the figure only
+    type: bool
+    default: true
+    advanced: true
+    requires: extend_orbit
+    help: Let the extension passes repaint only the figure, not the grey around it.
+
+  - name: extend_tele_distance
+    label: Extension telephoto distance
+    type: float
+    default: 2.0
+    minimum: 1.0
+    maximum: 4.0
+    advanced: true
+    requires: extend_orbit
+    help: How far the outermost extension cameras pull back, as a multiple of the orbit radius (1 = off).
+
+  - name: extend_tele_zoom
+    label: Extension telephoto zoom
+    type: float
+    default: 1.3
+    minimum: 1.0
+    maximum: 2.0
+    advanced: true
+    requires: extend_orbit
+    help: Extra zoom on the outermost extension cameras (1 = off).
+
   - name: extend_guide_sh
     label: Extension guide SH bands (inactive frames)
     type: int
@@ -3462,6 +3490,12 @@ steps:
       overlap_before: ${globals.extend_overlap_before}
       overlap_after: ${globals.extend_overlap_after}
       tilt_deg: ${globals.extend_tilt_deg}
+      # The telephoto past the band (steps/extend_orbit.py, "The lens"):
+      # ramps from x1 at +/-30 deg, so pass 2's cameras and the frames the
+      # passes share with it keep the orbit's lens; the new frames carry
+      # their own intrinsics from here to the final training.
+      tele_distance: ${globals.extend_tele_distance}
+      tele_zoom: ${globals.extend_tele_zoom}
       before_pass: ${globals.extend_before}
       after_pass: ${globals.extend_after}
       n_frames: 81
@@ -3606,12 +3640,39 @@ steps:
     outputs:
       masks: scene.extended.novel_masks
 
+  # The guide splat's plain accumulated alpha at the same cameras, for the
+  # figure mask only: with the confidence gate off nothing is culled to
+  # grey, so the parts the gate drops (soles, the gap between the legs —
+  # 0.5-2 % of the frame on 1d1e93) stay inside the figure the passes may
+  # repaint. Only the mask is read.
+  - id: extend_render_alpha
+    step: render_splat
+    dispatch: in_process
+    when:
+      - ${globals.extend_orbit}
+      - ${globals.extend_figure_mask}
+    inputs:
+      splat_path: scene.extended.splat_path
+      cameras: scene.extended.pass_cameras
+      dataset: dataset
+    params:
+      width: ${globals.resolution.0}
+      height: ${globals.resolution.1}
+      confidence: false
+      background: ""
+    outputs:
+      masks: scene.extended.figure_alphas
+
   # The two control videos, one per pass, each the matted guide render at
   # that pass's cameras over 0.5 grey (mask_splat's composite, the colour
   # pass 2's control ends on), inactive frames included: BEFORE = 41 new
   # frames (mask 1) then 40 beside pass 2's first (mask 0); AFTER = 41
   # beside pass 2's last (mask 0) then 40 new (mask 1). Both videos are
-  # dumped as pass 1's control video is.
+  # dumped as pass 1's control video is. With `extend_figure_mask` the new
+  # frames' mask is 1 on the figure only (the novel render's matte OR the
+  # plain alpha above, grown 3 px) and 0 on the grey around it: flagged
+  # whole, the BEFORE pass drew an upright torso and a second head over
+  # its guide (assemble_extension's docstring has the measurement).
   - id: extend_assemble
     step: assemble_extension
     dispatch: in_process
@@ -3628,8 +3689,11 @@ steps:
       guide_masks: scene.extended.guide_masks
       novel_images: scene.extended.novel_images
       novel_masks: scene.extended.novel_masks
+      figure_alphas: scene.extended.figure_alphas?
     params:
       bg_color: [0.5, 0.5, 0.5]
+      figure_mask: ${globals.extend_figure_mask}
+      figure_dilate_px: 3
       debug_dir: ${globals.output_root}/debug/extension_input
     outputs:
       before_images: scene.extended.before_phase.images
