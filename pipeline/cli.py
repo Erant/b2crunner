@@ -471,6 +471,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     def add_common(p: argparse.ArgumentParser) -> None:
         p.add_argument("--envs", default=DEFAULT_ENVS, help="Path to the envs registry YAML")
+        p.add_argument(
+            "--log-file", default=None,
+            help="Write the run's log here (default: a timestamped file under B2C_LOG_DIR; "
+                 "pass an empty string to disable file logging)",
+        )
 
     def add_wan_matmul(p: argparse.ArgumentParser) -> None:
         from .wan_fp8 import WAN_MATMUL_CHOICES, WAN_MATMUL_ENV
@@ -480,11 +485,6 @@ def build_parser() -> argparse.ArgumentParser:
             help="Wan 2.2 denoise matmul precision: 8 = fp8 x fp8 (default, SM89+), "
                  "16 = bf16 activations against the fp8 weights. Sets $" + WAN_MATMUL_ENV +
                  " for every step this process starts; a step's own fp8_matmul param wins",
-        )
-        p.add_argument(
-            "--log-file", default=None,
-            help="Write the run's log here (default: a timestamped file under B2C_LOG_DIR; "
-                 "pass an empty string to disable file logging)",
         )
 
     run_p = sub.add_parser("run", help="Run a workflow")

@@ -367,6 +367,18 @@ class TestWanMatmulSwitch(unittest.TestCase):
         with self.assertRaises(SystemExit), mock.patch("sys.stderr"):
             parser.parse_args(["ui", "--wan-matmul", "12"])
 
+    def test_every_subcommand_keeps_its_common_flags(self):
+        """--wan-matmul is its own helper, beside add_common, not inside it:
+        doctor, prefetch and params read args.log_file too."""
+        from pipeline.cli import build_parser
+
+        parser = build_parser()
+        for argv in (["doctor"], ["ui"], ["run", "helical", "--reference-image", "x.png"]):
+            with self.subTest(argv=argv[0]):
+                args = parser.parse_args(argv)
+                self.assertIsNone(args.log_file)
+        self.assertFalse(hasattr(parser.parse_args(["doctor"]), "wan_matmul"))
+
 
 if __name__ == "__main__":
     unittest.main()
