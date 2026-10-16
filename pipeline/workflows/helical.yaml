@@ -610,6 +610,13 @@ settings:
     advanced: true
     help: Store a body-part label per splat in the exported .ply.
 
+  - name: final_normals
+    label: Normal maps for the final training
+    type: bool
+    default: false
+    advanced: true
+    help: Supervise the final splat's surface with estimated normal maps (slower; the orbit extension's coverage makes them unnecessary).
+
   - name: lighting_correction
     label: Lighting correction
     default: prepass
@@ -4235,10 +4242,17 @@ steps:
   # (b2ctrain docs/random-background.md). ~0.9 s a frame at 1080x1920 on a
   # 4070 Ti with low_vram; batch 4 because 162 float32 maps of that size are
   # ~4 GB of host RAM before the batch's own.
+  # OFF by default since 2026-10-16 (`final_normals`): with the orbit
+  # extension the frames cover nearly the whole sphere, which pins the
+  # geometry the normals were bought for, and Sapiens2's normals from
+  # -70 deg (looking up the legs) are the least trustworthy ones. Off,
+  # train_final_splat gets no maps and the normal loss never engages.
   - id: final_normal_maps
     step: sapiens2_lite
     dispatch: in_process
-    when: ${globals.export_ply}
+    when:
+      - ${globals.export_ply}
+      - ${globals.final_normals}
     inputs:
       images: dataset.images
       # Pass 2's frames' maps from stage 4a (extend_normal_maps), made on

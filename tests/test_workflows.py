@@ -2458,6 +2458,23 @@ class TestTheOrbitExtension(unittest.TestCase):
         self.assertEqual(final_normals.inputs["normal_maps"], "scene.extended.pass2.normal_maps?")
         self.assertEqual(final_normals.inputs["normal_maps_offset"], "scene.extended.before?")
 
+    def test_the_final_normals_are_a_setting_off_by_default(self):
+        """final_normal_maps runs only with `final_normals` (default off); the
+        final training takes its maps optionally, so off it trains without
+        the normal loss, while the guide keeps its own pass 2 normals."""
+        spec = self._spec()
+        self.assertIs(spec.globals["final_normals"], False)
+        self.assertEqual(self._step(spec, "final_normal_maps").when,
+                         ["${globals.export_ply}", "${globals.final_normals}"])
+        self.assertEqual(self._step(spec, "train_final_splat").inputs["normal_maps"],
+                         "scene.final_normal_maps?")
+        spec.globals["extend_orbit"] = True
+        enabled = {s.id for s in spec.enabled_steps()}
+        self.assertNotIn("final_normal_maps", enabled)
+        self.assertIn("extend_normal_maps", enabled)
+        spec.globals["final_normals"] = True
+        self.assertIn("final_normal_maps", {s.id for s in spec.enabled_steps()})
+
     def test_the_two_control_videos_are_the_guide_at_the_passes_cameras(self):
         from pipeline.templating import resolve
 
