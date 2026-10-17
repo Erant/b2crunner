@@ -3518,80 +3518,20 @@ steps:
       tilt_deg: scene.extended.tilt_deg
       pass_cameras: scene.extended.pass_cameras
 
-  # Pass 2's 81 frames as the deliverable will have them, made here rather
-  # than at stage 5: upscaled (when run_upscale) and with their normal maps,
-  # so the guide splat is fitted to what the final splat is fitted to
-  # rather than to the raw 720p frames. The final upscale and
-  # final_normal_maps take these 81 back by offset (scene.extended.before,
-  # where splice_extension puts pass 2's frames) and only do the 81 new
-  # ones; nothing between here and there touches pass 2's frames except
-  # paste_eyes, which runs after the upscale and before the normals, so
-  # the reused maps are of the frames before the eye paste. Under
-  # scene.extended.pass2, not the dataset: the extension passes' control
-  # videos and the splice stay at the render size. The upscale's params
-  # are stage 5's (tests/test_workflows.py pins them); batch 1 makes each
-  # frame its own upscale, so two batches of 81 are one batch of 162.
-  - id: extend_upscale
-    step: seedvr2
-    dispatch: subprocess
-    env: seedvr2
-    when:
-      - ${globals.extend_orbit}
-      - ${globals.run_upscale}
-    inputs:
-      images: dataset.images
-      cameras: dataset.cameras
-    params:
-      resolution: 1080
-      batch_size: 1
-      vae_encode_tiled: true
-      vae_decode_tiled: true
-      seed: ${globals.seed}
-    outputs:
-      images: scene.extended.pass2.images
-      cameras: scene.extended.pass2.cameras
-
-  # With the upscale off, pass 2's frames as they are under the same keys.
-  - id: extend_native
-    step: pass_through
-    dispatch: in_process
-    when:
-      - ${globals.extend_orbit}
-      - {not: "${globals.run_upscale}"}
-    inputs:
-      images: dataset.images
-      cameras: dataset.cameras
-    outputs:
-      images: scene.extended.pass2.images
-      cameras: scene.extended.pass2.cameras
-
   # The retrained guide splat: pass 2's output, matted, fitted on the
-  # cameras it was made on. Its own matte, not dataset.masks: the frames
-  # here may be upscaled, and the dataset is still pass 2's at the render
-  # size until the splice (which writes a fresh VACE batch).
+  # cameras it was made on. The matte overwrites the all-1.0 VACE batch
+  # pass 2 read, which is past its use — the extension passes carry their
+  # own flags and extend_splice writes a fresh batch.
   - id: extend_masks
     step: rmbg
     dispatch: in_process
     when: ${globals.extend_orbit}
     inputs:
-      images: scene.extended.pass2.images
+      images: dataset.images
     params:
       low_vram: ${globals.low_vram}
     outputs:
-      masks: scene.extended.pass2.masks
-
-  # final_normal_maps' block on pass 2's frames.
-  - id: extend_normal_maps
-    step: sapiens2_lite
-    dispatch: in_process
-    when: ${globals.extend_orbit}
-    inputs:
-      images: scene.extended.pass2.images
-    params:
-      low_vram: ${globals.low_vram}
-      batch_size: 4
-    outputs:
-      normal_maps: scene.extended.pass2.normal_maps
+      masks: dataset.masks
 
   # train_splat's silhouette and hollow knobs, no alignment, no polish,
   # the evidence the render's gate reads. No solve of its own, like the
@@ -3601,21 +3541,17 @@ steps:
   # No photograph copies or face views either: the frames it fits already
   # carry the anchor as pass 2 painted it. Mesh and rig as the final
   # training takes them — the refit body when export_ply and refit_body
-  # are on, optional so their absence leaves the fit plain. Normal
-  # supervision as train_final_splat has it, with the random background
-  # that goes with it there (normals against the trainer's black make the
-  # dark edge streaks worse).
+  # are on, optional so their absence leaves the fit plain.
   - id: extend_train_splat
     step: brush
     dispatch: in_process
     when: ${globals.extend_orbit}
     inputs:
-      cameras: scene.extended.pass2.cameras
+      cameras: dataset.cameras
       image_names: dataset.image_names
       points_3d: dataset.points_3d
-      images: scene.extended.pass2.images
-      masks: scene.extended.pass2.masks
-      normal_maps: scene.extended.pass2.normal_maps
+      images: dataset.images
+      masks: dataset.masks
       mesh: scene.mesh_world?
       body_rig: scene.body_rig?
     params:
@@ -3625,10 +3561,6 @@ steps:
       hollow_weight: 0.5
       match_alpha_weight: 0.5
       export_evidence: true
-      normal_loss_strength: 0.05
-      normal_loss_step_start: 5000
-      normals_growth_grad_threshold: 0.0035
-      random_background: true
       # Into debug/ beside intermediate_splat.ply, for the same reason: it
       # is what the extension frames were painted from.
       export_dir: ${globals.output_root}/debug
@@ -3992,12 +3924,6 @@ steps:
     inputs:
       images: dataset.images
       cameras: dataset.cameras
-      # Pass 2's frames, upscaled at stage 4a for the guide training
-      # (extend_upscale), taken back where the splice put them; only the
-      # extension's new frames are upscaled here. Absent without the
-      # extension.
-      upscaled: scene.extended.pass2.images?
-      upscaled_offset: scene.extended.before?
     params:
       # SeedVR2's `resolution` is the target output *shortest edge*, not a
       # multiplier — asking for less than the input's shortest edge
@@ -4208,11 +4134,6 @@ steps:
       - ${globals.final_normals}
     inputs:
       images: dataset.images
-      # Pass 2's frames' maps from stage 4a (extend_normal_maps), made on
-      # the same upscaled frames before the eye paste; only the extension's
-      # new frames are estimated here. Absent without the extension.
-      normal_maps: scene.extended.pass2.normal_maps?
-      normal_maps_offset: scene.extended.before?
     params:
       low_vram: ${globals.low_vram}
       batch_size: 4
