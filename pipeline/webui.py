@@ -118,7 +118,7 @@ from .runs import (
     workflow_param_panel,
 )
 from .step import Param
-from .viewer import VIEWER_PATH, has_subject_file, mount_viewer, viewer_dir, viewer_link
+from .viewer import VIEWER_PATH, guard_viewer, has_subject_file, mount_viewer, viewer_dir, viewer_link
 from .workflow import WorkflowSpec, load_envs, truthy
 
 logger = logging.getLogger(__name__)
@@ -1402,10 +1402,11 @@ def build_server(
     server.state.gpu_scheduler = scheduler
     server.state.shutdown = shutdown
 
-    # Also before the Gradio mount, and like the API outside its login.
-    mount_viewer(server, lambda: merged_runs(scheduler))
+    # Also before the Gradio mount, and like the API outside its login —
+    # `guard_viewer` below puts it back behind that login.
+    viewer_on = mount_viewer(server, lambda: merged_runs(scheduler))
 
-    return gr.mount_gradio_app(
+    server = gr.mount_gradio_app(
         server, blocks, "/",
         auth=("b2c", token) if token else None,
         auth_message="Sign in with the pod's B2C_API_TOKEN as the password.",
@@ -1414,6 +1415,9 @@ def build_server(
         # Gradio's default allowlist (its own temp dir plus the cwd).
         allowed_paths=[str(data_dir()), str(output_dir()), str(upload_dir())],
     )
+    if viewer_on and token:
+        guard_viewer(server)
+    return server
 
 
 def launch(
