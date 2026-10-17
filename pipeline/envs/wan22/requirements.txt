@@ -30,8 +30,8 @@ kernels>=0.4.0
 # The Triton kernel path IS now verified on SM89 (RTX 4070 Ti,
 # SageAttention 2.2.0): cosine similarity .99991 against SDPA and ~1.75x
 # faster. So is the CUDA int8+fp8 kernel that #360 is about — .9993 and
-# ~2.4x — though _select_sage_backend() still steers away from it on Ada.
-# See its docstring for the numbers and why the caution stands.
+# ~2.4x — which _select_sage_backend() takes on Ada since 2026-10-17 (see
+# its docstring for the real-step numbers).
 sageattention>=2.1.1
 huggingface_hub>=0.25.0
 hf_transfer

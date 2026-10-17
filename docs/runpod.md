@@ -64,7 +64,7 @@ anything. Look for:
 ✓ OK    trainer binaries all 8 flags the argv needs are present
 ✓ OK    colmap           COLMAP 4.2.0 ... with CUDA     <- the pose refinement
 ✓ OK    step venvs       3 configured
-✓ OK    attention        _sage_qk_int8_pv_fp16_triton   <- the denoise kernel
+✓ OK    attention        sage                           <- the denoise kernel
 ✓ OK    huggingface      accessible / accessible        <- both gated repos
 ```
 

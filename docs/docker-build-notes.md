@@ -348,6 +348,11 @@ sign of thu-ml/SageAttention#360** on this card at 2.2.0 — but the steering
 still avoids it, because random tensors are not a 40-block diffusion run and
 that bug would present as corrupted frames, not a bad cosine.
 
+*2026-10-17:* that premise was wrong — #360 is an IllegalInstruction, a loud
+failure — and a real denoise step settled it: fp8 CUDA 70 s vs Triton 84 s,
+same distance from SDPA (35.8 dB). Ada now takes `sage` (the fp8 CUDA
+kernel); see `_select_sage_backend`.
+
 **Two real bugs found while doing this:**
 
 1. **`sage_hub` is broken**, and it was what `_select_sage_backend()`

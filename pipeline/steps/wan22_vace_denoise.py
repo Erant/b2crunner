@@ -251,9 +251,9 @@ before 2026-09-08.
 
 Attention backend: defaults to SageAttention via diffusers' attention
 dispatcher (params["attention_backend"] = "auto"), steered per-GPU-arch by
-`_select_sage_backend()` below — see its docstring for the SM89/L40S
-correctness caveat. Pass "none" to force PyTorch native SDPA, or an explicit
-diffusers backend name (see `set_attention_backend` docs) to override.
+`_select_sage_backend()` below. Pass "none" to force PyTorch native SDPA,
+or an explicit diffusers backend name (see `set_attention_backend` docs)
+to override.
 
 Download budget, per cold load: 17.58 + 17.58 GB of fp8 experts plus
 ~11.89 GB of base-repo components (text_encoder 11.36, vae 0.51, the rest
@@ -2301,22 +2301,21 @@ def _select_sage_backend() -> Optional[str]:
     back to SDPA on every non-Ada GPU — i.e. "auto" bought nothing there.
     The local kernels work; prefer them.
 
-    SM89 (Ada) gets the pure-Triton int8+fp16 kernel rather than the CUDA
-    int8+fp8 one, because the latter was reported to produce incorrect
-    output on Ada — thu-ml/SageAttention#360. Measured on an RTX 4070 Ti
-    with SageAttention 2.2.0, 40 heads x 128 dim, against SDPA:
+    SM89 (Ada) used to be overridden to the pure-Triton int8+fp16 kernel
+    over thu-ml/SageAttention#360 (IllegalInstruction from the CUDA int8+fp8
+    kernel on Ada) — a loud failure, not a silent one, and gone with 2.2.0
+    as built here. Measured 2026-10-17 on an RTX 4070 Ti, one real denoise
+    step (720x1280x81, high expert, low_vram) per backend:
 
-        seq    SDPA     triton int8+fp16      CUDA int8+fp8
-        1024   0.37ms   0.26ms (cos .99992)   0.29ms (cos .99930)
-        4096   4.80ms   2.98ms (cos .99991)   2.51ms (cos .99928)
-        9216  22.32ms  12.75ms (cos .99991)   9.40ms (cos .99926)
+        backend               step     v rel err vs SDPA   x0 PSNR vs SDPA
+        SDPA                 130.7 s          -                  -
+        triton int8+fp16      84.4 s        4.26 %          35.75 dB mean
+        CUDA int8+fp8         70.2 s        4.66 %          35.79 dB mean
 
-    So on 2.2.0 the fp8 CUDA kernel shows no sign of #360 on this card, and
-    is ~36% faster than the Triton one. It is still NOT the default: those
-    are random tensors, not a 40-block diffusion run, and #360 is exactly
-    the kind of bug that shows up as corrupted frames rather than a bad
-    cosine similarity. Set `attention_backend:
-    _sage_qk_int8_pv_fp8_cuda` explicitly to take it, after checking output.
+    so Ada now takes `sage`, whose sageattn() runs that CUDA int8+fp8
+    kernel there. It costs ~400 MB more VRAM (an fp8 copy of V): on a 12 GB
+    card under low_vram it ran out until PYTORCH_CUDA_ALLOC_CONF=
+    expandable_segments:True, which the envs registry now sets for wan22.
 
     sm_100 (datacenter Blackwell) has no local kernel — SageAttention 2.2.0
     does not support it, so the image cannot build one (see the Dockerfile's
@@ -2330,8 +2329,6 @@ def _select_sage_backend() -> Optional[str]:
     major, minor = torch.cuda.get_device_capability()
     if (major, minor) < (8, 0):
         return None
-    if (major, minor) == (8, 9):
-        return "_sage_qk_int8_pv_fp16_triton"
     return "sage"
 
 

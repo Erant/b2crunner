@@ -15,6 +15,12 @@ envs:
   wan22:
     kind: subprocess
     python_bin: /opt/venv_wan22/bin/python
+    # The fp8 SageAttention kernel's V copy (~400 MB) runs a 12 GB card out
+    # under low_vram without it — see _select_sage_backend. Here, not
+    # image-wide: seedvr2 setdefaults its own allocator (cudaMallocAsync),
+    # which a global PYTORCH_CUDA_ALLOC_CONF would silently replace.
+    env:
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
   sam3dbody:
     kind: subprocess
     python_bin: /opt/venv_sam3dbody/bin/python

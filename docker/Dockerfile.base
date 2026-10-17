@@ -532,8 +532,8 @@ RUN /opt/venv_main/bin/pip install 'gradio>=5.0,<7.0' 'fastapi>=0.110,<1.0' 'uvi
 #   4096   4.80ms   2.98ms (cos .99991)   2.51ms (cos .99928)
 #   9216  22.32ms  12.75ms (cos .99991)   9.40ms (cos .99926)
 #
-# i.e. ~1.75x on the Triton kernel the step selects for SM89, ~2.4x on the
-# fp8 CUDA one. Both track SDPA closely. See pipeline/steps/
+# i.e. ~1.75x on the Triton kernel, ~2.4x on the fp8 CUDA one (which the
+# step selects for SM89, through `sage`). Both track SDPA closely. See pipeline/steps/
 # wan22_vace_denoise.py's _select_sage_backend for which is chosen and why.
 #
 # LAST IN THE STAGE, like the gradio layer above and for the same reason:
