@@ -7,8 +7,9 @@ smaller than the input's shortest edge downscales instead, which is what
 the first, deliberately-cheap smoke test did before being corrected).
 Output visibly sharper with no artifacts or color-cast drift. dispatch:
 subprocess, own venv — flash-attn/apex are NOT required despite an earlier
-version of this docstring assuming so (see below); the default
-attention_mode ("sdpa") is pure PyTorch.
+version of this docstring assuming so (see below). attention_mode
+defaults to "auto": SageAttention 2 where the GPU can run it, PyTorch SDPA
+otherwise — see `_select_attention_mode`.
 
 The previous version of this module assumed `_process_frames_core` lived
 in `src.core.generation_utils` and took a handful of fields. Both were
@@ -132,6 +133,23 @@ def _fit_cameras_to_images(cameras: List[Any], images: List[np.ndarray]) -> tupl
     return rescaled, resolution
 
 
+def _select_attention_mode() -> str:
+    """inference_cli's attention_mode for "auto": `sageattn_2` on SM80+,
+    `sdpa` below that or without CUDA.
+
+    sageattn_2 calls SageAttention's `sageattn_varlen`, which in 2.2.0 is
+    pure Triton (int8 QK, fp16 PV), so no arch needs a kernel from the
+    image's SAGE_CUDA_ARCH_LIST. A venv without the package
+    is upstream's problem to handle, and it does: validate_attention_mode
+    falls back to sdpa with a warning.
+    """
+    import torch
+
+    if torch.cuda.is_available() and torch.cuda.get_device_capability() >= (8, 0):
+        return "sageattn_2"
+    return "sdpa"
+
+
 @register_step("seedvr2")
 class SeedVR2Step(Step):
     # Almost all of these are inference_cli.py's own argparse knobs, mirrored
@@ -184,7 +202,9 @@ class SeedVR2Step(Step):
         Param("vae_decode_tile_size", int, 1024, "Decode tile size", advanced=True),
         Param("vae_decode_tile_overlap", int, 128, "Decode tile overlap", advanced=True),
         Param("tile_debug", str, "false", "Upstream's tile debug switch", advanced=True),
-        Param("attention_mode", str, "sdpa", "Attention implementation", advanced=True),
+        Param("attention_mode", str, "auto",
+              "Attention implementation (auto = sageattn_2 on SM80+, else sdpa)",
+              advanced=True),
         Param("compile_dit", bool, False, "torch.compile the DiT", advanced=True),
         Param("compile_vae", bool, False, "torch.compile the VAE", advanced=True),
         Param("compile_backend", str, "inductor", "torch.compile backend", advanced=True),
@@ -310,7 +330,10 @@ class SeedVR2Step(Step):
             vae_decode_tile_size=params["vae_decode_tile_size"],
             vae_decode_tile_overlap=params["vae_decode_tile_overlap"],
             tile_debug=params["tile_debug"],
-            attention_mode=params["attention_mode"],
+            attention_mode=(
+                _select_attention_mode() if params["attention_mode"] == "auto"
+                else params["attention_mode"]
+            ),
             compile_dit=params["compile_dit"],
             compile_vae=params["compile_vae"],
             compile_backend=params["compile_backend"],

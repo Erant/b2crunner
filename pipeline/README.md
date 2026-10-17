@@ -595,7 +595,8 @@ Requires `PyYAML` and `requests` (added to `requirements.txt`) plus whatever
   `os.environ.setdefault(...)`; `main()` is guarded by `if __name__ ==
   "__main__"`). Also corrected a bad guess in `requirements.txt`:
   flash-attn/apex are NOT required — they're optional accelerators behind
-  non-default `attention_mode` values; the default `sdpa` is pure PyTorch.
+  non-default `attention_mode` values. (Since 2026-10-17 the default is
+  `auto` = `sageattn_2` on SM80+, else pure-PyTorch `sdpa`.)
 - `generate_firstlast`/`inject_anchor` (`anchor_stub.py`) — warp the
   sheet's front half to the anchor camera and inject it into the frame batch,
   producing the per-frame reference/denoise mask `wan22_vace_denoise`

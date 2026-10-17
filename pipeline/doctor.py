@@ -554,6 +554,12 @@ try:
 except Exception as exc:
     out["selected"] = f"could not resolve: {exc}"
 
+try:
+    from pipeline.steps.seedvr2 import _select_attention_mode
+    out["seedvr2"] = _select_attention_mode()
+except Exception as exc:
+    out["seedvr2"] = f"could not resolve: {exc}"
+
 print("B2C_ATTENTION " + json.dumps(out))
 """
 
@@ -602,10 +608,7 @@ def check_attention(envs: Dict[str, Dict[str, Any]]) -> Check:
         f"sageattention: {found.get('sageattention')}",
         f"triton: {found.get('triton')}",
         f"diffusers: {found.get('diffusers')}",
-        # Not a guess: this is seedvr2's own default, and unlike wan22 it
-        # has no auto-selection — flash-attn/apex are optional accelerators
-        # behind non-default attention_mode values. See steps/seedvr2.py.
-        "seedvr2 upscale: sdpa (PyTorch native; its attention_mode default)",
+        f"seedvr2 upscale will request: {found.get('seedvr2', 'unknown')}",
     ]
 
     # A sage backend that was asked for but whose package is missing means

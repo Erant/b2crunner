@@ -14,8 +14,9 @@
 # corrected from an earlier guess: flash-attn/apex are NOT required —
 # they're optional accelerators behind --attention_mode flash_attn_2/
 # flash_attn_3/sageattn_*, only imported if explicitly requested (see
-# src/optimization/compatibility.py). Default attention_mode is "sdpa",
-# pure PyTorch, no extra ABI-pinned native extension needed.
+# src/optimization/compatibility.py). The step's attention_mode "auto"
+# requests sageattn_2 on SM80+ (the image builds sageattention into this
+# venv — see docker/Dockerfile.base); without it upstream falls back to sdpa.
 
 torch
 torchvision

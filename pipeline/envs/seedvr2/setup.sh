@@ -18,7 +18,6 @@ SITE_PACKAGES=$(python3 -c "import site; print(site.getsitepackages()[0])")
 echo "$VENDOR_DIR" > "$SITE_PACKAGES/seedvr2_vendor.pth"
 echo "vendored at $VENDOR_DIR, added to $SITE_PACKAGES/seedvr2_vendor.pth"
 
-echo "NOTE: attention_mode defaults to sdpa (pure PyTorch, no extra native"
-echo "extension). flash-attn/sageattention are optional accelerators only"
-echo "imported if explicitly requested via params.attention_mode — install"
-echo "them by hand later if flash_attn_2/flash_attn_3/sageattn_* is wanted."
+echo "NOTE: attention_mode auto requests sageattn_2 on SM80+ and falls back to"
+echo "sdpa (pure PyTorch) if sageattention is not installed — install it by"
+echo "hand (see pipeline/envs/wan22/requirements.txt) for the speedup."

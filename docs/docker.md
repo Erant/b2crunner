@@ -254,7 +254,8 @@ real inference on an L40S RunPod pod — see `pipeline/README.md`'s
   720x1280 -> 1440x2560 upscale) confirmed on a bare pod venv, see
   `pipeline/steps/seedvr2.py`'s docstring. flash-attn/apex are NOT actually
   needed (an earlier version of this doc/requirements.txt guessed they
-  were) — the default `attention_mode: sdpa` is pure PyTorch. Same
+  were) — `attention_mode: sdpa` is pure PyTorch (the default `auto` takes
+  `sageattn_2` on SM80+). Same
   bare-pod-venv-vs-Docker-image caveat as sam3dbody above applies.
 
 Not yet verified — best-guess, flagged as such in `docker/Dockerfile`'s
