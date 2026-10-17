@@ -36,7 +36,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
-from .run_state import RunJob, RunState, owner_alive, tail_lines
+from .run_state import RunJob, RunState, run_owner_alive, tail_lines
 
 logger = logging.getLogger(__name__)
 
@@ -171,7 +171,7 @@ class GpuScheduler:
                 continue
             if state.status not in ("queued", "running"):
                 continue
-            if state.owner and owner_alive(state.owner) is not False:
+            if state.owner and run_owner_alive(state.owner, finished) is not False:
                 continue
             job_path = self._work_dir / path.name.replace(".status.json", ".job.json")
             if state.status == "queued" and not state.started:

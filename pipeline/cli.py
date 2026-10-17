@@ -188,6 +188,7 @@ def run_workflow(args: argparse.Namespace) -> int:
         run_jobs_dir() / f"{run_name}.status.json",
     )
     writer.publish()
+    writer.start_heartbeat()
     try:
         code = _run_workflow(args, spec, workflow_path, run_name, log_path, out, writer)
     except KeyboardInterrupt:

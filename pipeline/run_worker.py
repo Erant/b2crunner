@@ -33,6 +33,7 @@ import os
 import shutil
 import signal
 import sys
+import threading
 import time
 import traceback
 from pathlib import Path
@@ -42,7 +43,7 @@ from . import steps  # noqa: F401  registers every Step; this is an entrypoint
 from .dataset import Dataset
 from .logging_setup import setup_logging
 from .run_state import (
-    PREVIEW_DIRNAME, RunJob, RunState, StepRecord, same_previews, write_previews,
+    HEARTBEAT_SECONDS, PREVIEW_DIRNAME, RunJob, RunState, StepRecord, same_previews, write_previews,
 )
 from .runner import RunCancelled, RunEvent, WorkflowRunner
 from .workflow import WorkflowSpec, apply_ui_overrides, load_envs
@@ -76,6 +77,24 @@ class _StatusWriter:
         # one against — the latest step's, or an earlier step's when the
         # steps since changed nothing visible.
         self._last_previews: list[str] = []
+        self._heartbeat: Optional[threading.Event] = None
+
+    def start_heartbeat(self, interval: float = HEARTBEAT_SECONDS) -> None:
+        """Touch the status file every `interval` until `finish`, so a reader
+        that cannot see this process (another container) can still tell a
+        live run from one whose container is gone (`run_owner_alive`).
+        Only `pipeline.cli` runs need it: a scheduler's worker is watched
+        by its scheduler."""
+        stop = self._heartbeat = threading.Event()
+
+        def beat() -> None:
+            while not stop.wait(interval):
+                try:
+                    os.utime(self.status_path)
+                except OSError:
+                    pass  # removed or mid-replace: the next publish rewrites it
+
+        threading.Thread(target=beat, name="status-heartbeat", daemon=True).start()
 
     def publish(self) -> None:
         tmp = self.status_path.with_suffix(self.status_path.suffix + ".tmp")
@@ -162,6 +181,8 @@ class _StatusWriter:
             raise RunCancelled(f"cancelled before step {event.index} ({event.step_id})")
 
     def finish(self, status: str, message: str = "", error: str = "") -> None:
+        if self._heartbeat is not None:
+            self._heartbeat.set()
         self.state.status = status
         self.state.finished = time.time()
         if message:

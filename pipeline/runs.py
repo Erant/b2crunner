@@ -38,7 +38,7 @@ from . import steps  # noqa: F401  registers every Step; the registry must be wh
 from .gpu_scheduler import GpuScheduler
 from .logging_setup import timestamped_run_name
 from .paths import log_dir, output_dir, run_jobs_dir, upload_dir
-from .run_state import RunJob, RunState, owner_alive
+from .run_state import RunJob, RunState, run_owner_alive
 from .step import Param
 from .workflow import (
     RETIRED_GLOBALS, Output, WorkflowSpec, apply_ui_overrides, retired_globals,
@@ -1367,7 +1367,7 @@ def discover_runs() -> List[RunState]:
         except (OSError, ValueError):
             continue  # caught a worker mid-write, or a truncated file
         state = RunState.from_dict(data)
-        if state.status in ("queued", "running") and state.owner and owner_alive(state.owner) is False:
+        if state.status in ("queued", "running") and state.owner and run_owner_alive(state.owner, mtime) is False:
             state.status = "failed"
             state.finished = state.finished or mtime
             state.message = f"{state.message}: its process is gone".lstrip(": ")

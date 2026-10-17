@@ -11,6 +11,7 @@ process.
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -179,6 +180,29 @@ def owner_alive(token: str) -> Optional[bool]:
     if namespace != _pid_namespace():
         return None
     return _start_ticks(pid_number) == ticks
+
+
+
+# A `pipeline.cli` run touches its status file this often while it runs
+# (`run_worker._StatusWriter.start_heartbeat`), and a reader that cannot
+# check the owner itself takes a file untouched for `HEARTBEAT_STALE` as a
+# dead run. Ten beats of slack: a busy host may starve the thread a while.
+HEARTBEAT_SECONDS = 60.0
+HEARTBEAT_STALE = 600.0
+
+
+def run_owner_alive(token: str, status_mtime: float, now: Optional[float] = None) -> Optional[bool]:
+    """`owner_alive`, falling back to the status file's heartbeat when the
+    owner sits in another PID namespace: a CLI run in a separate container
+    (`docker run ... pipeline run`) whose container has since gone would
+    otherwise read as running forever — nothing here can see its pids, and
+    nothing else would ever say it ended. None still means "cannot tell"
+    for a token that does not parse."""
+    verdict = owner_alive(token)
+    if verdict is not None or token.count("|") != 3:
+        return verdict
+    age = (time.time() if now is None else now) - status_mtime
+    return None if age < HEARTBEAT_STALE else False
 
 
 @dataclass

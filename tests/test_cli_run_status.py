@@ -13,12 +13,13 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import unittest.mock
 from pathlib import Path
 
 from pipeline import run_state
-from pipeline.run_state import owner_alive, process_token
+from pipeline.run_state import HEARTBEAT_STALE, RunState, owner_alive, process_token, run_owner_alive
 from tests.helpers import REPO_ROOT, orbit_dataset
 from tests.test_run_worker import ENVS_PATH, _write_workflow
 
@@ -102,6 +103,44 @@ class TestOwnerAlive(unittest.TestCase):
                 unittest.mock.patch.object(run_state, "_pid_namespace", lambda: ""), \
                 unittest.mock.patch.object(run_state, "_start_ticks", lambda pid: ""):
             self.assertIs(owner_alive(process_token()), True)
+
+
+
+class TestHeartbeat(unittest.TestCase):
+    """A CLI run in another container cannot be checked by pid, so its status
+    file's heartbeat decides: two such runs sat at `running` for days after
+    their containers were gone (2026-10-16), unclearable."""
+
+    def _foreign(self) -> str:
+        boot, _, pid, ticks = process_token().split("|")
+        return "|".join((boot, "pid:[1]", pid, ticks))
+
+    def test_a_fresh_heartbeat_cannot_be_told(self):
+        self.assertIsNone(run_owner_alive(self._foreign(), 1000.0, now=1000.0 + HEARTBEAT_STALE - 1))
+
+    def test_a_stale_heartbeat_is_gone(self):
+        self.assertIs(run_owner_alive(self._foreign(), 1000.0, now=1000.0 + HEARTBEAT_STALE + 1), False)
+
+    def test_a_checkable_owner_ignores_the_heartbeat(self):
+        self.assertIs(run_owner_alive(process_token(), 0.0, now=1e12), True)
+
+    def test_no_owner_cannot_be_told(self):
+        self.assertIsNone(run_owner_alive("", 0.0, now=1e12))
+
+    def test_the_writer_touches_the_file_until_it_finishes(self):
+        from pipeline.run_worker import _StatusWriter
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "r.status.json"
+            writer = _StatusWriter(RunState(name="r", status="running"), path)
+            writer.publish()
+            os.utime(path, (1000.0, 1000.0))
+            writer.start_heartbeat(interval=0.02)
+            deadline = time.time() + 5
+            while path.stat().st_mtime == 1000.0 and time.time() < deadline:
+                time.sleep(0.01)
+            self.assertGreater(path.stat().st_mtime, 1000.0)
+            writer.finish("done")
+            self.assertTrue(writer._heartbeat.is_set())
 
 
 if __name__ == "__main__":
