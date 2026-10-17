@@ -33,6 +33,7 @@ has and hasn't been verified on real hardware.
 | `B2C_API_TOKEN` | a long random string | **Set this.** It turns on the HTTP API at `/api/v1` (as a bearer token) *and* puts the web UI behind a login form that takes it as the password, username `b2c`. Without it the API is not served at all and the UI is open to anyone who can guess the pod id — the proxy URL below is public. Generate one with `openssl rand -hex 24`. |
 | `PUBLIC_KEY` | your SSH public key | RunPod usually injects this. The entrypoint starts `sshd` only when it is present. |
 | `B2C_SHUTDOWN_COMMAND` | `runpodctl stop pod $RUNPOD_POD_ID` | What to do about the *host* when `POST /api/v1/shutdown` stops the container. Optional, and empty by default: the container knows how to stop itself, but it cannot know whether that ends a bill — see [Stopping when you are done](#stopping-when-you-are-done). Needs `runpodctl` on the pod (**it is not in the image**) and `RUNPOD_API_KEY` / `RUNPOD_POD_ID` set. |
+| `B2C_BINDTO` | `0.0.0.0` | **Required.** The address the web UI listens on. The image defaults to `127.0.0.1`, which inside a container nobody can reach — not RunPod's proxy either, so without this the pod looks up but the URL never answers. |
 | `B2C_PORT` | `7860` | Only if you need a different port. |
 | `B2C_PREFETCH` | `0` | Only if you want the old lazy behaviour — each step downloading its own checkpoint mid-run. Default is to pull everything at start. |
 

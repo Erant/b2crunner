@@ -108,7 +108,7 @@ than trusting markers that vouch for another cache's contents.
 
 | Argument | Behaviour |
 |---|---|
-| none, or `ui` | Serves the web UI on `$B2C_PORT` and **stays alive**. The default. |
+| none, or `ui` | Serves the web UI on `$B2C_BINDTO:$B2C_PORT` (default `127.0.0.1`: set `B2C_BINDTO=0.0.0.0` for a published or proxied port; `docker-compose.yml` does) and **stays alive**. The default. |
 | `run ...` | One workflow run, then exits. |
 | `doctor` / `steps` / `workflows` | The matching CLI subcommand, then exits. |
 | `bash` / `sh` / `shell` | A shell; extra arguments pass through, so `bash -c '...'` works. |

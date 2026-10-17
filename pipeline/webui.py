@@ -1421,7 +1421,7 @@ def build_server(
 
 
 def launch(
-    host: str = "0.0.0.0", port: int = 7860, envs_path: str = "", share: bool = False,
+    host: str = "127.0.0.1", port: int = 7860, envs_path: str = "", share: bool = False,
     gpu_count: Optional[int] = None, serve_api: bool = True,
 ) -> None:
     """Serve until stopped, and take the GPU workers down first when it is.

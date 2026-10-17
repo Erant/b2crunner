@@ -32,8 +32,9 @@ services:
     image: b2c/pipeline:latest
     ports:
       # The web UI. On RunPod this is the template's "HTTP Ports" entry
-      # instead; here it is a plain publish.
-      - "7860:7860"
+      # instead; here it is a plain publish, on the host's loopback unless
+      # B2C_BINDTO says otherwise (B2C_BINDTO=0.0.0.0 ./run.sh for the LAN).
+      - "${B2C_BINDTO:-127.0.0.1}:7860:7860"
     environment:
       # Gated models (briaai/RMBG-2.0, facebook/sam-3d-body-dinov3) need a
       # token from an account that has accepted each licence. Injected at
@@ -56,6 +57,10 @@ services:
       # The Wan 2.2 denoise's matmul precision, 8 (fp8 x fp8) or 16 (bf16
       # activations): run.sh --wan-matmul, read by every run's workers.
       - B2C_WAN_MATMUL=${B2C_WAN_MATMUL:-8}
+      # Every interface INSIDE the container, always: the publish above is
+      # what decides who on the host side can reach it, and a server on the
+      # container's own loopback is reachable by nobody.
+      - B2C_BINDTO=0.0.0.0
     volumes:
       # Everything the pipeline writes — outputs, logs, the HF cache, the
       # dispatchers' IPC pickles — goes here. The container's own writable

@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 import time
 import traceback
@@ -571,7 +572,11 @@ def build_parser() -> argparse.ArgumentParser:
     add_api_parser(sub)
 
     ui_p = sub.add_parser("ui", help="Launch the web UI")
-    ui_p.add_argument("--host", default="0.0.0.0")
+    ui_p.add_argument(
+        "--host", default=os.environ.get("B2C_BINDTO", "127.0.0.1"),
+        help="Address to listen on (default $B2C_BINDTO, else 127.0.0.1). "
+             "0.0.0.0 serves every interface: a pod, or inside a container",
+    )
     ui_p.add_argument("--port", type=int, default=7860)
     ui_p.add_argument("--share", action="store_true", help="Request a public gradio.live tunnel")
     ui_p.add_argument(
@@ -593,8 +598,6 @@ def build_parser() -> argparse.ArgumentParser:
 
 def apply_wan_matmul(args: argparse.Namespace) -> None:
     """--wan-matmul into the environment every worker inherits (wan_fp8.wan_matmul_bits)."""
-    import os
-
     from .wan_fp8 import WAN_MATMUL_ENV, wan_matmul_bits
 
     if args.wan_matmul is not None:

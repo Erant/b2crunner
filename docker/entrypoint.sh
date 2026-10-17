@@ -28,6 +28,10 @@ set -euo pipefail
 
 PYTHON=/opt/venv_main/bin/python
 B2C_PORT="${B2C_PORT:-7860}"
+# The address the web UI listens on. Loopback unless told otherwise: a pod
+# template (or docker-compose.yml) sets 0.0.0.0, because inside a container
+# 127.0.0.1 is unreachable from the outside, port publish or not.
+B2C_BINDTO="${B2C_BINDTO:-127.0.0.1}"
 DATA_DIR="${B2C_DATA_DIR:-/data}"
 
 log() { echo "[entrypoint] $*"; }
@@ -204,8 +208,12 @@ serve_ui() {
         log "  'runpodctl stop pod \$RUNPOD_POD_ID' to actually end the bill."
     fi
 
-    log "starting the web UI on 0.0.0.0:${B2C_PORT}"
-    exec "$PYTHON" -m pipeline.cli ui --host 0.0.0.0 --port "$B2C_PORT"
+    log "starting the web UI on ${B2C_BINDTO}:${B2C_PORT}"
+    if [ "$B2C_BINDTO" = 127.0.0.1 ] || [ "$B2C_BINDTO" = localhost ]; then
+        log "  loopback only: unreachable from outside this container. Set"
+        log "  B2C_BINDTO=0.0.0.0 to serve it through a published or proxied port."
+    fi
+    exec "$PYTHON" -m pipeline.cli ui --host "$B2C_BINDTO" --port "$B2C_PORT"
 }
 
 main() {
