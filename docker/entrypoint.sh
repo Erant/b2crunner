@@ -124,6 +124,11 @@ start_sshd() {
     echo "$PUBLIC_KEY" >> /root/.ssh/authorized_keys
     chmod 700 /root/.ssh
     chmod 600 /root/.ssh/authorized_keys
+    # The image ships host keys (openssh-server's postinst makes them at
+    # build time) and `-A` only fills in missing ones, so every pod would
+    # share one private key that anyone can pull off Docker Hub. Fresh per
+    # container instead.
+    rm -f /etc/ssh/ssh_host_*
     ssh-keygen -A >/dev/null 2>&1
     mkdir -p /run/sshd
     /usr/sbin/sshd
@@ -191,8 +196,8 @@ serve_ui() {
         log "  same token as its password (username b2c)"
     else
         log "WARNING: no B2C_API_TOKEN — the HTTP API is NOT served, and the web UI"
-        log "  is unauthenticated on a proxy URL anyone with the pod id can reach."
-        log "  Set it on the pod template to enable both."
+        log "  has no login. Fine on loopback; anywhere else (a pod's proxy URL, the"
+        log "  LAN) anyone who reaches it can drive it. Set it to enable both."
     fi
 
     # What `POST /api/v1/shutdown` will do besides stopping this container.
