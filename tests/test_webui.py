@@ -290,5 +290,44 @@ class TestWiring(unittest.TestCase):
         self.assertTrue(run.exists())
 
 
+@unittest.skipIf(webui is None, "the web UI's dependencies are not installed here")
+class TestOpenWarning(unittest.TestCase):
+    """No login and reachable beyond loopback: the log and the page both say so."""
+
+    def exposure(self, host, share=False, published=None):
+        env = {webui.PUBLISHED_ENV: published} if published else {}
+        with unittest.mock.patch.dict(os.environ, env, clear=False):
+            if not published:
+                os.environ.pop(webui.PUBLISHED_ENV, None)
+            return webui.exposure(host, share)
+
+    def test_loopback_is_quiet(self):
+        for host in ("127.0.0.1", "127.0.1.1", "localhost", "::1"):
+            self.assertEqual(self.exposure(host), "", host)
+
+    def test_every_interface_or_a_lan_address_is_not(self):
+        self.assertIn("0.0.0.0", self.exposure("0.0.0.0"))
+        self.assertIn("192.168.1.5", self.exposure("192.168.1.5"))
+
+    def test_share_is_public_whatever_the_host(self):
+        self.assertIn("gradio.live", self.exposure("127.0.0.1", share=True))
+
+    def test_a_container_goes_by_the_host_side_publish(self):
+        self.assertEqual(self.exposure("0.0.0.0", published="127.0.0.1"), "")
+        self.assertIn("0.0.0.0", self.exposure("0.0.0.0", published="0.0.0.0"))
+
+    def test_the_banner_is_on_the_page_only_when_asked_for(self):
+        def banners(**kwargs):
+            with TemporaryDirectory() as tmp, \
+                    unittest.mock.patch.dict(os.environ, {"B2C_DATA_DIR": tmp}):
+                app = webui.build_app("", gpu_count=1, **kwargs)
+            return [b for b in app.blocks.values()
+                    if isinstance(b, gr.HTML) and "⚠" in str(b.value)]
+
+        self.assertEqual(banners(), [])
+        (banner,) = banners(open_warning="no <login>")
+        self.assertIn("no &lt;login&gt;", banner.value)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

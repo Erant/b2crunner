@@ -61,6 +61,9 @@ services:
       # what decides who on the host side can reach it, and a server on the
       # container's own loopback is reachable by nobody.
       - B2C_BINDTO=0.0.0.0
+      # ...so the UI learns its reach from here: the host side of the publish,
+      # for its no-login warning (pipeline/webui.py exposure()).
+      - B2C_PUBLISHED_ON=${B2C_BINDTO:-127.0.0.1}
     volumes:
       # Everything the pipeline writes — outputs, logs, the HF cache, the
       # dispatchers' IPC pickles — goes here. The container's own writable

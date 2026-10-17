@@ -95,6 +95,7 @@ from __future__ import annotations
 
 import html
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -571,7 +572,7 @@ def _step_rows(state: RunState) -> List[List[Any]]:
 # the app
 # --------------------------------------------------------------------------
 
-def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
+def build_app(envs_path: str, gpu_count: Optional[int] = None, open_warning: str = "") -> gr.Blocks:
     scheduler = GpuScheduler(
         gpu_count=gpu_count if gpu_count is not None else detect_gpu_count(),
         work_dir=run_jobs_dir(),
@@ -583,6 +584,13 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
 
     with gr.Blocks(title="b2c_runner", analytics_enabled=False) as app:
         gr.Markdown("# b2c_runner\nBody2COLMAP pipeline — submit a run, watch it, collect the output.")
+        # `launch` sets it when the UI is unguarded and reachable from beyond
+        # this machine: the person at the page may never see the server log.
+        if open_warning:
+            gr.HTML(
+                '<div style="background:#b91c1c;color:#fff;padding:0.6em 1em;border-radius:6px;'
+                f'font-weight:600">⚠ {html.escape(open_warning)}</div>'
+            )
         # A standing way into the viewer's own subject picker, beside the
         # Results tab's per-run button (which needs a run with a subject file).
         if viewer_on:
@@ -1308,6 +1316,7 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None) -> gr.Blocks:
 
 def build_server(
     envs_path: str = "", gpu_count: Optional[int] = None, serve_api: bool = True,
+    open_warning: str = "",
 ) -> "fastapi.FastAPI":
     """The whole server: the HTTP API, then the Gradio UI mounted under it.
 
@@ -1339,7 +1348,7 @@ def build_server(
     from .cli import DEFAULT_ENVS
 
     envs_path = envs_path or DEFAULT_ENVS
-    blocks = build_app(envs_path, gpu_count=gpu_count)
+    blocks = build_app(envs_path, gpu_count=gpu_count, open_warning=open_warning)
     scheduler: GpuScheduler = blocks._gpu_scheduler  # noqa: SLF001
     token = api_token()
 
@@ -1420,6 +1429,33 @@ def build_server(
     return server
 
 
+# What the host side publishes the UI on, when that is not `--host`: inside a
+# container the server listens on 0.0.0.0 and the port publish decides who
+# reaches it (docker-compose.yml sets this from B2C_BINDTO).
+PUBLISHED_ENV = "B2C_PUBLISHED_ON"
+
+
+def _is_loopback(host: str) -> bool:
+    import ipaddress
+
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def exposure(host: str, share: bool) -> str:
+    """Who beyond this machine can reach the UI, in words; "" when only this machine can."""
+    if share:
+        return "a public gradio.live URL (--share): anyone on the internet who has the link"
+    published = os.environ.get(PUBLISHED_ENV) or host
+    if _is_loopback(published):
+        return ""
+    return f"{published}: anyone who can reach this machine's network"
+
+
 def launch(
     host: str = "127.0.0.1", port: int = 7860, envs_path: str = "", share: bool = False,
     gpu_count: Optional[int] = None, serve_api: bool = True,
@@ -1445,7 +1481,18 @@ def launch(
 
     import uvicorn
 
-    server = build_server(envs_path, gpu_count=gpu_count, serve_api=serve_api)
+    from .api import TOKEN_ENV, api_token
+
+    reach = exposure(host, share)
+    open_warning = ""
+    if reach and not api_token():
+        open_warning = (f"This UI has no login and is reachable on {reach}. "
+                        f"Anyone there can start runs and download every result. Set {TOKEN_ENV}.")
+        _shout(open_warning)
+    elif share:
+        _shout(f"--share serves this UI on {reach}; only the {TOKEN_ENV} login stands in the way.")
+
+    server = build_server(envs_path, gpu_count=gpu_count, serve_api=serve_api, open_warning=open_warning)
     scheduler: GpuScheduler = server.state.gpu_scheduler
 
     config = uvicorn.Config(
@@ -1474,6 +1521,12 @@ def launch(
     if share:
         _open_tunnel(host, port)
     running.run()
+
+
+def _shout(message: str) -> None:
+    """A warning boxed in the log, where a one-line WARNING scrolls past unread."""
+    bar = "!" * 78
+    logger.warning("\n%s\n!! WARNING: %s\n%s", bar, message, bar)
 
 
 def _open_tunnel(host: str, port: int) -> None:

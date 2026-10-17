@@ -28,6 +28,8 @@ Set `B2C_API_TOKEN` to guard the UI (login password) and enable the API.
 The UI listens on 127.0.0.1 only unless `B2C_BINDTO` says otherwise
 (`B2C_BINDTO=0.0.0.0 ./run.sh` to reach it from the LAN; a pod template needs
 `B2C_BINDTO=0.0.0.0`, see [docs/runpod.md](docs/runpod.md)).
+Reachable beyond loopback (or with `--share`) and no `B2C_API_TOKEN`, the UI
+says so: a boxed warning in the log and a red banner on the page.
 
 ## Model weights
 
