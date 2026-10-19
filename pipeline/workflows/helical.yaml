@@ -4701,6 +4701,8 @@ steps:
       anchor: true
       reference: photo
       keep_copy: ${globals.output_root}/debug/face_detailer/before_face_detailer.ply
+      train_on: head
+      train_on_dilate_px: 12
       debug_dir: ${globals.output_root}/debug/face_detailer/face1_views
     outputs:
       images: scene.face_detail.face1.control
@@ -4924,6 +4926,7 @@ steps:
       front_image: scene.front_image
       front_matte: scene.front_matte
       body_rig: scene.body_rig
+      label_splat_path: scene.face_detail.base_splat
     params:
       name: face2
       path: lissajous
@@ -4933,6 +4936,8 @@ steps:
       ratio: 2
       anchor: true
       reference: photo
+      train_on: head
+      train_on_dilate_px: 12
       debug_dir: ${globals.output_root}/debug/face_detailer/face2_views
     outputs:
       images: scene.face_detail.face2.control
@@ -5197,7 +5202,7 @@ steps:
       focal_per_m: 1510
       anchor: false
       reference: back
-      hair_weights: true
+      train_on: hair
       debug_dir: ${globals.output_root}/debug/face_detailer/hair_views
     outputs:
       images: scene.face_detail.hair.control

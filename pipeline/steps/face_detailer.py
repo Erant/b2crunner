@@ -32,6 +32,9 @@ against its absence:
     panel as the reference, rendered from the face-detailed splat, its frames supervising only the hair
     (loss weights = the original splat's hair class at those cameras). Judged by eye: the back of the head
     goes from clumps to fine strands matching the front.
+  * the arms left out of every clip's control (`hide_arms`, zero loss weight where they are in front) and the face
+    clips' loss kept to the head (`train_on: head`): the video model repaints whatever else is in the frame, and
+    on 0256db that put a tattooed hand on the gauntlet and an orange glow on the shoulder badges.
 
 Five steps here, the rest are the pipeline's own (wan22_vace_denoise, rmbg, seedvr2, detect_face_views,
 fit_head_per_view, paste_eyes, brush):
@@ -70,6 +73,8 @@ _GL = np.diag([1.0, -1.0, -1.0])
 _SH_C0 = 0.28209479177387814
 #: Sapiens2's Hair class (steps/sapiens2.py SEG_CLASSES), as the trainer votes it onto the splats.
 HAIR_LABEL = 4
+#: The head as the trainer votes it: Eyeglass, Face_Neck, Hair, the lips, the teeth and the tongue.
+HEAD_LABELS = (2, 3, 4, 24, 25, 26, 27, 28)
 #: The grey the clips stand on: the renders' background and the matted photograph's.
 _GREY = 128
 #: MHR's elbows and upper arms (the joint tree: 39/75 under the clavicles 38/74, their subtrees the arms with
@@ -174,13 +179,13 @@ def hair_centre(scene: Any, below_m: float = 0.15) -> Optional[np.ndarray]:
     return np.array([(lo[0] + hi[0]) / 2, (hi[1] + lo[1] - below_m) / 2, (lo[2] + hi[2]) / 2])
 
 
-def class_mask_scene(scene: Any, label: int) -> Any:
-    """The splat with every Gaussian of class `label` white and every other black, base colour only: its
+def class_mask_scene(scene: Any, label: Any) -> Any:
+    """The splat with every Gaussian of class `label` (one or several) white and every other black, base colour only: its
     render over black is that class's accumulated alpha, occluded by the rest."""
     labels = _labels(scene)
     if labels is None:
         raise ValueError("face_detail_views: the splat carries no seg_label (splat_labels off?)")
-    return mask_scene(scene, labels == label)
+    return mask_scene(scene, np.isin(labels, np.atleast_1d(label)))
 
 
 def mask_scene(scene: Any, selected: np.ndarray) -> Any:
@@ -280,13 +285,13 @@ class FaceDetailViewsStep(Step):
               "front_image": the sheet's front panel, "front_matte": its matte — the anchor frame and the face
                              reference (`reference: photo`),
               "reference_image"?: the matted back panel (`reference: back`), "back_matte"?: its matte,
-              "label_splat_path"?: a splat carrying seg_label, for the hair's framing and loss weights
-                                   (default splat_path),
+              "label_splat_path"?: a splat carrying seg_label, for the hair's framing and the `train_on`
+                                   loss weights (default splat_path),
               "body_rig"?: build_body_rig's, for `hide_arms`}
     outputs: {"images": [BGR] the control video, "masks": [float HxW] its VACE masks (1 = paint, 0 at the
               anchor frame), "cameras": [Camera], "image_names": [str], "reference_image": BGR,
               "anchor_index": int or None, "weights": [float HxW] or None — the clip's loss weights: the
-                                       hair (`hair_weights`) times zero where the hidden arms are,
+                                       head or the hair (`train_on`) times zero where the hidden arms are,
               "splat_path": str — the splat as it was (`keep_copy`, else splat_path), "stats": {...}}
 
     The view sphere is centred on the head (`centre: head`, the MHR head joint) or the hair (`centre: hair`,
@@ -300,6 +305,11 @@ class FaceDetailViewsStep(Step):
     (0256db: the raised gauntlet became a tattooed hand and trained into the splat). Where the arms are in front
     in the full splat the clip has nothing true to say, so those pixels get zero loss weight, dilated; the
     anchor frame, the photograph itself, keeps full weight.
+
+    `train_on` keeps the clip's loss to the head or the hair: the splat's own classes at the clip's cameras
+    (occluded by the rest), dilated. The video model repaints whatever else is in the frame, and close-ups
+    outweigh the original views there (0256db: the shoulder badges recoloured with an orange glow by clip 2's
+    profiles); the face clips are for the face. The anchor frame keeps full weight.
     """
 
     PARAMS = (
@@ -319,8 +329,9 @@ class FaceDetailViewsStep(Step):
         Param("anchor", bool, True, "Put the photograph, warped into the start pose, in the first frame (inactive)"),
         Param("reference", str, "photo", "VACE reference: the photograph's face at the start pose, or the back panel",
               choices=("photo", "back")),
-        Param("hair_weights", bool, False, "Publish loss weights that keep this clip to the hair"),
-        Param("hair_dilate_px", int, 4, "Dilate the hair weights by this many pixels", minimum=0),
+        Param("train_on", str, "all", "Loss weights that keep this clip to the head or the hair, or none",
+              choices=("all", "head", "hair")),
+        Param("train_on_dilate_px", int, 4, "Dilate the train_on weights by this many pixels", minimum=0),
         Param("hide_arms", str, "elbow", "Leave the arms out of the control from the elbows or the shoulders down",
               choices=("none", "elbow", "shoulder")),
         Param("arm_dilate_px", int, 8, "Grow the hidden arms' zero-weight region by this many pixels", minimum=0),
@@ -441,17 +452,18 @@ class FaceDetailViewsStep(Step):
             reference = back_crop(inputs["reference_image"], inputs.get("back_matte"), W, H)
 
         weights = None
-        if params["hair_weights"]:
-            hair, _ = _rasterize(scene=class_mask_scene(label_scene, HAIR_LABEL), splat_path=None, cameras=clip_cams,
+        if params["train_on"] != "all":
+            classes = HAIR_LABEL if params["train_on"] == "hair" else HEAD_LABELS
+            kept, _ = _rasterize(scene=class_mask_scene(label_scene, classes), splat_path=None, cameras=clip_cams,
                                  image_names=names, width=W, height=H, bg_color=(0.0, 0.0, 0.0),
                                  render_path=params["render_path"])
-            k = 2 * int(params["hair_dilate_px"]) + 1
+            k = 2 * int(params["train_on_dilate_px"]) + 1
             weights = []
-            for im in hair:
+            for i, im in enumerate(kept):
                 m = (cv2.cvtColor(im[..., :3], cv2.COLOR_BGR2GRAY) > 64).astype(np.uint8) * 255
                 m = cv2.GaussianBlur(cv2.dilate(m, np.ones((k, k), np.uint8)), (0, 0), 2)
-                weights.append(m.astype(np.float32) / 255.0)
-            stats["hair_coverage"] = round(float(np.mean([w.mean() for w in weights])), 4)
+                weights.append(np.ones((H, W), np.float32) if i == anchor_index else m.astype(np.float32) / 255.0)
+            stats[f"{params['train_on']}_coverage"] = round(float(np.mean([w.mean() for w in weights])), 4)
         if arms is not None and arms.any():
             seen, _ = _rasterize(scene=mask_scene(scene, arms), splat_path=None, cameras=clip_cams, image_names=names,
                                  width=W, height=H, bg_color=(0.0, 0.0, 0.0), render_path=params["render_path"])
