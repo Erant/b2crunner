@@ -22,6 +22,7 @@ from . import subject_glb  # noqa: F401
 from . import rig_subject  # noqa: F401
 from . import photo_priority  # noqa: F401
 from . import face_views  # noqa: F401
+from . import face_detailer  # noqa: F401
 from . import face_landmarks  # noqa: F401
 from . import head_fit  # noqa: F401
 from . import mask_splat  # noqa: F401

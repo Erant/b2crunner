@@ -515,6 +515,19 @@ settings:
     default: false
     help: Stream the denoise model's weights to fit a ~12 GB GPU (slower).
 
+  - name: face_detailer
+    label: Face detailer
+    type: bool
+    default: false
+    help: Refine the trained splat's face with two close-up 480p denoise clips around the head, trained back in.
+
+  - name: hair_detailer
+    label: Hair detailer
+    type: bool
+    default: true
+    requires: face_detailer
+    help: A third clip, circling the head, that refines the hair.
+
   - name: weak_skeleton
     label: Weak skeleton
     type: bool
@@ -851,9 +864,10 @@ globals:
 # The denoise passes' prompts, each written once and referred to by alias
 # below. `orbit` is the drawing-controlled passes' (re-outline, pass 1),
 # with the camera-orbit sentence; `render` is the passes conditioned on a
-# splat render (pass 2, the extensions). Every pass also lists both as its
-# `prompt_bank`: whichever pass runs first encodes the two in one
-# text-encoder pass and the resident worker reuses them. Not read by the
+# splat render (pass 2, the extensions); `face` is the face detailer's
+# close-ups. Every pass also lists all three as its `prompt_bank`: whichever
+# pass runs first encodes them in one text-encoder pass and the resident
+# worker reuses them. Not read by the
 # workflow loader itself — it is only where the anchors live.
 #
 # Each is ~780 T5 tokens before the subject (~200 more); the denoise encodes
@@ -920,6 +934,26 @@ prompts:
         in every frame, and do not swing round with the camera. Matte skin, matte \
         cloth, photorealistic, sharp focus, identical clothing and lighting in \
         every frame."
+  # The face detailer's three clips (`face_detailer`, steps/face_detailer.py):
+  # a close-up of the head and shoulders on the grey the splat is rendered
+  # over, no room, the camera arcing about the head. Written for those clips
+  # and measured as written (experiments/face_detailer, 2026-10-18); the hair
+  # clip reads it too.
+  face: &prompt_face "人工光、柔光、低对比度、均匀照明、环绕运镜、特写镜头。时间静止，人物完全静止。头部与身体保持固定，面部肌肉完全不动，维持单一的中性表情。双眼\
+        一眨不眨，眼睑保持张开且稳定，目光空洞而固定，锁定远处的一个点，对镜头毫无察觉、毫无反应。背景是一块平整的纯灰色影棚背景布。镜头以匀速、固定焦距围绕人物\
+        头部缓慢地沿弧线移动，人物头部与肩膀始终保持在画面中央。 \
+        Time is frozen and only the camera moves. The gaze stays anchored to a \
+        distant point as the camera passes, so the eyes never follow the lens. \
+        Eyelids stay open and steady, the expression holds without a single \
+        micro-movement, and the head stays fixed on the body. A close-up \
+        head-and-shoulders portrait of $SUBJECT_DESC$, in front of a plain flat \
+        grey studio backdrop. The camera arcs slowly around the subject's head \
+        at a steady pace and a fixed focal length, keeping the head and \
+        shoulders centred in the frame. Soft, even, low-contrast light wraps the \
+        face from every side, and the skin holds one even brightness from every \
+        angle. Detailed natural skin texture, clearly defined eyes, eyebrows and \
+        lips, individual strands of hair, matte skin, photorealistic, sharp \
+        focus, identical face, hair and lighting in every frame."
 
 steps:
   # ================================================================ bootstrap
@@ -1663,7 +1697,7 @@ steps:
       sampler_shift: 5
       strength: [1, 1, 0.5, 0.5]
       prompt: *prompt_orbit
-      prompt_bank: [*prompt_orbit, *prompt_render]
+      prompt_bank: [*prompt_orbit, *prompt_render, *prompt_face]
       negative_prompt: "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静\
         止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的\
         手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体\
@@ -2250,7 +2284,7 @@ steps:
       # THIS pass. Untested at full resolution and on pass 2: if a run comes
       # back with painted-on clothes, this is the first suspect.
       prompt: *prompt_orbit
-      prompt_bank: [*prompt_orbit, *prompt_render]
+      prompt_bank: [*prompt_orbit, *prompt_render, *prompt_face]
       negative_prompt: "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静\
         止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的\
         手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体\
@@ -3444,7 +3478,7 @@ steps:
       sampler_shift: 2.5
       strength: [0.8, 0.8, 0.8, 0.8, 0.8, 0.8]
       prompt: *prompt_render
-      prompt_bank: [*prompt_orbit, *prompt_render]
+      prompt_bank: [*prompt_orbit, *prompt_render, *prompt_face]
       negative_prompt: "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静\
         止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的\
         手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体\
@@ -3729,17 +3763,21 @@ steps:
     params:
       width: ${globals.resolution.0}
       height: ${globals.resolution.1}
+      # 4 steps, not pass 2's 6 (2026-10-18): the face detailer's 4/6
+      # ablation on 9016a1 (steps/face_detailer.py) matched or beat 6 on
+      # held-out consistency and fidelity at -20 % denoise time, for 6-12 %
+      # less face sharpness. Not measured on the extension itself.
       steps_high: 2
-      steps_low: 4
+      steps_low: 2
       cfg: 1.0
       seed: ${globals.seed}
       low_vram: ${globals.low_vram}
       sampler_high: euler
       sampler_low: euler
       sampler_shift: 2.5
-      strength: [0.8, 0.8, 0.8, 0.8, 0.8, 0.8]
+      strength: [0.8, 0.8, 0.8, 0.8]
       prompt: *prompt_render
-      prompt_bank: [*prompt_orbit, *prompt_render]
+      prompt_bank: [*prompt_orbit, *prompt_render, *prompt_face]
       negative_prompt: "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静\
         止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的\
         手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体\
@@ -3765,17 +3803,21 @@ steps:
     params:
       width: ${globals.resolution.0}
       height: ${globals.resolution.1}
+      # 4 steps, not pass 2's 6 (2026-10-18): the face detailer's 4/6
+      # ablation on 9016a1 (steps/face_detailer.py) matched or beat 6 on
+      # held-out consistency and fidelity at -20 % denoise time, for 6-12 %
+      # less face sharpness. Not measured on the extension itself.
       steps_high: 2
-      steps_low: 4
+      steps_low: 2
       cfg: 1.0
       seed: ${globals.seed}
       low_vram: ${globals.low_vram}
       sampler_high: euler
       sampler_low: euler
       sampler_shift: 2.5
-      strength: [0.8, 0.8, 0.8, 0.8, 0.8, 0.8]
+      strength: [0.8, 0.8, 0.8, 0.8]
       prompt: *prompt_render
-      prompt_bank: [*prompt_orbit, *prompt_render]
+      prompt_bank: [*prompt_orbit, *prompt_render, *prompt_face]
       negative_prompt: "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静\
         止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的\
         手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体\
@@ -4545,6 +4587,750 @@ steps:
       export_dir: ${globals.output_root}/ply
       export_name: scene.ply
       trainer_files_dir: ${globals.output_root}/debug/reupscale
+    outputs:
+      splat_path: dataset.splat_path
+
+  # ============================================================ face detailer
+  # `face_detailer` (steps/face_detailer.py, the measurements in its
+  # docstring): the deliverable's head, refined by short close-up denoise
+  # clips rendered from the splat itself and trained back in, warm, growth
+  # off — the splat count does not change. Two face clips, the second
+  # rendered from a splat already retrained on the first (a PROGRESSIVE
+  # clip: an independent second clip averages two hallucinations and
+  # softens the front), then, with `hair_detailer`, one clip circling the
+  # head for the hair. Each clip is the pipeline's own denoise at 480x832
+  # (the splat's own detail level; 720p bought nothing here) with the
+  # split strength (0.8 on the high-noise expert, 0.5 after), which removes
+  # control-texture defects (a cheek blotch at 0.8 flat) for a little
+  # silhouette fidelity (IoU 0.989 -> 0.978), in 4 steps: against 6 on
+  # 9016a1 (2026-10-18) iris/mouth agreement 1.12/1.07 against 1.06/1.23 px,
+  # photo-view PSNR 18.1 against 17.1 dB, face sharpness 6-12 % lower, the
+  # three clips 550 s against 689 s on a 4070 Ti. Every retraining starts from the deliverable as
+  # train_final_splat (or the re-upscale) left it, copied aside first by
+  # the first clip's views: the face retrainings export over ply/scene.ply.
+  # After every other training, before the subject file, so export_subject
+  # and rig_subject see the detailed splat; colmap/ is unchanged (the
+  # clips are not part of the delivered dataset).
+  #
+  # The photograph at 4x for the eyes the clips get pasted (SeedVR2 on its
+  # face crop, one frame): at clip zoom the photograph's own pixels are
+  # too few for the eye texture. The rest of the photograph is bicubic.
+  - id: fd_photo_crop
+    step: face_detail_photo_crop
+    dispatch: in_process
+    when:
+      - ${globals.face_detailer}
+      - ${globals.export_ply}
+      - ${globals.refit_body}
+    inputs:
+      image: scene.front_image
+      face_landmarks: scene.face_landmarks
+    outputs:
+      images: scene.face_detail.photo.crop_images
+      cameras: scene.face_detail.photo.crop_cameras
+      crop: scene.face_detail.photo.crop
+
+  - id: fd_photo_upscale
+    step: seedvr2
+    dispatch: subprocess
+    env: seedvr2
+    when:
+      - ${globals.face_detailer}
+      - ${globals.export_ply}
+      - ${globals.refit_body}
+    inputs:
+      images: scene.face_detail.photo.crop_images
+      cameras: scene.face_detail.photo.crop_cameras
+    params:
+      # face_detail_photo_crop's 320 px, 4x.
+      resolution: 1280
+      batch_size: 1
+      vae_encode_tiled: true
+      vae_decode_tiled: true
+      seed: ${globals.seed}
+    outputs:
+      images: scene.face_detail.photo.crop_upscaled
+
+  - id: fd_photo_merge
+    step: face_detail_photo_merge
+    dispatch: in_process
+    when:
+      - ${globals.face_detailer}
+      - ${globals.export_ply}
+      - ${globals.refit_body}
+    inputs:
+      image: scene.front_image
+      face_landmarks: scene.face_landmarks
+      focal_length: scene.focal_length
+      crop: scene.face_detail.photo.crop
+      images: scene.face_detail.photo.crop_upscaled
+    params:
+      scale: 4
+    outputs:
+      image: scene.face_detail.photo.image
+      face_landmarks: scene.face_detail.photo.face_landmarks
+      focal_length: scene.face_detail.photo.focal_length
+
+  # Clip 1: a Lissajous figure about the head, yaw +-45 and pitch +-20
+  # about the photograph's view, two vertical periods (3.2 deg/frame), the
+  # photograph warped into its first frame (inactive) and its matted face
+  # as the reference. The splat as it stands is copied aside here: it is
+  # what every retraining below starts from.
+  - id: fd_face1_views
+    step: face_detail_views
+    dispatch: in_process
+    when:
+      - ${globals.face_detailer}
+      - ${globals.export_ply}
+      - ${globals.refit_body}
+    inputs:
+      splat_path: dataset.splat_path
+      cameras: dataset.cameras
+      anchor_frame_index: dataset.extras.anchor_frame_index
+      joints: scene.joints
+      world_from_raw: scene.world_from_raw
+      front_image: scene.front_image
+      front_matte: scene.front_matte
+    params:
+      name: face1
+      path: lissajous
+      yaw_deg: 45
+      pitch_deg: 20
+      ratio: 2
+      anchor: true
+      reference: photo
+      keep_copy: ${globals.output_root}/debug/face_detailer/before_face_detailer.ply
+      debug_dir: ${globals.output_root}/debug/face_detailer/face1_views
+    outputs:
+      images: scene.face_detail.face1.control
+      masks: scene.face_detail.face1.control_masks
+      cameras: scene.face_detail.face1.cameras
+      image_names: scene.face_detail.face1.image_names
+      reference_image: scene.face_detail.face1.reference
+      anchor_index: scene.face_detail.face1.anchor_index
+      weights: scene.face_detail.face1.weights
+      splat_path: scene.face_detail.base_splat
+      stats: scene.face_detail.face1.path_stats
+
+  - id: fd_face1_denoise
+    step: wan22_vace_denoise
+    dispatch: subprocess
+    env: wan22
+    keep_loaded: true
+    when:
+      - ${globals.face_detailer}
+      - ${globals.export_ply}
+      - ${globals.refit_body}
+    inputs:
+      control_video: scene.face_detail.face1.control
+      control_masks: scene.face_detail.face1.control_masks
+      reference_image: scene.face_detail.face1.reference
+      subject_desc: dataset.prompt
+    params:
+      width: 480
+      height: 832
+      steps_high: 2
+      steps_low: 2
+      cfg: 1.0
+      seed: ${globals.seed}
+      low_vram: ${globals.low_vram}
+      sampler_high: euler
+      sampler_low: euler
+      sampler_shift: 2.5
+      strength: [0.8, 0.8, 0.5, 0.5]
+      prompt: *prompt_face
+      prompt_bank: [*prompt_orbit, *prompt_render, *prompt_face]
+      negative_prompt: "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静\
+        止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的\
+        手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体\
+        ，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走, \
+        chewing, tattoos, 眼球运动，眨眼，眼动追踪，微表情，面部抽动，头部移\
+        动, 小头, 小脸"
+    outputs:
+      images: scene.face_detail.face1.images
+
+  - id: fd_face1_matte
+    step: rmbg
+    dispatch: in_process
+    when:
+      - ${globals.face_detailer}
+      - ${globals.export_ply}
+      - ${globals.refit_body}
+    inputs:
+      images: scene.face_detail.face1.images
+    params:
+      low_vram: ${globals.low_vram}
+    outputs:
+      masks: scene.face_detail.face1.masks
+
+  # The pipeline's own per-view head fit and eye paste on the clip (Wan's
+  # eyes follow the camera), the photograph at 4x as the eye texture;
+  # face_detail_clip zeroes the loss on every eye the paste skipped.
+  - id: fd_face1_face_views
+    step: detect_face_views
+    dispatch: in_process
+    when:
+      - ${globals.face_detailer}
+      - ${globals.export_ply}
+      - ${globals.refit_body}
+    inputs:
+      images: scene.face_detail.face1.images
+      image_names: scene.face_detail.face1.image_names
+      cameras: scene.face_detail.face1.cameras
+      mesh_world: scene.mesh_world
+      joints: scene.joints
+      keypoints_3d: scene.keypoints_3d
+      world_from_raw: scene.world_from_raw
+      face_correspondence: scene.face_correspondence
+    params:
+      debug_dir: ${globals.output_root}/debug/face_detailer/face1_face_views
+    outputs:
+      face_views: scene.face_detail.face1.face_views
+
+  - id: fd_face1_head_fit
+    step: fit_head_per_view
+    dispatch: subprocess
+    env: sam3dbody
+    when:
+      - ${globals.face_detailer}
+      - ${globals.export_ply}
+      - ${globals.refit_body}
+    inputs:
+      pose_params: scene.pose_params
+      focal_length: scene.face_detail.photo.focal_length
+      vertices: scene.vertices
+      faces: scene.faces
+      world_from_raw: scene.world_from_raw
+      face_correspondence: scene.face_correspondence
+      face_views: scene.face_detail.face1.face_views
+      face_landmarks: scene.face_detail.photo.face_landmarks
+      image: scene.face_detail.photo.image
+    params:
+      debug_dir: ${globals.output_root}/debug/face_detailer/face1_head_fit
+    outputs:
+      head_fit_views: scene.face_detail.face1.head_fit
+
+  - id: fd_face1_eyes
+    step: paste_eyes
+    dispatch: in_process
+    when:
+      - ${globals.face_detailer}
+      - ${globals.export_ply}
+      - ${globals.refit_body}
+    inputs:
+      images: scene.face_detail.face1.images
+      image_names: scene.face_detail.face1.image_names
+      cameras: scene.face_detail.face1.cameras
+      head_fit_views: scene.face_detail.face1.head_fit
+      image: scene.face_detail.photo.image
+      face_landmarks: scene.face_detail.photo.face_landmarks
+    params:
+      debug_dir: ${globals.output_root}/debug/face_detailer/face1_eyes
+    outputs:
+      images: scene.face_detail.face1.images
+      eye_stats: scene.face_detail.face1.eye_stats
+
+  - id: fd_face1_clip
+    step: face_detail_clip
+    dispatch: in_process
+    when:
+      - ${globals.face_detailer}
+      - ${globals.export_ply}
+      - ${globals.refit_body}
+    inputs:
+      images: scene.face_detail.face1.images
+      masks: scene.face_detail.face1.masks
+      cameras: scene.face_detail.face1.cameras
+      image_names: scene.face_detail.face1.image_names
+      anchor_index: scene.face_detail.face1.anchor_index
+      face_views: scene.face_detail.face1.face_views
+      eye_stats: scene.face_detail.face1.eye_stats
+    outputs:
+      clip: scene.face_detail.face1.clip
+
+  - id: fd_retrain_a_dataset
+    step: face_detail_dataset
+    dispatch: in_process
+    when:
+      - ${globals.face_detailer}
+      - ${globals.export_ply}
+      - ${globals.refit_body}
+    inputs:
+      images: dataset.images
+      image_names: dataset.image_names
+      cameras: dataset.cameras
+      masks: dataset.masks
+      clip_a: scene.face_detail.face1.clip
+    outputs:
+      images: scene.face_detail.retrain_a.images
+      image_names: scene.face_detail.retrain_a.image_names
+      cameras: scene.face_detail.retrain_a.cameras
+      masks: scene.face_detail.retrain_a.masks
+      weights: scene.face_detail.retrain_a.weights
+      labels: scene.face_detail.retrain_a.labels
+
+  # Retraining A: the deliverable's views plus clip 1, only to render clip
+  # 2's control from. 6000 iterations warm from the deliverable, growth off
+  # (the count stays), two alignment iterations (the largest lever of these
+  # retrainings: front sharpness 32 -> 42), no rig.
+  - id: fd_retrain_a_train
+    step: brush
+    dispatch: in_process
+    when:
+      - ${globals.face_detailer}
+      - ${globals.export_ply}
+      - ${globals.refit_body}
+    inputs:
+      cameras: scene.face_detail.retrain_a.cameras
+      image_names: scene.face_detail.retrain_a.image_names
+      points_3d: dataset.points_3d
+      images: scene.face_detail.retrain_a.images
+      masks: scene.face_detail.retrain_a.masks
+      weights: scene.face_detail.retrain_a.weights?
+      init_splat: scene.face_detail.base_splat
+    params:
+      total_steps: 6000
+      growth_stop_iter: 0
+      random_background: true
+      align_iters: 2
+      align_steps: 2000
+      align_debug_dir: ${globals.output_root}/debug/face_detailer/retrain_a_alignment
+      polish_steps: 0
+      body_rig: false
+      export_dir: ${globals.output_root}/debug/face_detailer
+      export_name: retrain_a.ply
+      trainer_files_dir: ${globals.output_root}/debug/face_detailer/retrain_a
+    outputs:
+      splat_path: scene.face_detail.splat_a
+
+  # Clip 2, progressive: rendered from retraining A, yaw +-90 and pitch
+  # -40..+20 about the photograph's view (5.5 deg/frame) — the profiles and
+  # the views from below.
+  - id: fd_face2_views
+    step: face_detail_views
+    dispatch: in_process
+    when:
+      - ${globals.face_detailer}
+      - ${globals.export_ply}
+      - ${globals.refit_body}
+    inputs:
+      splat_path: scene.face_detail.splat_a
+      cameras: dataset.cameras
+      anchor_frame_index: dataset.extras.anchor_frame_index
+      joints: scene.joints
+      world_from_raw: scene.world_from_raw
+      front_image: scene.front_image
+      front_matte: scene.front_matte
+    params:
+      name: face2
+      path: lissajous
+      yaw_deg: 90
+      pitch_deg: 30
+      pitch_offset_deg: -10
+      ratio: 2
+      anchor: true
+      reference: photo
+      debug_dir: ${globals.output_root}/debug/face_detailer/face2_views
+    outputs:
+      images: scene.face_detail.face2.control
+      masks: scene.face_detail.face2.control_masks
+      cameras: scene.face_detail.face2.cameras
+      image_names: scene.face_detail.face2.image_names
+      reference_image: scene.face_detail.face2.reference
+      anchor_index: scene.face_detail.face2.anchor_index
+      weights: scene.face_detail.face2.weights
+      splat_path: scene.face_detail.face2.source_splat
+      stats: scene.face_detail.face2.path_stats
+
+  - id: fd_face2_denoise
+    step: wan22_vace_denoise
+    dispatch: subprocess
+    env: wan22
+    keep_loaded: true
+    when:
+      - ${globals.face_detailer}
+      - ${globals.export_ply}
+      - ${globals.refit_body}
+    inputs:
+      control_video: scene.face_detail.face2.control
+      control_masks: scene.face_detail.face2.control_masks
+      reference_image: scene.face_detail.face2.reference
+      subject_desc: dataset.prompt
+    params:
+      width: 480
+      height: 832
+      steps_high: 2
+      steps_low: 2
+      cfg: 1.0
+      seed: ${globals.seed}
+      low_vram: ${globals.low_vram}
+      sampler_high: euler
+      sampler_low: euler
+      sampler_shift: 2.5
+      strength: [0.8, 0.8, 0.5, 0.5]
+      prompt: *prompt_face
+      prompt_bank: [*prompt_orbit, *prompt_render, *prompt_face]
+      negative_prompt: "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静\
+        止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的\
+        手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体\
+        ，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走, \
+        chewing, tattoos, 眼球运动，眨眼，眼动追踪，微表情，面部抽动，头部移\
+        动, 小头, 小脸"
+    outputs:
+      images: scene.face_detail.face2.images
+
+  - id: fd_face2_matte
+    step: rmbg
+    dispatch: in_process
+    when:
+      - ${globals.face_detailer}
+      - ${globals.export_ply}
+      - ${globals.refit_body}
+    inputs:
+      images: scene.face_detail.face2.images
+    params:
+      low_vram: ${globals.low_vram}
+    outputs:
+      masks: scene.face_detail.face2.masks
+
+  - id: fd_face2_face_views
+    step: detect_face_views
+    dispatch: in_process
+    when:
+      - ${globals.face_detailer}
+      - ${globals.export_ply}
+      - ${globals.refit_body}
+    inputs:
+      images: scene.face_detail.face2.images
+      image_names: scene.face_detail.face2.image_names
+      cameras: scene.face_detail.face2.cameras
+      mesh_world: scene.mesh_world
+      joints: scene.joints
+      keypoints_3d: scene.keypoints_3d
+      world_from_raw: scene.world_from_raw
+      face_correspondence: scene.face_correspondence
+    params:
+      debug_dir: ${globals.output_root}/debug/face_detailer/face2_face_views
+    outputs:
+      face_views: scene.face_detail.face2.face_views
+
+  - id: fd_face2_head_fit
+    step: fit_head_per_view
+    dispatch: subprocess
+    env: sam3dbody
+    when:
+      - ${globals.face_detailer}
+      - ${globals.export_ply}
+      - ${globals.refit_body}
+    inputs:
+      pose_params: scene.pose_params
+      focal_length: scene.face_detail.photo.focal_length
+      vertices: scene.vertices
+      faces: scene.faces
+      world_from_raw: scene.world_from_raw
+      face_correspondence: scene.face_correspondence
+      face_views: scene.face_detail.face2.face_views
+      face_landmarks: scene.face_detail.photo.face_landmarks
+      image: scene.face_detail.photo.image
+    params:
+      debug_dir: ${globals.output_root}/debug/face_detailer/face2_head_fit
+    outputs:
+      head_fit_views: scene.face_detail.face2.head_fit
+
+  - id: fd_face2_eyes
+    step: paste_eyes
+    dispatch: in_process
+    when:
+      - ${globals.face_detailer}
+      - ${globals.export_ply}
+      - ${globals.refit_body}
+    inputs:
+      images: scene.face_detail.face2.images
+      image_names: scene.face_detail.face2.image_names
+      cameras: scene.face_detail.face2.cameras
+      head_fit_views: scene.face_detail.face2.head_fit
+      image: scene.face_detail.photo.image
+      face_landmarks: scene.face_detail.photo.face_landmarks
+    params:
+      debug_dir: ${globals.output_root}/debug/face_detailer/face2_eyes
+    outputs:
+      images: scene.face_detail.face2.images
+      eye_stats: scene.face_detail.face2.eye_stats
+
+  - id: fd_face2_clip
+    step: face_detail_clip
+    dispatch: in_process
+    when:
+      - ${globals.face_detailer}
+      - ${globals.export_ply}
+      - ${globals.refit_body}
+    inputs:
+      images: scene.face_detail.face2.images
+      masks: scene.face_detail.face2.masks
+      cameras: scene.face_detail.face2.cameras
+      image_names: scene.face_detail.face2.image_names
+      anchor_index: scene.face_detail.face2.anchor_index
+      face_views: scene.face_detail.face2.face_views
+      eye_stats: scene.face_detail.face2.eye_stats
+    outputs:
+      clip: scene.face_detail.face2.clip
+
+  # The face rig v3 on the clips' frames, constrained (steps/face_detailer.py):
+  # the raw per-view fits are 8-16 mm noisy; the clips' shared offset
+  # removed, a +-3 frame median and a 10 mm cap leave 1.5-2 mm, and the
+  # nose and mouth then agree between views (mouth 1.60 -> 1.15 px held-out).
+  - id: fd_face_rig
+    step: face_detail_rig
+    dispatch: in_process
+    when:
+      - ${globals.face_detailer}
+      - ${globals.export_ply}
+      - ${globals.refit_body}
+    inputs:
+      body_rig: scene.body_rig
+      head_fit_a: scene.face_detail.face1.head_fit
+      image_names_a: scene.face_detail.face1.image_names
+      head_fit_b: scene.face_detail.face2.head_fit
+      image_names_b: scene.face_detail.face2.image_names
+    params:
+      debug_dir: ${globals.output_root}/debug/face_detailer/rig
+    outputs:
+      body_rig: scene.face_detail.body_rig
+      face_rig_stats: scene.face_detail.face_rig_stats
+
+  - id: fd_retrain_b_dataset
+    step: face_detail_dataset
+    dispatch: in_process
+    when:
+      - ${globals.face_detailer}
+      - ${globals.export_ply}
+      - ${globals.refit_body}
+    inputs:
+      images: dataset.images
+      image_names: dataset.image_names
+      cameras: dataset.cameras
+      masks: dataset.masks
+      labels: scene.seg_labels?
+      clip_a: scene.face_detail.face1.clip
+      clip_b: scene.face_detail.face2.clip
+    outputs:
+      images: scene.face_detail.retrain_b.images
+      image_names: scene.face_detail.retrain_b.image_names
+      cameras: scene.face_detail.retrain_b.cameras
+      masks: scene.face_detail.retrain_b.masks
+      weights: scene.face_detail.retrain_b.weights
+      labels: scene.face_detail.retrain_b.labels
+
+  # Retraining B: the deliverable's views plus both face clips, with the
+  # face rig. The face detailer's result; the hair clip's control with
+  # `hair_detailer` on, in which case retraining C votes the labels.
+  - id: fd_retrain_b_train
+    step: brush
+    dispatch: in_process
+    when:
+      - ${globals.face_detailer}
+      - ${globals.export_ply}
+      - ${globals.refit_body}
+    inputs:
+      cameras: scene.face_detail.retrain_b.cameras
+      image_names: scene.face_detail.retrain_b.image_names
+      points_3d: dataset.points_3d
+      images: scene.face_detail.retrain_b.images
+      masks: scene.face_detail.retrain_b.masks
+      weights: scene.face_detail.retrain_b.weights?
+      body_rig: scene.face_detail.body_rig
+      labels: scene.face_detail.retrain_b.labels?
+      init_splat: scene.face_detail.base_splat
+    params:
+      total_steps: 6000
+      growth_stop_iter: 0
+      random_background: true
+      align_iters: 2
+      align_steps: 2000
+      align_debug_dir: ${globals.output_root}/debug/face_detailer/retrain_b_alignment
+      polish_steps: 0
+      defer_labels: ${globals.hair_detailer}
+      export_dir: ${globals.output_root}/ply
+      export_name: scene.ply
+      trainer_files_dir: ${globals.output_root}/debug/face_detailer/retrain_b
+    outputs:
+      splat_path: dataset.splat_path
+
+  # The hair clip (`hair_detailer`): one turn of a helix about the hair
+  # (centre and height from the splat's Hair labels), elevation -20..+30
+  # from level, the back panel's head and shoulders as the reference, no
+  # anchor; its loss weights are the deliverable's Hair class at the clip's
+  # cameras, dilated, so these frames train the hair and nothing else.
+  # Rendered from retraining B.
+  - id: fd_hair_views
+    step: face_detail_views
+    dispatch: in_process
+    when:
+      - ${globals.face_detailer}
+      - ${globals.export_ply}
+      - ${globals.refit_body}
+      - ${globals.hair_detailer}
+    inputs:
+      splat_path: dataset.splat_path
+      cameras: dataset.cameras
+      anchor_frame_index: dataset.extras.anchor_frame_index
+      joints: scene.joints
+      world_from_raw: scene.world_from_raw
+      front_image: scene.front_image
+      front_matte: scene.front_matte
+      reference_image: dataset.reference_image
+      back_matte: scene.back_matte?
+      label_splat_path: scene.face_detail.base_splat
+    params:
+      name: hair
+      path: helix
+      turns: 1
+      pitch_deg: 25
+      pitch_offset_deg: 5
+      elevation: level
+      centre: hair
+      focal_per_m: 1510
+      anchor: false
+      reference: back
+      hair_weights: true
+      debug_dir: ${globals.output_root}/debug/face_detailer/hair_views
+    outputs:
+      images: scene.face_detail.hair.control
+      masks: scene.face_detail.hair.control_masks
+      cameras: scene.face_detail.hair.cameras
+      image_names: scene.face_detail.hair.image_names
+      reference_image: scene.face_detail.hair.reference
+      anchor_index: scene.face_detail.hair.anchor_index
+      weights: scene.face_detail.hair.weights
+      splat_path: scene.face_detail.hair.source_splat
+      stats: scene.face_detail.hair.path_stats
+
+  - id: fd_hair_denoise
+    step: wan22_vace_denoise
+    dispatch: subprocess
+    env: wan22
+    keep_loaded: true
+    when:
+      - ${globals.face_detailer}
+      - ${globals.export_ply}
+      - ${globals.refit_body}
+      - ${globals.hair_detailer}
+    inputs:
+      control_video: scene.face_detail.hair.control
+      control_masks: scene.face_detail.hair.control_masks
+      reference_image: scene.face_detail.hair.reference
+      subject_desc: dataset.prompt
+    params:
+      width: 480
+      height: 832
+      steps_high: 2
+      steps_low: 2
+      cfg: 1.0
+      seed: ${globals.seed}
+      low_vram: ${globals.low_vram}
+      sampler_high: euler
+      sampler_low: euler
+      sampler_shift: 2.5
+      strength: [0.8, 0.8, 0.5, 0.5]
+      prompt: *prompt_face
+      prompt_bank: [*prompt_orbit, *prompt_render, *prompt_face]
+      negative_prompt: "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静\
+        止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的\
+        手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体\
+        ，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走, \
+        chewing, tattoos, 眼球运动，眨眼，眼动追踪，微表情，面部抽动，头部移\
+        动, 小头, 小脸"
+    outputs:
+      images: scene.face_detail.hair.images
+
+  - id: fd_hair_matte
+    step: rmbg
+    dispatch: in_process
+    when:
+      - ${globals.face_detailer}
+      - ${globals.export_ply}
+      - ${globals.refit_body}
+      - ${globals.hair_detailer}
+    inputs:
+      images: scene.face_detail.hair.images
+    params:
+      low_vram: ${globals.low_vram}
+    outputs:
+      masks: scene.face_detail.hair.masks
+
+  - id: fd_hair_clip
+    step: face_detail_clip
+    dispatch: in_process
+    when:
+      - ${globals.face_detailer}
+      - ${globals.export_ply}
+      - ${globals.refit_body}
+      - ${globals.hair_detailer}
+    inputs:
+      images: scene.face_detail.hair.images
+      masks: scene.face_detail.hair.masks
+      cameras: scene.face_detail.hair.cameras
+      image_names: scene.face_detail.hair.image_names
+      weights: scene.face_detail.hair.weights
+    outputs:
+      clip: scene.face_detail.hair.clip
+
+  - id: fd_retrain_c_dataset
+    step: face_detail_dataset
+    dispatch: in_process
+    when:
+      - ${globals.face_detailer}
+      - ${globals.export_ply}
+      - ${globals.refit_body}
+      - ${globals.hair_detailer}
+    inputs:
+      images: dataset.images
+      image_names: dataset.image_names
+      cameras: dataset.cameras
+      masks: dataset.masks
+      labels: scene.seg_labels?
+      clip_a: scene.face_detail.face1.clip
+      clip_b: scene.face_detail.face2.clip
+      clip_c: scene.face_detail.hair.clip
+    outputs:
+      images: scene.face_detail.retrain_c.images
+      image_names: scene.face_detail.retrain_c.image_names
+      cameras: scene.face_detail.retrain_c.cameras
+      masks: scene.face_detail.retrain_c.masks
+      weights: scene.face_detail.retrain_c.weights
+      labels: scene.face_detail.retrain_c.labels
+
+  # Retraining C: retraining B's views plus the hair clip, again warm from
+  # the deliverable as it was.
+  - id: fd_retrain_c_train
+    step: brush
+    dispatch: in_process
+    when:
+      - ${globals.face_detailer}
+      - ${globals.export_ply}
+      - ${globals.refit_body}
+      - ${globals.hair_detailer}
+    inputs:
+      cameras: scene.face_detail.retrain_c.cameras
+      image_names: scene.face_detail.retrain_c.image_names
+      points_3d: dataset.points_3d
+      images: scene.face_detail.retrain_c.images
+      masks: scene.face_detail.retrain_c.masks
+      weights: scene.face_detail.retrain_c.weights?
+      body_rig: scene.face_detail.body_rig
+      labels: scene.face_detail.retrain_c.labels?
+      init_splat: scene.face_detail.base_splat
+    params:
+      total_steps: 6000
+      growth_stop_iter: 0
+      random_background: true
+      align_iters: 2
+      align_steps: 2000
+      align_debug_dir: ${globals.output_root}/debug/face_detailer/retrain_c_alignment
+      polish_steps: 0
+      export_dir: ${globals.output_root}/ply
+      export_name: scene.ply
+      trainer_files_dir: ${globals.output_root}/debug/face_detailer/retrain_c
     outputs:
       splat_path: dataset.splat_path
 

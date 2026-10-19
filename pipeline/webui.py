@@ -742,20 +742,24 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None, open_warning: str
 
                             # `requires:` on a setting or an output: a knob
                             # only meaningful behind another switch is drawn
-                            # greyed out while it is off and follows it. The
-                            # run-side half is the steps' own `when:` and,
-                            # for an output, `resolve_outputs`.
+                            # greyed out while it is off and follows it — or,
+                            # when both sit in the main panel, is hidden while
+                            # it is off (Hair detailer under Face detailer).
+                            # The run-side half is the steps' own `when:`
+                            # and, for an output, `resolve_outputs`.
                             requires = {s.name: s.requires for s in settings}
                             requires.update({o.name: o.requires for o in outputs if o.switch})
+                            plain_names = {p.name for p in plain}
                             for param in panel:
-                                source = controls.get(requires.get(param.name) or "")
+                                source_name = requires.get(param.name) or ""
+                                source = controls.get(source_name)
                                 if source is None:
                                     continue
-                                controls[param.name].interactive = truthy(
-                                    values.get(requires[param.name])
-                                )
+                                attr = ("visible" if param.name in plain_names and source_name in plain_names
+                                        else "interactive")
+                                setattr(controls[param.name], attr, truthy(values.get(source_name)))
                                 source.change(
-                                    lambda on: gr.update(interactive=truthy(on)),
+                                    lambda on, attr=attr: gr.update(**{attr: truthy(on)}),
                                     inputs=[source], outputs=[controls[param.name]],
                                 )
 

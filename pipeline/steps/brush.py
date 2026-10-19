@@ -633,13 +633,18 @@ def write_labels(colmap_dir: Path, image_names: Sequence[str],
     `masks/` sidecar so the trainer matches them by stem. The ids are
     written as they are — NOT through `mask_to_alpha_u8`, which scales a
     [0, 1] map to 0..255 and would turn class 3 into 255. Nothing is written
-    when there are none; the directory's absence means "no vote".
+    when there are none; the directory's absence means "no vote", and a
+    None entry is one view that does not vote.
     """
     if not labels:
         return
     labels_dir = colmap_dir / "labels"
     labels_dir.mkdir(exist_ok=True)
+    written = 0
     for label, filename in zip(labels, image_names):
+        if label is None:
+            continue
+        written += 1
         label = np.asarray(label)
         if label.ndim != 2:
             raise ValueError(f"labels must be HxW class-id maps, got shape {label.shape}")
@@ -647,7 +652,7 @@ def write_labels(colmap_dir: Path, image_names: Sequence[str],
     logger.info(
         "brush: %d training view(s) carry a labels/ sidecar (per-pixel class "
         "ids); the trainer votes them onto the splats at export as seg_label / "
-        "seg_conf", len(labels),
+        "seg_conf", written,
     )
 
 
@@ -658,18 +663,23 @@ def write_loss_weights(colmap_dir: Path, image_names: Sequence[str],
     Greyscale PNGs, 255 = full weight, named the way the `masks/` sidecar is
     so brush matches them to their frames by stem. Nothing is written when
     there are none: the directory's absence is what "every view at weight
-    1" looks like to brush.
+    1" looks like to brush, and so is a view's own missing file (a None
+    entry).
     """
     if not weights:
         return
     weights_dir = colmap_dir / "weights"
     weights_dir.mkdir(exist_ok=True)
+    written = 0
     for weight, filename in zip(weights, image_names):
+        if weight is None:
+            continue
         cv2.imwrite(str(weights_dir / _sidecar_name(filename)), mask_to_alpha_u8(weight))
+        written += 1
     logger.info(
         "brush: %d training view(s) carry a weights/ sidecar (per-pixel loss "
         "weight); brush multiplies it into each view's loss on top of its alpha "
-        "mode", len(weights),
+        "mode", written,
     )
 
 
@@ -831,9 +841,11 @@ class BrushStep(Step):
              "masks": Optional[List[np.ndarray]] float32 [0,1], foreground=1,
              "normal_maps": Optional[List[np.ndarray]] HxWx3 float32 [-1,1],
              "weights": Optional[List[np.ndarray]] float32 [0,1], a per-pixel
-                        loss weight per training view (weights/ sidecar),
+                        loss weight per training view (weights/ sidecar); a
+                        None entry is a view without one (weight 1),
              "labels": Optional[List[np.ndarray]] HxW uint8 class ids per
-                        training view (sapiens2_seg's batched `labels`),
+                        training view (sapiens2_seg's batched `labels`; a
+                        None entry is a view that does not vote),
                         written as the labels/ sidecar; the trainer votes
                         them onto the splats and the exported .ply carries
                         `seg_label` / `seg_conf` per Gaussian (b2ctrain
@@ -857,7 +869,10 @@ class BrushStep(Step):
              "support_images": Optional[List[np.ndarray]] BGR(A),
              "support_masks": Optional[List[np.ndarray]] float32 [0,1],
              "support_image_names": Optional[List[str]],
-             "support_normal_maps": Optional[List[np.ndarray]]}
+             "support_normal_maps": Optional[List[np.ndarray]],
+             "init_splat": Optional[str] — a trained .ply to start from (a
+                     warm start: linked as the dataset's init.ply, which the
+                     trainer prefers over points3D.txt)}
     outputs: {"splat_path": str}
 
     The `support_*` inputs are the masked half of a mixed run — extra
@@ -1321,6 +1336,9 @@ class BrushStep(Step):
                     cv2.imwrite(str(images_dir / filename), frame)
 
             write_frames(training_frames())
+            if inputs.get("init_splat"):
+                _link_init_ply(colmap_dir, Path(inputs["init_splat"]))
+                logger.info("brush: warm start from %s", inputs["init_splat"])
 
             if normal_maps is not None:
                 normals_dir = colmap_dir / "normals"

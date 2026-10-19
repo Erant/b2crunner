@@ -211,7 +211,8 @@ renders of a splat trained on pass 2's 81 frames. Whatever the passes paint
 over the overlap is discarded; pass 2's frames stay. Everything downstream
 then runs on 162 views instead of 81. The cost is two more denoises (no
 model reload), a fourth splat training, and twice the frames in every later
-step. `debug/extension_input/` holds the control videos and
+step. The two passes run 4 denoise steps, not pass 2's 6 (2026-10-18, from
+the face detailer's 4/6 ablation; not measured on the extension itself). `debug/extension_input/` holds the control videos and
 `debug/extension_splat.ply` the guide splat.
 
 **extend_tilt_deg** — how far past the ±30° band the outermost extension
@@ -260,6 +261,36 @@ it on. The retraining keeps the alignment loop and body rig but drops the
 normal maps. The first splat is kept as
 `debug/reupscale/final_before_reupscale.ply`. It costs ~15 min of SeedVR2 on
 a 4070 Ti plus a training.
+
+**face_detailer** — after the deliverable training (and the re-upscale),
+refines the head with close-up 480x832 denoise clips rendered from the
+splat itself, then retrains the splat on them (`steps/face_detailer.py`):
+1. clip 1, a Lissajous path about the head (yaw ±45°, pitch ±20°), the
+   photograph warped into its first frame and its face as the reference;
+2. a retraining on it, which clip 2 is rendered from (yaw ±90°, pitch
+   -40°..+20°: the profiles and the views from below);
+3. the pipeline's own eye paste on both clips, with the photograph's face
+   upscaled 4x by SeedVR2 for the eye texture; eyes it skips get no loss;
+4. the face rig v3 on the clips' frames only, its shared offset removed,
+   median-smoothed and capped at 10 mm;
+5. the final retraining: warm from the deliverable, 6000 iterations, growth
+   off (the splat count does not change), two alignment iterations.
+
+On two subjects' held-out face views, iris reprojection error went 1.51 →
+1.17 px and mouth 1.60 → 1.15 px, and the face took the photograph's skin
+and tattoos. Each clip is 4 denoise steps: against 6 on 9016a1, iris/mouth
+1.12/1.07 against 1.06/1.23 px, photo-view PSNR 18.1 against 17.1 dB, face
+sharpness 6–12 % lower, ~15.5 against ~18 min for the stage on a 4070 Ti.
+The pipeline run measured softer at the front than the hand-run experiment
+(sharpness 76 against 94 at 6 steps, one seed). colmap/ does not include
+the clips. The splat before it is kept as
+`debug/face_detailer/before_face_detailer.ply`.
+
+**hair_detailer** (shown with the face detailer) — a third clip, one turn of
+a helix about the hair (elevation -20°..+30°, the back panel's head as the
+reference), whose frames train only the splats' Hair class. Judged by eye:
+the back of the head goes from clumps to strands matching the front; the
+Laplacian measure disagrees, as it rewards the clumps.
 
 **lighting_correction** (`prepass` / `off`) — takes the generator's
 frame-to-frame relighting out of the frames before the deliverable

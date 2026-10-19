@@ -158,6 +158,29 @@ _ROOM = "meeting at clear corners. "
 assert DENOISE_PROMPT.count(_ROOM) == 1
 DRAWING_PROMPT = DENOISE_PROMPT.replace(_ROOM, _ROOM + ORBIT_SENTENCE)
 
+#: The face detailer's close-up clips (helical.yaml's `face` prompt; the
+#: hair clip reads it too): a head-and-shoulders portrait on a grey
+#: backdrop, no room — what experiments/face_detailer measured.
+FACE_PROMPT = (
+    '人工光、柔光、低对比度、均匀照明、环绕运镜、特写镜头。时间静止，人物完全静止。头部与身体保持固定，面部肌肉完全不动，维持'
+    '单一的中性表情。双眼一眨不眨，眼睑保持张开且稳定，目光空洞而固定，锁定远处的一个点，对镜头毫无察觉、毫无反应。背景是一块'
+    '平整的纯灰色影棚背景布。镜头以匀速、固定焦距围绕人物头部缓慢地沿弧线移动，人物头部与肩膀始终保持在画面中央。 Time '
+    'is frozen and only the camera moves. The gaze stays anchored'
+    ' to a distant point as the camera passes, so the eyes never '
+    'follow the lens. Eyelids stay open and steady, the expressio'
+    'n holds without a single micro-movement, and the head stays '
+    'fixed on the body. A close-up head-and-shoulders portrait of'
+    ' $SUBJECT_DESC$, in front of a plain flat grey studio backdr'
+    "op. The camera arcs slowly around the subject's head at a st"
+    'eady pace and a fixed focal length, keeping the head and sho'
+    'ulders centred in the frame. Soft, even, low-contrast light '
+    'wraps the face from every side, and the skin holds one even '
+    'brightness from every angle. Detailed natural skin texture, '
+    'clearly defined eyes, eyebrows and lips, individual strands '
+    'of hair, matte skin, photorealistic, sharp focus, identical '
+    'face, hair and lighting in every frame.'
+)
+
 def _workflows():
     return sorted(WORKFLOW_DIR.glob("*.yaml"))
 
@@ -1141,6 +1164,11 @@ class TestWorkflowFiles(unittest.TestCase):
                             f"'{step.id}' reads supporting views and must read "
                             f"the weights that make the frames yield to them",
                         )
+                    elif step.id.startswith("fd_retrain_"):
+                        # The face detailer's own loss weights (unpasted eyes,
+                        # the hair clip's hair), not a yield to anything.
+                        self.assertEqual(step.inputs.get("weights"),
+                                         step.inputs["images"].replace(".images", ".weights") + "?")
                     else:
                         self.assertNotIn(
                             "weights", step.inputs,
@@ -1205,8 +1233,13 @@ class TestWorkflowFiles(unittest.TestCase):
         # (refine_cameras_final) moved the subject 1.6-2.9 px on screen at
         # 1080x1920 for 1.62 -> 1.60 px of reprojection on 6692a0, so it
         # trains on the poses the frames were made on.
+        #
+        # The face detailer's retrainings (steps/face_detailer.py) are the
+        # deliverable's views at the same poses plus clips rendered from the
+        # splat at cameras of its own making: registered by construction,
+        # the alignment loop takes the rest.
         unrefined = {"reoutline_train_splat", "extend_train_splat", "relight_pretrain", "reupscale_train",
-                     "train_final_splat"}
+                     "train_final_splat", "fd_retrain_a_train", "fd_retrain_b_train", "fd_retrain_c_train"}
         for path in _workflows():
             spec = WorkflowSpec.from_yaml(str(path))
             ids = [s.id for s in spec.steps]
@@ -1482,8 +1515,11 @@ class TestWorkflowFiles(unittest.TestCase):
         # full-resolution passes, the gated 480p re-outline pass, and the
         # two gated orbit-extension passes (2026-09-21), which are pass 2's
         # block on the two extension videos and carry pass 2's prompt.
-        expected = {"helical.yaml": 5}
+        # Plus the face detailer's three gated 480p close-ups (2026-10-18),
+        # which carry the `face` prompt.
+        expected = {"helical.yaml": 8}
         drawn = {"denoise_pass1", "reoutline_denoise"}
+        close_ups = {"fd_face1_denoise", "fd_face2_denoise", "fd_hair_denoise"}
         workflows = _workflows()
         seen = 0
         for path in workflows:
@@ -1495,7 +1531,8 @@ class TestWorkflowFiles(unittest.TestCase):
                 seen += 1
                 passes += 1
                 with self.subTest(workflow=path.name, step=step.id):
-                    want = DRAWING_PROMPT if step.id in drawn else DENOISE_PROMPT
+                    want = (DRAWING_PROMPT if step.id in drawn
+                            else FACE_PROMPT if step.id in close_ups else DENOISE_PROMPT)
                     self.assertEqual(step.params.get("prompt"), want)
                     self.assertEqual(
                         step.params.get("negative_prompt"), DENOISE_NEGATIVE_PROMPT
@@ -1612,6 +1649,13 @@ class TestWorkflowFiles(unittest.TestCase):
                         )
                 for step in spec.steps:
                     if step.step != "wan22_vace_denoise":
+                        continue
+                    # The face detailer's clips condition on their own crop
+                    # (the photograph's face, or the back panel's head),
+                    # which face_detail_views makes from these same halves.
+                    if step.id.startswith("fd_"):
+                        clip = step.id[len("fd_"):-len("_denoise")]
+                        self.assertEqual(step.inputs.get("reference_image"), f"scene.face_detail.{clip}.reference")
                         continue
                     with self.subTest(step=step.id):
                         self.assertEqual(
@@ -1738,13 +1782,15 @@ class TestTheIntermediateSplatIsKept(unittest.TestCase):
         spec = WorkflowSpec.from_yaml(resolve_workflow("helical"))
         scope = {"globals": dict(spec.globals, output_root="/out")}
         # The re-upscale's retraining exports over the deliverable on purpose
-        # (steps/reupscale.py copies the splat aside first), so it is the one
-        # training left out; that it lands exactly on train_final_splat's path
+        # (steps/reupscale.py copies the splat aside first), and so do the face
+        # detailer's last two (fd_face1_views copies it aside), so they are
+        # left out; that it lands exactly on train_final_splat's path
         # is checked in test_reupscale.
         exports = [
             (resolve(step.params, scope).get("export_dir"),
              resolve(step.params, scope).get("export_name"))
-            for step in spec.steps if step.step == "brush" and step.id != "reupscale_train"
+            for step in spec.steps if step.step == "brush" and step.id not in (
+                "reupscale_train", "fd_retrain_b_train", "fd_retrain_c_train")
         ]
         self.assertEqual(len(exports), len(set(exports)), f"two trainings share a path: {exports}")
 
@@ -1964,6 +2010,21 @@ class TestTheDenoiseSettingsAreTheMeasuredOnes(unittest.TestCase):
         self.assertEqual(params["sampler_shift"], 5)
         self.assertEqual(params["strength"], [1, 1, 0.5, 0.5, 0.5, 0.5])
         self.assertEqual((params["steps_high"], params["steps_low"]), (2, 4))
+
+    def test_the_extension_and_the_face_detailer_run_four_steps(self):
+        """Pass 1 and pass 2 keep 6 steps; the extension passes and the face
+        detailer's clips run 4 (2026-10-18, the face detailer's 4/6 ablation),
+        with a strength schedule one entry per step."""
+        for step_id, strength in (("denoise_extension_before", [0.8] * 4), ("denoise_extension_after", [0.8] * 4),
+                                  ("fd_face1_denoise", [0.8, 0.8, 0.5, 0.5]), ("fd_face2_denoise", [0.8, 0.8, 0.5, 0.5]),
+                                  ("fd_hair_denoise", [0.8, 0.8, 0.5, 0.5])):
+            with self.subTest(step=step_id):
+                params = self._step(step_id).params
+                self.assertEqual((params["steps_high"], params["steps_low"]), (2, 2))
+                self.assertEqual(params["strength"], strength)
+        for step_id in ("denoise_pass1", "denoise_pass2"):
+            params = self._step(step_id).params
+            self.assertEqual((params["steps_high"], params["steps_low"]), (2, 4))
 
     def test_pass_2_is_the_quality_sweep_s_corner_at_0_8(self):
         """Euler on the opening steps at shift 2.5 (shift 8 and uni_pc each
@@ -2488,13 +2549,16 @@ class TestTheOrbitExtension(unittest.TestCase):
         })
 
     def test_both_extension_passes_are_pass_2s_block_on_their_own_video(self):
+        """Pass 2's block, except in 4 steps rather than 6 (2026-10-18): 2 per
+        expert and the same flat 0.8 on each."""
         spec = self._spec()
         pass2 = self._step(spec, "denoise_pass2")
+        four = dict(pass2.params, steps_low=2, strength=[0.8, 0.8, 0.8, 0.8])
         for name, phase in (("denoise_extension_before", "before_phase"),
                             ("denoise_extension_after", "after_phase")):
             with self.subTest(step=name):
                 extra = self._step(spec, name)
-                self.assertEqual(extra.params, pass2.params)
+                self.assertEqual(extra.params, four)
                 self.assertEqual((extra.dispatch, extra.env, extra.keep_loaded),
                                  (pass2.dispatch, pass2.env, pass2.keep_loaded))
                 self.assertEqual(extra.inputs, {
