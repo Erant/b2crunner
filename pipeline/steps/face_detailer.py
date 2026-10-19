@@ -72,6 +72,10 @@ _SH_C0 = 0.28209479177387814
 HAIR_LABEL = 4
 #: The grey the clips stand on: the renders' background and the matted photograph's.
 _GREY = 128
+#: MHR's elbows and upper arms (the joint tree: 39/75 under the clavicles 38/74, their subtrees the arms with
+#: the hands' 20 joints each).
+MHR_ELBOW_JOINTS = (40, 76)
+MHR_SHOULDER_JOINTS = (39, 75)
 
 
 # -- the path -----------------------------------------------------------------------------------------------
@@ -173,15 +177,48 @@ def hair_centre(scene: Any, below_m: float = 0.15) -> Optional[np.ndarray]:
 def class_mask_scene(scene: Any, label: int) -> Any:
     """The splat with every Gaussian of class `label` white and every other black, base colour only: its
     render over black is that class's accumulated alpha, occluded by the rest."""
-    from body2colmap.splat_scene import SplatScene
-
     labels = _labels(scene)
     if labels is None:
         raise ValueError("face_detail_views: the splat carries no seg_label (splat_labels off?)")
-    sh = np.zeros((len(labels), 1, 3), np.float32)
-    sh[:, 0, :] = np.where((labels == label)[:, None], 0.5 / _SH_C0, -0.5 / _SH_C0)
+    return mask_scene(scene, labels == label)
+
+
+def mask_scene(scene: Any, selected: np.ndarray) -> Any:
+    """The splat with the `selected` Gaussians white and every other black, base colour only."""
+    from body2colmap.splat_scene import SplatScene
+
+    sh = np.zeros((len(selected), 1, 3), np.float32)
+    sh[:, 0, :] = np.where(np.asarray(selected, bool)[:, None], 0.5 / _SH_C0, -0.5 / _SH_C0)
     return SplatScene(means=scene.means, scales=scene.scales, quats=scene.quats, opacities=scene.opacities,
                       sh_coeffs=sh, sh_degree=0)
+
+
+def subset_scene(scene: Any, keep: np.ndarray) -> Any:
+    """The splat without the Gaussians `keep` is False for."""
+    from body2colmap.splat_scene import SplatScene
+
+    keep = np.asarray(keep, bool)
+    return SplatScene(means=scene.means[keep], scales=scene.scales[keep], quats=scene.quats[keep],
+                      opacities=scene.opacities[keep], sh_coeffs=scene.sh_coeffs[keep], sh_degree=scene.sh_degree)
+
+
+def arm_gaussians(scene: Any, rig: Dict[str, Any], cut: str) -> np.ndarray:
+    """Per Gaussian, whether it is arm: its nearest body-rig vertex is skinned mostly to the joints from
+    `cut` ("elbow": the forearms and hands, "shoulder": the whole arms) down."""
+    from scipy.spatial import cKDTree
+
+    parents = np.asarray(rig["parents"], np.int64)
+    roots = MHR_ELBOW_JOINTS if cut == "elbow" else MHR_SHOULDER_JOINTS
+    if max(roots) >= len(parents):
+        raise ValueError(f"face_detail_views: the body rig has {len(parents)} joints, not MHR's")
+    arm = np.zeros(len(parents), bool)
+    arm[list(roots)] = True
+    for j in range(1, len(parents)):
+        arm[j] |= arm[parents[j]]
+    w = np.asarray(rig["weights"], np.float64)
+    vert_arm = (w * arm[np.asarray(rig["joints"], np.int64)]).sum(1) / np.maximum(w.sum(1), 1e-9)
+    _, nearest = cKDTree(np.asarray(rig["verts"], np.float64)).query(np.asarray(scene.means, np.float64))
+    return vert_arm[nearest] > 0.5
 
 
 # -- the photograph -----------------------------------------------------------------------------------------
@@ -244,17 +281,25 @@ class FaceDetailViewsStep(Step):
                              reference (`reference: photo`),
               "reference_image"?: the matted back panel (`reference: back`), "back_matte"?: its matte,
               "label_splat_path"?: a splat carrying seg_label, for the hair's framing and loss weights
-                                   (default splat_path)}
+                                   (default splat_path),
+              "body_rig"?: build_body_rig's, for `hide_arms`}
     outputs: {"images": [BGR] the control video, "masks": [float HxW] its VACE masks (1 = paint, 0 at the
               anchor frame), "cameras": [Camera], "image_names": [str], "reference_image": BGR,
-              "anchor_index": int or None, "weights": [float HxW] or None — the hair's loss weights
-                                                                           (`hair_weights`),
+              "anchor_index": int or None, "weights": [float HxW] or None — the clip's loss weights: the
+                                       hair (`hair_weights`) times zero where the hidden arms are,
               "splat_path": str — the splat as it was (`keep_copy`, else splat_path), "stats": {...}}
 
     The view sphere is centred on the head (`centre: head`, the MHR head joint) or the hair (`centre: hair`,
     `hair_centre`); a view is (yaw, pitch) about it at the photograph's distance, yaw from the photograph's
     direction, pitch from its elevation (`elevation: photo`) or from level (`elevation: level`). The focal
     length is `focal_per_m` times that distance, so the head is the same size in every subject's clip.
+
+    `hide_arms` renders the control without the arms (the Gaussians bound to the rig from the elbows or the
+    shoulders down): a hand near the face, or an arm between a view from below and the head, would otherwise
+    hide the face from the video model, and the model, with only a face as its reference, repaints it as skin
+    (0256db: the raised gauntlet became a tattooed hand and trained into the splat). Where the arms are in front
+    in the full splat the clip has nothing true to say, so those pixels get zero loss weight, dilated; the
+    anchor frame, the photograph itself, keeps full weight.
     """
 
     PARAMS = (
@@ -276,6 +321,9 @@ class FaceDetailViewsStep(Step):
               choices=("photo", "back")),
         Param("hair_weights", bool, False, "Publish loss weights that keep this clip to the hair"),
         Param("hair_dilate_px", int, 4, "Dilate the hair weights by this many pixels", minimum=0),
+        Param("hide_arms", str, "elbow", "Leave the arms out of the control from the elbows or the shoulders down",
+              choices=("none", "elbow", "shoulder")),
+        Param("arm_dilate_px", int, 8, "Grow the hidden arms' zero-weight region by this many pixels", minimum=0),
         Param("name", str, "face", "Frame name prefix (unique per clip)"),
         Param("keep_copy", str, "", "Copy the splat here first and publish the copy as splat_path"),
         Param("debug_dir", str, "", "Write the path, the anchor registration and a contact sheet here"),
@@ -326,8 +374,18 @@ class FaceDetailViewsStep(Step):
         c2ws = [_look_at_cv(target + dist * _directions(np.array(yaw0 + a), np.array(b)), target) for a, b in zip(u, pitch)]
         clip_cams = [_camera(m, fx, W, H) for m in c2ws]
         names = [f"{params['name']}_{i + 1:05d}.png" for i in range(N)]
-        images, _alphas = _rasterize(scene=scene, splat_path=str(splat_path), cameras=clip_cams, image_names=names,
-                                     width=W, height=H, bg_color=(0.5, 0.5, 0.5), render_path=params["render_path"])
+        arms = None
+        if params["hide_arms"] != "none":
+            if not isinstance(inputs.get("body_rig"), dict):
+                raise ValueError("face_detail_views: hide_arms needs 'body_rig'")
+            arms = arm_gaussians(scene, inputs["body_rig"], params["hide_arms"])
+        if arms is not None and arms.any():
+            images, _alphas = _rasterize(scene=subset_scene(scene, ~arms), splat_path=None, cameras=clip_cams,
+                                         image_names=names, width=W, height=H, bg_color=(0.5, 0.5, 0.5),
+                                         render_path=params["render_path"])
+        else:
+            images, _alphas = _rasterize(scene=scene, splat_path=str(splat_path), cameras=clip_cams, image_names=names,
+                                         width=W, height=H, bg_color=(0.5, 0.5, 0.5), render_path=params["render_path"])
         images = [np.ascontiguousarray(im[..., :3]) for im in images]
         masks = [np.ones((H, W), np.float32) for _ in range(N)]
         stats: Dict[str, Any] = {"path": params["path"], "deg_per_frame": round(float(speed), 3), "centre": centre_from,
@@ -394,11 +452,28 @@ class FaceDetailViewsStep(Step):
                 m = cv2.GaussianBlur(cv2.dilate(m, np.ones((k, k), np.uint8)), (0, 0), 2)
                 weights.append(m.astype(np.float32) / 255.0)
             stats["hair_coverage"] = round(float(np.mean([w.mean() for w in weights])), 4)
+        if arms is not None and arms.any():
+            seen, _ = _rasterize(scene=mask_scene(scene, arms), splat_path=None, cameras=clip_cams, image_names=names,
+                                 width=W, height=H, bg_color=(0.0, 0.0, 0.0), render_path=params["render_path"])
+            k = 2 * int(params["arm_dilate_px"]) + 1
+            free = []
+            for i, im in enumerate(seen):
+                m = (cv2.cvtColor(im[..., :3], cv2.COLOR_BGR2GRAY) > 32).astype(np.uint8) * 255
+                m = cv2.GaussianBlur(cv2.dilate(m, np.ones((k, k), np.uint8)), (0, 0), 2)
+                free.append(np.ones((H, W), np.float32) if i == anchor_index else 1.0 - m.astype(np.float32) / 255.0)
+            weights = free if weights is None else [w * f for w, f in zip(weights, free)]
+            stats["arms"] = {"hidden": params["hide_arms"], "gaussians": int(arms.sum()),
+                             "frames_with_arms": int(sum(f.min() < 0.5 for f in free)),
+                             "zero_weight_fraction": round(float(np.mean([(f < 0.5).mean() for f in free])), 4)}
 
         logger.info("face_detail_views: %s %d frames about the %s at %.2f m, %.2f deg/frame, yaw %+.0f..%+.0f, "
                     "pitch %+.0f..%+.0f (photograph at %+.0f), anchor %s, reference %s", params["path"], N, centre_from,
                     dist, speed, u.min(), u.max(), pitch.min(), pitch.max(), pitch0,
                     "frame %d" % anchor_index if anchor_index is not None else "none", params["reference"])
+        if "arms" in stats:
+            logger.info("face_detail_views: arms hidden from the %s down (%d Gaussians), in front in %d of %d frames, "
+                        "%.1f %% of the pixels at zero weight", params["hide_arms"], stats["arms"]["gaussians"],
+                        stats["arms"]["frames_with_arms"], N, 100.0 * stats["arms"]["zero_weight_fraction"])
         if params["debug_dir"]:
             debug = Path(params["debug_dir"])
             debug.mkdir(parents=True, exist_ok=True)
@@ -407,6 +482,9 @@ class FaceDetailViewsStep(Step):
             picks = list(range(0, N, max(N // 8, 1)))[:9]
             sheet = np.concatenate([cv2.resize(images[i], (W // 2, H // 2)) for i in picks] + [cv2.resize(reference, (W // 2, H // 2))], 1)
             cv2.imwrite(str(debug / f"{params['name']}_control.jpg"), sheet)
+            if weights is not None:
+                cv2.imwrite(str(debug / f"{params['name']}_weights.jpg"), np.concatenate(
+                    [cv2.resize((images[i] * weights[i][..., None]).astype(np.uint8), (W // 2, H // 2)) for i in picks], 1))
         return {"images": images, "masks": masks, "cameras": clip_cams, "image_names": names,
                 "reference_image": reference, "anchor_index": anchor_index, "weights": weights,
                 "splat_path": str(splat_path), "stats": stats}
@@ -515,12 +593,13 @@ class FaceDetailClipStep(Step):
 
     inputs:  {"images": [BGR] the clip (eyes pasted), "masks": [float] its matte (rmbg), "cameras", "image_names",
               "anchor_index"?: the photograph's frame, "face_views"?: detect_face_views' landmarks on the clip,
-              "eye_stats"?: paste_eyes' per-view record, "weights"?: loss weights of the clip's own (the hair's)}
+              "eye_stats"?: paste_eyes' per-view record, "weights"?: loss weights of the clip's own (the hair, the
+              hidden arms: face_detail_views')}
     outputs: {"clip": {"images", "masks", "cameras", "image_names", "weights": [float HxW or None]}}
 
-    With `weights` wired they are the clip's loss weights (the hair clip). Otherwise every eye the paste did not
-    draw gets zero weight, in every frame but the photograph's: those are the video model's eyes, which follow
-    the camera, and the eyes the rest of the views agree on must not be pulled towards them.
+    `weights` are the clip's loss weights. With `face_views` wired (the face clips) every eye the paste did not
+    draw gets zero weight on top, in every frame but the photograph's: those are the video model's eyes, which
+    follow the camera, and the eyes the rest of the views agree on must not be pulled towards them.
     """
 
     PARAMS = (
@@ -533,29 +612,32 @@ class FaceDetailClipStep(Step):
         if not (len(images) == len(names) == len(masks) == len(cameras)):
             raise ValueError(f"face_detail_clip: images {len(images)}, image_names {len(names)}, masks {len(masks)}, "
                              f"cameras {len(cameras)} disagree")
-        weights: List[Optional[np.ndarray]]
-        if inputs.get("weights") is not None:
-            weights = list(inputs["weights"])
-            how = "own loss weights"
-        else:
+        own = inputs.get("weights")
+        weights: List[Optional[np.ndarray]] = list(own) if own is not None else [None] * len(images)
+        if len(weights) != len(images):
+            raise ValueError(f"face_detail_clip: weights {len(weights)} for {len(images)} frames")
+        how = "own loss weights" if own is not None else "no loss weights"
+        if inputs.get("face_views") is not None:
             anchor = inputs.get("anchor_index")
             landmarks = (inputs.get("face_views") or {}).get("landmarks_px", {})
             drawn = (inputs.get("eye_stats") or {}).get("views", {})
             if not isinstance(drawn, dict):
                 drawn = {}
-            weights, masked = [], 0
+            masked = 0
             for i, (img, name) in enumerate(zip(images, names)):
                 lm = landmarks.get(name)
                 if i == anchor or lm is None:
-                    weights.append(None)
                     continue
                 pasted = drawn.get(name, {})
                 sides = [s for s in _LID_RINGS if not (isinstance(pasted.get(s), dict) and "skipped" not in pasted[s])]
-                weights.append(eye_weights(img.shape[:2], lm, sides, int(params["eye_dilate_px"])) if sides else None)
+                if sides:
+                    eyes = eye_weights(img.shape[:2], lm, sides, int(params["eye_dilate_px"]))
+                    weights[i] = eyes if weights[i] is None else weights[i] * eyes
                 masked += len(sides)
-            how = f"{masked} unpasted eyes at zero weight"
+            how += f", {masked} unpasted eyes at zero weight"
         logger.info("face_detail_clip: %d frames, %s", len(images), how)
-        return {"clip": {"images": images, "masks": masks, "cameras": cameras, "image_names": names, "weights": weights}}
+        return {"clip": {"images": images, "masks": masks, "cameras": cameras, "image_names": names,
+                         "weights": weights if any(w is not None for w in weights) else None}}
 
 
 # -- face_detail_dataset ------------------------------------------------------------------------------------------

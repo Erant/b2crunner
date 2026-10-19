@@ -4691,6 +4691,7 @@ steps:
       world_from_raw: scene.world_from_raw
       front_image: scene.front_image
       front_matte: scene.front_matte
+      body_rig: scene.body_rig
     params:
       name: face1
       path: lissajous
@@ -4845,6 +4846,7 @@ steps:
       anchor_index: scene.face_detail.face1.anchor_index
       face_views: scene.face_detail.face1.face_views
       eye_stats: scene.face_detail.face1.eye_stats
+      weights: scene.face_detail.face1.weights?
     outputs:
       clip: scene.face_detail.face1.clip
 
@@ -4921,6 +4923,7 @@ steps:
       world_from_raw: scene.world_from_raw
       front_image: scene.front_image
       front_matte: scene.front_matte
+      body_rig: scene.body_rig
     params:
       name: face2
       path: lissajous
@@ -5072,6 +5075,7 @@ steps:
       anchor_index: scene.face_detail.face2.anchor_index
       face_views: scene.face_detail.face2.face_views
       eye_stats: scene.face_detail.face2.eye_stats
+      weights: scene.face_detail.face2.weights?
     outputs:
       clip: scene.face_detail.face2.clip
 
@@ -5178,6 +5182,7 @@ steps:
       world_from_raw: scene.world_from_raw
       front_image: scene.front_image
       front_matte: scene.front_matte
+      body_rig: scene.body_rig
       reference_image: dataset.reference_image
       back_matte: scene.back_matte?
       label_splat_path: scene.face_detail.base_splat
