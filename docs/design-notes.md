@@ -294,7 +294,8 @@ Laplacian measure disagrees, as it rewards the clumps.
 
 **lighting_correction** (`prepass` / `off`) — takes the generator's
 frame-to-frame relighting out of the frames before the deliverable
-training. The passes are generated separately: exposure swings 10–23 % and
+training. Off by default since 2026-10-21 (it does more harm than good on
+some subjects); `prepass` turns it on. The passes are generated separately: exposure swings 10–23 % and
 white balance 6–12 % across the final frames, and the splat's SH bands
 absorb it. `prepass` does three things:
 1. trains a 5k-iteration splat for geometry;

@@ -632,10 +632,10 @@ settings:
 
   - name: lighting_correction
     label: Lighting correction
-    default: prepass
+    default: "off"
     choices: [prepass, "off"]
     advanced: true
-    help: Remove frame-to-frame lighting changes before the final training.
+    help: Remove frame-to-frame lighting changes before the final training (can hurt some subjects).
 
   - name: outline_strength
     label: Outline strength
@@ -825,26 +825,27 @@ outputs:
 # Quality presets (`profiles:`, pipeline/workflow.py): values for the
 # settings and outputs above, applied to the controls by the Run tab's
 # "Quality profile" picker; anything a profile does not name keeps its value.
-# Both train the splat on relit (lighting_correction prepass), upscaled
-# frames; they differ in the orbit's length. Neither turns on the re-upscale:
+# Both train the splat on upscaled frames without the lighting correction
+# (off since 2026-10-21: it hurts some subjects); they differ in the orbit's
+# length. Neither turns on the re-upscale:
 # it is hit or miss (2026-10-09), so it stays a hand-picked setting.
 profiles:
   - name: medium
     label: Medium
-    help: The single helical orbit (no extension), relit, upscaled and trained.
+    help: The single helical orbit (no extension), upscaled and trained.
     settings:
       extend_orbit: false
-      lighting_correction: prepass
+      lighting_correction: "off"
       run_upscale: true
       export_ply: true
       reupscale: false
 
   - name: high
     label: High
-    help: The extended orbit, relit, upscaled and trained.
+    help: The extended orbit, upscaled and trained.
     settings:
       extend_orbit: true
-      lighting_correction: prepass
+      lighting_correction: "off"
       run_upscale: true
       export_ply: true
       reupscale: false

@@ -104,7 +104,7 @@ class TestWiring(unittest.TestCase):
                 for step in (pre, fix):
                     self.assertIn({"eq": ["${globals.lighting_correction}", "prepass"]}, step.when)
                 setting = next(p for p in spec.settings if p.name == "lighting_correction")
-                self.assertEqual(setting.default, "prepass")
+                self.assertEqual(setting.default, "off")
 
 
 if __name__ == "__main__":

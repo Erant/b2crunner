@@ -25,7 +25,7 @@ class TestShippedProfiles(unittest.TestCase):
                 self.assertEqual([p.title for p in spec.profiles], ["Medium", "High"])
 
     def test_each_profile_runs_what_it_says(self):
-        # (extend, reupscale) — every one relit, upscaled and trained
+        # (extend, reupscale) — every one upscaled and trained, none relit
         expect = {"medium": (False, False), "high": (True, False)}
         for path in WORKFLOWS:
             for profile in WorkflowSpec.from_yaml(str(path)).profiles:
@@ -36,7 +36,7 @@ class TestShippedProfiles(unittest.TestCase):
                     live = _live(spec)
                     extend, reupscale = expect[profile.name]
                     self.assertEqual(truthy(spec.globals["extend_orbit"]), extend)
-                    self.assertEqual(spec.globals["lighting_correction"], "prepass")
+                    self.assertEqual(spec.globals["lighting_correction"], "off")
                     self.assertIn("upscale", live)
                     self.assertIn("train_final_splat", live)
                     self.assertEqual("reupscale_train" in live, reupscale)
