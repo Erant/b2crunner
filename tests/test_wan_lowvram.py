@@ -76,6 +76,56 @@ class TestLowVramForwardIsTheStockForward(unittest.TestCase):
         self.assertTrue(torch.equal(got, want),
                         f"max |diff| {(got.float() - want.float()).abs().max().item()}")
 
+    def test_fused_is_the_stock_forward_within_bf16_rounding(self):
+        """install(fused=True) compiles the per-token work: not bitwise any
+        more, but the same arithmetic, so within bf16 rounding of the stock
+        forward through all 7 + 3 blocks."""
+        torch = _stack_or_skip()
+        if torch is None:
+            self.skipTest("needs torch + diffusers + CUDA")
+        from pipeline import wan_lowvram
+
+        stock = _model(torch)
+        low = copy.deepcopy(stock)
+        wan_lowvram.install(low, chunk=7, fused=True)
+        inputs = _inputs(torch)
+        with torch.no_grad():
+            want = stock(**inputs)[0].float()
+            got = low(**inputs)[0].float()
+        rel = ((got - want).norm() / want.norm()).item()
+        self.assertLess(rel, 0.01, f"relative error {rel:.4f}")
+        self.assertTrue(torch.isfinite(got).all())
+        self.assertIsNotNone(wan_lowvram._kernels)   # the fused path is what ran
+
+    def test_the_self_attention_override_replaces_only_self_attention(self):
+        """install(self_attention=fn): fn gets every block's full-sequence
+        self-attention in (batch, tokens, heads, head_dim) and nothing else.
+        With SDPA as fn the answer is the stock one, bitwise."""
+        torch = _stack_or_skip()
+        if torch is None:
+            self.skipTest("needs torch + diffusers + CUDA")
+        from pipeline import wan_lowvram
+
+        calls = []
+
+        def sdpa(q, k, v):
+            calls.append(tuple(q.shape))
+            out = torch.nn.functional.scaled_dot_product_attention(
+                q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2))
+            return out.transpose(1, 2)
+
+        stock = _model(torch)
+        low = copy.deepcopy(stock)
+        wan_lowvram.install(low, chunk=7, self_attention=sdpa)
+        inputs = _inputs(torch)
+        with torch.no_grad():
+            want = stock(**inputs)[0]
+            got = low(**inputs)[0]
+        self.assertTrue(torch.equal(got, want),
+                        f"max |diff| {(got.float() - want.float()).abs().max().item()}")
+        self.assertEqual(len(calls), 7 + 3)   # main blocks + VACE blocks
+        self.assertTrue(all(s == (1, 90, 2, 128) for s in calls), calls)
+
     def test_group_offload_wraps_the_low_vram_forwards(self):
         """The offload hooks must wrap the swapped-in forwards, not the
         stock ones — install() first, then offload — and still give the

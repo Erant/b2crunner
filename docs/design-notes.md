@@ -394,6 +394,18 @@ ones that measured worse.
   `torch._scaled_mm`. LoRA adapters stay bf16. 2026-10-16, run 1d1e93 pass 1 step 1,
   4070 Ti low_vram: 99.9 -> 83.1 s warm (1.20x), same peak VRAM, predicted x0 34 dB
   from the weight-only one; full-pass quality and the 5090 not measured yet.
+- **Step profile after the gpu-unlock FP32-accumulate unlock** (2026-10-25, 4070 Ti,
+  1d1e93 pass 1, low_vram): a warm 60.4 s step was 28 s self-attention, 9 s fp8 GEMM,
+  ~21 s eager per-token kernels, 1.8 s weight streaming; at 285 W it averages 215 W, so
+  a higher power limit buys nothing. Three changes take it to 48.2 s: `wan_lora`
+  (LoRA add as `addmm_`, -3.7 s), `wan_lowvram.install(fused=True)` (per-token work
+  compiled, -8.2 s) and `_ada_self_attention` (Sage fp8 at pv_accum fp32+fp32, -3.1 s).
+  vs a bf16-matmul + SDPA reference the output is 6.3 / 4.9 % off over two steps, the
+  eager path 5.6 / 5.5 %. The first step after each expert switch costs ~16 s more: the
+  17.6 GB expert is re-read from the SATA volume (T5's 11 GB evicts it too; 29 GB RAM).
+  Reading ahead does not hide it — madvise/fadvise WILLNEED are ignored on this btrfs,
+  and a pread thread made the step slower (93 vs 83 s): the prefetched pages are
+  evicted before use. More RAM is the fix.
 - Untaken idea: publish a diffusers-format fp8 checkpoint with the LoRA fused
   (quantize through `TorchAoConfig`, fuse, `safe_serialization=True`). None exists
   on the Hub (all fp8 quants are ComfyUI-format).

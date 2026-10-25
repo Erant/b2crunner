@@ -28,6 +28,14 @@ chunking a per-token op does not change any element's value, and the
 attention calls get the same full-sequence q/k/v — so this is a memory
 layout change, not an approximation. See tests/test_wan_lowvram.py.
 
+`install(fused=True)` gives up that bitwise identity for speed: the per-token
+work between the matmuls (fp32 norm -> modulate -> cast, q/k RMSNorm + RoPE,
+gated residual adds) runs as torch.compile'd kernels instead of one eager
+kernel per op, each of which reads and writes the whole chunk. Those eager
+kernels were ~21 s of a 60 s warm step (2026-10-25, 4070 Ti, 720x1280x81,
+low_vram); fused, the step is 52.2 s. Same math, different rounding — see
+_fused_block_body.
+
 The weights are streamed by `stream_weights` below, not by diffusers' group
 offloading (see its docstring for why), though `install()` works under both.
 Blocks are always entered through `module(...)`, never by reaching into
@@ -62,7 +70,12 @@ def _rope(x, cos, sin):
     return out.type_as(x)
 
 
-def _attend(attn, q, k, v):
+def _attend(attn, q, k, v, override=None):
+    """Attention over (batch, tokens, heads, head_dim) q/k/v. `override`, when
+    given, replaces diffusers' dispatch with fn(q, k, v) in the same layout
+    (install()'s `self_attention`)."""
+    if override is not None:
+        return override(q, k, v).flatten(2, 3).type_as(q)
     from diffusers.models.attention_dispatch import dispatch_attention_fn
 
     out = dispatch_attention_fn(
@@ -85,6 +98,8 @@ def _block_body(block, h, encoder_hidden_states, temb, rotary_emb, chunk: int):
     attn1, attn2 = block.attn1, block.attn2
     if attn1.fused_projections or attn2.fused_projections or attn2.add_k_proj is not None:
         raise NotImplementedError("wan_lowvram: fused or image-conditioned attention is not supported")
+    if getattr(block, "_lowvram_fused", False):
+        return _fused_block_body(block, h, encoder_hidden_states, temb, rotary_emb, chunk)
 
     shift_msa, scale_msa, gate_msa, c_shift_msa, c_scale_msa, c_gate_msa = (
         block.scale_shift_table.to(temb.device) + temb.float()
@@ -103,7 +118,7 @@ def _block_body(block, h, encoder_hidden_states, temb, rotary_emb, chunk: int):
         k[:, s:e] = _rope(attn1.norm_k(attn1.to_k(x)).unflatten(2, (heads, -1)), cos[:, s:e], sin[:, s:e])
         v[:, s:e] = attn1.to_v(x).unflatten(2, (heads, -1))
     del x
-    a = _attend(attn1, q, k, v)
+    a = _attend(attn1, q, k, v, getattr(block, "_lowvram_self_attention", None))
     del q, k, v
     for s, e in _spans(length, chunk):
         o = attn1.to_out[1](attn1.to_out[0](a[:, s:e]))
@@ -130,6 +145,115 @@ def _block_body(block, h, encoder_hidden_states, temb, rotary_emb, chunk: int):
         x = (block.norm3(h[:, s:e].float()) * (1 + c_scale_msa) + c_shift_msa).type_as(h)
         f = block.ffn(x)
         h[:, s:e] = (h[:, s:e].float() + f.float() * c_gate_msa).type_as(h)
+    return h
+
+
+_kernels = None
+
+
+def _fused_kernels():
+    """The compiled per-token kernels _fused_block_body runs, built once.
+
+    dynamic=True: the last chunk of a sequence is short, and the chunk
+    size itself is a parameter.
+    """
+    global _kernels
+    if _kernels is None:
+        import torch
+        import torch.nn.functional as F
+
+        @torch.compile(dynamic=True)
+        def modulated_norm(x, scale, shift, eps: float):
+            """FP32LayerNorm (no affine) * (1 + scale) + shift, cast back."""
+            return (F.layer_norm(x.float(), (x.shape[-1],), None, None, eps) * (1 + scale) + shift).to(x.dtype)
+
+        @torch.compile(dynamic=True)
+        def affine_norm(x, weight, bias, eps: float):
+            """FP32LayerNorm with its affine (the cross-attention norm2), cast back."""
+            return F.layer_norm(x.float(), (x.shape[-1],), weight.float(), bias.float(), eps).to(x.dtype)
+
+        @torch.compile(dynamic=True)
+        def gated_add_(h, x, gate):
+            """h += x * gate in fp32, in place on the bf16 slice."""
+            h.copy_((h.float() + x.float() * gate).to(h.dtype))
+
+        @torch.compile(dynamic=True)
+        def rms_rope(x, weight, eps: float, cos, sin, heads: int):
+            """norm_q / norm_k (RMSNorm across heads) then _rope, one kernel."""
+            x = F.rms_norm(x, (x.shape[-1],), weight, eps).unflatten(2, (heads, -1))
+            x1, x2 = x.unflatten(-1, (-1, 2)).unbind(-1)
+            cos, sin = cos[..., 0::2], sin[..., 1::2]
+            return torch.stack([x1 * cos - x2 * sin, x1 * sin + x2 * cos], dim=-1).flatten(-2).to(x.dtype)
+
+        _kernels = types.SimpleNamespace(
+            modulated_norm=modulated_norm, affine_norm=affine_norm,
+            gated_add_=gated_add_, rms_rope=rms_rope,
+        )
+    return _kernels
+
+
+def _fused_block_body(block, h, encoder_hidden_states, temb, rotary_emb, chunk: int):
+    """_block_body with the per-token work between the matmuls compiled.
+
+    The same operations in the same order, but inductor keeps intermediates
+    in registers and fp32 where the eager path rounds each op's output to
+    its dtype (the RMSNorm output to bf16 before RoPE, say), so values
+    differ in the last bits. Measured 2026-10-25 against bf16-matmul + SDPA
+    output on the real model (720x1280x81, Lightning LoRA live), the eager
+    path is 5.6 % / 5.5 % off over two steps and this one 5.4 % / 4.3 %:
+    no less accurate, just not bitwise. tests/test_wan_lowvram.py holds it
+    to the stock forward within bf16 tolerance.
+    """
+    import torch
+
+    kern = _fused_kernels()
+    attn1, attn2 = block.attn1, block.attn2
+    shift_msa, scale_msa, gate_msa, c_shift_msa, c_scale_msa, c_gate_msa = (
+        block.scale_shift_table.to(temb.device) + temb.float()
+    ).chunk(6, dim=1)
+    batch, length, _ = h.shape
+    heads = attn1.heads
+    cos, sin = rotary_emb
+
+    # 1. Self-attention.
+    q = h.new_empty(batch, length, heads, h.shape[-1] // heads)
+    k = torch.empty_like(q)
+    v = torch.empty_like(q)
+    for s, e in _spans(length, chunk):
+        x = kern.modulated_norm(h[:, s:e], scale_msa, shift_msa, block.norm1.eps)
+        q[:, s:e] = kern.rms_rope(attn1.to_q(x), attn1.norm_q.weight, attn1.norm_q.eps,
+                                  cos[:, s:e], sin[:, s:e], heads)
+        k[:, s:e] = kern.rms_rope(attn1.to_k(x), attn1.norm_k.weight, attn1.norm_k.eps,
+                                  cos[:, s:e], sin[:, s:e], heads)
+        v[:, s:e] = attn1.to_v(x).unflatten(2, (heads, -1))
+    del x
+    a = _attend(attn1, q, k, v, getattr(block, "_lowvram_self_attention", None))
+    del q, k, v
+    for s, e in _spans(length, chunk):
+        kern.gated_add_(h[:, s:e], attn1.to_out[1](attn1.to_out[0](a[:, s:e])), gate_msa)
+    del a
+
+    # 2. Cross-attention.
+    q = h.new_empty(batch, length, heads, h.shape[-1] // heads)
+    for s, e in _spans(length, chunk):
+        if isinstance(block.norm2, torch.nn.LayerNorm):
+            x = kern.affine_norm(h[:, s:e], block.norm2.weight, block.norm2.bias, block.norm2.eps)
+        else:
+            x = block.norm2(h[:, s:e].float()).type_as(h)
+        q[:, s:e] = attn2.norm_q(attn2.to_q(x)).unflatten(2, (heads, -1))
+    del x
+    k = attn2.norm_k(attn2.to_k(encoder_hidden_states)).unflatten(2, (heads, -1))
+    v = attn2.to_v(encoder_hidden_states).unflatten(2, (heads, -1))
+    a = _attend(attn2, q, k, v)
+    del q, k, v
+    for s, e in _spans(length, chunk):
+        h[:, s:e] += attn2.to_out[1](attn2.to_out[0](a[:, s:e]))
+    del a
+
+    # 3. Feed-forward.
+    for s, e in _spans(length, chunk):
+        x = kern.modulated_norm(h[:, s:e], c_scale_msa, c_shift_msa, block.norm3.eps)
+        kern.gated_add_(h[:, s:e], block.ffn(x), c_gate_msa)
     return h
 
 
@@ -329,8 +453,14 @@ def stream_weights(root, device) -> None:
     walk(root)
 
 
-def install(transformer, chunk: int = DEFAULT_CHUNK) -> None:
+def install(transformer, chunk: int = DEFAULT_CHUNK, fused: bool = False,
+            self_attention=None) -> None:
     """Swap the low-VRAM forwards onto `transformer` and its blocks.
+
+    `fused` compiles the per-token work (_fused_block_body; not bitwise).
+    `self_attention`, fn(q, k, v) over (batch, tokens, heads, head_dim),
+    replaces diffusers' attention dispatch for the full-sequence
+    self-attention only; cross-attention keeps the dispatch.
 
     Under diffusers' group offloading this must run first: those hooks wrap
     whatever `forward` each module has when they are registered.
@@ -340,6 +470,8 @@ def install(transformer, chunk: int = DEFAULT_CHUNK) -> None:
         raise ValueError("wan_lowvram: VACE layer 0 is required")
     for module in (transformer, *transformer.blocks, *transformer.vace_blocks):
         module._lowvram_chunk = chunk
+        module._lowvram_fused = fused
+        module._lowvram_self_attention = self_attention
     transformer.forward = types.MethodType(_model_forward, transformer)
     for block in transformer.blocks:
         block.forward = types.MethodType(_main_block_forward, block)

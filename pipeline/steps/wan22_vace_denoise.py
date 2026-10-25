@@ -1401,6 +1401,11 @@ class Wan22VaceDenoiseStep(Step):
 
         if params["use_lora"]:
             self._load_lora_unfused(pipe, params)
+            from ..wan_lora import enable_lora_addmm
+
+            for transformer in (pipe.transformer, pipe.transformer_2):
+                count = enable_lora_addmm(transformer)
+            logger.info("LoRA add folded into addmm on %d Linears per expert", count)
 
         fp8_matmul = params["fp8_matmul"]
         if fp8_matmul is None:
@@ -1691,7 +1696,10 @@ class Wan22VaceDenoiseStep(Step):
           the per-token work chunked. Stock: OOM on a 1.51 GiB fp32 upcast
           in the hint precompute. Low-VRAM: peak 7.3 GiB, ~107 s a forward
           with the Lightning LoRA live — the same arithmetic, bitwise (see
-          tests/test_wan_lowvram.py).
+          tests/test_wan_lowvram.py). It runs `fused`, the per-token work
+          compiled, which is not bitwise but no less accurate (see
+          wan_lowvram._fused_block_body), and on Ada with a self-attention
+          override (_ada_self_attention).
         * Every component streams its weights with `wan_lowvram.
           stream_weights` instead of `apply_group_offloading`. The latter's
           unstreamed offload returns weights with `module.to("cpu")`, a
@@ -1711,7 +1719,8 @@ class Wan22VaceDenoiseStep(Step):
 
         for transformer in (pipe.transformer, pipe.transformer_2):
             if transformer is not None:
-                wan_lowvram.install(transformer)
+                wan_lowvram.install(transformer, fused=True,
+                                    self_attention=_ada_self_attention(transformer))
         for module in pipe.components.values():
             if isinstance(module, torch.nn.Module):
                 wan_lowvram.stream_weights(module, device)
@@ -2330,6 +2339,33 @@ def _select_sage_backend() -> Optional[str]:
     if (major, minor) < (8, 0):
         return None
     return "sage"
+
+
+def _ada_self_attention(transformer):
+    """The low_vram self-attention override for Ada, or None.
+
+    sageattn() on SM89 runs the CUDA int8+fp8 kernel at pv_accum_dtype
+    "fp32+fp16". At "fp32+fp32" the same kernel is faster on a 4070 Ti
+    with the gpu-unlock FP32-accumulate rate (2026-10-25, 75,600 tokens x
+    40 heads: 524 -> 494 ms a call; a warm 720x1280x81 low_vram step
+    60.4 -> 57.3 s) at the same error (3.9 % vs SDPA either way). Only
+    when diffusers was given `sage`, so attention_backend still decides
+    which kernel family runs; cross-attention keeps the dispatch.
+    """
+    import torch
+
+    backend = transformer.blocks[0].attn1.processor._attention_backend
+    if getattr(backend, "value", backend) != "sage":
+        return None
+    if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (8, 9):
+        return None
+    from sageattention import sageattn_qk_int8_pv_fp8_cuda
+
+    def attend(q, k, v):
+        return sageattn_qk_int8_pv_fp8_cuda(q, k, v, tensor_layout="NHD", is_causal=False,
+                                            pv_accum_dtype="fp32+fp32")
+
+    return attend
 
 
 def _mask_to_pil(m: np.ndarray) -> Image.Image:
