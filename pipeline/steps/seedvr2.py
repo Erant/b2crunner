@@ -150,6 +150,58 @@ def _select_attention_mode() -> str:
     return "sdpa"
 
 
+def _fold_vae_padding() -> None:
+    """Let cuDNN pad the VAE's convolutions instead of an F.pad copy first.
+
+    The vendored InflatedCausalConv3d.memory_limit_conv zero-pads every
+    input with `safe_pad_operation` and then convolves at padding 0: a full
+    copy of the activation per conv, for padding cuDNN does for free.
+    Where the pad is plain spatial zero padding (symmetric, nothing
+    temporal) and the tensor needs no memory-limit split, this passes it to
+    the conv instead. Every other case is upstream's own path, unchanged.
+    Measured 2026-10-25, 4070 Ti, 25 frames 720x1280 -> 1080x1920: tiled
+    (the workflow's setting) 3.55 -> 3.34 s a frame, encode 0.71 -> 0.65
+    and decode 1.51 -> 1.39; untiled 3.41 -> 3.30. Untiled the output is
+    bit-identical; tiled it is 53 dB from the unfolded run, which is
+    otherwise deterministic — cuDNN picks other kernels for some tiles once
+    it does the padding, a rounding-level change (Sage vs SDPA attention is
+    also 53 dB, tiled vs untiled 44 dB). Idempotent.
+    """
+    import math
+
+    import torch
+    from src.models.video_vae_v3.modules import causal_inflation_lib as cil
+
+    conv = cil.InflatedCausalConv3d
+    if getattr(conv.memory_limit_conv, "_b2c_folded", False):
+        return
+    upstream = conv.memory_limit_conv
+
+    def memory_limit_conv(self, x, *, split_dim=3, padding=(0, 0, 0, 0, 0, 0), prev_cache=None):
+        w0, w1, h0, h1, t0, t1 = padding
+        if math.isinf(self.memory_limit) or w0 != w1 or h0 != h1 or t0 or t1:
+            return upstream(self, x, split_dim=split_dim, padding=padding, prev_cache=prev_cache)
+        shape = list(x.shape)
+        if prev_cache is not None:
+            shape[split_dim - 1] += prev_cache.size(split_dim - 1)
+        shape[-2] += h0 + h1
+        shape[-1] += w0 + w1
+        if math.prod(shape) * x.element_size() / 1024**3 >= self.memory_limit and split_dim != x.ndim:
+            # Upstream splits this one; leave it to.
+            return upstream(self, x, split_dim=split_dim, padding=padding, prev_cache=prev_cache)
+        if prev_cache is not None:
+            x = torch.cat([prev_cache, x], dim=split_dim - 1)
+        saved = self.padding
+        self.padding = (0, h0, w0)
+        try:
+            return torch.nn.Conv3d.forward(self, x)
+        finally:
+            self.padding = saved
+
+    memory_limit_conv._b2c_folded = True
+    conv.memory_limit_conv = memory_limit_conv
+
+
 @register_step("seedvr2")
 class SeedVR2Step(Step):
     # Almost all of these are inference_cli.py's own argparse knobs, mirrored
@@ -346,6 +398,8 @@ class SeedVR2Step(Step):
             cache_dit=params["cache_dit"],
             cache_vae=params["cache_vae"],
         )
+
+        _fold_vae_padding()
 
         # _process_frames_core ends by converting its bf16 final_video to
         # float32 in one piece: a 4 GB copy of 162 1080x1920 frames next to

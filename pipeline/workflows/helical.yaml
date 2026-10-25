@@ -3980,9 +3980,15 @@ steps:
       resolution: 1080
       # steps/seedvr2.py defaults this to 5; 1 is this workflow's own
       # choice — raise it once a real VRAM budget for the upscale is known.
+      # (Batch 5 runs a 12 GB card out of memory at 1080, 2026-10-25.)
       batch_size: 1
       vae_encode_tiled: true
       vae_decode_tiled: true
+      # torch.compile the DiT: ~28 s to compile, then 0.63 instead of 1.19 s
+      # a frame (4070 Ti, 2026-10-25; output 52 dB from the eager one). Pays
+      # past ~50 frames, and this step always has 81 or more. Not on the
+      # face photo upscale below, which is a handful of frames.
+      compile_dit: true
       # Was 42, its own number, while both denoise passes were 0. One
       # `seed` setting now feeds all three, so a run is one sample rather
       # than three unrelated ones.

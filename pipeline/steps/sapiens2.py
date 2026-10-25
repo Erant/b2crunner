@@ -61,6 +61,7 @@ its own alpha keeps it; otherwise borrow the RGB frame's mask").
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from typing import Any, Dict, List
 
@@ -104,6 +105,28 @@ PART_PRESETS = {
     "all": ALL_FOREGROUND,
     "fg": ALL_FOREGROUND,
 }
+
+
+@contextlib.contextmanager
+def tf32():
+    """TF32 matmuls and convolutions for the forwards inside, restored after.
+
+    Scoped rather than set once because these steps run in_process, beside
+    others that never asked for it. fp32 inference here runs on the CUDA
+    cores otherwise; TF32 puts it on the tensor cores. Measured 2026-10-25,
+    4070 Ti, 720x1280, batch 1, against fp32: normal-1b 0.717 -> 0.427 s a
+    frame at 0.03 deg mean angle; seg-1b 0.666 -> 0.395 s with 0.001 % of
+    labels changed. Not the pointmap head: fp32 is load-bearing there (see
+    pointmap_splat.py) and TF32 rounds matmul inputs to a 10-bit mantissa.
+    """
+    import torch
+
+    saved = torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32
+    torch.backends.cuda.matmul.allow_tf32 = torch.backends.cudnn.allow_tf32 = True
+    try:
+        yield
+    finally:
+        torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32 = saved
 
 
 def parse_parts(spec: str) -> "frozenset[int]":
@@ -201,7 +224,7 @@ class Sapiens2LiteStep(Step):
         sizes = [(img.shape[0], img.shape[1]) for img in images_bgr]
 
         inputs = self._processor(images=pil_images, return_tensors="pt").to(self._device)
-        with torch.inference_mode():
+        with torch.inference_mode(), tf32():
             outputs = self._model(**inputs)
 
         result = self._processor.post_process_normal_estimation(
@@ -364,7 +387,7 @@ class Sapiens2SegStep(Step):
         rgb = Image.fromarray(cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB))
         processed = self._processor(images=[rgb], return_tensors="pt").to(self._device)
         processed["pixel_values"] = processed["pixel_values"].to(self._dtype)
-        with torch.inference_mode():
+        with torch.inference_mode(), tf32():
             return self._model(**processed)
 
     def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
