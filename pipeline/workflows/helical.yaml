@@ -3988,6 +3988,10 @@ steps:
       # a frame (4070 Ti, 2026-10-25; output 52 dB from the eager one). Pays
       # past ~50 frames, and this step always has 81 or more. Not on the
       # face photo upscale below, which is a handful of frames.
+      # compile_vae stays off: it needs g++ (not in the base image) and,
+      # with it, buys only ~8% on encode/decode (0.64 -> 0.59, 1.39 -> 1.28
+      # s a frame) for 25-45 s of compile and +2.5-4 GiB peak — decode ran
+      # a 12 GB card out of memory in one of three runs (2026-10-25).
       compile_dit: true
       # Was 42, its own number, while both denoise passes were 0. One
       # `seed` setting now feeds all three, so a run is one sample rather
