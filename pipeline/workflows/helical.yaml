@@ -5373,6 +5373,44 @@ steps:
     outputs:
       clip: scene.face_detail.hair.clip
 
+  # The hair clip at 2x too, for the same reason as the face clips'.
+  - id: fd_hair_upscale
+    step: seedvr2
+    dispatch: subprocess
+    env: seedvr2
+    when:
+      - ${globals.face_detailer}
+      - ${globals.export_ply}
+      - ${globals.refit_body}
+      - ${globals.hair_detailer}
+    inputs:
+      images: scene.face_detail.hair.images
+      cameras: scene.face_detail.hair.cameras
+    params:
+      resolution: 960
+      batch_size: 1
+      vae_encode_tiled: true
+      vae_decode_tiled: true
+      seed: ${globals.seed}
+    outputs:
+      images: scene.face_detail.hair.upscaled_images
+      cameras: scene.face_detail.hair.upscaled_cameras
+
+  - id: fd_hair_clip_upscale
+    step: face_detail_clip_upscale
+    dispatch: in_process
+    when:
+      - ${globals.face_detailer}
+      - ${globals.export_ply}
+      - ${globals.refit_body}
+      - ${globals.hair_detailer}
+    inputs:
+      clip: scene.face_detail.hair.clip
+      images: scene.face_detail.hair.upscaled_images
+      cameras: scene.face_detail.hair.upscaled_cameras
+    outputs:
+      clip: scene.face_detail.hair.clip_upscaled
+
   - id: fd_retrain_c_dataset
     step: face_detail_dataset
     dispatch: in_process
@@ -5389,7 +5427,7 @@ steps:
       labels: scene.seg_labels?
       clip_a: scene.face_detail.face1.clip_upscaled
       clip_b: scene.face_detail.face2.clip_upscaled
-      clip_c: scene.face_detail.hair.clip
+      clip_c: scene.face_detail.hair.clip_upscaled
     outputs:
       images: scene.face_detail.retrain_c.images
       image_names: scene.face_detail.retrain_c.image_names
