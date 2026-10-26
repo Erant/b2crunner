@@ -4863,6 +4863,48 @@ steps:
     outputs:
       clip: scene.face_detail.face1.clip
 
+  # The clip at 2x for the retrainings that deliver (B, C): at 480p they
+  # averaged the clips' detail away, each frame's a few pixels off the
+  # next's (steps/face_detailer.py; held-out face sharpness 60 -> 104 on
+  # 8180cc). SeedVR2 one frame at a time, the reupscale settings, after the
+  # eye paste. Retraining A, which only renders clip 2's control, keeps the
+  # 480p clip, as measured.
+  - id: fd_face1_upscale
+    step: seedvr2
+    dispatch: subprocess
+    env: seedvr2
+    when:
+      - ${globals.face_detailer}
+      - ${globals.export_ply}
+      - ${globals.refit_body}
+    inputs:
+      images: scene.face_detail.face1.images
+      cameras: scene.face_detail.face1.cameras
+    params:
+      # 480x832 -> 960x1664.
+      resolution: 960
+      batch_size: 1
+      vae_encode_tiled: true
+      vae_decode_tiled: true
+      seed: ${globals.seed}
+    outputs:
+      images: scene.face_detail.face1.upscaled_images
+      cameras: scene.face_detail.face1.upscaled_cameras
+
+  - id: fd_face1_clip_upscale
+    step: face_detail_clip_upscale
+    dispatch: in_process
+    when:
+      - ${globals.face_detailer}
+      - ${globals.export_ply}
+      - ${globals.refit_body}
+    inputs:
+      clip: scene.face_detail.face1.clip
+      images: scene.face_detail.face1.upscaled_images
+      cameras: scene.face_detail.face1.upscaled_cameras
+    outputs:
+      clip: scene.face_detail.face1.clip_upscaled
+
   - id: fd_retrain_a_dataset
     step: face_detail_dataset
     dispatch: in_process
@@ -5095,6 +5137,41 @@ steps:
     outputs:
       clip: scene.face_detail.face2.clip
 
+  - id: fd_face2_upscale
+    step: seedvr2
+    dispatch: subprocess
+    env: seedvr2
+    when:
+      - ${globals.face_detailer}
+      - ${globals.export_ply}
+      - ${globals.refit_body}
+    inputs:
+      images: scene.face_detail.face2.images
+      cameras: scene.face_detail.face2.cameras
+    params:
+      resolution: 960
+      batch_size: 1
+      vae_encode_tiled: true
+      vae_decode_tiled: true
+      seed: ${globals.seed}
+    outputs:
+      images: scene.face_detail.face2.upscaled_images
+      cameras: scene.face_detail.face2.upscaled_cameras
+
+  - id: fd_face2_clip_upscale
+    step: face_detail_clip_upscale
+    dispatch: in_process
+    when:
+      - ${globals.face_detailer}
+      - ${globals.export_ply}
+      - ${globals.refit_body}
+    inputs:
+      clip: scene.face_detail.face2.clip
+      images: scene.face_detail.face2.upscaled_images
+      cameras: scene.face_detail.face2.upscaled_cameras
+    outputs:
+      clip: scene.face_detail.face2.clip_upscaled
+
   # The face rig v3 on the clips' frames, constrained (steps/face_detailer.py):
   # the raw per-view fits are 8-16 mm noisy; the clips' shared offset
   # removed, a +-3 frame median and a 10 mm cap leave 1.5-2 mm, and the
@@ -5131,8 +5208,8 @@ steps:
       cameras: dataset.cameras
       masks: dataset.masks
       labels: scene.seg_labels?
-      clip_a: scene.face_detail.face1.clip
-      clip_b: scene.face_detail.face2.clip
+      clip_a: scene.face_detail.face1.clip_upscaled
+      clip_b: scene.face_detail.face2.clip_upscaled
     outputs:
       images: scene.face_detail.retrain_b.images
       image_names: scene.face_detail.retrain_b.image_names
@@ -5310,8 +5387,8 @@ steps:
       cameras: dataset.cameras
       masks: dataset.masks
       labels: scene.seg_labels?
-      clip_a: scene.face_detail.face1.clip
-      clip_b: scene.face_detail.face2.clip
+      clip_a: scene.face_detail.face1.clip_upscaled
+      clip_b: scene.face_detail.face2.clip_upscaled
       clip_c: scene.face_detail.hair.clip
     outputs:
       images: scene.face_detail.retrain_c.images

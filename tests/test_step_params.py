@@ -155,8 +155,10 @@ class TestEveryRegisteredStep(unittest.TestCase):
         """A step with no declaration is invisible to the UI and unchecked
         by `WorkflowSpec.validate`. The ones that legitimately take none are
         named here so adding another is a deliberate act."""
-        # matte_reference: bg_color is an input; face_detail_dataset only concatenates.
-        takes_none = {"generate_firstlast", "matte_reference", "embed_orbit_record", "face_detail_dataset"}
+        # matte_reference: bg_color is an input; face_detail_dataset only concatenates;
+        # face_detail_clip_upscale only resizes to the frames it is given.
+        takes_none = {"generate_firstlast", "matte_reference", "embed_orbit_record", "face_detail_dataset",
+                      "face_detail_clip_upscale"}
         for name, step_class in sorted(STEP_REGISTRY.items()):
             if name.startswith("_test"):
                 continue

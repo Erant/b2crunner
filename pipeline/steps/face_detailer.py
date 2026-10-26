@@ -35,8 +35,18 @@ against its absence:
   * the arms left out of every clip's control (`hide_arms`, zero loss weight where they are in front) and the face
     clips' loss kept to the head (`train_on: head`): the video model repaints whatever else is in the frame, and
     on 0256db that put a tattooed hand on the gauntlet and an orange glow on the shoulder badges.
+  * the face clips upscaled 2x by SeedVR2 (one frame at a time, after the eye paste) for the retrainings that
+    deliver (`face_detail_clip_upscale`; retraining A, which only renders clip 2's control, keeps clip 1 at
+    480p). At 480p the retraining kept a quarter of the clips' face sharpness: Wan draws the detail a few
+    pixels differently in every frame (alignment residual 4-6 px against 1.3 for the original views, not
+    shrinking between alignment iterations) and the retraining averaged it away, to below the splat it
+    started from. Measured on 8180cc (2026-10-26, held-out views): face sharpness front / profile / high
+    60 / 62 / 65 -> 104 / 117 / 120 (the splat before the detailer: 98 / 108 / 121), photo-view PSNR 18.8 ->
+    18.6 dB. Not the original views' faces competing with the clips': their face at zero weight changed
+    nothing (0.01 dB); and SeedVR2 on 160 renders of the detailed splat about the head instead (then
+    retrained) reached only 86 / 85 / 98 at 17.8 dB.
 
-Five steps here, the rest are the pipeline's own (wan22_vace_denoise, rmbg, seedvr2, detect_face_views,
+Six steps here, the rest are the pipeline's own (wan22_vace_denoise, rmbg, seedvr2, detect_face_views,
 fit_head_per_view, paste_eyes, brush):
 
   face_detail_views        the path's cameras, the splat rendered along it (the control video and its VACE
@@ -44,6 +54,7 @@ fit_head_per_view, paste_eyes, brush):
   face_detail_photo_crop   the photograph's face, cut out square for one SeedVR2 frame
   face_detail_photo_merge  the photograph 4x with that crop feathered in: paste_eyes' eye texture
   face_detail_clip         one denoised clip as training views: names, matte, loss weights
+  face_detail_clip_upscale that clip with its frames upscaled: matte and loss weights resized to them
   face_detail_dataset      the final training's views plus the clips, the sidecars per view
   face_detail_rig          the rig's per-view face deltas on the clips' frames, constrained
 
@@ -650,6 +661,42 @@ class FaceDetailClipStep(Step):
         logger.info("face_detail_clip: %d frames, %s", len(images), how)
         return {"clip": {"images": images, "masks": masks, "cameras": cameras, "image_names": names,
                          "weights": weights if any(w is not None for w in weights) else None}}
+
+
+@register_step("face_detail_clip_upscale")
+class FaceDetailClipUpscaleStep(Step):
+    """A face_detail_clip clip with its frames swapped for upscaled ones.
+
+    inputs:  {"clip": face_detail_clip's, "images": [BGR] the same frames upscaled (seedvr2), "cameras": seedvr2's
+              cameras for them (the intrinsics scaled)}
+    outputs: {"clip": the clip at the upscaled size: images and cameras replaced, matte and loss weights resized}
+
+    The matte and the weights stay the ones made at the clip's own size (rmbg, the eye lids, the head) and are
+    resized bilinearly: the upscale moves no edge by more than a fraction of an input pixel.
+    """
+
+    def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+        clip = inputs["clip"]
+        images, cameras = list(inputs["images"]), list(inputs["cameras"])
+        n = len(clip["images"])
+        if len(images) != n or len(cameras) != n:
+            raise ValueError(f"face_detail_clip_upscale: {len(images)} upscaled frames and {len(cameras)} cameras "
+                             f"for a clip of {n}")
+        h, w = images[0].shape[:2]
+        if any(im.shape[:2] != (h, w) for im in images):
+            raise ValueError("face_detail_clip_upscale: the upscaled frames differ in size")
+
+        def resize(m: Optional[np.ndarray]) -> Optional[np.ndarray]:
+            if m is None:
+                return None
+            return cv2.resize(normalize_mask(m), (w, h), interpolation=cv2.INTER_LINEAR)
+
+        weights = clip.get("weights")
+        h0, w0 = clip["images"][0].shape[:2]
+        logger.info("face_detail_clip_upscale: %d frames %dx%d -> %dx%d", n, w0, h0, w, h)
+        return {"clip": {"images": images, "cameras": cameras, "image_names": list(clip["image_names"]),
+                         "masks": [resize(m) for m in clip["masks"]],
+                         "weights": [resize(x) for x in weights] if weights is not None else None}}
 
 
 # -- face_detail_dataset ------------------------------------------------------------------------------------------
