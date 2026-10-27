@@ -1239,7 +1239,7 @@ class TestWorkflowFiles(unittest.TestCase):
         # splat at cameras of its own making: registered by construction,
         # the alignment loop takes the rest.
         unrefined = {"reoutline_train_splat", "extend_train_splat", "relight_pretrain", "reupscale_train",
-                     "train_final_splat", "fd_retrain_a_train", "fd_retrain_b_train", "fd_retrain_c_train"}
+                     "train_final_splat", "fd_retrain_b_train", "fd_retrain_c_train"}
         for path in _workflows():
             spec = WorkflowSpec.from_yaml(str(path))
             ids = [s.id for s in spec.steps]
@@ -1515,11 +1515,12 @@ class TestWorkflowFiles(unittest.TestCase):
         # full-resolution passes, the gated 480p re-outline pass, and the
         # two gated orbit-extension passes (2026-09-21), which are pass 2's
         # block on the two extension videos and carry pass 2's prompt.
-        # Plus the face detailer's three gated 480p close-ups (2026-10-18),
+        # Plus the face detailer's two gated 480p close-ups (2026-10-18; three
+        # until 2026-10-27),
         # which carry the `face` prompt.
-        expected = {"helical.yaml": 8}
+        expected = {"helical.yaml": 7}
         drawn = {"denoise_pass1", "reoutline_denoise"}
-        close_ups = {"fd_face1_denoise", "fd_face2_denoise", "fd_hair_denoise"}
+        close_ups = {"fd_face1_denoise", "fd_hair_denoise"}
         workflows = _workflows()
         seen = 0
         for path in workflows:
@@ -2016,7 +2017,7 @@ class TestTheDenoiseSettingsAreTheMeasuredOnes(unittest.TestCase):
         detailer's clips run 4 (2026-10-18, the face detailer's 4/6 ablation),
         with a strength schedule one entry per step."""
         for step_id, strength in (("denoise_extension_before", [0.8] * 4), ("denoise_extension_after", [0.8] * 4),
-                                  ("fd_face1_denoise", [0.8, 0.8, 0.5, 0.5]), ("fd_face2_denoise", [0.8, 0.8, 0.5, 0.5]),
+                                  ("fd_face1_denoise", [0.8, 0.8, 0.5, 0.5]),
                                   ("fd_hair_denoise", [0.8, 0.8, 0.5, 0.5])):
             with self.subTest(step=step_id):
                 params = self._step(step_id).params

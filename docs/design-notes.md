@@ -265,16 +265,21 @@ a 4070 Ti plus a training.
 **face_detailer** — after the deliverable training (and the re-upscale),
 refines the head with close-up 480x832 denoise clips rendered from the
 splat itself, then retrains the splat on them (`steps/face_detailer.py`):
-1. clip 1, a Lissajous path about the head (yaw ±45°, pitch ±20°), the
+1. one clip, a Lissajous path about the head (yaw ±70°, pitch ±20°), the
    photograph warped into its first frame and its face as the reference;
-2. a retraining on it, which clip 2 is rendered from (yaw ±90°, pitch
-   -40°..+20°: the profiles and the views from below);
-3. the pipeline's own eye paste on both clips, with the photograph's face
+2. the pipeline's own eye paste on it, with the photograph's face
    upscaled 4x by SeedVR2 for the eye texture; eyes it skips get no loss;
-4. the face rig v3 on the clips' frames only, its shared offset removed,
+3. the clip upscaled 2x by SeedVR2 (at 480p the retraining averaged its
+   detail away);
+4. the face rig v3 on the clip's frames only, its shared offset removed,
    median-smoothed and capped at 10 mm;
 5. the final retraining: warm from the deliverable, 6000 iterations, growth
    off (the splat count does not change), two alignment iterations.
+
+The one clip replaced two (2026-10-27; the second, yaw ±90°, was rendered
+from a retraining on the first): sharper at the front, profile and high
+views on all three subjects measured, 0.4–0.7 dB lower photo-view PSNR, in
+half the time (~9 against ~17.5 min on a 4070 Ti).
 
 On two subjects' held-out face views, iris reprojection error went 1.51 →
 1.17 px and mouth 1.60 → 1.15 px, and the face took the photograph's skin
@@ -286,7 +291,7 @@ The pipeline run measured softer at the front than the hand-run experiment
 the clips. The splat before it is kept as
 `debug/face_detailer/before_face_detailer.ply`.
 
-**hair_detailer** (shown with the face detailer) — a third clip, one turn of
+**hair_detailer** (shown with the face detailer) — a second clip, one turn of
 a helix about the hair (elevation -20°..+30°, the back panel's head as the
 reference), whose frames train only the splats' Hair class. Judged by eye:
 the back of the head goes from clumps to strands matching the front; the

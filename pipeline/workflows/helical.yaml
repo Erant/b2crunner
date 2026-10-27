@@ -935,7 +935,7 @@ prompts:
         in every frame, and do not swing round with the camera. Matte skin, matte \
         cloth, photorealistic, sharp focus, identical clothing and lighting in \
         every frame."
-  # The face detailer's three clips (`face_detailer`, steps/face_detailer.py):
+  # The face detailer's clips (`face_detailer`, steps/face_detailer.py):
   # a close-up of the head and shoulders on the grey the splat is rendered
   # over, no room, the camera arcing about the head. Written for those clips
   # and measured as written (experiments/face_detailer, 2026-10-18); the hair
@@ -4605,11 +4605,11 @@ steps:
   # `face_detailer` (steps/face_detailer.py, the measurements in its
   # docstring): the deliverable's head, refined by short close-up denoise
   # clips rendered from the splat itself and trained back in, warm, growth
-  # off — the splat count does not change. Two face clips, the second
-  # rendered from a splat already retrained on the first (a PROGRESSIVE
-  # clip: an independent second clip averages two hallucinations and
-  # softens the front), then, with `hair_detailer`, one clip circling the
-  # head for the hair. Each clip is the pipeline's own denoise at 480x832
+  # off — the splat count does not change. One face clip (2026-10-27: it
+  # replaced two, the second rendered from a splat retrained on the first;
+  # the one clip is sharper at every view measured, in half the time), then,
+  # with `hair_detailer`, one clip circling the head for the hair. Each
+  # clip is the pipeline's own denoise at 480x832
   # (the splat's own detail level; 720p bought nothing here) with the
   # split strength (0.8 on the high-noise expert, 0.5 after), which removes
   # control-texture defects (a cheek blotch at 0.8 flat) for a little
@@ -4682,11 +4682,19 @@ steps:
       face_landmarks: scene.face_detail.photo.face_landmarks
       focal_length: scene.face_detail.photo.focal_length
 
-  # Clip 1: a Lissajous figure about the head, yaw +-45 and pitch +-20
-  # about the photograph's view, two vertical periods (3.2 deg/frame), the
-  # photograph warped into its first frame (inactive) and its matted face
-  # as the reference. The splat as it stands is copied aside here: it is
-  # what every retraining below starts from.
+  # The face clip: a Lissajous figure about the head, yaw +-70 and pitch
+  # +-20 about the photograph's view, two vertical periods, the photograph
+  # warped into its first frame (inactive) and its matted face as the
+  # reference. The splat as it stands is copied aside here: it is what
+  # every retraining below starts from. It replaced two clips (yaw +-45 /
+  # pitch +-20, then yaw +-90 / pitch -40..+20 rendered from a retraining
+  # on the first), measured without the hair clip on 8180cc / c261fc /
+  # 032922, held-out head sharpness front/side/high and photo-view PSNR:
+  #   two clips   104/117/120 18.58   100/ 98/ 95 17.51   79/88/96 19.69
+  #   this clip   108/137/135 17.90   107/116/106 17.31   82/98/97 18.98
+  # in 540-550 s against 1015-1065 s. Wider (yaw +-90, pitch -40..+20)
+  # softens the front 8-14 %; yaw +-55 sits between; three vertical periods
+  # per two horizontal (ratio 1.5) loses the front by up to 25 %.
   - id: fd_face1_views
     step: face_detail_views
     dispatch: in_process
@@ -4706,7 +4714,7 @@ steps:
     params:
       name: face1
       path: lissajous
-      yaw_deg: 45
+      yaw_deg: 70
       pitch_deg: 20
       ratio: 2
       anchor: true
@@ -4867,8 +4875,7 @@ steps:
   # averaged the clips' detail away, each frame's a few pixels off the
   # next's (steps/face_detailer.py; held-out face sharpness 60 -> 104 on
   # 8180cc). SeedVR2 one frame at a time, the reupscale settings, after the
-  # eye paste. Retraining A, which only renders clip 2's control, keeps the
-  # 480p clip, as measured.
+  # eye paste.
   - id: fd_face1_upscale
     step: seedvr2
     dispatch: subprocess
@@ -4905,275 +4912,8 @@ steps:
     outputs:
       clip: scene.face_detail.face1.clip_upscaled
 
-  - id: fd_retrain_a_dataset
-    step: face_detail_dataset
-    dispatch: in_process
-    when:
-      - ${globals.face_detailer}
-      - ${globals.export_ply}
-      - ${globals.refit_body}
-    inputs:
-      images: dataset.images
-      image_names: dataset.image_names
-      cameras: dataset.cameras
-      masks: dataset.masks
-      clip_a: scene.face_detail.face1.clip
-    outputs:
-      images: scene.face_detail.retrain_a.images
-      image_names: scene.face_detail.retrain_a.image_names
-      cameras: scene.face_detail.retrain_a.cameras
-      masks: scene.face_detail.retrain_a.masks
-      weights: scene.face_detail.retrain_a.weights
-      labels: scene.face_detail.retrain_a.labels
-
-  # Retraining A: the deliverable's views plus clip 1, only to render clip
-  # 2's control from. 6000 iterations warm from the deliverable, growth off
-  # (the count stays), two alignment iterations (the largest lever of these
-  # retrainings: front sharpness 32 -> 42), no rig.
-  - id: fd_retrain_a_train
-    step: brush
-    dispatch: in_process
-    when:
-      - ${globals.face_detailer}
-      - ${globals.export_ply}
-      - ${globals.refit_body}
-    inputs:
-      cameras: scene.face_detail.retrain_a.cameras
-      image_names: scene.face_detail.retrain_a.image_names
-      points_3d: dataset.points_3d
-      images: scene.face_detail.retrain_a.images
-      masks: scene.face_detail.retrain_a.masks
-      weights: scene.face_detail.retrain_a.weights?
-      init_splat: scene.face_detail.base_splat
-    params:
-      total_steps: 6000
-      growth_stop_iter: 0
-      random_background: true
-      align_iters: 2
-      align_steps: 2000
-      align_debug_dir: ${globals.output_root}/debug/face_detailer/retrain_a_alignment
-      polish_steps: 0
-      body_rig: false
-      export_dir: ${globals.output_root}/debug/face_detailer
-      export_name: retrain_a.ply
-      trainer_files_dir: ${globals.output_root}/debug/face_detailer/retrain_a
-    outputs:
-      splat_path: scene.face_detail.splat_a
-
-  # Clip 2, progressive: rendered from retraining A, yaw +-90 and pitch
-  # -40..+20 about the photograph's view (5.5 deg/frame) — the profiles and
-  # the views from below.
-  - id: fd_face2_views
-    step: face_detail_views
-    dispatch: in_process
-    when:
-      - ${globals.face_detailer}
-      - ${globals.export_ply}
-      - ${globals.refit_body}
-    inputs:
-      splat_path: scene.face_detail.splat_a
-      cameras: dataset.cameras
-      anchor_frame_index: dataset.extras.anchor_frame_index
-      joints: scene.joints
-      world_from_raw: scene.world_from_raw
-      front_image: scene.front_image
-      front_matte: scene.front_matte
-      body_rig: scene.body_rig
-      label_splat_path: scene.face_detail.base_splat
-    params:
-      name: face2
-      path: lissajous
-      yaw_deg: 90
-      pitch_deg: 30
-      pitch_offset_deg: -10
-      ratio: 2
-      anchor: true
-      reference: photo
-      train_on: head
-      train_on_dilate_px: 12
-      debug_dir: ${globals.output_root}/debug/face_detailer/face2_views
-    outputs:
-      images: scene.face_detail.face2.control
-      masks: scene.face_detail.face2.control_masks
-      cameras: scene.face_detail.face2.cameras
-      image_names: scene.face_detail.face2.image_names
-      reference_image: scene.face_detail.face2.reference
-      anchor_index: scene.face_detail.face2.anchor_index
-      weights: scene.face_detail.face2.weights
-      splat_path: scene.face_detail.face2.source_splat
-      stats: scene.face_detail.face2.path_stats
-
-  - id: fd_face2_denoise
-    step: wan22_vace_denoise
-    dispatch: subprocess
-    env: wan22
-    keep_loaded: true
-    when:
-      - ${globals.face_detailer}
-      - ${globals.export_ply}
-      - ${globals.refit_body}
-    inputs:
-      control_video: scene.face_detail.face2.control
-      control_masks: scene.face_detail.face2.control_masks
-      reference_image: scene.face_detail.face2.reference
-      subject_desc: dataset.prompt
-    params:
-      width: 480
-      height: 832
-      steps_high: 2
-      steps_low: 2
-      cfg: 1.0
-      seed: ${globals.seed}
-      low_vram: ${globals.low_vram}
-      sampler_high: euler
-      sampler_low: euler
-      sampler_shift: 2.5
-      strength: [0.8, 0.8, 0.5, 0.5]
-      prompt: *prompt_face
-      prompt_bank: [*prompt_orbit, *prompt_render, *prompt_face]
-      negative_prompt: "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静\
-        止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的\
-        手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体\
-        ，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走, \
-        chewing, tattoos, 眼球运动，眨眼，眼动追踪，微表情，面部抽动，头部移\
-        动, 小头, 小脸"
-    outputs:
-      images: scene.face_detail.face2.images
-
-  - id: fd_face2_matte
-    step: rmbg
-    dispatch: in_process
-    when:
-      - ${globals.face_detailer}
-      - ${globals.export_ply}
-      - ${globals.refit_body}
-    inputs:
-      images: scene.face_detail.face2.images
-    params:
-      low_vram: ${globals.low_vram}
-    outputs:
-      masks: scene.face_detail.face2.masks
-
-  - id: fd_face2_face_views
-    step: detect_face_views
-    dispatch: in_process
-    when:
-      - ${globals.face_detailer}
-      - ${globals.export_ply}
-      - ${globals.refit_body}
-    inputs:
-      images: scene.face_detail.face2.images
-      image_names: scene.face_detail.face2.image_names
-      cameras: scene.face_detail.face2.cameras
-      mesh_world: scene.mesh_world
-      joints: scene.joints
-      keypoints_3d: scene.keypoints_3d
-      world_from_raw: scene.world_from_raw
-      face_correspondence: scene.face_correspondence
-    params:
-      debug_dir: ${globals.output_root}/debug/face_detailer/face2_face_views
-    outputs:
-      face_views: scene.face_detail.face2.face_views
-
-  - id: fd_face2_head_fit
-    step: fit_head_per_view
-    dispatch: subprocess
-    env: sam3dbody
-    when:
-      - ${globals.face_detailer}
-      - ${globals.export_ply}
-      - ${globals.refit_body}
-    inputs:
-      pose_params: scene.pose_params
-      focal_length: scene.face_detail.photo.focal_length
-      vertices: scene.vertices
-      faces: scene.faces
-      world_from_raw: scene.world_from_raw
-      face_correspondence: scene.face_correspondence
-      face_views: scene.face_detail.face2.face_views
-      face_landmarks: scene.face_detail.photo.face_landmarks
-      image: scene.face_detail.photo.image
-    params:
-      debug_dir: ${globals.output_root}/debug/face_detailer/face2_head_fit
-    outputs:
-      head_fit_views: scene.face_detail.face2.head_fit
-
-  - id: fd_face2_eyes
-    step: paste_eyes
-    dispatch: in_process
-    when:
-      - ${globals.face_detailer}
-      - ${globals.export_ply}
-      - ${globals.refit_body}
-    inputs:
-      images: scene.face_detail.face2.images
-      image_names: scene.face_detail.face2.image_names
-      cameras: scene.face_detail.face2.cameras
-      head_fit_views: scene.face_detail.face2.head_fit
-      image: scene.face_detail.photo.image
-      face_landmarks: scene.face_detail.photo.face_landmarks
-    params:
-      debug_dir: ${globals.output_root}/debug/face_detailer/face2_eyes
-    outputs:
-      images: scene.face_detail.face2.images
-      eye_stats: scene.face_detail.face2.eye_stats
-
-  - id: fd_face2_clip
-    step: face_detail_clip
-    dispatch: in_process
-    when:
-      - ${globals.face_detailer}
-      - ${globals.export_ply}
-      - ${globals.refit_body}
-    inputs:
-      images: scene.face_detail.face2.images
-      masks: scene.face_detail.face2.masks
-      cameras: scene.face_detail.face2.cameras
-      image_names: scene.face_detail.face2.image_names
-      anchor_index: scene.face_detail.face2.anchor_index
-      face_views: scene.face_detail.face2.face_views
-      eye_stats: scene.face_detail.face2.eye_stats
-      weights: scene.face_detail.face2.weights?
-    outputs:
-      clip: scene.face_detail.face2.clip
-
-  - id: fd_face2_upscale
-    step: seedvr2
-    dispatch: subprocess
-    env: seedvr2
-    when:
-      - ${globals.face_detailer}
-      - ${globals.export_ply}
-      - ${globals.refit_body}
-    inputs:
-      images: scene.face_detail.face2.images
-      cameras: scene.face_detail.face2.cameras
-    params:
-      resolution: 960
-      batch_size: 1
-      vae_encode_tiled: true
-      vae_decode_tiled: true
-      seed: ${globals.seed}
-    outputs:
-      images: scene.face_detail.face2.upscaled_images
-      cameras: scene.face_detail.face2.upscaled_cameras
-
-  - id: fd_face2_clip_upscale
-    step: face_detail_clip_upscale
-    dispatch: in_process
-    when:
-      - ${globals.face_detailer}
-      - ${globals.export_ply}
-      - ${globals.refit_body}
-    inputs:
-      clip: scene.face_detail.face2.clip
-      images: scene.face_detail.face2.upscaled_images
-      cameras: scene.face_detail.face2.upscaled_cameras
-    outputs:
-      clip: scene.face_detail.face2.clip_upscaled
-
-  # The face rig v3 on the clips' frames, constrained (steps/face_detailer.py):
-  # the raw per-view fits are 8-16 mm noisy; the clips' shared offset
+  # The face rig v3 on the clip's frames, constrained (steps/face_detailer.py):
+  # the raw per-view fits are 8-16 mm noisy; the clip's shared offset
   # removed, a +-3 frame median and a 10 mm cap leave 1.5-2 mm, and the
   # nose and mouth then agree between views (mouth 1.60 -> 1.15 px held-out).
   - id: fd_face_rig
@@ -5187,8 +4927,6 @@ steps:
       body_rig: scene.body_rig
       head_fit_a: scene.face_detail.face1.head_fit
       image_names_a: scene.face_detail.face1.image_names
-      head_fit_b: scene.face_detail.face2.head_fit
-      image_names_b: scene.face_detail.face2.image_names
     params:
       debug_dir: ${globals.output_root}/debug/face_detailer/rig
     outputs:
@@ -5209,7 +4947,6 @@ steps:
       masks: dataset.masks
       labels: scene.seg_labels?
       clip_a: scene.face_detail.face1.clip_upscaled
-      clip_b: scene.face_detail.face2.clip_upscaled
     outputs:
       images: scene.face_detail.retrain_b.images
       image_names: scene.face_detail.retrain_b.image_names
@@ -5218,7 +4955,7 @@ steps:
       weights: scene.face_detail.retrain_b.weights
       labels: scene.face_detail.retrain_b.labels
 
-  # Retraining B: the deliverable's views plus both face clips, with the
+  # Retraining B: the deliverable's views plus the face clip, with the
   # face rig. The face detailer's result; the hair clip's control with
   # `hair_detailer` on, in which case retraining C votes the labels.
   - id: fd_retrain_b_train
@@ -5459,7 +5196,6 @@ steps:
       masks: dataset.masks
       labels: scene.seg_labels?
       clip_a: scene.face_detail.face1.clip_upscaled
-      clip_b: scene.face_detail.face2.clip_upscaled
       clip_c: scene.face_detail.hair.clip_upscaled
     outputs:
       images: scene.face_detail.retrain_c.images

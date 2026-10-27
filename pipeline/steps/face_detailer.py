@@ -9,14 +9,16 @@ on held-out face views: triangulated iris reprojection error 1.51 -> 1.17 px, mo
 skin and tattoos as the photograph's, the splat count unchanged. The recipe, every part of which was measured
 against its absence:
 
-  * clip 1: a Lissajous figure, yaw +-45, pitch +-20 about the photograph's view, two vertical periods, at
-    constant angular speed (3.2 deg/frame; the video model wants no acceleration and no reversal of one
-    axis at a time, which a single arc or a back-and-forth sweep gives it);
-  * clip 2: PROGRESSIVE — rendered from a splat already retrained on clip 1 — yaw +-90, pitch -40..+20
-    (5.5 deg/frame). An independent second clip from the original splat softens the front (two
-    hallucinations averaged); a progressive one does not, and it is what reaches the profiles and the
-    views from below;
-  * the pipeline's own `paste_eyes` on both clips, with the photograph's face crop upscaled 4x by SeedVR2 for
+  * one face clip: a Lissajous figure, yaw +-70, pitch +-20 about the photograph's view, two vertical periods,
+    at constant angular speed (the video model wants no acceleration and no reversal of one axis at a time,
+    which a single arc or a back-and-forth sweep gives it). It replaced two (2026-10-27): yaw +-45 / pitch
+    +-20, then a PROGRESSIVE yaw +-90 / pitch -40..+20 rendered from a splat already retrained on the first.
+    Upscaled as below and without the hair clip, on 8180cc / c261fc / 032922, held-out face sharpness front /
+    profile / high and photo-view PSNR, two clips 104/117/120 18.58, 100/98/95 17.51, 79/88/96 19.69 dB;
+    this one 108/137/135 17.90, 107/116/106 17.31, 82/98/97 18.98 dB; the stage 540-550 s against
+    1015-1065 s. One clip wider (yaw +-90, pitch -40..+20) is 8-14 % softer at the front; yaw +-55 sits
+    between; ratio 1.5 loses the front by up to 25 %;
+  * the pipeline's own `paste_eyes` on every clip, with the photograph's face crop upscaled 4x by SeedVR2 for
     the eye texture: Wan's eyes follow the camera (iris error 2.25 px on a single clip). Eyes the paste
     skips get zero loss weight (`face_detail_clip`);
   * the face rig v3 (`face_detail_rig`), constrained: the original views get no deltas, the clip frames'
@@ -35,9 +37,8 @@ against its absence:
   * the arms left out of every clip's control (`hide_arms`, zero loss weight where they are in front) and the face
     clips' loss kept to the head (`train_on: head`): the video model repaints whatever else is in the frame, and
     on 0256db that put a tattooed hand on the gauntlet and an orange glow on the shoulder badges.
-  * the face clips upscaled 2x by SeedVR2 (one frame at a time, after the eye paste) for the retrainings that
-    deliver (`face_detail_clip_upscale`; retraining A, which only renders clip 2's control, keeps clip 1 at
-    480p). At 480p the retraining kept a quarter of the clips' face sharpness: Wan draws the detail a few
+  * the clips upscaled 2x by SeedVR2 (one frame at a time, after the eye paste) for the retrainings
+    (`face_detail_clip_upscale`). At 480p the retraining kept a quarter of the clips' face sharpness: Wan draws the detail a few
     pixels differently in every frame (alignment residual 4-6 px against 1.3 for the original views, not
     shrinking between alignment iterations) and the retraining averaged it away, to below the splat it
     started from. Measured on 8180cc (2026-10-26, held-out views): face sharpness front / profile / high
