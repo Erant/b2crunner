@@ -56,7 +56,8 @@ def b2crig_python(root: Path, explicit: str = "") -> str:
 class RigSubjectStep(Step):
     """The subject file rigged by b2crig, plus a clip to pose it with.
 
-    inputs:  {"subject_path": export_subject's .glb}
+    inputs:  {"subject_path": export_subject's .glb, "views_dir"?: the delivered splat's last training set when it
+              is not the capture (face_detail_rig_views): the containment fine-tune trains on it instead}
     outputs: {"subject_path": the rigged .glb (the same path), "clip_path": the clip file or None}
     """
 
@@ -68,6 +69,12 @@ class RigSubjectStep(Step):
         Param("debug_dir", str, REQUIRED, "Where the unrigged subject file, the pose set and the training log go"),
         Param("clip", str, "rom_tour", "The clip written beside the subject file ('none': no clip)",
               choices=["rom_tour", "none"]),
+        # b2crig's pose containment fine-tune retrains the splat; on the
+        # capture's frames it re-learnt their colours without the final
+        # training's alignment and body rig. 8180cc: body sharpness 18.3 ->
+        # 12.2 (30.1 dB against the delivered splat); distilled 16.3 (36.6 dB).
+        Param("distill", bool, True, "The rig's fine-tune trains on the delivered splat's own renders, not the "
+              "frames (b2crig --distill)"),
         Param("b2crig_dir", str, "", "The b2crig checkout (empty: $B2CRIG_DIR, /opt/b2crig, ~/Projects/b2crig)",
               advanced=True),
         Param("python", str, "", "The interpreter that runs b2crig (empty: $B2CRIG_PYTHON, the checkout's .venv, "
@@ -92,6 +99,10 @@ class RigSubjectStep(Step):
         work = Path(tempfile.mkdtemp(prefix="b2c_rig_"))
         cmd = [b2crig_python(root, params["python"]), str(root / ENTRY), str(unrigged), str(capture), str(subject),
                "--work", str(work), "--clip", params["clip"]]
+        if inputs.get("views_dir"):
+            cmd += ["--views", str(inputs["views_dir"])]
+        if params["distill"]:
+            cmd += ["--distill"]
         try:
             tail = stream_command(cmd, "b2crig", cwd=str(root), throttle=False)
         except BaseException:

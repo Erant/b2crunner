@@ -37,5 +37,32 @@ class TestFaceDetailClipUpscale(unittest.TestCase):
                           self.step.resolve_params({}))
 
 
+class TestFaceDetailRigViews(unittest.TestCase):
+    def test_a_colmap_dataset_with_the_sidecars_the_views_have(self):
+        import tempfile
+        from pathlib import Path
+
+        import cv2
+        from body2colmap.camera import Camera
+
+        cams = [Camera(focal_length=(f, f), image_size=(w, h), principal_point=(w / 2, h / 2),
+                       position=np.array([0, 0, 2], np.float32), rotation=np.eye(3, dtype=np.float32))
+                for f, w, h in ((100.0, 8, 16), (200.0, 16, 32))]
+        mask = [np.ones((16, 8), np.float32), np.zeros((32, 16), np.float32)]
+        step = get_step_class("face_detail_rig_views")()
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(step.run({"images": [np.zeros((16, 8, 3), np.uint8), np.zeros((32, 16, 3), np.uint8)],
+                                 "image_names": ["frame_00001_.png", "face1_00001.png"], "cameras": cams, "masks": mask,
+                                 "weights": [None, np.full((32, 16), 0.5, np.float32)],
+                                 "labels": [np.full((16, 8), 3, np.uint8), None],
+                                 "points_3d": (np.zeros((0, 3), np.float32), np.zeros((0, 3), np.uint8))},
+                                step.resolve_params({"output_dir": d + "/views"}))["views_dir"])
+            cam_lines = [l for l in (out / "cameras.txt").read_text().splitlines() if l and not l.startswith("#")]
+            self.assertEqual(len(cam_lines), 2)   # one per lens
+            self.assertEqual(cv2.imread(str(out / "images" / "frame_00001_.png"), cv2.IMREAD_UNCHANGED)[..., 3].min(), 255)
+            self.assertEqual(sorted(p.name for p in (out / "weights").iterdir()), ["face1_00001.png"])
+            self.assertEqual(sorted(p.name for p in (out / "labels").iterdir()), ["frame_00001_.png"])
+
+
 if __name__ == "__main__":
     unittest.main()

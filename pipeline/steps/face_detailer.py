@@ -46,7 +46,7 @@ against its absence:
     nothing (0.01 dB); and SeedVR2 on 160 renders of the detailed splat about the head instead (then
     retrained) reached only 86 / 85 / 98 at 17.8 dB.
 
-Six steps here, the rest are the pipeline's own (wan22_vace_denoise, rmbg, seedvr2, detect_face_views,
+Seven steps here, the rest are the pipeline's own (wan22_vace_denoise, rmbg, seedvr2, detect_face_views,
 fit_head_per_view, paste_eyes, brush):
 
   face_detail_views        the path's cameras, the splat rendered along it (the control video and its VACE
@@ -56,6 +56,7 @@ fit_head_per_view, paste_eyes, brush):
   face_detail_clip         one denoised clip as training views: names, matte, loss weights
   face_detail_clip_upscale that clip with its frames upscaled: matte and loss weights resized to them
   face_detail_dataset      the final training's views plus the clips, the sidecars per view
+  face_detail_rig_views    the last retraining's views on disk, the cameras the rig's fine-tune distils at
   face_detail_rig          the rig's per-view face deltas on the clips' frames, constrained
 
 Coordinates: the dataset's world frame, y up (the orbit's). Cameras are body2colmap Cameras (OpenGL
@@ -75,7 +76,7 @@ import numpy as np
 
 from ..masks import normalize_mask
 from ..registry import register_step
-from ..step import Param, Step
+from ..step import REQUIRED, Param, Step
 from .face_views import LID_RING_IMAGE_LEFT, LID_RING_IMAGE_RIGHT, MHR_HEAD_JOINT, to_world
 
 logger = logging.getLogger(__name__)
@@ -733,6 +734,56 @@ class FaceDetailDatasetStep(Step):
                     sum(len(c["images"]) for c in clips), len(clips), sum(w is not None for w in weights))
         return {"images": images, "image_names": names, "cameras": cameras, "masks": masks,
                 "weights": weights if any(w is not None for w in weights) else None, "labels": labels}
+
+
+@register_step("face_detail_rig_views")
+class FaceDetailRigViewsStep(Step):
+    """The detailer's last retraining set on disk, for the rig (rig_subject's `views_dir`).
+
+    inputs:  {"images", "image_names", "cameras", "masks", "weights"?, "labels"?: face_detail_dataset's,
+              "points_3d": the dataset's}
+    outputs: {"views_dir": a COLMAP dataset: cameras.txt (one per lens), images.txt, points3D.txt, images/ (RGBA, the
+              matte as alpha), labels/ and weights/ for the views that have them}
+
+    b2crig's containment fine-tune retrains the splat it rigs, on its capture views unless it is given these. With
+    `distill` (rig_subject's default) it trains on the delivered splat's renders at these views' cameras, so the
+    clips' close-ups of the head hold the head. Measured on 8180cc, held-out face sharpness front / profile / high and
+    photo-view PSNR; the delivered splat 98 / 100 / 105, 18.1 dB:
+      the capture's frames (colmap/, the views from before the detailer)      54 / 57 / 64, 16.6 dB  (the old face)
+      these views' frames                                                     62 / 69 / 73, 17.6 dB  (no alignment
+                                                                                there: the clips' detail averages)
+      the capture's frames, the head at zero weight                           67 / 66 / 76, 16.5 dB  (the trainer's
+                                                                                pruning and respawning wear it down)
+      the capture's frames without the head + renders at the clips' cameras   89 / 89 / 94, 18.1 dB
+      renders at all of these views' cameras (distill)                        92 / 93 / 97, 18.1 dB
+    """
+
+    PARAMS = (
+        Param("output_dir", str, REQUIRED, "Where the dataset goes"),
+    )
+
+    def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+        from body2colmap.exporter import ColmapExporter
+
+        from ..masks import mask_to_alpha_u8
+        from .brush import write_labels, write_loss_weights
+
+        out = Path(params["output_dir"])
+        if out.exists():
+            shutil.rmtree(out)
+        (out / "images").mkdir(parents=True)
+        names, images, masks = list(inputs["image_names"]), list(inputs["images"]), list(inputs["masks"])
+        if not (len(names) == len(images) == len(masks) == len(inputs["cameras"])):
+            raise ValueError("face_detail_rig_views: images, image_names, masks and cameras disagree")
+        ColmapExporter(cameras=list(inputs["cameras"]), image_names=names,
+                       points_3d=inputs["points_3d"]).export(output_dir=out)
+        for name, img, mask in zip(names, images, masks):
+            cv2.imwrite(str(out / "images" / Path(name).with_suffix(".png").name),
+                        np.dstack([np.asarray(img)[..., :3], mask_to_alpha_u8(mask)]))
+        write_labels(out, names, inputs.get("labels"))
+        write_loss_weights(out, names, inputs.get("weights"))
+        logger.info("face_detail_rig_views: %d views -> %s", len(names), out)
+        return {"views_dir": str(out)}
 
 
 # -- face_detail_rig ----------------------------------------------------------------------------------------------

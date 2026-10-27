@@ -5253,6 +5253,34 @@ steps:
     outputs:
       splat_path: dataset.splat_path
 
+  # The views the delivered splat was last trained on, for rig_subject: its
+  # fine-tune distils the splat at these cameras, the clips' close-ups of
+  # the head among them. On colmap/'s frames it put the capture's face back
+  # (8180cc: held-out face sharpness 98 -> 54, photo-view PSNR 18.1 -> 16.6
+  # dB); distilled at these 92, 18.1 dB (steps/face_detailer.py).
+  # Retraining B's here, C's below with the hair clip.
+  - id: fd_rig_views_b
+    step: face_detail_rig_views
+    dispatch: in_process
+    when:
+      - ${globals.face_detailer}
+      - ${globals.export_ply}
+      - ${globals.refit_body}
+      - ${globals.rig_splat}
+      - {not: "${globals.hair_detailer}"}
+    inputs:
+      images: scene.face_detail.retrain_b.images
+      image_names: scene.face_detail.retrain_b.image_names
+      cameras: scene.face_detail.retrain_b.cameras
+      masks: scene.face_detail.retrain_b.masks
+      weights: scene.face_detail.retrain_b.weights?
+      labels: scene.face_detail.retrain_b.labels?
+      points_3d: dataset.points_3d
+    params:
+      output_dir: ${globals.output_root}/debug/face_detailer/rig_views
+    outputs:
+      views_dir: scene.face_detail.rig_views
+
   # The hair clip (`hair_detailer`): one turn of a helix about the hair
   # (centre and height from the splat's Hair labels), elevation -20..+30
   # from level, the back panel's head and shoulders as the reference, no
@@ -5470,6 +5498,28 @@ steps:
     outputs:
       splat_path: dataset.splat_path
 
+  - id: fd_rig_views_c
+    step: face_detail_rig_views
+    dispatch: in_process
+    when:
+      - ${globals.face_detailer}
+      - ${globals.export_ply}
+      - ${globals.refit_body}
+      - ${globals.rig_splat}
+      - ${globals.hair_detailer}
+    inputs:
+      images: scene.face_detail.retrain_c.images
+      image_names: scene.face_detail.retrain_c.image_names
+      cameras: scene.face_detail.retrain_c.cameras
+      masks: scene.face_detail.retrain_c.masks
+      weights: scene.face_detail.retrain_c.weights?
+      labels: scene.face_detail.retrain_c.labels?
+      points_3d: dataset.points_3d
+    params:
+      output_dir: ${globals.output_root}/debug/face_detailer/rig_views
+    outputs:
+      views_dir: scene.face_detail.rig_views
+
   # The deliverable as one glTF file beside the bare scene.ply (b2cgltf
   # SPEC.md, steps/subject_glb.py): the splat, the refitted MHR body skinned
   # to its named skeleton, the orbit record with the orbit and final cameras,
@@ -5509,6 +5559,7 @@ steps:
       - ${globals.rig_splat}
     inputs:
       subject_path: scene.subject_path
+      views_dir: scene.face_detail.rig_views?
     params:
       capture_dir: ${globals.output_root}/colmap
       debug_dir: ${globals.output_root}/debug/rig

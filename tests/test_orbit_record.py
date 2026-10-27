@@ -226,7 +226,11 @@ class TestTheWiring(unittest.TestCase):
                 # The last training before the subject file: the final one, the re-upscale's retraining of it
                 # (the `reupscale` switch) or the face detailer's (`face_detailer`, `hair_detailer`), which all
                 # write the same splat path.
-                self.assertEqual(order[-3], "fd_retrain_c_train")
+                trainings = [s.id for s in spec.steps if s.step == "brush"]
+                self.assertEqual(trainings[-1], "fd_retrain_c_train")
+                # then only the face detailer's views for the rig, written from that training's dataset
+                self.assertEqual(order[order.index("fd_retrain_c_train") + 1:-2], ["fd_rig_views_c"])
+                self.assertEqual(steps["rig_subject"].inputs["views_dir"], "scene.face_detail.rig_views?")
                 self.assertLess(order.index("train_final_splat"), order.index("reupscale_render"))
                 self.assertLess(order.index("reupscale_train"), order.index("fd_face1_views"))
                 for last in ("reupscale_train", "fd_retrain_b_train", "fd_retrain_c_train"):
