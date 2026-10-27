@@ -343,7 +343,8 @@ class FaceDetailViewsStep(Step):
               choices=("photo", "back")),
         Param("train_on", str, "all", "Loss weights that keep this clip to the head or the hair, or none",
               choices=("all", "head", "hair")),
-        Param("train_on_dilate_px", int, 4, "Dilate the train_on weights by this many pixels", minimum=0),
+        Param("train_on_dilate_px", int, 4, "Dilate the train_on weights by this many pixels (negative: erode)",
+              minimum=-32),
         Param("hide_arms", str, "elbow", "Leave the arms out of the control from the elbows or the shoulders down",
               choices=("none", "elbow", "shoulder")),
         Param("arm_dilate_px", int, 8, "Grow the hidden arms' zero-weight region by this many pixels", minimum=0),
@@ -469,11 +470,13 @@ class FaceDetailViewsStep(Step):
             kept, _ = _rasterize(scene=class_mask_scene(label_scene, classes), splat_path=None, cameras=clip_cams,
                                  image_names=names, width=W, height=H, bg_color=(0.0, 0.0, 0.0),
                                  render_path=params["render_path"])
-            k = 2 * int(params["train_on_dilate_px"]) + 1
+            grow = int(params["train_on_dilate_px"])
+            k = 2 * abs(grow) + 1
+            morph = cv2.dilate if grow >= 0 else cv2.erode
             weights = []
             for i, im in enumerate(kept):
                 m = (cv2.cvtColor(im[..., :3], cv2.COLOR_BGR2GRAY) > 64).astype(np.uint8) * 255
-                m = cv2.GaussianBlur(cv2.dilate(m, np.ones((k, k), np.uint8)), (0, 0), 2)
+                m = cv2.GaussianBlur(morph(m, np.ones((k, k), np.uint8)), (0, 0), 2)
                 weights.append(np.ones((H, W), np.float32) if i == anchor_index else m.astype(np.float32) / 255.0)
             stats[f"{params['train_on']}_coverage"] = round(float(np.mean([w.mean() for w in weights])), 4)
         if arms is not None and arms.any():

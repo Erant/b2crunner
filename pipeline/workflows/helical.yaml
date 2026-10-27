@@ -5285,7 +5285,11 @@ steps:
   # (centre and height from the splat's Hair labels), elevation -20..+30
   # from level, the back panel's head and shoulders as the reference, no
   # anchor; its loss weights are the deliverable's Hair class at the clip's
-  # cameras, dilated, so these frames train the hair and nothing else.
+  # cameras, ERODED 4 px, so these frames train the hair's interior and
+  # nothing else. Dilated (the old 4 px), a long braid's edge took the clip's
+  # misdrawn pixels and 00009's thigh grew a dark smudge beside the hair tie;
+  # 0 px left a smaller one; -4 px none, with the head unchanged (front/side/
+  # high 102/96/95 against 101/97/95, photo PSNR 17.43 against 17.44).
   # Rendered from retraining B.
   - id: fd_hair_views
     step: face_detail_views
@@ -5319,6 +5323,7 @@ steps:
       anchor: false
       reference: back
       train_on: hair
+      train_on_dilate_px: -4
       debug_dir: ${globals.output_root}/debug/face_detailer/hair_views
     outputs:
       images: scene.face_detail.hair.control
