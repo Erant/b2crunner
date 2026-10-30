@@ -24,6 +24,7 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DOCKERFILE = REPO_ROOT / "docker" / "Dockerfile"
+BASE_DOCKERFILE = REPO_ROOT / "docker" / "Dockerfile.base"
 ENTRYPOINT = REPO_ROOT / "docker" / "entrypoint.sh"
 COMPOSE = REPO_ROOT / "docker" / "docker-compose.yml"
 DOCKER_ENVS = REPO_ROOT / "docker" / "envs.docker.yaml"
@@ -33,7 +34,10 @@ APP_DIR = "/opt/b2c_runner"
 
 class TestDockerfile(unittest.TestCase):
     def setUp(self):
+        # The image is two files since 1913f85: Dockerfile.base builds the dependencies (apt, venvs, COLMAP), and
+        # the app Dockerfile goes FROM it by digest and adds the pins, the trainer and the code.
         self.text = DOCKERFILE.read_text()
+        self.base = BASE_DOCKERFILE.read_text()
 
     def test_the_app_does_not_live_under_the_default_runpod_volume_mount(self):
         """RunPod's pod template defaults its volume mount path to /workspace.
@@ -94,7 +98,7 @@ class TestDockerfile(unittest.TestCase):
         still leave `pipeline.cli ui` unable to import it.
         """
         self.assertRegex(
-            self.text,
+            self.base,
             r"/opt/venv_main/bin/pip install[^\n]*(\\\n[^\n]*)*gradio",
             "no `pip install ... gradio` into /opt/venv_main, which is the venv "
             "docker/entrypoint.sh runs the UI with",
@@ -105,7 +109,7 @@ class TestDockerfile(unittest.TestCase):
         for tool in ("git", "curl", "procps", "less", "rsync", "openssh-server", "unzip", "jq"):
             with self.subTest(tool=tool):
                 self.assertRegex(
-                    self.text, rf"(?m)^\s+.*\b{re.escape(tool)}\b",
+                    self.base, rf"(?m)^\s+.*\b{re.escape(tool)}\b",
                     f"{tool} is not installed in the runtime stage",
                 )
 
@@ -124,10 +128,10 @@ class TestDockerfile(unittest.TestCase):
         $ORIGIN/../lib) and put on PATH. steps/refine_cameras.py's default
         `colmap_path` is the bare name `colmap`.
         """
-        self.assertIn("AS colmap-builder", self.text)
-        self.assertIn("-DCUDA_ENABLED=ON", self.text)
-        self.assertIn('grep -q "with CUDA"', self.text)
-        self.assertIn("COPY --from=colmap-builder /opt/colmap /opt/colmap", self.text)
+        self.assertIn("AS colmap-builder", self.base)
+        self.assertIn("-DCUDA_ENABLED=ON", self.base)
+        self.assertIn('grep -q "with CUDA"', self.base)
+        self.assertIn("COPY --from=colmap-builder /opt/colmap /opt/colmap", self.base)
         self.assertIn("ENV PATH=/opt/colmap/bin:${PATH}", self.text)
 
     def test_colmap_s_apt_layer_sits_below_the_venv_copies(self):
@@ -150,20 +154,20 @@ class TestDockerfile(unittest.TestCase):
         venv_base = "COPY --from=python-builder /opt/venv_base"
         brush_copy = "COPY --from=b2ctrain-builder /out-b2ctrain /usr/local/bin/b2ctrain"
 
-        for marker in (colmap_pkg, venv_base, brush_copy):
-            self.assertIn(marker, self.text)
+        for marker in (colmap_pkg, venv_base):
+            self.assertIn(marker, self.base)
+        self.assertIn(brush_copy, self.text)
 
         self.assertGreater(
-            self.text.index(colmap_pkg), self.text.index(venv_base),
+            self.base.index(colmap_pkg), self.base.index(venv_base),
             "COLMAP's apt packages are above the venv copies again — a change "
             "to them now re-runs every layer behind them and re-pushes the "
             "runtime stage's RUN layers",
         )
-        self.assertLess(
-            self.text.index(colmap_pkg), self.text.index(brush_copy),
-            "COLMAP's apt packages moved below the trainer COPYs — a "
-            "B2CTRAIN_REF bump would now invalidate them and re-push ~450 MB",
-        )
+        # The trainer is in the app file, which goes FROM the base: every base layer, COLMAP's apt among them,
+        # sits below the trainer COPYs by construction.
+        self.assertNotIn(brush_copy, self.base,
+                         "the trainer COPY moved into the base — a B2CTRAIN_REF bump would now rebuild the base")
 
     def test_a_code_change_re_runs_only_the_application_layers(self):
         """Every layer below `COPY . /opt/b2c_runner` re-executes with each
@@ -207,10 +211,10 @@ class TestDockerfile(unittest.TestCase):
         self.assertIsNotNone(rig, "no b2crig ADD")
         self.assertEqual(rig.group(1), IMAGE_B2CRIG_DIR)
         self.assertRegex(self.text, r"ARG B2CRIG_REF=[0-9a-f]{40}\n")
+        # COLMAP's apt and copy are base layers (Dockerfile.base), below all of this by construction.
+        self.assertRegex(self.base, r"(?m)^COPY --from=colmap-builder /opt/colmap /opt/colmap$")
         at = lambda pattern: re.search(pattern, self.text, re.M).start()
         order = [
-            self.text.rindex("RUN apt-get update", 0, self.text.index("libceres4t64")),
-            at(r"^COPY --from=colmap-builder /opt/colmap /opt/colmap$"),
             at(r"^COPY --from=b2ctrain-builder /out-b2ctrain "),
             add.start(),
             rig.start(),
@@ -218,7 +222,7 @@ class TestDockerfile(unittest.TestCase):
         ]
         self.assertEqual(order, sorted(order))
         between = self.text[order[0]:order[-1]]
-        runs = re.findall(r"(?m)^RUN (.*)$", between)[1:]   # past the COLMAP apt RUN itself
+        runs = re.findall(r"(?m)^RUN (.*)$", between)
         self.assertEqual(runs, ["b2ctrain --help > /dev/null && brush-splat-render --help > /dev/null"],
                          "a writing RUN among the prebuilt pieces is a new blob on every pin bump above it")
 
@@ -231,10 +235,10 @@ class TestDockerfile(unittest.TestCase):
         override has to name cuda13, and the base images have to agree with
         it.
         """
-        self.assertIn("gpu_cuda13", self.text)
-        self.assertIn("FETCHCONTENT_SOURCE_DIR_ONNXRUNTIME", self.text)
+        self.assertIn("gpu_cuda13", self.base)
+        self.assertIn("FETCHCONTENT_SOURCE_DIR_ONNXRUNTIME", self.base)
 
-        bases = re.findall(r"^FROM nvidia/cuda:(\S+?)-", self.text, re.M)
+        bases = re.findall(r"^FROM nvidia/cuda:(\S+?)-", self.base + self.text, re.M)
         self.assertTrue(bases, "no nvidia/cuda base images found")
         for base in bases:
             self.assertTrue(
@@ -251,17 +255,17 @@ class TestDockerfile(unittest.TestCase):
             venv_root = str(Path(config["python_bin"]).parent.parent)
             with self.subTest(env=name):
                 self.assertIn(
-                    f"make-child-venv {venv_root}", self.text,
+                    f"make-child-venv {venv_root}", self.base,
                     f"env '{name}' points at {venv_root}, which the Dockerfile never creates",
                 )
                 self.assertIn(
-                    f"COPY --from=python-builder {venv_root} {venv_root}", self.text,
+                    f"COPY --from=python-builder {venv_root} {venv_root}", self.base,
                     f"env '{name}'s venv is built but never copied into the runtime stage",
                 )
 
     def test_the_orchestrator_venv_is_also_built_and_copied(self):
-        self.assertIn("make-child-venv /opt/venv_main", self.text)
-        self.assertIn("COPY --from=python-builder /opt/venv_main /opt/venv_main", self.text)
+        self.assertIn("make-child-venv /opt/venv_main", self.base)
+        self.assertIn("COPY --from=python-builder /opt/venv_main /opt/venv_main", self.base)
 
 
 class TestEntrypoint(unittest.TestCase):
