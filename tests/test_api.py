@@ -549,13 +549,14 @@ class TestWhatAWorkflowDeclares(ApiTestCase):
         # fold on 2026-09-26, on by default, and the upscale left the
         # Outputs box (gone) for it. "Rig splat" (2026-09-30) is the one output
         # in the open: it is a per-run choice, off by default. The face and
-        # hair detailers (2026-10-18) are per-run choices too.
+        # hair detailers (2026-10-18) are per-run choices too, and so is Rig
+        # splat's De-light (2026-10-29).
         body = self.client.get(
             f"{API_PREFIX}/workflows/helical", headers=AUTH
         ).json()
         plain = [s["name"] for s in body["settings"] if not s["advanced"]]
         self.assertEqual(plain, ["resolution", "framing", "input_layout", "seed",
-                                 "low_vram", "face_detailer", "hair_detailer"])
+                                 "low_vram", "face_detailer", "hair_detailer", "delight"])
         self.assertEqual([o["name"] for o in body["outputs"] if not o["advanced"]
                           and not o["always"]], ["rig_splat"])
         by_name = {s["name"]: s for s in body["settings"]}

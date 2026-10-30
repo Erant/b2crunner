@@ -47,9 +47,9 @@ The three differ only in what they tell the UI:
   * `settings:` is a declared knob — a `Param` (pipeline/step.py), with the
     same `type`/`default`/`help`/`choices`/`minimum`/`maximum`/`advanced`
     vocabulary a step param has, plus a `label:`, a `group:` and an optional
-    `requires:` naming a setting it is only meaningful with (drawn greyed
-    out while that one is off). The UI draws these, through the same widget
-    code it draws step params with. This is where `resolution` and
+    `requires:` naming a setting, or an output's switch, it is only
+    meaningful with (drawn greyed out while that one is off). The UI draws
+    these, through the same widget code it draws step params with. This is where `resolution` and
     `framing` live: what more than one step must agree on AND what somebody
     actually wants to change.
   * `outputs:` is a deliverable — a switch its export steps read through
@@ -570,18 +570,20 @@ class WorkflowSpec:
                     f"It declares: {', '.join(sorted(declared))}."
                 )
         # A setting's `requires:` is the same contract, and the UI greys the
-        # control out behind the named switch — so the name has to be a
-        # setting (an output is a deliverable, not a switch a knob follows),
-        # and not the setting itself.
-        settings_by_name = {param.name for param in self.settings}
+        # control out behind the named switch — so the name has to be another
+        # setting or an output that has a switch (Rig splat's De-light), not
+        # an `always` output and not the setting itself. The steps it gates
+        # read both in their `when:`; nothing forces the setting off.
+        switches = {param.name for param in self.settings}
+        switches |= {output.name for output in self.outputs if output.switch}
         for param in self.settings:
             if not param.requires:
                 continue
-            if param.requires == param.name or param.requires not in settings_by_name:
+            if param.requires == param.name or param.requires not in switches:
                 raise ValueError(
                     f"Workflow '{self.name}' setting '{param.name}' requires "
-                    f"'{param.requires}', which is not another declared setting. "
-                    f"It declares: {', '.join(sorted(settings_by_name))}."
+                    f"'{param.requires}', which is not another declared setting "
+                    f"or output switch. It declares: {', '.join(sorted(switches))}."
                 )
 
         # A profile names declared knobs only, with values that fit them.

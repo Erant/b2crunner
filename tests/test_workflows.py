@@ -1917,17 +1917,19 @@ class TestTheSingleViewInput(unittest.TestCase):
         self.assertEqual(step.outputs.get("reference_image"), "dataset.reference_image")
         self.assertEqual(step.inputs.get("masks"), "dataset.masks")
 
-    def test_the_reference_has_exactly_three_writers(self):
+    def test_the_reference_has_exactly_four_writers(self):
         """The split (the back panel, or None), the matte (that panel cut
-        out onto the anchor border's grey, or None again) and the pick (the
-        rear view, or the matted panel again). A fourth would be a second
-        opinion on what the denoise passes condition on."""
+        out onto the anchor border's grey, or None again), Rig splat's
+        De-light (that panel without the camera's headlight, off by default)
+        and the pick (the rear view, or the matted panel again). A fifth
+        would be a second opinion on what the denoise passes condition on."""
         spec = self._spec()
         writers = [
             s.id for s in spec.steps
             if "dataset.reference_image" in s.outputs.values()
         ]
-        self.assertEqual(writers, ["split_sheet", "matte_reference", "pick_rear_view"])
+        self.assertEqual(writers, ["split_sheet", "matte_reference", "delight_references",
+                                   "pick_rear_view"])
 
     def test_every_denoise_reads_the_matted_panel(self):
         """No pass conditions on the room the sheet was photographed in:
@@ -2068,7 +2070,9 @@ class TestTheReoutlineBranch(unittest.TestCase):
         spec = self._spec()
         # The Weak skeleton setting's anchor injections ride beside the two
         # the branch is placed against; they are not part of the branch.
-        order = [s.id for s in spec.steps if not s.id.endswith("_stick_free")]
+        # Neither is Rig splat's De-light, which follows it.
+        order = [s.id for s in spec.steps
+                 if not s.id.endswith("_stick_free") and not s.id.startswith("delight_")]
         first = order.index("reinject_anchor_initial") + 1
         self.assertEqual(order[first:first + len(self.BRANCH)], self.BRANCH)
         self.assertEqual(order[first + len(self.BRANCH)], "dump_denoise_input")
@@ -2770,7 +2774,8 @@ class TestDeclaredSettings(unittest.TestCase):
 
     def test_a_setting_requiring_something_undeclared_or_itself_is_refused(self):
         """`requires:` on a setting greys its control out behind another
-        setting, so the name has to be one — not an output, not itself."""
+        setting or an output's switch, so the name has to be one — not an
+        `always` output, not itself."""
         def body(requires):
             return (
                 "name: badreq\n"
@@ -2780,6 +2785,8 @@ class TestDeclaredSettings(unittest.TestCase):
                 f"    requires: {requires}\n"
                 "outputs:\n"
                 "  - name: export_thing\n    dir: thing\n    label: Thing\n    help: x\n"
+                "  - name: export_always\n    dir: always\n    label: Always\n    help: x\n"
+                "    always: true\n"
                 "steps:\n"
                 "  - id: a\n    step: rmbg\n    dispatch: in_process\n"
                 "    when: ${globals.switch}\n"
@@ -2787,14 +2794,15 @@ class TestDeclaredSettings(unittest.TestCase):
                 "  - id: b\n    step: rmbg\n    dispatch: in_process\n"
                 "    when: ${globals.export_thing}\n"
             )
-        for requires in ("no_such_setting", "knob", "export_thing"):
+        for requires in ("no_such_setting", "knob", "export_always"):
             with self.subTest(requires=requires):
                 with self.assertRaises(ValueError) as caught:
                     WorkflowSpec.from_yaml(self._write(body(requires))).validate()
                 self.assertIn(requires, str(caught.exception))
-        spec = WorkflowSpec.from_yaml(self._write(body("switch")))
-        spec.validate()
-        self.assertEqual(next(p for p in spec.settings if p.name == "knob").requires, "switch")
+        for requires in ("switch", "export_thing"):
+            spec = WorkflowSpec.from_yaml(self._write(body(requires)))
+            spec.validate()
+            self.assertEqual(next(p for p in spec.settings if p.name == "knob").requires, requires)
 
     def test_a_setting_read_only_through_another_settings_requires_is_not_an_orphan(self):
         """The switch a `requires:` names is read, the way an output's is."""

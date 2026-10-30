@@ -528,6 +528,13 @@ settings:
     requires: face_detailer
     help: A third clip, circling the head, that refines the hair.
 
+  - name: delight
+    label: De-light
+    type: bool
+    default: false
+    requires: rig_splat
+    help: Take the camera's headlight out of the reference and photo before the first denoise, so the rig can be lit afresh.
+
   - name: weak_skeleton
     label: Weak skeleton
     type: bool
@@ -2011,6 +2018,87 @@ steps:
       masks: scene.inactive_masks?
     outputs:
       images: scene.control_no_skeleton
+
+  # ------------------------------------------------------------ de-light
+  # Rig splat's De-light: the camera's headlight out of the two real images
+  # pass 1 conditions on (the back panel, the warped photo), so the splat
+  # carries no shading baked in from the lens and the rig can be lit
+  # afresh. The lighting study's DL arm, swapped in at this same point: the
+  # anchor frame already injected into dataset.images keeps the photograph
+  # as it was, and every later reinjection reads the delit one. See
+  # steps/delight.py. A single photo has no back panel; its two maps come
+  # out None and delight_references hands None through.
+  - id: delight_reference_labels
+    step: sapiens2_seg
+    dispatch: in_process
+    when:
+      - ${globals.rig_splat}
+      - ${globals.delight}
+    inputs:
+      image: dataset.reference_image?
+    params:
+      parts: all
+    outputs:
+      labels: scene.delight_reference_labels
+
+  - id: delight_anchor_labels
+    step: sapiens2_seg
+    dispatch: in_process
+    when:
+      - ${globals.rig_splat}
+      - ${globals.delight}
+    inputs:
+      image: dataset.anchor_image
+    params:
+      parts: all
+    outputs:
+      labels: scene.delight_anchor_labels
+
+  - id: delight_reference_normals
+    step: sapiens2_lite
+    dispatch: in_process
+    when:
+      - ${globals.rig_splat}
+      - ${globals.delight}
+    inputs:
+      image: dataset.reference_image?
+    params:
+      low_vram: ${globals.low_vram}
+    outputs:
+      normal_map: scene.delight_reference_normals
+
+  - id: delight_anchor_normals
+    step: sapiens2_lite
+    dispatch: in_process
+    when:
+      - ${globals.rig_splat}
+      - ${globals.delight}
+    inputs:
+      image: dataset.anchor_image
+    params:
+      low_vram: ${globals.low_vram}
+    outputs:
+      normal_map: scene.delight_anchor_normals
+
+  - id: delight_references
+    step: delight_references
+    dispatch: in_process
+    when:
+      - ${globals.rig_splat}
+      - ${globals.delight}
+    inputs:
+      reference_image: dataset.reference_image?
+      reference_labels: scene.delight_reference_labels?
+      reference_normals: scene.delight_reference_normals?
+      anchor_image: dataset.anchor_image
+      anchor_labels: scene.delight_anchor_labels
+      anchor_normals: scene.delight_anchor_normals
+    params:
+      debug_dir: ${globals.output_root}/debug/delight
+    outputs:
+      reference_image: dataset.reference_image
+      anchor_image: dataset.anchor_image
+      slopes: scene.delight_slopes
 
   # The control video pass 1 is about to be handed, written to the debug
   # bundle: the 81 frames with their VACE mask in the alpha channel, the

@@ -349,6 +349,17 @@ the splat is split at the finger joints and fine-tuned for about a minute,
 so posed limbs don't throw splats outside the figure. The unrigged file
 stays in `debug/rig/`. Needs the body refit.
 
+**delight** (shown with Rig splat, off by default) — takes the camera's
+headlight out of the back panel and the warped photo before pass 1
+(`pipeline/steps/delight.py`), so the rigged splat carries less shading
+baked in from the lens and can be lit afresh. Per Sapiens2 class, log2
+luminance is fitted against the normal's z toward the lens and grazing
+pixels are lifted by that slope (at most 1.5 stops). This is the lighting
+study's DL arm (2026-10-28), which won every lighting metric on the final
+splat (hl45 +0.51 -> +0.05). The anchor frame already in pass 1's control
+keeps the original photo, as it did in the study. Before/after preview:
+`debug/delight/`.
+
 ## Video denoise (Wan 2.2 VACE)
 
 `pipeline/steps/wan22_vace_denoise.py` (diffusers `WanVACEPipeline`, env `wan22`)

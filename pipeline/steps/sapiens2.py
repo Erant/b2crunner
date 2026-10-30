@@ -203,6 +203,11 @@ class Sapiens2LiteStep(Step):
             torch.cuda.empty_cache()
 
     def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+        # An optional single image read as None (the sheet's back panel on a
+        # single-photo run): no image, no normals, no model loaded.
+        if "images" not in inputs and inputs.get("image") is None:
+            return {"normal_map": None}
+
         if self._model is None:
             self.load(params)
 
@@ -391,6 +396,11 @@ class Sapiens2SegStep(Step):
             return self._model(**processed)
 
     def run(self, inputs: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+        # An optional single image read as None (the sheet's back panel on a
+        # single-photo run): no image, no classes, no model loaded.
+        if "images" not in inputs and inputs.get("image") is None:
+            return {"mask": None, "labels": None, "box": None}
+
         self._ready(params)
 
         if "images" in inputs:

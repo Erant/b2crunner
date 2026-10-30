@@ -14,6 +14,7 @@ from . import brush  # noqa: F401
 from . import colmap_export  # noqa: F401
 from . import crop  # noqa: F401
 from . import dataset_io  # noqa: F401
+from . import delight  # noqa: F401
 from . import elevation_views  # noqa: F401
 from . import extend_orbit  # noqa: F401
 from . import face_priority  # noqa: F401

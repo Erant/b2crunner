@@ -702,6 +702,14 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None, open_warning: str
 
                         switches = [o.as_param() for o in outputs if o.switch]
                         panel = list(settings) + switches
+                        # A setting that requires an output's switch (Rig
+                        # splat's De-light) is drawn right after that switch.
+                        output_names = {o.name for o in switches}
+                        followers = [p for p in settings if p.requires in output_names]
+                        panel = [p for p in panel if p not in followers]
+                        for follower in followers:
+                            at = next(i for i, p in enumerate(panel) if p.name == follower.requires)
+                            panel.insert(at + 1, follower)
                         plain = [s for s in panel if not s.advanced]
                         advanced = [s for s in panel if s.advanced]
 
