@@ -63,7 +63,8 @@ class ExportSubjectStep(Step):
 
     inputs:  {"splat_path": the trained .ply, "cameras" / "image_names": what it was trained on,
               "body_params" / "mesh_world" / "rig_binding": refit_body_to_splat's,
-              "record": snapshot_orbit's (optional: without it B2C_orbit holds only the final cameras)}
+              "record": snapshot_orbit's (optional: without it B2C_orbit holds only the final cameras),
+              "levels"?: splat_lods' LOD levels, chained behind the splat (SPEC 4.7)}
     outputs: {"subject_path": the .glb}
     """
 
@@ -116,8 +117,9 @@ class ExportSubjectStep(Step):
             images=images, **{k: _plain(record.get(k)) for k in _ORBIT_KEYS})
 
         fields, _ = convert.read_trainer_ply(ply_path)
+        levels = [(convert.read_trainer_ply(lv["path"])[0], lv["method"]) for lv in inputs.get("levels") or ()]
         path = write_subject(ply_path.parent / params["name"], fields, body, capture, tool="b2crunner",
-                             commit=_commit(), log=logger.info)
+                             commit=_commit(), levels=levels, log=logger.info)
         logger.info(
             "export_subject: %s (%.1f MB): %d splats, %d body vertices, %d joints, %d final + %d orbit cameras, "
             "images: %s", path.name, path.stat().st_size / 1e6, len(fields["x"]), len(body.verts),

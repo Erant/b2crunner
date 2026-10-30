@@ -5349,6 +5349,26 @@ steps:
     outputs:
       views_dir: scene.face_detail.rig_views
 
+  # The delivered splat's LOD levels, 100k and 50k splats (steps/splat_lods.py):
+  # merged by b2ctrain, then fine-tuned on its own renders at the capture's
+  # cameras. Always on for an unrigged delivery (levels can be stripped
+  # later); a rigged one gets b2crig's levels instead, from the splat it
+  # retrains. ~2 x 6000 steps.
+  - id: splat_lods
+    step: splat_lods
+    dispatch: in_process
+    when:
+      - ${globals.export_ply}
+      - ${globals.refit_body}
+      - {not: "${globals.rig_splat}"}
+    inputs:
+      splat_path: dataset.splat_path
+    params:
+      views_dir: ${globals.output_root}/colmap
+      work_dir: ${globals.output_root}/debug/lod
+    outputs:
+      levels: scene.splat_levels
+
   # The deliverable as one glTF file beside the bare scene.ply (b2cgltf
   # SPEC.md, steps/subject_glb.py): the splat, the refitted MHR body skinned
   # to its named skeleton, the orbit record with the orbit and final cameras,
@@ -5370,6 +5390,7 @@ steps:
       mesh_world: scene.mesh_world
       rig_binding: scene.rig_binding
       record: scene.orbit_record?
+      levels: scene.splat_levels?
     outputs:
       subject_path: scene.subject_path
 

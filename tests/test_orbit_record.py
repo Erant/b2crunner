@@ -228,8 +228,9 @@ class TestTheWiring(unittest.TestCase):
                 # write the same splat path.
                 trainings = [s.id for s in spec.steps if s.step == "brush"]
                 self.assertEqual(trainings[-1], "fd_retrain_c_train")
-                # then only the face detailer's views for the rig, written from that training's dataset
-                self.assertEqual(order[order.index("fd_retrain_c_train") + 1:-2], ["fd_rig_views_c"])
+                # then only the face detailer's views for the rig, written from that training's dataset, and the
+                # unrigged delivery's LOD levels
+                self.assertEqual(order[order.index("fd_retrain_c_train") + 1:-2], ["fd_rig_views_c", "splat_lods"])
                 self.assertEqual(steps["rig_subject"].inputs["views_dir"], "scene.face_detail.rig_views?")
                 self.assertLess(order.index("train_final_splat"), order.index("reupscale_render"))
                 self.assertLess(order.index("reupscale_train"), order.index("fd_face1_views"))

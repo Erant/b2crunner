@@ -45,7 +45,9 @@ ARG BASE_IMAGE=erantimus/b2crunner:base-20261011@sha256:8f27df40bab8021d05b0a293
 # 0d7e5a9 (2026-09-30): cage posing, the binding export and the pose containment
 # loss, which the Rig splat output (b2crig) drives, on top of e0fbc38's visibility
 # cull (the cage commit rebased onto it); additive for everything else.
-ARG B2CTRAIN_REF=0d7e5a9db734e62b25f70317e6c14735a8485f61
+# cebf39d (2026-10-30): lod-merge / lod-distill, the splat's LOD levels (steps/splat_lods.py and
+# b2crig's levels stage, which needs lod-merge --cage-min-conf); seg labels through every export.
+ARG B2CTRAIN_REF=cebf39d03eb5638e2c158c5f6168bf912bd9aba4
 
 # =============================================================================
 # Stage 1: b2ctrain
@@ -250,7 +252,8 @@ print('body2colmap eye_style default:', f.DEFAULT_EYE_STYLE)"
 # then re-runs this one small layer and no venv. Pinned by commit, as
 # b2ctrain is: the file format is a contract with b2crig. numpy is its only dependency, already in
 # venv_base.
-ARG B2CGLTF_REF=ad878fcb2b47a23bb49b070b9373accde3d2de34
+# 5385b22 (2026-10-30): LOD levels (SPEC 4.7, b2cgltf.lod), write_subject(levels=).
+ARG B2CGLTF_REF=5385b229ed194b01df0eb1a1d664400f1eae82fd
 RUN /opt/venv_base/bin/pip install --no-deps \
         "b2cgltf @ git+https://github.com/Erant/b2cgltf.git@${B2CGLTF_REF}" \
     && /opt/venv_base/bin/python -c "import b2cgltf.b2crunner.subject"
@@ -323,7 +326,8 @@ ADD --keep-git-dir=false https://github.com/Erant/b2cviewer.git#${B2CVIEWER_REF}
 # as b2cgltf is, and bumped with it: b2crig writes its half of the subject file
 # through that package. The doctor's b2crig check proves the imports at start.
 # 191026f: capture views keep their own lens (the extension's per-view telephoto).
-ARG B2CRIG_REF=166641516697e0227bb285309be29eadeae513a4
+# 48f5534 (2026-10-30): rig_subject always writes the splat's LOD levels (100k / 50k).
+ARG B2CRIG_REF=48f5534b864de41dc6e9adf31914fc958c3ce850
 ADD --keep-git-dir=false https://github.com/Erant/b2crig.git#${B2CRIG_REF} /opt/b2crig
 
 # NOT /workspace/b2c_runner, which is where this used to live. RunPod's

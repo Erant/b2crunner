@@ -349,6 +349,18 @@ the splat is split at the finger joints and fine-tuned for about a minute,
 so posed limbs don't throw splats outside the figure. The unrigged file
 stays in `debug/rig/`. Needs the body refit.
 
+**LOD levels** (always, with the body refit) — `scene.glb` also carries
+two smaller copies of the splat, for subjects seen small: 100k splats for
+up to 960 px of screen height and 50k for up to 480 px (b2cgltf SPEC 4.7,
+`MSFT_lod`; the levels sit in no scene). b2ctrain merges the splat down
+(`lod-merge`, never across seg classes), then fine-tunes each level on the
+full splat's own renders (`lod-distill`, ~15 s each). Unrigged,
+`pipeline/steps/splat_lods.py` makes them; rigged, b2crig makes its own
+from the splat it retrains. crew-brazil: 41.9 / 38.8 dB PSNR against the
+full splat at a quarter of the capture's size. Pruning instead
+(`--sparsify`) gave 33 / 31 dB and looked broken. There is no switch: the
+levels can be stripped from the file later.
+
 **delight** (shown with Rig splat, off by default) — takes the camera's
 headlight out of the back panel and the warped photo before pass 1
 (`pipeline/steps/delight.py`), so the rigged splat carries less shading
