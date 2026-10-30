@@ -253,7 +253,8 @@ print('body2colmap eye_style default:', f.DEFAULT_EYE_STYLE)"
 # b2ctrain is: the file format is a contract with b2crig. numpy is its only dependency, already in
 # venv_base.
 # 5385b22 (2026-10-30): LOD levels (SPEC 4.7, b2cgltf.lod), write_subject(levels=).
-ARG B2CGLTF_REF=5385b229ed194b01df0eb1a1d664400f1eae82fd
+# 12cd0bb (2026-10-30): the multi-level web writer (web.subject_lods, web.subject level=, strip_lods).
+ARG B2CGLTF_REF=12cd0bb614fb3815f93a288fa78b02a23f31afc5
 RUN /opt/venv_base/bin/pip install --no-deps \
         "b2cgltf @ git+https://github.com/Erant/b2cgltf.git@${B2CGLTF_REF}" \
     && /opt/venv_base/bin/python -c "import b2cgltf.b2crunner.subject"
@@ -315,7 +316,8 @@ RUN b2ctrain --help > /dev/null && brush-splat-render --help > /dev/null
 # source rather than a RUN git clone: no git needed in this stage, and
 # BuildKit caches it by the commit. Pinned by commit, as b2cgltf is: the
 # page reads b2cgltf's files, so the two move together.
-ARG B2CVIEWER_REF=6f7b89166249d91047c2894e8ed6ba13717fddc2
+# eb6b1d8 (2026-10-30): streamed `<name>.lods/` subjects, Detail auto by maxScreenHeightPx.
+ARG B2CVIEWER_REF=eb6b1d809d7601d1169477cee1090159e7d2710c
 ADD --keep-git-dir=false https://github.com/Erant/b2cviewer.git#${B2CVIEWER_REF} /opt/b2cviewer
 
 # b2crig (Erant/b2crig): the rig behind the "Rig splat" output
