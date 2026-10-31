@@ -906,6 +906,11 @@ def run_log_path(run_dir: Optional[Path], log_path: Optional[Path] = None) -> Op
 # older `scene.ply` whose header carries `b2c.*` records is packaged with
 # those lines stripped.
 SPLAT_DIR = "ply"
+# The COLMAP export is a deliverable on disk but optional in an archive: it is
+# packaged only when asked for (the `colmap` argument, the Results tabs'
+# checkbox, `/result?colmap=true`). By default an archive is the splat + log;
+# a run whose only deliverable is colmap/ still carries it.
+COLMAP_DIR = "colmap"
 SPLAT_FORMATS: Dict[str, str] = {"gltf": ".glb", "ply": ".ply"}
 DEFAULT_SPLAT_FORMAT = "gltf"
 
@@ -966,6 +971,7 @@ def _run_members(
     prefix: str = "",
     debug: bool = True,
     fmt: str = DEFAULT_SPLAT_FORMAT,
+    colmap: bool = False,
 ) -> List["tuple[str, Path, int, bool]"]:
     """Every (arcname, source, compression) one run contributes, in order.
 
@@ -990,6 +996,8 @@ def _run_members(
     splat_suffix = SPLAT_FORMATS.get(packaged_format(run_dir, workflow, fmt) or "", None)
     members: List["tuple[str, Path, int, bool]"] = []
     for name, directory in sorted(directories.items()):
+        if name == COLMAP_DIR and not colmap and len(directories) > 1:
+            continue  # a run with nothing else keeps it: an archive of only a log is no archive
         for path in sorted(directory.rglob("*")):
             if not path.is_file():
                 continue
@@ -1028,6 +1036,7 @@ def _write_run_members(
     prefix: str = "",
     debug: bool = True,
     fmt: str = DEFAULT_SPLAT_FORMAT,
+    colmap: bool = False,
 ) -> bool:
     """Write one run's deliverables into an already-open archive.
 
@@ -1035,7 +1044,7 @@ def _write_run_members(
     can never drift into carrying different things. Returns False, having
     written nothing at all, for a run with no deliverables.
     """
-    members = _run_members(run_dir, workflow, log_path, prefix, debug, fmt)
+    members = _run_members(run_dir, workflow, log_path, prefix, debug, fmt, colmap)
     for arcname, path, compression, strip in members:
         if strip:
             _write_bare_ply(bundle, path, arcname)
@@ -1051,14 +1060,14 @@ def _write_run_members(
 # run packaged before `debug/` was carried keeps handing back its old
 # contents forever, while the docs say `debug/` is in there. **Bump this
 # whenever `_write_run_members` changes what it writes.**
-ARCHIVE_FORMAT = b"b2c-result-2: outputs (ply/: scene.glb or a bare scene.ply) + debug/ + log.txt"
+ARCHIVE_FORMAT = b"b2c-result-3: outputs (ply/: scene.glb or a bare scene.ply; colmap/ optional) + debug/ + log.txt"
 
 
 # One run's share of an archive, as `_write_run_members` takes it:
-# (run_dir, workflow, log_path, prefix, debug, fmt). A per-run archive is one
+# (run_dir, workflow, log_path, prefix, debug, fmt, colmap). A per-run archive is one
 # of these with an empty prefix; the combined bundle is one per run under
 # its run name.
-_ArchivePart = Tuple[Path, str, Optional[Path], str, bool, str]
+_ArchivePart = Tuple[Path, str, Optional[Path], str, bool, str, bool]
 
 
 def archive_is_current(
@@ -1068,6 +1077,7 @@ def archive_is_current(
     log_path: Optional[Path] = None,
     debug: bool = True,
     fmt: str = DEFAULT_SPLAT_FORMAT,
+    colmap: bool = False,
 ) -> bool:
     """True when `archive` already holds this run exactly as it stands.
 
@@ -1084,11 +1094,11 @@ def archive_is_current(
     are hundreds of megabytes of PNG, and the only writer is a run that
     has already finished.
     """
-    return _archive_holds(archive, [(Path(run_dir), workflow, log_path, "", debug, fmt)])
+    return _archive_holds(archive, [(Path(run_dir), workflow, log_path, "", debug, fmt, colmap)])
 
 
 def bundle_is_current(archive: Path, states: List[RunState], debug: bool = True,
-                      fmt: str = DEFAULT_SPLAT_FORMAT) -> bool:
+                      fmt: str = DEFAULT_SPLAT_FORMAT, colmap: bool = False) -> bool:
     """True when the combined bundle already holds these runs as they stand.
 
     The same three checks as `archive_is_current`, over every run at
@@ -1096,14 +1106,14 @@ def bundle_is_current(archive: Path, states: List[RunState], debug: bool = True,
     cannot see: a run that finished since the last press, or one pruned
     off the volume, is a different list of names.
     """
-    return _archive_holds(archive, _bundle_parts(states, debug, fmt))
+    return _archive_holds(archive, _bundle_parts(states, debug, fmt, colmap))
 
 
 def _bundle_parts(states: List[RunState], debug: bool = True,
-                  fmt: str = DEFAULT_SPLAT_FORMAT) -> List[_ArchivePart]:
+                  fmt: str = DEFAULT_SPLAT_FORMAT, colmap: bool = False) -> List[_ArchivePart]:
     """What `build_bundle_zip` writes for `states`, run by run."""
     return [
-        (Path(state.output_dir), state.workflow, state.log_path, state.name, debug, fmt)
+        (Path(state.output_dir), state.workflow, state.log_path, state.name, debug, fmt, colmap)
         for state in states if state.output_dir
     ]
 
@@ -1114,8 +1124,8 @@ def _archive_holds(archive: Path, parts: List[_ArchivePart]) -> bool:
         return False
     expected = [
         name
-        for run_dir, workflow, log_path, prefix, debug, fmt in parts
-        for name, _path, _c, _s in _run_members(run_dir, workflow, log_path, prefix, debug, fmt)
+        for run_dir, workflow, log_path, prefix, debug, fmt, colmap in parts
+        for name, _path, _c, _s in _run_members(run_dir, workflow, log_path, prefix, debug, fmt, colmap)
     ]
     try:
         with zipfile.ZipFile(archive) as bundle:
@@ -1134,8 +1144,9 @@ def _archive_holds(archive: Path, parts: List[_ArchivePart]) -> bool:
         return False  # truncated, or not an archive this module wrote
     stamp = archive.stat().st_mtime
     sources: List[Path] = []
-    for run_dir, workflow, log_path, _prefix, debug, _fmt in parts:
-        sources += list(result_dirs(run_dir, workflow).values())
+    for run_dir, workflow, log_path, _prefix, debug, _fmt, colmap in parts:
+        dirs = result_dirs(run_dir, workflow)
+        sources += [d for n, d in dirs.items() if colmap or n != COLMAP_DIR or len(dirs) == 1]
         if debug:
             sources += list(debug_dirs(run_dir).values())
         log = run_log_path(run_dir, log_path)
@@ -1183,6 +1194,7 @@ def existing_result_zip(
     log_path: Optional[Path] = None,
     debug: bool = True,
     fmt: str = DEFAULT_SPLAT_FORMAT,
+    colmap: bool = False,
 ) -> Optional[str]:
     """The run's archive if one is already built and still current, else None.
 
@@ -1196,7 +1208,7 @@ def existing_result_zip(
         return None
     archive = result_archive_path(run_dir, fmt)
     if archive.is_file() and archive_is_current(
-        archive, Path(run_dir), workflow, log_path, debug, fmt
+        archive, Path(run_dir), workflow, log_path, debug, fmt, colmap
     ):
         return str(archive)
     return None
@@ -1209,8 +1221,9 @@ def build_result_zip(
     reuse: bool = False,
     debug: bool = True,
     fmt: str = DEFAULT_SPLAT_FORMAT,
+    colmap: bool = False,
 ) -> Optional[str]:
-    """One archive holding only the deliverables: colmap/ and/or ply/.
+    """One archive holding the deliverables: ply/, and colmap/ only if `colmap`.
 
     `fmt` picks the splat's format (`SPLAT_FORMATS`); see `_run_members`.
 
@@ -1253,7 +1266,7 @@ def build_result_zip(
 
     archive = result_archive_path(run_dir, fmt)
     with _archive_lock(archive):
-        if reuse and archive_is_current(archive, Path(run_dir), workflow, log_path, debug, fmt):
+        if reuse and archive_is_current(archive, Path(run_dir), workflow, log_path, debug, fmt, colmap):
             return str(archive)
         # Beside the destination, not in TMPDIR: os.replace is only atomic
         # within one filesystem, and on a pod those are different mounts.
@@ -1265,7 +1278,7 @@ def build_result_zip(
             # wall clock.
             with zipfile.ZipFile(staging, "w", compression=zipfile.ZIP_STORED) as bundle:
                 bundle.comment = ARCHIVE_FORMAT
-                _write_run_members(bundle, Path(run_dir), workflow, log_path, debug=debug, fmt=fmt)
+                _write_run_members(bundle, Path(run_dir), workflow, log_path, debug=debug, fmt=fmt, colmap=colmap)
             os.replace(staging, archive)
         finally:
             staging.unlink(missing_ok=True)
@@ -1286,7 +1299,7 @@ def bundle_path(fmt: str = DEFAULT_SPLAT_FORMAT) -> Path:
 
 def build_bundle_zip(
     states: List[RunState], reuse: bool = False, debug: bool = True,
-    fmt: str = DEFAULT_SPLAT_FORMAT,
+    fmt: str = DEFAULT_SPLAT_FORMAT, colmap: bool = False,
 ) -> Optional[str]:
     """Every run's deliverables in one archive, each under its own run name.
 
@@ -1306,15 +1319,18 @@ def build_bundle_zip(
     # and for the same reason — this path is fixed, so two presses of the
     # button write the same file. See `build_result_zip`.
     with _archive_lock(archive):
-        if reuse and bundle_is_current(archive, states, debug, fmt):
+        if reuse and bundle_is_current(archive, states, debug, fmt, colmap):
             return str(archive)
         staging = archive.with_suffix(f".zip.{secrets.token_hex(4)}.part")
         try:
             with zipfile.ZipFile(staging, "w", compression=zipfile.ZIP_STORED) as bundle:
                 bundle.comment = ARCHIVE_FORMAT
-                for run_dir, workflow, log_path, prefix, debug, fmt in _bundle_parts(states, debug, fmt):
+                for run_dir, workflow, log_path, prefix, p_debug, p_fmt, p_colmap in _bundle_parts(
+                        states, debug, fmt, colmap
+                ):
                     if _write_run_members(
-                        bundle, run_dir, workflow, log_path, prefix=prefix, debug=debug, fmt=fmt,
+                        bundle, run_dir, workflow, log_path, prefix=prefix, debug=p_debug, fmt=p_fmt,
+                        colmap=p_colmap,
                     ):
                         written += 1
             if not written:
@@ -1397,12 +1413,12 @@ def completed_runs() -> List[RunState]:
 
 
 def run_contents(state: RunState, debug: bool = True,
-                 fmt: str = DEFAULT_SPLAT_FORMAT) -> "tuple[str, int]":
+                 fmt: str = DEFAULT_SPLAT_FORMAT, colmap: bool = False) -> "tuple[str, int]":
     """One run's archive as a summary line and a total size in bytes: what `_run_members` packages for `fmt`
     (the splat by its file name, so a run that falls back from glTF to the PLY says so)."""
     groups: Dict[str, List[Path]] = {}
     for arcname, path, _c, _s in _run_members(Path(state.output_dir), state.workflow, state.log_path,
-                                              debug=debug, fmt=fmt) if state.output_dir else []:
+                                              debug=debug, fmt=fmt, colmap=colmap) if state.output_dir else []:
         top = Path(arcname).parts[0]
         groups.setdefault(arcname if top in (SPLAT_DIR, "log.txt") else top, []).append(path)
     total = 0

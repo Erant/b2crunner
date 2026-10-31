@@ -148,7 +148,7 @@ def _report_end(client: B2CClient, state: Dict[str, Any]) -> None:
 
 
 def _download(client: B2CClient, name: str, into: Path, debug: bool = False,
-              splat_format: Optional[str] = None) -> int:
+              splat_format: Optional[str] = None, colmap: bool = False) -> int:
     reported = [0]
 
     def progress(written: int, total: int) -> None:
@@ -165,6 +165,8 @@ def _download(client: B2CClient, name: str, into: Path, debug: bool = False,
     try:
         # Only when asked for: without --format the server's default (glTF) applies.
         extra = {"splat_format": splat_format} if splat_format else {}
+        if colmap:
+            extra["colmap"] = True
         path = client.download_result(name, into, on_progress=progress, debug=debug, **extra)
     except ApiError as exc:
         if exc.status == 404:
@@ -213,7 +215,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         return 1
     print()
     failed = _download(client, name, Path(args.output), debug=args.debug,
-                       splat_format=getattr(args, "format", None))
+                       splat_format=getattr(args, "format", None), colmap=getattr(args, "colmap", False))
     if args.shutdown_when_done:
         if failed:
             # Only once the .zip is on this disk. Stopping the container is
@@ -321,7 +323,7 @@ def cmd_log(args: argparse.Namespace) -> int:
 
 def cmd_result(args: argparse.Namespace) -> int:
     return _download(_client(args), args.name, Path(args.output), debug=args.debug,
-                     splat_format=getattr(args, "format", None))
+                     splat_format=getattr(args, "format", None), colmap=getattr(args, "colmap", False))
 
 
 def cmd_cancel(args: argparse.Namespace) -> int:
@@ -431,6 +433,7 @@ def add_parser(subparsers) -> argparse.ArgumentParser:
     submission_args(run_p)
     run_p.add_argument("-o", "--output", default=".", help="Where to save the result .zip")
     run_p.add_argument("--debug", action="store_true", help="Include debug/ in the .zip")
+    run_p.add_argument("--colmap", action="store_true", help="Include colmap/ in the .zip")
     run_p.add_argument("--format", choices=("gltf", "ply"), default=None,
                        help="The splat in the .zip: the glTF subject file (the server's default) or the bare PLY")
     run_p.add_argument("--interval", type=float, default=5.0, help="Seconds between polls")
@@ -484,6 +487,7 @@ def add_parser(subparsers) -> argparse.ArgumentParser:
     result_p.add_argument("name")
     result_p.add_argument("-o", "--output", default=".")
     result_p.add_argument("--debug", action="store_true", help="Include debug/ in the .zip")
+    result_p.add_argument("--colmap", action="store_true", help="Include colmap/ in the .zip")
     result_p.add_argument("--format", choices=("gltf", "ply"), default=None,
                           help="The splat in the .zip: the glTF subject file (the server's default) or the bare PLY")
     result_p.set_defaults(func=cmd_result)

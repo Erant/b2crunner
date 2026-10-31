@@ -211,7 +211,8 @@ by default, because the intermediate splat is hundreds of MB against a
 few hundred KB for the camera dumps.
 
 The **Results** tab has three things: the one `.zip` of the run's
-deliverables (`colmap/` and `ply/`, plus `debug/` if you tick it,
+deliverables (`ply/` and the log; `colmap/` if you tick **Include COLMAP data**
+(`/result?colmap=true`, `api result --colmap`), `debug/` if you tick that,
 and nothing else — the run directory's own frames stay on the volume), the
 final frames, and a **per-step contact sheet**: eight frames spaced evenly
 through the batch, captured after every step, one row per step in run

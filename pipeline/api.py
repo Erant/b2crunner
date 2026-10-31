@@ -554,10 +554,10 @@ def build_router(
         return {"name": name, "path": str(path), "log": tail_lines(path, max_lines=tail)}
 
     @router.get("/runs/{name}/result")
-    def get_result(name: str, debug: bool = Query(False),
+    def get_result(name: str, debug: bool = Query(False), colmap: bool = Query(False),
                    format: str = Query(DEFAULT_SPLAT_FORMAT)) -> FileResponse:  # noqa: A002 (the query name)
-        """The run's deliverables as one .zip — `colmap/`, `ply/`, `log.txt`,
-        and `debug/` with `?debug=true`.
+        """The run's deliverables as one .zip — `ply/`, `log.txt`,
+        `colmap/` with `?colmap=true`, and `debug/` with `?debug=true`.
 
         `?format=gltf` (the default) or `?format=ply` picks what `ply/` holds:
         the subject file `scene.glb` or the bare `scene.ply`. A run without a
@@ -585,7 +585,7 @@ def build_router(
             )
         archive = build_result_zip(
             state.output_dir, state.workflow, state.log_path, reuse=True,
-            debug=debug, fmt=format,
+            debug=debug, fmt=format, colmap=colmap,
         )
         if archive is None:
             raise HTTPException(

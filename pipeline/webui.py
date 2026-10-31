@@ -111,6 +111,7 @@ from .paths import data_dir, output_dir, run_jobs_dir, upload_dir
 from .run_state import PREVIEW_FRAMES, RunState, tail_lines
 from .cli import available_workflows
 from .runs import (
+    COLMAP_DIR,
     DEFAULT_SPLAT_FORMAT, IMAGE_SUFFIXES, WORKFLOW_DEFAULT, SubmitError,
     build_bundle_zip, build_result_zip, bundle_path, clear_finished_runs, completed_runs, existing_result_zip,
     packaged_format,
@@ -485,7 +486,7 @@ def _download_links(archives: List[str]) -> str:
 
 
 def _result_summary(
-    state: RunState, debug: bool = False, fmt: str = DEFAULT_SPLAT_FORMAT,
+    state: RunState, debug: bool = False, fmt: str = DEFAULT_SPLAT_FORMAT, colmap: bool = False,
 ) -> tuple[str, List[str], Optional[str]]:
     """What the Results tab says about a run: (markdown, final frames, archive).
 
@@ -524,6 +525,8 @@ def _result_summary(
     packaged = packaged_format(Path(directory), state.workflow, fmt)
     suffix = {"gltf": ".glb", "ply": ".ply"}.get(packaged or "")
     for name, path in sorted(directories.items()):
+        if name == COLMAP_DIR and not colmap and len(directories) > 1:
+            continue
         if name == "ply":
             files = sorted(f for f in path.glob(f"*{suffix}") if f.is_file()) if suffix else []
             for f in files:
@@ -542,7 +545,7 @@ def _result_summary(
         )
 
     archive = existing_result_zip(
-        Path(directory), state.workflow, state.log_path, debug=debug, fmt=fmt,
+        Path(directory), state.workflow, state.log_path, debug=debug, fmt=fmt, colmap=colmap,
     )
     verb = "contains" if archive else "will contain"
     if archive:
@@ -891,6 +894,10 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None, open_warning: str
                     choices=SPLAT_FORMAT_CHOICES, value=DEFAULT_SPLAT_FORMAT,
                     label="Splat format", info=_SPLAT_FORMAT_INFO, scale=1,
                 )
+                results_colmap_in = gr.Checkbox(
+                    value=False, label="Include COLMAP data", scale=1,
+                    info="The colmap/ dataset; off = splat + log only.",
+                )
                 results_debug_in = gr.Checkbox(
                     value=False, label="Include debug/", scale=1,
                     info="Intermediate files, hundreds of MB.",
@@ -929,6 +936,9 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None, open_warning: str
                 bundle_in = gr.Checkbox(
                     value=False, label="Also build one combined .zip", scale=1,
                     info="Uses as much disk again as the per-run archives.",
+                )
+                all_colmap_in = gr.Checkbox(
+                    value=False, label="Include COLMAP data", scale=1,
                 )
                 all_debug_in = gr.Checkbox(
                     value=False, label="Include debug/", scale=1,
@@ -1002,7 +1012,8 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None, open_warning: str
         ]
 
         def view(run_name: Optional[str], memo: Optional[dict], step_filter: str,
-                 debug: bool, force: bool, fmt: str = DEFAULT_SPLAT_FORMAT) -> tuple:
+                 debug: bool, force: bool, fmt: str = DEFAULT_SPLAT_FORMAT,
+                 colmap: bool = False) -> tuple:
             """Everything about `run_name`, or `gr.update()` where nothing moved.
 
             `force` repaints regardless — the page load and a picker change,
@@ -1017,7 +1028,7 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None, open_warning: str
             live = state.status in ("queued", "running")
             fmt = fmt or DEFAULT_SPLAT_FORMAT
             sig = [run_name, state.status, state.current, state.total, int(state.finished),
-                   bool(debug), fmt]
+                   bool(debug), fmt, bool(colmap)]
             stale = force or sig != memo.get("sig")
 
             fleet = _fleet_status(scheduler)
@@ -1050,7 +1061,7 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None, open_warning: str
                 filter_upd = previews_upd = keep
 
             if stale:
-                info_upd, frames_upd, archive = _result_summary(state, bool(debug), fmt)
+                info_upd, frames_upd, archive = _result_summary(state, bool(debug), fmt, bool(colmap))
                 zip_upd = _download_links([archive] if archive else [])
                 viewable = viewer_on and has_subject_file(state.output_dir)
                 viewer_upd = gr.update(
@@ -1069,8 +1080,8 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None, open_warning: str
                 info_upd, frames_upd, zip_upd, viewer_upd, filter_upd, previews_upd, memo,
             )
 
-        def on_tick(run_name, memo, step_filter, debug=False, fmt=DEFAULT_SPLAT_FORMAT):
-            *painted, memo = view(run_name, memo, step_filter, debug, force=False, fmt=fmt)
+        def on_tick(run_name, memo, step_filter, debug=False, fmt=DEFAULT_SPLAT_FORMAT, colmap=False):
+            *painted, memo = view(run_name, memo, step_filter, debug, force=False, fmt=fmt, colmap=colmap)
             # The picker's rows carry each run's status icon, so they move
             # as runs start and finish; resent only then, so an open
             # dropdown is not redrawn under the pointer every two seconds.
@@ -1079,43 +1090,47 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None, open_warning: str
             memo["choices"] = choices
             return (picker, *painted, memo)
 
-        def on_load(run_name, memo, step_filter, debug=False, fmt=DEFAULT_SPLAT_FORMAT):
+        def on_load(run_name, memo, step_filter, debug=False, fmt=DEFAULT_SPLAT_FORMAT, colmap=False):
             """A fresh page: every run on the volume, the most recent selected."""
             choices = _run_choices(scheduler)
             names = [value for _, value in choices]
             selected = run_name if run_name in names else (names[0] if names else None)
-            *painted, memo = view(selected, memo, step_filter, debug, force=True, fmt=fmt)
+            *painted, memo = view(selected, memo, step_filter, debug, force=True, fmt=fmt, colmap=colmap)
             memo["choices"] = choices
             return (gr.update(choices=choices, value=selected), *painted, memo)
 
-        def on_change(run_name, memo, step_filter, debug=False, fmt=DEFAULT_SPLAT_FORMAT):
-            return view(run_name, memo, step_filter, debug, force=True, fmt=fmt)
+        def on_change(run_name, memo, step_filter, debug=False, fmt=DEFAULT_SPLAT_FORMAT, colmap=False):
+            return view(run_name, memo, step_filter, debug, force=True, fmt=fmt, colmap=colmap)
 
         timer = gr.Timer(2.0)
         timer.tick(
-            on_tick, inputs=[run_picker, memo, preview_step_in, results_debug_in, results_format_in],
+            on_tick, inputs=[run_picker, memo, preview_step_in, results_debug_in, results_format_in, results_colmap_in],
             outputs=[run_picker, *view_outputs],
         )
         app.load(
-            on_load, inputs=[run_picker, memo, preview_step_in, results_debug_in, results_format_in],
+            on_load, inputs=[run_picker, memo, preview_step_in, results_debug_in, results_format_in, results_colmap_in],
             outputs=[run_picker, *view_outputs], show_progress="hidden",
         )
         # `.change`, not `.input`: a run submitted below selects itself
         # programmatically, and that has to repaint too.
         run_picker.change(
-            on_change, inputs=[run_picker, memo, preview_step_in, results_debug_in, results_format_in],
+            on_change, inputs=[run_picker, memo, preview_step_in, results_debug_in, results_format_in, results_colmap_in],
             outputs=view_outputs, show_progress="hidden",
         )
         preview_step_in.change(
-            on_change, inputs=[run_picker, memo, preview_step_in, results_debug_in, results_format_in],
+            on_change, inputs=[run_picker, memo, preview_step_in, results_debug_in, results_format_in, results_colmap_in],
             outputs=view_outputs, show_progress="hidden",
         )
         results_debug_in.change(
-            on_change, inputs=[run_picker, memo, preview_step_in, results_debug_in, results_format_in],
+            on_change, inputs=[run_picker, memo, preview_step_in, results_debug_in, results_format_in, results_colmap_in],
+            outputs=view_outputs, show_progress="hidden",
+        )
+        results_colmap_in.change(
+            on_change, inputs=[run_picker, memo, preview_step_in, results_debug_in, results_format_in, results_colmap_in],
             outputs=view_outputs, show_progress="hidden",
         )
         results_format_in.change(
-            on_change, inputs=[run_picker, memo, preview_step_in, results_debug_in, results_format_in],
+            on_change, inputs=[run_picker, memo, preview_step_in, results_debug_in, results_format_in, results_colmap_in],
             outputs=view_outputs, show_progress="hidden",
         )
 
@@ -1194,7 +1209,8 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None, open_warning: str
 
         clear_btn.click(on_clear, inputs=[run_picker], outputs=[run_picker])
 
-        def on_package(run_name: Optional[str], debug: bool = False, fmt: str = DEFAULT_SPLAT_FORMAT):
+        def on_package(run_name: Optional[str], debug: bool = False, fmt: str = DEFAULT_SPLAT_FORMAT,
+                       colmap: bool = False):
             """Build (or reuse) the selected run's archive — the one slow press.
 
             Separate from looking at a run on purpose: the first archive of
@@ -1215,19 +1231,19 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None, open_warning: str
                 )
             archive = build_result_zip(
                 Path(state.output_dir), state.workflow, state.log_path, reuse=True,
-                debug=bool(debug), fmt=fmt or DEFAULT_SPLAT_FORMAT,
+                debug=bool(debug), fmt=fmt or DEFAULT_SPLAT_FORMAT, colmap=bool(colmap),
             )
             if not archive:
                 raise gr.Error("This run produced no deliverables to package.")
-            info, _frames, _archive = _result_summary(state, bool(debug), fmt or DEFAULT_SPLAT_FORMAT)
+            info, _frames, _archive = _result_summary(state, bool(debug), fmt or DEFAULT_SPLAT_FORMAT, bool(colmap))
             return info, _download_links([archive])
 
         package_btn.click(
-            on_package, inputs=[run_picker, results_debug_in, results_format_in],
+            on_package, inputs=[run_picker, results_debug_in, results_format_in, results_colmap_in],
             outputs=[results_info, results_zip],
         )
 
-        def on_all_results(bundle: bool, debug: bool, fmt: str = DEFAULT_SPLAT_FORMAT):
+        def on_all_results(bundle: bool, debug: bool, fmt: str = DEFAULT_SPLAT_FORMAT, colmap: bool = False):
             """Package every finished run on the volume, streaming as it goes.
 
             A generator, unlike everything else on the page: the first press
@@ -1260,10 +1276,10 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None, open_warning: str
                     f"Packaging **{index} of {len(runs)}** — `{state.name}`…",
                     rows, gr.update(), gr.update(), thumbs,
                 )
-                contents, size = run_contents(state, bool(debug), fmt)
+                contents, size = run_contents(state, bool(debug), fmt, bool(colmap))
                 archive = build_result_zip(
                     Path(state.output_dir), state.workflow, state.log_path,
-                    reuse=True, debug=bool(debug), fmt=fmt,
+                    reuse=True, debug=bool(debug), fmt=fmt, colmap=bool(colmap),
                 )
                 if archive:
                     archives.append(archive)
@@ -1288,7 +1304,7 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None, open_warning: str
             if bundle:
                 yield ("Building the combined .zip…", rows, gr.update(),
                        gr.update(), thumbs)
-                path = build_bundle_zip(runs, reuse=True, debug=bool(debug), fmt=fmt)
+                path = build_bundle_zip(runs, reuse=True, debug=bool(debug), fmt=fmt, colmap=bool(colmap))
                 if path:
                     combined = gr.update(visible=True, value=_download_links([path]))
                     info.append(
@@ -1297,7 +1313,7 @@ def build_app(envs_path: str, gpu_count: Optional[int] = None, open_warning: str
             yield "\n\n".join(info), rows, _download_links(archives), combined, thumbs
 
         all_refresh.click(
-            on_all_results, inputs=[bundle_in, all_debug_in, all_format_in],
+            on_all_results, inputs=[bundle_in, all_debug_in, all_format_in, all_colmap_in],
             outputs=[all_info, all_table, all_files, bundle_out, all_gallery],
         )
 

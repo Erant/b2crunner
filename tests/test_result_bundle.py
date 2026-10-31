@@ -86,7 +86,7 @@ class _BundleCase(unittest.TestCase):
 class TestResultBundle(_BundleCase):
     def test_it_holds_the_deliverables_and_only_those(self):
         run = _run_dir(self.root, colmap=True, ply=True)
-        names = self._names(runs.build_result_zip(run))
+        names = self._names(runs.build_result_zip(run, colmap=True))
 
         self.assertEqual(names, [
             "colmap/cameras.txt",
@@ -96,6 +96,17 @@ class TestResultBundle(_BundleCase):
             "colmap/points3D.txt",
             "ply/scene.ply",
         ])
+
+    def test_colmap_is_left_out_unless_asked_for(self):
+        run = _run_dir(self.root, colmap=True, ply=True, name="no-colmap")
+        self.assertEqual(self._names(runs.build_result_zip(run)), ["ply/scene.ply"])
+        self.assertEqual(self._names(runs.build_result_zip(run, colmap=True))[0], "colmap/cameras.txt")
+        # Flipping the option back rebuilds rather than reusing the larger archive.
+        self.assertEqual(self._names(runs.build_result_zip(run, reuse=True)), ["ply/scene.ply"])
+
+    def test_a_colmap_only_run_keeps_its_colmap(self):
+        run = _run_dir(self.root, colmap=True, ply=False, name="only-colmap")
+        self.assertIn("colmap/cameras.txt", self._names(runs.build_result_zip(run)))
 
     def test_the_run_directorys_own_frames_stay_out_of_it(self):
         """The dataset frames and the intermediate splat are the bulk of a
@@ -368,7 +379,7 @@ class TestEveryRunOnTheVolume(_BundleCase):
 
         with unittest.mock.patch.object(runs, "output_dir", lambda: self.runs):
             state = runs.completed_runs()[0]
-        contents, size = runs.run_contents(state)
+        contents, size = runs.run_contents(state, colmap=True)
 
         self.assertIn("colmap/ (5)", contents)
         # No scene.glb in this run: the default (glTF) request falls back to the PLY, named as a file.
@@ -531,7 +542,7 @@ class TestEveryRunOnTheVolume(_BundleCase):
 
         def package():
             try:
-                results.append(runs.build_result_zip(run))
+                results.append(runs.build_result_zip(run, colmap=True))
             except Exception as exc:  # pragma: no cover - the failure this pins
                 errors.append(exc)
 

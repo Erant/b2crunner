@@ -338,10 +338,11 @@ class B2CClient:
         on_progress: Optional[Callable[[int, int], None]] = None,
         debug: bool = False,
         splat_format: Optional[str] = None,
+        colmap: bool = False,
     ) -> Path:
         """Stream the run's `.zip` to `destination`; return the file written.
 
-        `debug` adds the run's `debug/` directory to the archive; `splat_format`
+        `debug` adds the run's `debug/` directory to the archive, `colmap` its `colmap/`; `splat_format`
         ("gltf" or "ply", the server's default when None) picks what `ply/` holds.
 
         `destination` names a file only when it ends in `.zip`; anything
@@ -371,6 +372,7 @@ class B2CClient:
         response = self._request(
             "GET", f"/runs/{name}/result", stream=True, timeout=(self.timeout, None),
             params={**({"debug": "true"} if debug else {}),
+                    **({"colmap": "true"} if colmap else {}),
                     **({"format": splat_format} if splat_format else {})} or None,
         )
         if target.is_dir() or target.suffix.lower() != ".zip":
