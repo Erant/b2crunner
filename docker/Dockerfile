@@ -329,7 +329,9 @@ ADD --keep-git-dir=false https://github.com/Erant/b2cviewer.git#${B2CVIEWER_REF}
 # through that package. The doctor's b2crig check proves the imports at start.
 # 191026f: capture views keep their own lens (the extension's per-view telephoto).
 # 48f5534 (2026-10-30): rig_subject always writes the splat's LOD levels (100k / 50k).
-ARG B2CRIG_REF=48f5534b864de41dc6e9adf31914fc958c3ce850
+# ff041c4 (2026-11-01): rig_subject stage 0 refits the canonical finger slots to the
+# splat (--no-hands skips it); validated on all 9 palms-* subjects.
+ARG B2CRIG_REF=ff041c489a357f1ca355ae0994cf0af6d2122ab9
 ADD --keep-git-dir=false https://github.com/Erant/b2crig.git#${B2CRIG_REF} /opt/b2crig
 
 # NOT /workspace/b2c_runner, which is where this used to live. RunPod's
